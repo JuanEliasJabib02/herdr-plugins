@@ -14,7 +14,7 @@ import * as store from "./store.js";
 import * as G from "./git.js";
 import {
   parseInput, freeName, nameTaken, worktreePath, repoName, baseChoices,
-  agentChoices, defaultAgent, takesDirs, projectChoices, companionChoices, initialProject, createWorkspace,
+  agentChoices, defaultAgent, takesDirs, projectChoices, companionChoices, initialProject, clashError, createWorkspace,
 } from "./new-workspace-model.js";
 
 // Herdr's own glyphs (shipped with every install).
@@ -113,6 +113,11 @@ export default class NewWorkspace {
     return p ? [...this.companionProjects(), p] : [];
   }
 
+  // The chosen projects that would share a worktree path, said with ~, or "".
+  clash() {
+    return clashError(this.repos(), tilde);
+  }
+
   agent() {
     const choices = agentChoices(this.agents);
     return choices.find((a) => a.key === this.agentKey) ?? defaultAgent(choices);
@@ -179,6 +184,8 @@ export default class NewWorkspace {
     if (!p) return "Pick a project.";
     const notGit = [p, ...this.companionProjects()].find((x) => this.bases[x.path]?.def === null);
     if (notGit) return `${notGit.name} is not a git repository.`;
+    const clash = this.clash();
+    if (clash) return clash;
     if (!parseInput(this.text).name) return "Type a name.";
     return "";
   }
@@ -364,6 +371,7 @@ export default class NewWorkspace {
     // Also create in: the rest of the primary's group.
     const chips = this.chips();
     const chosen = this.companionProjects();
+    const clash = this.clash();
     const chip = (p, i) => {
       const on = this.companions.includes(p.path);
       const d = this.bases[p.path]?.def;
@@ -395,7 +403,8 @@ export default class NewWorkspace {
           this.checkbox(t, "nw-access", this.access, "Give the agent access to these worktrees",
             takesDirs(agent) ? "" : "Claude Code and Codex only", () => { this.access = !this.access; }))))
         .when(chosen.length > 0, (el) => el.child(div().pt(6).text_size(11.5).text_color(t.dim)
-          .child("Each one from its own default branch, with no space of its own."))))
+          .child("Each one from its own default branch, with no space of its own.")))
+        .when(Boolean(clash), (el) => el.child(div().pt(6).text_size(11.5).text_color(t.blocked).child(clash))))
       .when(this.agentsFailed && this.agents.length === 0, (el) => el.child(div().pt(10).text_size(11.5).text_color(t.dim).child("Could not load agents.")))
       .children(this.warnings.map((w) => div().pt(10).text_size(12).text_color(t.muted).child(w)))
       .when(Boolean(this.error), (el) => el.child(div().pt(10).text_size(12).text_color(t.blocked).child(this.error)))

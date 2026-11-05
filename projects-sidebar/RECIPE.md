@@ -21,7 +21,7 @@ across repos.
     "Projects" for the default group, with a "+" (Add project) on the right.
   - Project rows: 28 px with rounded 8 corners. Each has a chevron (collapse),
     a folder icon, the repo name in `foreground` semibold, and a "+" (New
-    workspace) on hover.
+    workspace) that brightens on hover.
   - Workspace rows: 28 px, indented 26 px.
     - Leading icon: the agent's status mark while one of its spaces is
       working, blocked or done; otherwise a home icon on the main checkout and
@@ -38,12 +38,12 @@ across repos.
 - **Groups bar:**
   - One chip per group, in creation order, 28 px tall. The first three show
     "F1", "F2", "F3" after the name, which is cut at 160 px.
-  - The active chip has a `raised` background.
+  - The active chip has a `selected` background.
   - Another group's chip gets a dot when one of its agents is blocked or done:
     `blocked` if any is blocked, else `done`.
   - A "+" (New group) sits on the right.
 - **Narrow sidebar** (under 160 px wide): projects show as initials ("HP" for
-  herdr-plugins) with the status of their shown workspace, and group chips
+  herdr-plugins) with the most urgent status among their workspaces, and group chips
   show initials only ("Pr").
 - **New workspace dialog:** a 560 × 600 modal with these parts:
   - Project select: the current group first, then "Other groups".
@@ -124,7 +124,10 @@ across repos.
     tested with `node --test`.
   - `store.js` is the only code that touches the shared keys: `projects.v1`
     (groups and projects), `projects.ui.v1` (collapsed), `projects.cache.v1`
-    (worktree lists) and `projects.agents.v1` (`knownAgents()`).
+    (worktree lists) and `projects.agents.v1` (`knownAgents()`). A stored
+    `projects.v1` with a malformed group or project keeps the valid rest, and
+    the original is copied to `projects.v1.backup` before the first write
+    over it.
   - `config.js` holds `MOD` and `WORKTREE_ROOT` (`~/orca/workspaces`).
 - **Commands:** `projects.add`, `projects.add-here`, `projects.new-workspace`,
   `projects.group1`..`projects.group3`, `projects.ping`. `keys.json` binds
@@ -167,6 +170,8 @@ across repos.
   - Linear, GitLab and fetching issue titles aren't supported; such a link
     is named by its slug.
   - Worktrees are never deleted from here.
+  - Two chosen projects with the same folder name (`/a/web`, `/b/web`) would
+    land on the same worktree path: the dialog says so and Create stays off.
 
 **Done when**
 

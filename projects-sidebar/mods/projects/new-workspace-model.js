@@ -258,15 +258,40 @@ export function creationPlan({ primary, companions, name, base, defaults, root, 
   ];
 }
 
+// Every workspace goes to <root>/<repo name>/<name>, so two chosen projects
+// with one folder name (/a/web and /b/web) would get the same path: the
+// second `git worktree add` fails after the first one was made. The groups
+// of chosen projects that share a folder name (case ignored, as macOS
+// folders do), in the order given; [] when there is none.
+export function pathClashes(projects) {
+  const byFolder = new Map();
+  for (const p of projects ?? []) {
+    const key = repoName(p).toLowerCase();
+    byFolder.set(key, [...(byFolder.get(key) ?? []), p]);
+  }
+  return [...byFolder.values()].filter((g) => g.length > 1);
+}
+
+const andList = (items) => (items.length < 2 ? items.join("") : `${items.slice(0, -1).join(", ")} and ${items.at(-1)}`);
+
+// What pathClashes means to the person creating, or "" when there is no
+// clash. `show`: how a project's path is written (the dialog: ~/…).
+export function clashError(projects, show = (path) => path) {
+  return pathClashes(projects)
+    .map((g) => `${andList(g.map((p) => show(p.path)))} share the folder name ${repoName(g[0])}, so their workspaces would land on the same path: pick only one of them.`)
+    .join(" ");
+}
+
 const firstLine = (s) => String(s ?? "").split("\n").map((l) => l.trim()).find(Boolean) ?? "";
 
 // Creates a workspace in the primary and every companion:
 //   req = { primary, companions, text, base, agent, access, root, home }
 //   io  = { fetch, defaultBase, branchExists, addWorktree, exists } (gitOps
 //         plus a file check)
-// Fetches every repo at once (a failure warns, the local refs are used),
-// finds a name free in all of them, adds the companions then the primary,
-// and stops at the first failure without undoing anything. Resolves
+// Refuses, before any git runs, projects whose workspaces would share a path
+// (pathClashes). Fetches every repo at once (a failure warns, the local refs
+// are used), finds a name free in all of them, adds the companions then the
+// primary, and stops at the first failure without undoing anything. Resolves
 //   { ok: true, name, created, warnings, launch }  launch: space.new's args,
 //     for the primary only: { folder, name, argv?, task? }
 //   { ok: false, error, name?, created, warnings }
@@ -277,6 +302,8 @@ export async function createWorkspace(req, io) {
   if (!wanted) return { ok: false, error: "Type a name, a branch, #issue or a link.", created: [], warnings };
   if (!primary) return { ok: false, error: "Pick a project.", created: [], warnings };
   const repos = [...companions, primary];
+  const clash = clashError(repos);
+  if (clash) return { ok: false, error: clash, created: [], warnings };
   const fetched = await Promise.all(repos.map((p) => io.fetch(p.path)));
   fetched.forEach((r, i) => {
     if (!r?.ok) warnings.push(`Couldn't fetch origin in ${repoName(repos[i])} (${firstLine(r?.err) || "no answer"}): used the local refs.`);

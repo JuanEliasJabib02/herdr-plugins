@@ -15,7 +15,7 @@ import {
   pickDefaultBase, baseChoices,
   agentChoices, defaultAgent, agentArgv,
   projectChoices, companionChoices, initialProject,
-  creationPlan, gitOps, nameTaken, createWorkspace,
+  creationPlan, pathClashes, clashError, gitOps, nameTaken, createWorkspace,
 } from "../projects-sidebar/mods/projects/new-workspace-model.js";
 
 // ── Names (D12) ────────────────────────────────────────────────────────────
@@ -212,6 +212,23 @@ test("creation plan: companions first, each from its own default base, then the 
   assert.deepEqual(plain.map((s) => [s.repo, s.base, s.primary]), [["/code/shop", "main", true]], "no base chosen: the primary's default");
 });
 
+test("path clashes: chosen projects with one folder name would share a worktree path; different names don't", () => {
+  const a = { path: "/a/web", name: "web" };
+  const b = { path: "/b/web", name: "web" };
+  const api = { path: "/code/api", name: "api" };
+  assert.deepEqual(pathClashes([a, api, b]), [[a, b]]);
+  assert.equal(
+    clashError([a, api, b]),
+    "/a/web and /b/web share the folder name web, so their workspaces would land on the same path: pick only one of them.",
+  );
+  assert.match(clashError([a, b], (path) => path.replace("/a", "~")), /^~\/web and \/b\/web /, "paths written the caller's way");
+  assert.deepEqual(pathClashes([{ path: "/x/web" }, { path: "/y/web/" }]).length, 1, "the folder name comes from the path when there is no name");
+  assert.equal(pathClashes([{ path: "/a/Web", name: "Web" }, b]).length, 1, "case ignored, as macOS folders do");
+  assert.deepEqual(pathClashes([api, { path: "/code/shop", name: "shop" }, { path: "/code/web", name: "web" }]), [], "different names: no clash");
+  assert.equal(clashError([api, { path: "/code/shop", name: "shop" }]), "");
+  assert.deepEqual(pathClashes([]), []);
+});
+
 // ── Real git (throwaway repos, no global config or hooks) ──────────────────
 
 const root = realpathSync(mkdtempSync(join(tmpdir(), "projects-sidebar-nw-")));
@@ -364,6 +381,30 @@ test("create: a failure stops, names the repo that failed and lists what was alr
   const notRepo = await createWorkspace({ primary: { path: plain, name: "not-a-repo" }, companions: [], text: "x", base: null, agent: claude, access: true, root: ws, home: "/nowhere" }, io);
   assert.equal(notRepo.ok, false);
   assert.match(notRepo.error, /not-a-repo is not a git repository/);
+});
+
+test("create: two chosen projects with one folder name are refused before any git runs; nothing is left behind", async () => {
+  const seed = makeProject("clash-seed");
+  const a = { path: join(root, "clash-a", "web"), name: "web" };
+  const b = { path: join(root, "clash-b", "web"), name: "web" };
+  for (const p of [a, b]) sh(root, ["clone", "-q", seed.origin, p.path]);
+  const ws = join(root, "ws-clash");
+  const calls = [];
+  const watched = Object.fromEntries(Object.entries(io).map(([k, f]) => [k, (...args) => {
+    calls.push(k);
+    return f(...args);
+  }]));
+  const r = await createWorkspace({
+    primary: a, companions: [b], text: "fix", base: null,
+    agent: claude, access: true, root: ws, home: "/nowhere",
+  }, watched);
+  assert.equal(r.ok, false);
+  assert.ok(r.error.includes(`${b.path} and ${a.path}`), `the error names both projects: ${r.error}`);
+  assert.deepEqual(calls, [], "no git command and no file check ran");
+  assert.deepEqual(r.created, []);
+  assert.equal(r.launch, undefined, "no space");
+  assert.ok(!existsSync(join(ws, "web", "fix")), "no companion worktree left behind");
+  for (const p of [a, b]) assert.equal(sh(p.path, ["branch", "--list", "fix"]), "", `no fix branch in ${p.path}`);
 });
 
 test("create: a failed fetch warns and goes on with the local refs", async () => {

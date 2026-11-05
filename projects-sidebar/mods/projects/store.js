@@ -1,12 +1,14 @@
 // Persisted state: the only module that reads or writes this mod's shared()
-// keys (lib.js KEYS). Reads are validated (an invalid or foreign value reads
-// as the empty value, never throws); writes happen only when the value
-// changes, because setShared re-renders every mod. Never write from render().
+// keys (lib.js KEYS). Reads are validated (a malformed entry is dropped, a
+// foreign value reads as the empty value, never throws); writes happen only
+// when the value changes, because setShared re-renders every mod. A stored
+// registry that didn't read back as itself is copied to its backup key before
+// the first write over it. Never write from render().
 
 import { shared, setShared } from "herdr";
 import {
   KEYS, changed, normPath,
-  parseRegistry, parseUi, withCollapsed, parseCache, parseAgents,
+  parseRegistry, registryWrites, parseUi, withCollapsed, parseCache, parseAgents,
 } from "./lib.js";
 
 function write(key, value) {
@@ -19,8 +21,14 @@ function write(key, value) {
 
 export const registry = () => parseRegistry(shared(KEYS.registry));
 
+// Before the first write over a stored value parseRegistry couldn't read
+// whole (lib.js needsBackup), that value goes to projects.v1.backup as it
+// was; only into an empty backup, so the first original survives. The
+// writes and their order come from lib.js registryWrites.
 export function saveRegistry(next) {
-  return write(KEYS.registry, next);
+  const writes = registryWrites(shared(KEYS.registry), shared(KEYS.registryBackup), next);
+  for (const [key, value] of writes) setShared(key, value);
+  return writes.length > 0;
 }
 
 // Applies one lib.js operation to the stored registry and saves the result:

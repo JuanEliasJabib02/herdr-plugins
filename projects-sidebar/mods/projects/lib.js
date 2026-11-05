@@ -11,6 +11,7 @@
 // A format change gets a new key (projects.v2), never a reshaped v1.
 export const KEYS = {
   registry: "projects.v1", // { version: 1, groups: [{ id, name, projects: [{ path, name }] }], activeGroup }
+  registryBackup: "projects.v1.backup", // the first stored projects.v1 that didn't read back as itself, as it was (needsBackup)
   ui: "projects.ui.v1", // { collapsed: [projectPath] }
   cache: "projects.cache.v1", // { [projectPath]: [{ path, branch, main }] }
   agents: "projects.agents.v1", // the last knownAgents() result
@@ -50,29 +51,36 @@ export function placeOf(space, panes) {
 
 const DEFAULT_GROUP = "Projects";
 
-// What a person starts with, and what any invalid stored value reads as.
+// What a person starts with, and what a stored value with no valid group
+// reads as.
 export function emptyRegistry() {
   return { version: 1, groups: [{ id: "g1", name: DEFAULT_GROUP, projects: [] }], activeGroup: "g1" };
 }
 
 const isObject = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
 
-// A stored `projects.v1` value as a registry. Anything that isn't one (another
-// version, another mod's value, a malformed group or project) is the empty
-// registry: nothing half-trusted is kept. Unknown fields are dropped, paths
-// normalized, a path listed twice kept only the first time, and an active
+const isGroup = (g) => isObject(g) && typeof g.id === "string" && g.id !== "" && typeof g.name === "string" && Array.isArray(g.projects);
+
+const isProject = (p) => isObject(p) && isAbsolute(p.path) && typeof p.name === "string";
+
+// A stored `projects.v1` value as a registry, salvaging what it can: a
+// malformed group is dropped with its projects, a malformed project alone,
+// and every valid group and project is kept. A value that isn't a v1
+// registry at all (another version, another mod's value) or keeps no valid
+// group is the empty registry. Unknown fields are dropped, paths normalized,
+// a group id or a path listed twice kept only the first time, and an active
 // group that doesn't exist falls back to the first group. Never throws.
 export function parseRegistry(value) {
-  if (!isObject(value) || value.version !== 1 || !Array.isArray(value.groups) || value.groups.length === 0) return emptyRegistry();
+  if (!isObject(value) || value.version !== 1 || !Array.isArray(value.groups)) return emptyRegistry();
   const ids = new Set();
   const paths = new Set();
   const groups = [];
   for (const g of value.groups) {
-    if (!isObject(g) || typeof g.id !== "string" || !g.id || ids.has(g.id) || typeof g.name !== "string" || !Array.isArray(g.projects)) return emptyRegistry();
+    if (!isGroup(g) || ids.has(g.id)) continue;
     ids.add(g.id);
     const projects = [];
     for (const p of g.projects) {
-      if (!isObject(p) || !isAbsolute(p.path) || typeof p.name !== "string") return emptyRegistry();
+      if (!isProject(p)) continue;
       const path = normPath(p.path);
       if (paths.has(path)) continue;
       paths.add(path);
@@ -80,8 +88,28 @@ export function parseRegistry(value) {
     }
     groups.push({ id: g.id, name: g.name, projects });
   }
+  if (groups.length === 0) return emptyRegistry();
   const activeGroup = ids.has(value.activeGroup) ? value.activeGroup : groups[0].id;
   return { version: 1, groups, activeGroup };
+}
+
+// Whether a stored `projects.v1` value (`raw`) must be kept in
+// KEYS.registryBackup before anything is written over it: it is there and
+// its reading (`parsed`: parseRegistry(raw)) isn't the same value, so the
+// write would lose whatever parseRegistry dropped. Nothing stored → false.
+export const needsBackup = (raw, parsed) => raw != null && changed(raw, parsed);
+
+// The shared() writes that save `next` over the stored `projects.v1` value
+// (`raw`), as ordered [key, value] pairs for store.js saveRegistry: none
+// when `next` is the same value; otherwise `raw` goes to KEYS.registryBackup
+// first when it needs one (needsBackup) and the backup (`backup`) is empty,
+// so the first original survives, and then `next` to KEYS.registry.
+export function registryWrites(raw, backup, next) {
+  if (!changed(raw, next)) return [];
+  const writes = [];
+  if (needsBackup(raw, parseRegistry(raw)) && backup == null) writes.push([KEYS.registryBackup, raw]);
+  writes.push([KEYS.registry, next]);
+  return writes;
 }
 
 // The group F1–F3 and the tree show: the active one, else the first.

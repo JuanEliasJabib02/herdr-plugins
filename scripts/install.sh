@@ -62,17 +62,38 @@ for item in $(items); do
 done
 
 mkdir -p "$home/.herdr-plugins" "$home/mods" "$home/layouts"
-: > "$manifest.new"
+# A run that stops partway leaves nothing half-written: the item being copied
+# and an unswapped manifest go on any exit, and those a killed run left
+# behind go before copying.
+installing=
+cleanup() {
+  [ -z "$installing" ] || rm -rf "$installing"
+  rm -f "$manifest.new"
+}
+trap cleanup EXIT
+trap 'exit 1' HUP INT TERM
+for item in $(items); do rm -rf "${home:?}/$item.installing"; done
+
+# Owned as soon as it lands: the manifest becomes the earlier one plus each
+# item copied so far, so a run that fails partway never leaves one of its own
+# items looking foreign to the next run.
+record() {
+  { [ ! -f "$manifest" ] || cat "$manifest"; echo "$1"; } | awk 'NF && !seen[$0]++' > "$manifest.new"
+  mv "$manifest.new" "$manifest"
+}
 for item in $(items); do
   # Copy next to it, then swap, so Herdr never reads a half-written mod.
-  rm -rf "${home:?}/$item.installing"
-  cp -R "$src/$item" "$home/$item.installing"
+  installing="$home/$item.installing"
+  cp -R "$src/$item" "$installing"
   rm -rf "${home:?}/$item"
-  mv "$home/$item.installing" "$home/$item"
-  echo "$item" >> "$manifest.new"
+  mv "$installing" "$home/$item"
+  installing=
+  record "$item"
   echo "installed $home/$item"
 done
-# What an earlier install brought and the plugin no longer has.
+# Only once every copy succeeded: what an earlier install brought and the
+# plugin no longer has.
+items > "$manifest.new"
 if [ -f "$manifest" ]; then
   while IFS= read -r item; do
     if [ -n "$item" ] && ! grep -qxF "$item" "$manifest.new"; then

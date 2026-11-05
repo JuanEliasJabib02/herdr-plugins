@@ -10,7 +10,7 @@
 // (nothing is created: Herdr writes its own on start); 1 when either file
 // can't be read as a keys file (nothing changed).
 
-import { copyFileSync, constants, readFileSync, realpathSync, renameSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, constants, readFileSync, realpathSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 const isObject = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
@@ -118,21 +118,25 @@ export function main(pluginPath, personPath, { out = console.log, err = console.
       out(`keys: nothing to add to ${personPath}`);
       return 0;
     }
-    let backup = backupName(personPath, now());
+    // The file itself: a keys.json that is a symlink (dotfiles) stays one,
+    // and the file it points to gets the keys.
+    const real = realpathSync(personPath);
+    let backup = backupName(real, now());
     for (let i = 2; ; i++) {
       try {
-        copyFileSync(personPath, backup, constants.COPYFILE_EXCL);
+        copyFileSync(real, backup, constants.COPYFILE_EXCL);
         break;
       } catch (e) {
         if (e.code !== "EEXIST" || i > 99) throw e;
-        backup = `${backupName(personPath, now())}-${i}`;
+        backup = `${backupName(real, now())}-${i}`;
       }
     }
-    // Written next to it, then swapped: Herdr reloads keys.json live and
-    // never sees half a file.
-    const tmp = `${personPath}.merging-${process.pid}`;
+    // Written next to it, with its mode, then swapped: Herdr reloads
+    // keys.json live and never sees half a file.
+    const tmp = `${real}.merging-${process.pid}`;
     writeFileSync(tmp, format(r.keys, person.text));
-    renameSync(tmp, personPath);
+    chmodSync(tmp, statSync(real).mode & 0o7777);
+    renameSync(tmp, real);
     for (const a of r.added) out(`keys: added ${a.key} → ${show(a.action)} in ${a.section}`);
     for (const s of r.shadows) out(`keys: in the ${s.section.slice(7)} layout, ${s.key} runs ${show(s.action)} instead of ${show(s.global)} (global)`);
     out(`keys: backed up ${backup}`);

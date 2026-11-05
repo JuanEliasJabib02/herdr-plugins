@@ -10,7 +10,7 @@ import { join } from "node:path";
 import {
   KEYS, COMMON_DIR, WORKTREE_LIST,
   normPath, placeOf, changed,
-  emptyRegistry, parseRegistry, activeGroup, findProject,
+  emptyRegistry, parseRegistry, needsBackup, registryWrites, activeGroup, findProject,
   addProject, removeProject, moveProject, addGroup, renameGroup, deleteGroup, selectGroup,
   parseUi, withCollapsed, parseCache, parseAgents,
   resolveProject, parseWorktrees, listCheckouts,
@@ -31,9 +31,10 @@ const pathsOf = (r, i) => r.groups[i].projects.map((p) => p.path);
 
 // ── Persisted keys ─────────────────────────────────────────────────────────
 
-test("persisted keys: the four versioned names of D3", () => {
+test("persisted keys: the four versioned names of D3, plus the registry's backup", () => {
   assert.deepEqual(KEYS, {
     registry: "projects.v1",
+    registryBackup: "projects.v1.backup",
     ui: "projects.ui.v1",
     cache: "projects.cache.v1",
     agents: "projects.agents.v1",
@@ -58,7 +59,7 @@ test("empty registry: one group named Projects, active", () => {
   assert.equal(r.activeGroup, r.groups[0].id);
 });
 
-test("invalid or foreign stored values become the empty registry, never throwing", () => {
+test("foreign values, unknown versions and registries with no valid group become the empty registry, never throwing", () => {
   const valid = twoGroups();
   const bad = [
     undefined, null, "", "projects", 42, true, [], [valid],
@@ -70,15 +71,91 @@ test("invalid or foreign stored values become the empty registry, never throwing
     { version: 1, groups: [{ name: "No id", projects: [] }], activeGroup: "g1" },
     { version: 1, groups: [{ id: "g1", name: 7, projects: [] }], activeGroup: "g1" },
     { version: 1, groups: [{ id: "g1", name: "A", projects: {} }], activeGroup: "g1" },
-    { version: 1, groups: [{ id: "g1", name: "A", projects: [{ path: "relative/dir", name: "dir" }] }], activeGroup: "g1" },
-    { version: 1, groups: [{ id: "g1", name: "A", projects: [{ path: "~/code/app", name: "app" }] }], activeGroup: "g1" },
-    { version: 1, groups: [{ id: "g1", name: "A", projects: [null] }], activeGroup: "g1" },
-    { version: 1, groups: [{ id: "g1", name: "A", projects: [] }, { id: "g1", name: "B", projects: [] }], activeGroup: "g1" },
+    { version: 1, groups: [null, "g2", []], activeGroup: "g1" },
     { theme: "dark", sidebar: { width: 332 } },
   ];
   for (const value of bad) {
     assert.deepEqual(parseRegistry(value), emptyRegistry(), `for ${JSON.stringify(value)}`);
   }
+});
+
+test("salvage: one bad project among valid ones is dropped alone, the others are kept", () => {
+  const stored = {
+    version: 1,
+    groups: [
+      { id: "g1", name: "Projects", projects: [
+        { path: "/code/app", name: "app" },
+        { path: "relative/dir", name: "dir" },
+        { path: "~/code/home", name: "home" },
+        null,
+        { path: "/code/nameless" },
+        { path: "/code/api", name: "API" },
+      ] },
+      { id: "g2", name: "Clients", projects: [{ path: "/code/shop", name: "shop" }] },
+    ],
+    activeGroup: "g2",
+  };
+  assert.deepEqual(parseRegistry(stored), {
+    version: 1,
+    groups: [
+      { id: "g1", name: "Projects", projects: [{ path: "/code/app", name: "app" }, { path: "/code/api", name: "API" }] },
+      { id: "g2", name: "Clients", projects: [{ path: "/code/shop", name: "shop" }] },
+    ],
+    activeGroup: "g2",
+  });
+  const onlyBad = { version: 1, groups: [{ id: "g1", name: "A", projects: [{ path: "relative/dir", name: "dir" }] }], activeGroup: "g1" };
+  assert.deepEqual(parseRegistry(onlyBad), { version: 1, groups: [{ id: "g1", name: "A", projects: [] }], activeGroup: "g1" }, "the group stays, empty");
+});
+
+test("salvage: a bad group is dropped with its projects, the other groups are kept; the active one falls back", () => {
+  const stored = {
+    version: 1,
+    groups: [
+      { id: "g1", name: "Projects", projects: [{ path: "/code/app", name: "app" }] },
+      { id: "g2", name: 7, projects: [{ path: "/code/lost", name: "lost" }] },
+      null,
+      { id: "g3", name: "Side", projects: {} },
+      { id: "g1", name: "Twin", projects: [{ path: "/code/twin", name: "twin" }] },
+      { id: "g4", name: "Clients", projects: [{ path: "/code/shop", name: "shop" }, { path: "/code/app/", name: "again" }] },
+    ],
+    activeGroup: "g2",
+  };
+  assert.deepEqual(parseRegistry(stored), {
+    version: 1,
+    groups: [
+      { id: "g1", name: "Projects", projects: [{ path: "/code/app", name: "app" }] },
+      { id: "g4", name: "Clients", projects: [{ path: "/code/shop", name: "shop" }] },
+    ],
+    activeGroup: "g1",
+  });
+});
+
+test("needsBackup: true only for a stored value that doesn't read back as itself", () => {
+  const valid = JSON.parse(JSON.stringify(twoGroups()));
+  assert.equal(needsBackup(valid, parseRegistry(valid)), false, "a valid registry");
+  assert.equal(needsBackup(null, parseRegistry(null)), false, "nothing stored");
+  assert.equal(needsBackup(undefined, parseRegistry(undefined)), false, "nothing stored");
+  const lossy = { ...valid, groups: [...valid.groups, { id: "g9", name: 7, projects: [] }] };
+  assert.equal(needsBackup(lossy, parseRegistry(lossy)), true, "a dropped group");
+  const badProject = { ...valid, groups: [{ ...valid.groups[0], projects: [...valid.groups[0].projects, null] }, valid.groups[1]] };
+  assert.equal(needsBackup(badProject, parseRegistry(badProject)), true, "a dropped project");
+  for (const foreign of [{ version: 2, groups: valid.groups }, "projects", 42]) {
+    assert.equal(needsBackup(foreign, parseRegistry(foreign)), true, `for ${JSON.stringify(foreign)}`);
+  }
+});
+
+test("registryWrites: the backup goes first, only over an empty backup, and nothing is written when the value is the same", () => {
+  const valid = JSON.parse(JSON.stringify(twoGroups()));
+  const next = selectGroup(valid, valid.groups[1].id);
+  const lossy = { ...valid, groups: [...valid.groups, { id: "g9", name: 7, projects: [] }] };
+  const old = { version: 1, groups: [{ id: "g0", name: "Old", projects: [] }], activeGroup: "g0" };
+  assert.deepEqual(registryWrites(valid, null, JSON.parse(JSON.stringify(valid))), [], "unchanged valid");
+  assert.deepEqual(registryWrites(valid, null, next), [[KEYS.registry, next]], "changed valid");
+  for (const empty of [null, undefined]) {
+    assert.deepEqual(registryWrites(lossy, empty, next), [[KEYS.registryBackup, lossy], [KEYS.registry, next]], `lossy raw, backup ${empty}`);
+  }
+  assert.deepEqual(registryWrites(lossy, old, next), [[KEYS.registry, next]], "lossy raw, a backup already there");
+  assert.deepEqual(registryWrites(null, null, next), [[KEYS.registry, next]], "nothing stored");
 });
 
 test("a valid stored registry is kept, unknown fields dropped, paths normalized", () => {

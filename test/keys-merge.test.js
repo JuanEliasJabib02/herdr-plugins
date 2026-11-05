@@ -5,7 +5,7 @@
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync, existsSync } from "node:fs";
+import { chmodSync, lstatSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, readlinkSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -160,6 +160,37 @@ test("CLI: a key the person uses is kept, with a warning", () => {
   assert.equal(r.status, 0, r.stderr);
   assert.equal(JSON.parse(readFileSync(person, "utf8"))["layout:projects"].f2, "space.rename");
   assert.match(r.stderr, /f2 .*space\.rename.*kept/);
+});
+
+test("CLI: a keys.json that is a symlink (dotfiles) stays one; its target gets the keys and keeps its mode", () => {
+  const dir = freshDir();
+  mkdirSync(join(dir, "dotfiles"));
+  mkdirSync(join(dir, "herdr-app"));
+  const target = join(dir, "dotfiles/keys.json");
+  const original = `${JSON.stringify(HERDR, null, 2)}\n`;
+  writeFileSync(target, original);
+  chmodSync(target, 0o600);
+  const link = join(dir, "herdr-app/keys.json");
+  symlinkSync("../dotfiles/keys.json", link);
+
+  const r = merge(PLUGIN_KEYS, link);
+  assert.equal(r.status, 0, r.stderr);
+  assert.ok(lstatSync(link).isSymbolicLink(), "still a symlink");
+  assert.equal(readlinkSync(link), "../dotfiles/keys.json");
+  assert.deepEqual(JSON.parse(readFileSync(target, "utf8")), mergeKeys(HERDR, plugin()).keys);
+  assert.equal(statSync(target).mode & 0o777, 0o600, "mode kept");
+  assert.equal(backups(join(dir, "dotfiles")).length, 1, "backed up next to the real file");
+  assert.equal(readFileSync(join(dir, "dotfiles", backups(join(dir, "dotfiles"))[0]), "utf8"), original);
+  for (const d of ["dotfiles", "herdr-app"]) assert.deepEqual(readdirSync(join(dir, d)).filter((f) => f.includes(".merging-")), [], `no temp file left in ${d}`);
+});
+
+test("CLI: a plain keys.json keeps its mode", () => {
+  const dir = freshDir();
+  const person = join(dir, "keys.json");
+  writeFileSync(person, `${JSON.stringify(HERDR, null, 2)}\n`);
+  chmodSync(person, 0o600);
+  assert.equal(merge(PLUGIN_KEYS, person).status, 0);
+  assert.equal(statSync(person).mode & 0o777, 0o600);
 });
 
 test("CLI: no keys file → nothing is created", () => {
