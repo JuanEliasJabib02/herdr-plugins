@@ -396,8 +396,12 @@ export default class NewWorkspace {
       .child(h_flex().gap(12).items_start()
         .child(v_flex().flex_1().min_w(0).child(label("Create from")).child(baseSelect))
         .child(v_flex().flex_1().min_w(0).child(label("Agent")).child(agentSelect)))
+      // Shown even with no other project in the group, so the feature can be
+      // found: the hint says where companions come from.
+      .when(Boolean(chips.group), (el) => el.child(label(`Also create in · ${chips.group.name}`)))
+      .when(Boolean(chips.group) && chips.projects.length === 0, (el) => el.child(div().text_size(11.5).text_color(t.dim)
+        .child(`No other project in ${chips.group.name}. Add one with the "+" next to Projects to make this branch there too.`)))
       .when(chips.projects.length > 0, (el) => el
-        .child(label(`Also create in · ${chips.group.name}`))
         .child(h_flex().flex_wrap().gap(6).children(chips.projects.map(chip)))
         .when(chosen.length > 0 && Boolean(agent.run), (el) => el.child(div().pt(10).child(
           this.checkbox(t, "nw-access", this.access, "Give the agent access to these worktrees",
