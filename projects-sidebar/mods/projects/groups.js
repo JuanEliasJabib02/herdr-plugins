@@ -1,9 +1,11 @@
-// The groups bar, above the sidebar footer: one chip per group in creation
-// order, F1–F3 on the first three (keys.json, section layout:projects), the
-// active group highlighted, a dot on a group that isn't shown and holds a
-// workspace whose agent is blocked or done, and "+" for a new group. Click a
-// chip to show its projects; right-click it for Rename and Delete. Below
-// 160 px the sidebar is a rail: chips show initials only.
+// The groups bar, above the sidebar footer, drawn like Orca's: one icon chip
+// per group in creation order (the code icon, so a long name never takes the
+// bar), the active group highlighted, a dot on a group that isn't shown and
+// holds a workspace whose agent is blocked or done, and "+" for a new group.
+// The name, what needs a look and the key (F1–F3 on the first three:
+// keys.json, section layout:projects) are in the chip's tooltip. Click a chip
+// to show its projects; right-click it for Rename and Delete. Below 160 px the
+// sidebar is a rail: the chips are smaller and centered, without "+".
 
 import { div, svg } from "gpui-kit";
 import { h_flex } from "gpui-base";
@@ -29,33 +31,22 @@ function find(node, id) {
 // The sidebar's width; below 160 px it is a rail (mods/spaces/main.js).
 const sidebarPx = () => find(layout(), "sidebar")?.size?.px ?? Infinity;
 
-// What a chip shows in the rail: the first letters of the first two words
-// ("Arctic Grey" → "AG"), or the first two letters of a single word
-// ("Clients" → "Cl").
-function initials(name) {
-  const words = String(name ?? "").trim().split(/\s+/).filter(Boolean);
-  if (words.length === 0) return "?";
-  if (words.length === 1) {
-    const [a = "", b = ""] = [...words[0]];
-    return a.toUpperCase() + b;
-  }
-  return words.slice(0, 2).map((w) => [...w][0].toUpperCase()).join("");
-}
-
 // Shows the n-th group (from 1), as F1–F3 do; nothing when there is none.
 function selectNth(n) {
   updateRegistry((r) => (r.groups[n - 1] ? selectGroup(r, r.groups[n - 1].id) : r));
 }
 
-// The dot color of each group, or null: the blocked color when one of its
-// agents waits on the person, else the done color (lib.js attentionByGroup,
-// over the same matches the tree uses).
+// The dot of each group, or null: { color, label }, the blocked color while
+// one of its agents waits on the person ("Needs attention"), else the done
+// color ("Agent done"). lib.js attentionByGroup, over the same matches the
+// tree uses.
 function dots(reg, t) {
   const sp = spaces();
   const matches = matchSpaces(cache(), sp, panes(), home());
   const any = attentionByGroup(reg, matches, sp);
   const blocked = attentionByGroup(reg, matches, sp.filter((s) => s.status === "blocked"));
-  return (id) => (blocked[id] ? t.blocked : any[id] ? t.done : null);
+  return (id) => (blocked[id] ? { color: t.blocked, label: "Needs attention" }
+    : any[id] ? { color: t.done, label: "Agent done" } : null);
 }
 
 export default class Groups {
@@ -63,29 +54,29 @@ export default class Groups {
 
   chip(g, i, { on, dot, rail }, t) {
     const key = KEYS[i] ?? null;
-    return h_flex()
+    const box = rail ? 26 : 28;
+    return div()
       .id(`group-${g.id}`)
       .relative()
       .flex_none()
+      .size(box)
+      .flex()
       .items_center()
+      .justify_center()
       .rounded(7)
       .cursor_pointer()
       .text_color(on ? t.foreground : t.muted)
       .when(on, (el) => el.bg(t.selected))
       .when(!on, (el) => el.hover((s) => s.bg(t.hover).text_color(t.foreground)))
-      .tooltip(key ? `${g.name} · ${key}` : g.name)
+      .tooltip([g.name, dot?.label, key].filter(Boolean).join(" · "))
       .on_click(() => updateRegistry((r) => selectGroup(r, g.id)))
       .on_mouse_down("right", (_e, cx) => {
         cx.stop_propagation();
         openGroupMenu(g.id);
       })
-      .when(rail, (el) => el.h(26).min_w(26).px(3).justify_center().text_size(11).font_semibold()
-        .child(initials(g.name))
-        .when(Boolean(dot), (el) => el.child(div().absolute().top(2).right(2).size(6).rounded_full().bg(dot))))
-      .when(!rail, (el) => el.h(28).min_w(36).max_w(160).flex_shrink(1).px(8).gap(6)
-        .child(div().min_w(0).truncate().child(g.name))
-        .when(Boolean(dot), (el) => el.child(div().flex_none().size(6).rounded_full().bg(dot)))
-        .when(Boolean(key), (el) => el.child(div().flex_none().text_size(11).text_color(on ? t.muted : t.dim).child(key))));
+      .child(svg(icon("code")).size(16))
+      .when(Boolean(dot), (el) => el.child(div().absolute().top(3).right(3).size(7).rounded_full()
+        .border(1).border_color(t.chrome).bg(dot.color)));
   }
 
   render() {

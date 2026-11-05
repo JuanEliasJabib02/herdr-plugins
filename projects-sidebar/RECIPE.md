@@ -35,16 +35,20 @@ across repos.
     the agent's title, and the time since its tab changed ("2m").
   - Empty group: "No projects in this group yet." and an "Add project" button.
     A project git can't list shows "Can't read this folder."
-- **Groups bar:**
-  - One chip per group, in creation order, 28 px tall. The first three show
-    "F1", "F2", "F3" after the name, which is cut at 160 px.
-  - The active chip has a `selected` background.
-  - Another group's chip gets a dot when one of its agents is blocked or done:
-    `blocked` if any is blocked, else `done`.
+- **Groups bar** (drawn like Orca's, so a long name never takes the bar):
+  - One icon chip per group, in creation order: 28 × 28 px with a 16 px code
+    icon (`<>`).
+  - Hovering a chip shows a tooltip with the name, "Needs attention" or
+    "Agent done" when the chip has a dot, and the key on the first three
+    ("AG · Needs attention · F3").
+  - The active chip has a `selected` background and a `foreground` icon. The
+    others are `muted` and brighten on hover.
+  - Another group's chip gets a dot at its top right when one of its agents
+    is blocked or done: `blocked` if any is blocked, else `done`.
   - A "+" (New group) sits on the right.
 - **Narrow sidebar** (under 160 px wide): projects show as initials ("HP" for
-  herdr-plugins) with the most urgent status among their workspaces, and group chips
-  show initials only ("Pr").
+  herdr-plugins) with the most urgent status among their workspaces. Group
+  chips shrink to 26 px and center, and "+" hides.
 - **New workspace dialog:** a 560 × 600 modal with these parts:
   - Project select: the current group first, then "Other groups".
   - Name input: takes a name, a branch, `#123`, or a GitHub issue / pull
@@ -143,7 +147,7 @@ across repos.
     (network) and `worktree add`.
   - `test -e`, to check whether a folder exists.
 - **Art:** its own Lucide-style icons in `icons/` (folder, branch, home,
-  plus), plus chevrons, check and spinner from Herdr's `workspace-chrome`
+  plus, code), plus chevrons, check and spinner from Herdr's `workspace-chrome`
   and agent icons from Herdr's `icons/`.
 
 **Watch out**
@@ -178,13 +182,15 @@ across repos.
 - `node --test 'test/*.test.js'` reports `fail 0`, and `herdr-app check`
   passes on `mods/projects`.
 - After `scripts/install.sh` and `layout.switch {name: "projects"}`, the
-  sidebar shows "Projects" with an empty state, and the groups bar shows
-  "Projects F1".
+  sidebar shows "Projects" with an empty state. The groups bar shows one
+  highlighted code icon whose tooltip reads "Projects · F1".
 - With a space open in a repo, `herdr-app do projects.add-here` lists that
   repo with `main` (home icon, open dot) and its other worktrees.
   A space in a folder outside every project is not shown.
-- `layout.resize {id: "sidebar", px: 76}` shows initials in the tree and in
-  the groups bar.
+- `layout.resize {id: "sidebar", px: 76}` shows initials in the tree and
+  smaller, centered chips in the groups bar.
+- With keys.json merged, F1–F3 select groups 1–3 while a terminal has focus,
+  and F2 no longer opens Rename tab in this layout.
 - `herdr-app do projects.new-workspace` opens the dialog on the focused
   space's project, with `origin/main` (or the repo's default) marked
   "default".
