@@ -14,6 +14,7 @@ import { View, div } from "gpui-kit";
 import { props, nextCommand } from "herdr";
 import Tree, { commands as treeCommands } from "./tree.js";
 import ProjectMenu from "./project-menu.js";
+import WorkspaceMenu from "./workspace-menu.js";
 import Groups, { commands as groupsCommands } from "./groups.js";
 import GroupForm from "./group-form.js";
 import GroupMenu from "./group-menu.js";
@@ -24,6 +25,7 @@ const VIEWS = {
   groups: Groups,
   "new-workspace": NewWorkspace,
   "project-menu": ProjectMenu,
+  "workspace-menu": WorkspaceMenu,
   "group-menu": GroupMenu,
   "group-form": GroupForm,
 };

@@ -24,6 +24,7 @@ import {
 } from "./tree-model.js";
 import { openNewWorkspace } from "./new-workspace.js";
 import { openProjectMenu } from "./project-menu.js";
+import { openWorkspaceMenu } from "./workspace-menu.js";
 
 // git listings at once (Juan has ~30 projects).
 const LISTERS = 4;
@@ -195,7 +196,10 @@ function projectRow(p, t) {
     .cursor_pointer()
     .hover((s) => s.bg(t.hover))
     .on_click(() => store.toggleCollapsed(p.path))
-    .on_mouse_down("right", () => openProjectMenu(p.path))
+    .on_mouse_down("right", (_e, cx) => {
+      cx.stop_propagation(); // or on_click runs too (ClickEvent carries no button)
+      openProjectMenu(p.path);
+    })
     .child(svg(chrome(p.collapsed ? "chevron-right" : "chevron-down")).size(11).flex_none().text_color(t.dim))
     .child(svg(icon("folder")).size(14).flex_none().text_color(t.muted))
     .child(div().flex_1().min_w(0).truncate().font_semibold().text_color(t.foreground).child(p.name))
@@ -220,6 +224,12 @@ function workspaceRow(w, t) {
     .when(w.selected, (el) => el.bg(t.selected))
     .when(!w.selected, (el) => el.hover((s) => s.bg(t.hover)))
     .on_click(() => go(openAction(w)))
+    // Stops here so the right button doesn't also run on_click (ClickEvent
+    // carries no button).
+    .on_mouse_down("right", (_e, cx) => {
+      cx.stop_propagation();
+      openWorkspaceMenu(w.project, w.path);
+    })
     .child(h_flex().w(14).flex_none().items_center().justify_center().child(lead))
     .child(div().flex_1().min_w(0).truncate().text_color(w.open ? t.foreground : t.muted).child(w.label))
     .when(w.open, (el) => el.child(div().size(6).flex_none().rounded(3).bg(w.selected ? t.accent : t.muted)));
@@ -248,7 +258,10 @@ function railRow(p, t) {
     .hover((s) => s.bg(t.hover))
     .tooltip(p.name)
     .on_click(() => go(railAction(p)))
-    .on_mouse_down("right", () => openProjectMenu(p.path))
+    .on_mouse_down("right", (_e, cx) => {
+      cx.stop_propagation(); // or on_click runs too (ClickEvent carries no button)
+      openProjectMenu(p.path);
+    })
     .child(div().text_size(12).font_semibold().text_color(p.selected ? t.foreground : t.muted).child(p.initials))
     .child(div().text_color(t[p.status] ?? t.dim).child(loud ? "●" : "·"));
 }

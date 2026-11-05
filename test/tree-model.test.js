@@ -7,7 +7,7 @@ import {
   emptyRegistry, addProject, addGroup, selectGroup, matchSpaces,
 } from "../projects-sidebar/mods/projects/lib.js";
 import {
-  buildTree, openAction, openMainAction, railAction, workspaceLabel, initials, mostUrgent,
+  buildTree, openAction, openMainAction, railAction, workspaceLabel, workspaceMenuItems, initials, mostUrgent,
   agentTitle, ago, isNarrow, projectMenuItems, withoutProject, pruneCache, projectPaths,
   watchDirs, eachLimit, liveFolder, addProjectAt,
 } from "../projects-sidebar/mods/projects/tree-model.js";
@@ -57,15 +57,15 @@ test("rows: the active group's projects, each followed by its workspaces, main f
   const t = tree();
   assert.equal(t.group.name, "Projects");
   assert.equal(t.empty, false);
-  assert.deepEqual(brief(t.rows), ["P app", "W main", "W feat-login", "P api", "W develop"]);
+  assert.deepEqual(brief(t.rows), ["P app", "W main", "W login", "P api", "W develop"]);
   assert.ok(!t.rows.some((r) => r.path === "/code/client" || r.project === "/code/client"), "other groups' projects aren't shown");
 });
 
 test("labels (D8): the main checkout by its branch with the home icon, a worktree by its folder", () => {
   const t = tree();
   assert.equal(ws(t, "main").main, true);
-  assert.equal(ws(t, "feat-login").main, false);
-  assert.equal(ws(t, "feat-login").branch, "feat/login");
+  assert.equal(ws(t, "login").main, false);
+  assert.equal(ws(t, "login").branch, "feat/login");
   assert.equal(workspaceLabel({ path: "/code/notes", branch: null, main: true }), "notes", "outside git or detached: the folder");
   assert.equal(workspaceLabel({ path: "/w/app/fix", branch: "bug/fix", main: false }), "fix");
 });
@@ -78,7 +78,7 @@ test("open and selected: a workspace with a space gets the open dot, the shown s
   const panes = [{ pane: "s2-p", tab: "s2-t1", terminal: "t2", cwd: "/Users/demo/orca/workspaces/app/feat-login/src" }];
   const t = tree({ spaces, panes });
   assert.deepEqual([ws(t, "main").open, ws(t, "main").selected, ws(t, "main").space], [true, true, "s1"]);
-  assert.deepEqual([ws(t, "feat-login").open, ws(t, "feat-login").selected, ws(t, "feat-login").space], [true, false, "s2"]);
+  assert.deepEqual([ws(t, "login").open, ws(t, "login").selected, ws(t, "login").space], [true, false, "s2"]);
   assert.deepEqual([ws(t, "develop").open, ws(t, "develop").selected, ws(t, "develop").space], [false, false, null]);
   assert.equal(t.projects[0].selected, true);
   assert.equal(t.projects[1].selected, false);
@@ -94,17 +94,17 @@ test("click (D8): an open workspace selects its space, a closed one opens a spac
   const t = tree({ spaces: [space("s1", "/code/app", { active: true })] });
   assert.deepEqual(openAction(ws(t, "main")), { name: "space.select", args: { id: "s1" } });
   assert.deepEqual(openAction(ws(t, "develop")), { name: "space.new", args: { folder: "/code/api", name: "develop" } });
-  assert.deepEqual(openAction(ws(t, "feat-login")), { name: "space.new", args: { folder: "/Users/demo/orca/workspaces/app/feat-login", name: "feat-login" } });
+  assert.deepEqual(openAction(ws(t, "login")), { name: "space.new", args: { folder: "/Users/demo/orca/workspaces/app/feat-login", name: "login" } });
 });
 
 test("agent row: under its workspace, status, cleaned title and time since its tab changed (S10)", () => {
   const spaces = [space("s2", "/Users/demo/orca/workspaces/app/feat-login", { status: "working", tabs: [tab("s2-t1", { changed_at: NOW - 90_000 })] })];
   const agents = [agent("t7", "s2", { status: "working", title: "✳ Traspaso de herdr-plugins" })];
   const t = tree({ spaces, agents });
-  assert.deepEqual(brief(t.rows), ["P app", "W main", "W feat-login", "A Traspaso de herdr-plugins", "P api", "W develop"]);
+  assert.deepEqual(brief(t.rows), ["P app", "W main", "W login", "A Traspaso de herdr-plugins", "P api", "W develop"]);
   const row = t.rows.find((r) => r.kind === "agent");
   assert.deepEqual([row.status, row.since, row.pane, row.program.key], ["working", "1m", "s2-p", "claude"]);
-  assert.equal(ws(t, "feat-login").status, "working", "the workspace shows the agent's status in place of its branch icon");
+  assert.equal(ws(t, "login").status, "working", "the workspace shows the agent's status in place of its branch icon");
   assert.equal(ws(t, "main").status, null);
 });
 
@@ -127,7 +127,7 @@ test("spaces outside every project are shown nowhere: no Others section (S14, S1
   ];
   const agents = [agent("t9", "tmp", { status: "done" }), agent("t8", "remote", { status: "blocked" })];
   const t = tree({ spaces, agents });
-  assert.deepEqual(brief(t.rows), ["P app", "W main", "W feat-login", "P api", "W develop"]);
+  assert.deepEqual(brief(t.rows), ["P app", "W main", "W login", "P api", "W develop"]);
   assert.ok(t.rows.every((r) => ["project", "workspace", "agent", "loading"].includes(r.kind)));
   assert.ok(t.rows.every((r) => !r.open && !r.selected && !r.status));
 });
@@ -150,14 +150,14 @@ test("empty group: no rows and the empty state, whatever other groups hold", () 
 test("a project not listed yet shows a loading row", () => {
   const { "/code/api": _, ...cache } = CACHE;
   const t = tree({ cache });
-  assert.deepEqual(brief(t.rows), ["P app", "W main", "W feat-login", "P api", "loading"]);
+  assert.deepEqual(brief(t.rows), ["P app", "W main", "W login", "P api", "loading"]);
   assert.equal(t.projects[1].loading, true);
 });
 
 test("a project git couldn't list (its folder gone) says so instead of loading for ever", () => {
   const { "/code/api": _, ...cache } = CACHE;
   const t = tree({ cache, failed: new Set(["/code/api"]) });
-  assert.deepEqual(brief(t.rows), ["P app", "W main", "W feat-login", "P api", "missing"]);
+  assert.deepEqual(brief(t.rows), ["P app", "W main", "W login", "P api", "missing"]);
   assert.deepEqual([t.projects[1].loading, t.projects[1].missing], [false, true]);
   assert.equal(tree({ failed: new Set(["/code/api"]) }).projects[1].missing, false, "a cached list still shows");
 });
@@ -315,4 +315,23 @@ test("listing every project: at most N at once, all of them, a failure doesn't s
 test("project paths: every group's projects, for the engine to list and watch", () => {
   assert.deepEqual(projectPaths(registry()), ["/code/app", "/code/api", "/code/client"]);
   assert.deepEqual(projectPaths(emptyRegistry()), []);
+});
+
+test("labels: another worktree by its branch's last segment, so a rename shows when the folder stays (D27)", () => {
+  assert.equal(workspaceLabel({ path: "/w/app/old-folder", branch: "renamed", main: false }), "renamed");
+  assert.equal(workspaceLabel({ path: "/w/app/feat-login", branch: "feat/login", main: false }), "login");
+  assert.equal(workspaceLabel({ path: "/w/app/detached", branch: null, main: false }), "detached", "detached: the folder");
+  assert.equal(workspaceLabel({ path: "/code/app", branch: "user/main-line", main: true }), "user/main-line", "main keeps its whole branch");
+});
+
+// ── Workspace menu (D20) ───────────────────────────────────────────────────
+
+test("workspace menu: Copy Path and Copy Worktree Name, on main and on the others", () => {
+  const ids = (row) => workspaceMenuItems(row).map((i) => `${i.id}:${i.label}`);
+  assert.deepEqual(ids({ path: "/code/app", branch: "main", main: true }), ["copy-path:Copy Path", "copy-name:Copy Worktree Name"]);
+  assert.deepEqual(ids({ path: "/w/app/feat-login", branch: "feat/login", main: false }), ["copy-path:Copy Path", "copy-name:Copy Worktree Name"]);
+  const [path, name] = workspaceMenuItems({ path: "/w/app/feat-login", branch: "feat/login", main: false });
+  assert.equal(path.text, "/w/app/feat-login");
+  assert.equal(name.text, "feat-login", "the worktree name is the folder's, not the branch's");
+  assert.deepEqual(workspaceMenuItems(null), []);
 });

@@ -44,3 +44,11 @@ test("projects layout: tree replaces Spaces, groups block sits above the footer"
   assert.deepEqual(groups.content, { mod: "projects", props: { view: "groups" } });
   assert.deepEqual(groups.size, { px: 44 });
 });
+
+test("the workspace menu is a view of the mod (D20)", () => {
+  const src = (f) => readFileSync(new URL(`../projects-sidebar/mods/projects/${f}`, import.meta.url), "utf8");
+  assert.match(src("main.js"), /"workspace-menu":\s*WorkspaceMenu/);
+  assert.match(src("workspace-menu.js"), /export default class WorkspaceMenu/);
+  assert.match(src("tree.js"), /openWorkspaceMenu\(/, "a workspace row's right-click opens it");
+});
+

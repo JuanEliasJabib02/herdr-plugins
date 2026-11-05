@@ -21,11 +21,14 @@ export function mostUrgent(statuses) {
 
 // ── Names ──────────────────────────────────────────────────────────────────
 
-// What a workspace row says (D8): the main checkout by its branch (Orca),
-// another worktree by its folder; a folder outside git or a detached main
-// checkout by its folder too.
+// What a workspace row says (D8, D27): the main checkout by its branch
+// (Orca); another worktree by its branch's last segment ("user/feat-x" →
+// "feat-x"), so a rename shows even when the folder keeps its name; a
+// detached checkout or a folder outside git by its folder.
 export function workspaceLabel(checkout) {
-  return (checkout.main && checkout.branch) || baseName(checkout.path);
+  if (checkout.main) return checkout.branch || baseName(checkout.path);
+  const leaf = String(checkout.branch ?? "").split("/").filter(Boolean).pop();
+  return leaf || baseName(checkout.path);
 }
 
 // A project in the narrow rail: the first letters of its first two words
@@ -223,6 +226,19 @@ export async function addProjectAt(folder, io) {
   const action = openMainAction({ project: path, cache, spaces: io.spaces(), panes: io.panes(), home: io.home });
   io.run(action.name, action.args);
   return { project: { path, name: project.name }, action };
+}
+
+// ── Workspace menu (D20) ───────────────────────────────────────────────────
+
+// The right-click menu of a workspace row: [{ id, label, text }]. Copy Path
+// and Copy Worktree Name (its folder's name, not the branch) on every
+// checkout. Unknown row: [].
+export function workspaceMenuItems(row) {
+  if (!row?.path) return [];
+  return [
+    { id: "copy-path", label: "Copy Path", text: row.path },
+    { id: "copy-name", label: "Copy Worktree Name", text: baseName(row.path) },
+  ];
 }
 
 // ── Project menu (D11) ─────────────────────────────────────────────────────
