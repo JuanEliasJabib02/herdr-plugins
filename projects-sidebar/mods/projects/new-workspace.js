@@ -7,9 +7,9 @@
 
 import { div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input } from "gpui-base";
-import { theme, props, run, openOverlay, closeOverlay, spaces, panes, home, knownAgents, exec, notify } from "herdr";
+import { theme, props, run, openOverlay, closeOverlay, spaces, panes, home, knownAgents, exec, notify, pickFolder } from "herdr";
 import { MOD, WORKTREE_ROOT, icon } from "./config.js";
-import { matchSpaces, findProject, normPath } from "./lib.js";
+import { matchSpaces, findProject, normPath, addProject } from "./lib.js";
 import * as store from "./store.js";
 import * as G from "./git.js";
 import {
@@ -175,6 +175,31 @@ export default class NewWorkspace {
     this.loadBases(path, cx);
     this.recheck(cx);
     this.input.focus();
+    cx.notify();
+  }
+
+  // The folder icon beside "Project", as in Orca's dialog: adds a repo to the
+  // primary's group without leaving the dialog, and picks its chip. A repo
+  // already in another group stays there (its right-click menu moves it).
+  async addToGroup(cx) {
+    const group = this.chips().group;
+    if (!group || this.busy) return;
+    const folder = await pickFolder({ prompt: `Add a project to ${group.name}` });
+    if (!folder) return;
+    try {
+      const project = await G.repoOf(folder);
+      const path = normPath(project.path);
+      const found = findProject(store.registry(), path);
+      if (found && found.group.id !== group.id) {
+        this.error = `${project.name} is in ${found.group.name}. Move it here with its right-click menu.`;
+      } else {
+        this.error = "";
+        if (!found) store.updateRegistry((r) => addProject(r, { path, name: project.name }, group.id));
+        if (path !== normPath(this.project) && !this.companions.includes(path)) this.toggleCompanion(path, cx);
+      }
+    } catch (e) {
+      this.error = `${folder}: ${e?.message ?? e}`;
+    }
     cx.notify();
   }
 
@@ -379,14 +404,20 @@ export default class NewWorkspace {
         .border_color(on ? t.accent : t.input).bg(on ? t.selected : t.background).cursor_pointer()
         .hover((s) => s.border_color(t.accent))
         .on_click((_e, cx) => this.toggleCompanion(p.path, cx))
-        .child(on ? svg(CHECK).size(13).flex_none().text_color(t.accent) : svg(icon("folder")).size(13).flex_none().text_color(t.dim))
+        .child(on ? svg(CHECK).size(13).flex_none().text_color(t.accent) : svg(icon("plus")).size(12).flex_none().text_color(t.dim))
         .child(div().text_size(12.5).child(p.name))
         .when(on, (el) => el.child(div().text_size(11).text_color(d === null ? t.blocked : t.dim).child(d === null ? "not git" : d ?? "…")));
     };
 
     const blocker = this.blocker();
     const body = v_flex().id("nw-body").flex_1().min_h(0).px(18).pb(10).overflow_y_scrollbar()
-      .child(label("Project"))
+      .child(h_flex().items_end().justify_between()
+        .child(label("Project"))
+        .when(Boolean(chips.group), (el) => el.child(div().id("nw-add-project").mb(4).size(22).flex().items_center().justify_center()
+          .rounded(6).cursor_pointer().text_color(t.dim).hover((s) => s.bg(t.hover).text_color(t.foreground))
+          .tooltip(`Add a project to ${chips.group.name}`)
+          .on_click((_e, cx) => cx.spawn(async () => this.addToGroup(cx)))
+          .child(svg(icon("folder-plus")).size(14)))))
       .child(projectSelect)
       .child(label("Name"))
       .child(Input.new(this.input).h(36).px(10).rounded(8).border_1().border_color(this.inputFocused ? t.accent : t.input).bg(t.background).text_size(12.8).text_color(t.foreground))
@@ -400,7 +431,7 @@ export default class NewWorkspace {
       // found: the hint says where companions come from.
       .when(Boolean(chips.group), (el) => el.child(label(`Also create in · ${chips.group.name}`)))
       .when(Boolean(chips.group) && chips.projects.length === 0, (el) => el.child(div().text_size(11.5).text_color(t.dim)
-        .child(`No other project in ${chips.group.name}. Add one with the "+" next to Projects to make this branch there too.`)))
+        .child(`No other project in ${chips.group.name}. Add one with the folder icon next to Project to make this branch there too.`)))
       .when(chips.projects.length > 0, (el) => el
         .child(h_flex().flex_wrap().gap(6).children(chips.projects.map(chip)))
         .when(chosen.length > 0 && Boolean(agent.run), (el) => el.child(div().pt(10).child(
