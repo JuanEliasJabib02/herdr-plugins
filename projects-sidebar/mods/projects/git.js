@@ -1,11 +1,12 @@
 // git on this machine, through Herdr's exec (the person's real environment:
 // PATH, HOME, auth). Projects are local, so nothing here takes a machine.
-// The parsing and the decisions live in lib.js and new-workspace-model.js,
-// which tests run against a real git.
+// The parsing and the decisions live in lib.js, new-workspace-model.js and
+// remove-workspace-model.js, which tests run against a real git.
 
 import { exec } from "herdr";
 import { resolveProject, listCheckouts } from "./lib.js";
 import { fetchOrigin, defaultBaseOf, recentBasesOf, branchExistsIn, addWorktreeIn } from "./new-workspace-model.js";
+import { removalCheck as checkRemoval, removeWorkspace as removeWith } from "./remove-workspace-model.js";
 
 // { ok, out, err } (mods/worktree/main.js `git`). Rejects when git can't
 // start there: not installed, or the folder is gone.
@@ -20,6 +21,15 @@ export const repoOf = (folder) => resolveProject(folder, git);
 
 // A project's workspaces, [{ path, branch, main }], the main checkout first.
 export const listWorktrees = (project) => listCheckouts(project, git);
+
+// Whether a path exists (`test -e`); false when it can't be checked.
+export async function pathExists(path) {
+  try {
+    return (await exec("test", ["-e", path])).code === 0;
+  } catch {
+    return false;
+  }
+}
 
 // ── New workspace (D12–D14) ────────────────────────────────────────────────
 
@@ -39,3 +49,18 @@ export const branchExists = (repo, name) => branchExistsIn(repo, name, git);
 
 // `git worktree add --no-track -b <name> -- <path> <base>`: { ok, out, err }.
 export const addWorktree = (repo, { name, path, base }) => addWorktreeIn(repo, { name, path, base }, git);
+
+// ── Delete (D22–D24) ───────────────────────────────────────────────────────
+
+// What deleting a workspace would take, from a fresh list: { deletable,
+// reason, failed, locked, lockReason, changes, submodules, branch,
+// mainBranch, list }. Never rejects.
+export const removalCheck = ({ project, path }) => checkRemoval({ project, path }, { git, exists: pathExists });
+
+// Deletes a workspace in D23's order: check again, closeSpaces() (awaited;
+// it closes the workspace's spaces and waits until they are gone), git
+// worktree remove, git branch -d. `seen`: the removalCheck the person
+// confirmed. Resolves { status, err, branch, branchErr, list, check }; never
+// rejects.
+export const removeWorkspace = ({ project, path, seen }, { closeSpaces }) =>
+  removeWith({ project, path, seen }, { git, exists: pathExists, closeSpaces });
