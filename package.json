@@ -1,0 +1,13 @@
+{
+  "name": "herdr-plugins",
+  "private": true,
+  "type": "module",
+  "description": "Orca Pro Max features rebuilt as Herdr plugins (mods and layouts).",
+  "license": "MIT",
+  "scripts": {
+    "test": "node --test 'test/*.test.js'"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

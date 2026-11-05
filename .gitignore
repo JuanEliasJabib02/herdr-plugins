@@ -1,0 +1,8 @@
+# ODD working files (plans, reviews, shots): never committed
+odd/
+# Written by Herdr / herdr-app check into every mod folder
+gpui-kit.d.ts
+jsconfig.json
+*.error
+node_modules/
+.DS_Store
