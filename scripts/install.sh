@@ -9,7 +9,9 @@
 #
 # Herdr's home is $HERDR_APP_HOME, else ~/.config/herdr-app. What it installed
 # is listed in <home>/.herdr-plugins/<plugin>.txt; it never overwrites or
-# removes anything else: a name already taken stops the install.
+# removes anything else: a name already taken stops the install. The plugin's
+# keys.json is merged into <home>/keys.json (new keys only, after a backup)
+# unless --no-keys; uninstalling leaves keys.json as it is.
 set -eu
 
 repo=$(cd "$(dirname "$0")/.." && pwd)
@@ -47,6 +49,7 @@ if [ "$mode" = uninstall ]; then
     [ -n "$item" ] && [ -e "$home/$item" ] && rm -rf "${home:?}/$item" && echo "removed $home/$item"
   done < "$manifest"
   rm "$manifest"
+  [ -f "$src/keys.json" ] && echo "keys: $home/keys.json keeps the plugin's shortcuts ($src/keys.json); remove them by hand if you want"
   exit 0
 fi
 
@@ -79,8 +82,18 @@ if [ -f "$manifest" ]; then
 fi
 mv "$manifest.new" "$manifest"
 
-if [ "$keys" = yes ] && [ -f "$src/keys.json" ] && [ -f "$repo/scripts/keys-merge.mjs" ]; then
-  node "$repo/scripts/keys-merge.mjs" "$src/keys.json" "$home/keys.json"
+# The plugin's shortcuts: merged into the person's keys.json, adding only the
+# keys they don't bind (scripts/keys-merge.mjs backs the file up first and
+# writes nothing when there's nothing to add). An edited keys.json no longer
+# gets Herdr's new default shortcuts on upgrade, so --no-keys skips this.
+if [ -f "$src/keys.json" ]; then
+  if [ "$keys" = no ]; then
+    echo "keys: not merged (--no-keys); the plugin's shortcuts are in $src/keys.json"
+  elif command -v node >/dev/null 2>&1; then
+    node "$repo/scripts/keys-merge.mjs" "$src/keys.json" "$home/keys.json"
+  else
+    echo "keys: node isn't installed; add the sections of $src/keys.json to $home/keys.json by hand" >&2
+  fi
 fi
 
 echo "done: show it with  herdr-app do layout.switch '{\"name\":\"projects\"}'  (ctrl-shift-l switches back)"

@@ -1,0 +1,7 @@
+{
+  "layout:projects": {
+    "f1": "projects.group1",
+    "f2": "projects.group2",
+    "f3": "projects.group3"
+  }
+}
