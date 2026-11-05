@@ -1,0 +1,318 @@
+// T3: the projects tree (M/tree-model.js): rows from the registry, the
+// worktree cache and Herdr's live spaces and agents; what a click does; Add
+// project; the project menu; the narrow rail; the worktree engine's helpers.
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import {
+  emptyRegistry, addProject, addGroup, selectGroup, matchSpaces,
+} from "../projects-sidebar/mods/projects/lib.js";
+import {
+  buildTree, openAction, openMainAction, railAction, workspaceLabel, initials, mostUrgent,
+  agentTitle, ago, isNarrow, projectMenuItems, withoutProject, pruneCache, projectPaths,
+  watchDirs, eachLimit, liveFolder, addProjectAt,
+} from "../projects-sidebar/mods/projects/tree-model.js";
+
+const HOME = "/Users/demo";
+const NOW = 1_800_000_000_000;
+
+// Two groups: Projects (app, api) active, Clients (client).
+function registry() {
+  let r = emptyRegistry();
+  r = addProject(r, { path: "/code/app" });
+  r = addProject(r, { path: "/code/api" });
+  r = addGroup(r, "Clients");
+  r = addProject(r, { path: "/code/client" }, r.groups[1].id);
+  return r;
+}
+
+const CACHE = {
+  "/code/app": [
+    { path: "/code/app", branch: "main", main: true },
+    { path: "/Users/demo/orca/workspaces/app/feat-login", branch: "feat/login", main: false },
+  ],
+  "/code/api": [{ path: "/code/api", branch: "develop", main: true }],
+  "/code/client": [{ path: "/code/client", branch: "main", main: true }],
+};
+
+const tab = (id, extra = {}) => ({ id, index: 1, name: "1", named: false, active: true, status: null, changed_at: null, ...extra });
+const space = (id, folder, extra = {}) => ({
+  id, index: 1, name: id, named: false, folder, machine: null, branch: null, active: false, status: null,
+  tabs: [tab(`${id}-t1`)], ...extra,
+});
+const CLAUDE = { key: "claude", name: "Claude Code", icon: "icons/claude.svg", tint: true, tile: null, color: null, shell: false, agent: true };
+const agent = (address, spaceId, extra = {}) => ({
+  address, pane: `${spaceId}-p`, space: spaceId, space_name: spaceId, tab: `${spaceId}-t1`, tab_index: 1, tab_name: "1",
+  status: "idle", app: "claude-code", program: CLAUDE, title: "", seq: 1, pinned: false, focused: false, ...extra,
+});
+
+const tree = (over = {}) => buildTree({
+  registry: registry(), cache: CACHE, spaces: [], panes: [], agents: [], collapsed: [], home: HOME, now: NOW, ...over,
+});
+const brief = (rows) => rows.map((r) => (r.kind === "project" ? `P ${r.name}` : r.kind === "workspace" ? `W ${r.label}` : r.kind === "agent" ? `A ${r.title}` : `${r.kind}`));
+const ws = (t, label) => t.rows.find((r) => r.kind === "workspace" && r.label === label);
+
+// ── Rows ───────────────────────────────────────────────────────────────────
+
+test("rows: the active group's projects, each followed by its workspaces, main first (S2, S11)", () => {
+  const t = tree();
+  assert.equal(t.group.name, "Projects");
+  assert.equal(t.empty, false);
+  assert.deepEqual(brief(t.rows), ["P app", "W main", "W feat-login", "P api", "W develop"]);
+  assert.ok(!t.rows.some((r) => r.path === "/code/client" || r.project === "/code/client"), "other groups' projects aren't shown");
+});
+
+test("labels (D8): the main checkout by its branch with the home icon, a worktree by its folder", () => {
+  const t = tree();
+  assert.equal(ws(t, "main").main, true);
+  assert.equal(ws(t, "feat-login").main, false);
+  assert.equal(ws(t, "feat-login").branch, "feat/login");
+  assert.equal(workspaceLabel({ path: "/code/notes", branch: null, main: true }), "notes", "outside git or detached: the folder");
+  assert.equal(workspaceLabel({ path: "/w/app/fix", branch: "bug/fix", main: false }), "fix");
+});
+
+test("open and selected: a workspace with a space gets the open dot, the shown space is highlighted (S10)", () => {
+  const spaces = [
+    space("s1", "/code/app", { active: true }),
+    space("s2", "~/orca/workspaces/app/feat-login"),
+  ];
+  const panes = [{ pane: "s2-p", tab: "s2-t1", terminal: "t2", cwd: "/Users/demo/orca/workspaces/app/feat-login/src" }];
+  const t = tree({ spaces, panes });
+  assert.deepEqual([ws(t, "main").open, ws(t, "main").selected, ws(t, "main").space], [true, true, "s1"]);
+  assert.deepEqual([ws(t, "feat-login").open, ws(t, "feat-login").selected, ws(t, "feat-login").space], [true, false, "s2"]);
+  assert.deepEqual([ws(t, "develop").open, ws(t, "develop").selected, ws(t, "develop").space], [false, false, null]);
+  assert.equal(t.projects[0].selected, true);
+  assert.equal(t.projects[1].selected, false);
+});
+
+test("open: two spaces on one workspace, the shown one is the one a click selects", () => {
+  const spaces = [space("s1", "/code/api"), space("s2", "/code/api/src", { active: true })];
+  assert.equal(ws(tree({ spaces }), "develop").space, "s2");
+  assert.equal(ws(tree({ spaces: [spaces[0], { ...spaces[1], active: false }] }), "develop").space, "s1");
+});
+
+test("click (D8): an open workspace selects its space, a closed one opens a space named by its label", () => {
+  const t = tree({ spaces: [space("s1", "/code/app", { active: true })] });
+  assert.deepEqual(openAction(ws(t, "main")), { name: "space.select", args: { id: "s1" } });
+  assert.deepEqual(openAction(ws(t, "develop")), { name: "space.new", args: { folder: "/code/api", name: "develop" } });
+  assert.deepEqual(openAction(ws(t, "feat-login")), { name: "space.new", args: { folder: "/Users/demo/orca/workspaces/app/feat-login", name: "feat-login" } });
+});
+
+test("agent row: under its workspace, status, cleaned title and time since its tab changed (S10)", () => {
+  const spaces = [space("s2", "/Users/demo/orca/workspaces/app/feat-login", { status: "working", tabs: [tab("s2-t1", { changed_at: NOW - 90_000 })] })];
+  const agents = [agent("t7", "s2", { status: "working", title: "✳ Traspaso de herdr-plugins" })];
+  const t = tree({ spaces, agents });
+  assert.deepEqual(brief(t.rows), ["P app", "W main", "W feat-login", "A Traspaso de herdr-plugins", "P api", "W develop"]);
+  const row = t.rows.find((r) => r.kind === "agent");
+  assert.deepEqual([row.status, row.since, row.pane, row.program.key], ["working", "1m", "s2-p", "claude"]);
+  assert.equal(ws(t, "feat-login").status, "working", "the workspace shows the agent's status in place of its branch icon");
+  assert.equal(ws(t, "main").status, null);
+});
+
+test("agent title: a named tab wins, a bare tab number or a path says the program's name", () => {
+  const live = agent("t1", "s1", { title: "⠂ Fix the login" });
+  assert.equal(agentTitle(live, tab("x")), "Fix the login");
+  assert.equal(agentTitle(live, tab("x", { name: "review", named: true })), "review");
+  assert.equal(agentTitle(agent("t1", "s1", { title: "~/code/app" }), tab("x", { name: "2" })), "Claude Code");
+  assert.equal(agentTitle(agent("t1", "s1", { title: "claude" }), undefined), "Claude Code");
+});
+
+test("time since: <1m, minutes, hours, days; nothing when the tab never changed", () => {
+  assert.deepEqual([ago(20_000), ago(90_000), ago(3 * 3_600_000), ago(2 * 86_400_000), ago(null)], ["<1m", "1m", "3h", "2d", ""]);
+});
+
+test("spaces outside every project are shown nowhere: no Others section (S14, S15)", () => {
+  const spaces = [
+    space("tmp", "/tmp/scratch", { active: true, status: "done" }),
+    space("remote", "/code/app", { machine: "vps", status: "blocked" }),
+  ];
+  const agents = [agent("t9", "tmp", { status: "done" }), agent("t8", "remote", { status: "blocked" })];
+  const t = tree({ spaces, agents });
+  assert.deepEqual(brief(t.rows), ["P app", "W main", "W feat-login", "P api", "W develop"]);
+  assert.ok(t.rows.every((r) => ["project", "workspace", "agent", "loading"].includes(r.kind)));
+  assert.ok(t.rows.every((r) => !r.open && !r.selected && !r.status));
+});
+
+test("collapsed: a collapsed project shows its own row only", () => {
+  const t = tree({ collapsed: ["/code/app"] });
+  assert.deepEqual(brief(t.rows), ["P app", "P api", "W develop"]);
+  assert.equal(t.rows[0].collapsed, true);
+  assert.equal(t.rows[1].collapsed, false);
+});
+
+test("empty group: no rows and the empty state, whatever other groups hold", () => {
+  const r = registry();
+  const empty = buildTree({ registry: selectGroup(addGroup(r, "Empty"), "g3"), cache: CACHE, spaces: [], panes: [], agents: [], collapsed: [], home: HOME, now: NOW });
+  assert.deepEqual([empty.group.name, empty.empty, empty.rows.length], ["Empty", true, 0]);
+  const fresh = buildTree({ registry: emptyRegistry(), cache: {}, spaces: [space("s1", "/code/app", { active: true })], panes: [], agents: [], collapsed: [], home: HOME, now: NOW });
+  assert.deepEqual([fresh.group.name, fresh.empty, fresh.rows.length], ["Projects", true, 0]);
+});
+
+test("a project not listed yet shows a loading row", () => {
+  const { "/code/api": _, ...cache } = CACHE;
+  const t = tree({ cache });
+  assert.deepEqual(brief(t.rows), ["P app", "W main", "W feat-login", "P api", "loading"]);
+  assert.equal(t.projects[1].loading, true);
+});
+
+test("a project git couldn't list (its folder gone) says so instead of loading for ever", () => {
+  const { "/code/api": _, ...cache } = CACHE;
+  const t = tree({ cache, failed: new Set(["/code/api"]) });
+  assert.deepEqual(brief(t.rows), ["P app", "W main", "W feat-login", "P api", "missing"]);
+  assert.deepEqual([t.projects[1].loading, t.projects[1].missing], [false, true]);
+  assert.equal(tree({ failed: new Set(["/code/api"]) }).projects[1].missing, false, "a cached list still shows");
+});
+
+// ── Narrow rail (D18) ──────────────────────────────────────────────────────
+
+test("rail: project initials, the most urgent status of its spaces, the selected project", () => {
+  assert.deepEqual(["herdr-plugins", "app", ".claude", "app_english", "expenses-logs"].map(initials), ["HP", "A", "C", "AE", "EL"]);
+  assert.equal(mostUrgent(["working", "done", null, "idle"]), "done");
+  assert.equal(mostUrgent(["idle", "blocked", "done"]), "blocked");
+  assert.equal(mostUrgent([null]), null);
+  const spaces = [
+    space("s1", "/code/app", { status: "working", active: true }),
+    space("s2", "/Users/demo/orca/workspaces/app/feat-login", { status: "done" }),
+  ];
+  const t = tree({ spaces });
+  assert.deepEqual([t.projects[0].initials, t.projects[0].status, t.projects[0].selected], ["A", "done", true]);
+  assert.deepEqual([t.projects[1].initials, t.projects[1].status, t.projects[1].selected], ["A", null, false]);
+});
+
+test("rail: narrow below 160 px of sidebar, by the shown layout", () => {
+  const layout = (px) => ({ id: "root", children: [{ id: "sidebar", size: { px } }, { id: "work" }] });
+  assert.equal(isNarrow(layout(76)), true);
+  assert.equal(isNarrow(layout(268)), false);
+  assert.equal(isNarrow({ id: "root", children: [] }), false);
+  assert.equal(isNarrow(null), false);
+});
+
+test("rail click: the shown workspace stays, else an open one is selected, else the main checkout opens", () => {
+  const spaces = [space("s1", "/code/app"), space("s2", "/Users/demo/orca/workspaces/app/feat-login", { active: true })];
+  const t = tree({ spaces });
+  assert.deepEqual(railAction(t.projects[0]), { name: "space.select", args: { id: "s2" } });
+  const t2 = tree({ spaces: [{ ...spaces[1], active: false }] });
+  assert.deepEqual(railAction(t2.projects[0]), { name: "space.select", args: { id: "s2" } });
+  assert.deepEqual(railAction(t2.projects[1]), { name: "space.new", args: { folder: "/code/api", name: "develop" } });
+});
+
+// ── Add project (D10; S5, S6) ──────────────────────────────────────────────
+
+// A fake of the herdr side of Add project: an in-memory registry and cache.
+function io({ reg = emptyRegistry(), cache = {}, spaces = [], resolve, list } = {}) {
+  const state = { reg, cache, runs: [] };
+  state.io = {
+    resolve: resolve ?? (async (folder) => ({ path: folder, name: folder.split("/").pop() })),
+    list: list ?? (async (path) => [{ path, branch: "main", main: true }]),
+    updateRegistry: (fn) => (state.reg = fn(state.reg)),
+    cache: () => state.cache,
+    saveWorktrees: (path, l) => { state.cache = { ...state.cache, [path]: l }; },
+    spaces: () => spaces,
+    panes: () => [],
+    home: HOME,
+    run: (name, args) => state.runs.push([name, args]),
+  };
+  return state;
+}
+
+test("add project: a picked folder joins the active group as its repo's main checkout, listed, and its space opens with no space open (S5, S6)", async () => {
+  const s = io({
+    resolve: async () => ({ path: "/code/new", name: "new" }),
+    list: async (path) => [{ path, branch: "trunk", main: true }, { path: "/w/new/fix", branch: "fix", main: false }],
+  });
+  const out = await addProjectAt("/w/new/fix/src", s.io);
+  assert.deepEqual(out.project, { path: "/code/new", name: "new" });
+  assert.deepEqual(s.reg.groups[0].projects, [{ path: "/code/new", name: "new" }]);
+  assert.equal(s.cache["/code/new"].length, 2);
+  assert.deepEqual(s.runs, [["space.new", { folder: "/code/new", name: "trunk" }]]);
+});
+
+test("add project: already registered in another group, not added twice; that group turns active and its open main space is selected", async () => {
+  const reg = registry();
+  const s = io({ reg, cache: CACHE, spaces: [space("s9", "/code/client")] });
+  await addProjectAt("/code/client", s.io);
+  assert.deepEqual(projectPaths(s.reg), ["/code/app", "/code/api", "/code/client"]);
+  assert.equal(s.reg.activeGroup, reg.groups[1].id);
+  assert.deepEqual(s.runs, [["space.select", { id: "s9" }]]);
+});
+
+test("add project: a folder git can't list is still added, and a space opens on it", async () => {
+  const s = io({ list: async () => { throw new Error("gone"); } });
+  await addProjectAt("/code/notes", s.io);
+  assert.deepEqual(projectPaths(s.reg), ["/code/notes"]);
+  assert.deepEqual(s.runs, [["space.new", { folder: "/code/notes", name: "notes" }]]);
+});
+
+test("add here: the focused space's live folder; another machine's or no space is refused (S5)", () => {
+  const spaces = [space("s1", "/code/app"), space("s2", "/code/api", { machine: "vps" })];
+  const panes = [{ pane: "s1-p", tab: "s1-t1", terminal: "t1", cwd: "/code/app/src" }];
+  assert.deepEqual(liveFolder({ space: "s1" }, spaces, panes), { folder: "/code/app/src" });
+  assert.ok(liveFolder({ space: "s2" }, spaces, panes).error);
+  assert.ok(liveFolder(null, spaces, panes).error);
+  assert.ok(liveFolder({ space: "gone" }, spaces, panes).error);
+});
+
+test("open main: the main checkout's space is selected when open, else opened (the project menu's Open main)", () => {
+  const spaces = [space("s1", "/code/app/src")];
+  assert.deepEqual(openMainAction({ project: "/code/app", cache: CACHE, spaces, panes: [], home: HOME }), { name: "space.select", args: { id: "s1" } });
+  assert.deepEqual(openMainAction({ project: "/code/api", cache: CACHE, spaces, panes: [], home: HOME }), { name: "space.new", args: { folder: "/code/api", name: "develop" } });
+  assert.deepEqual(openMainAction({ project: "/code/unlisted", cache: CACHE, spaces, panes: [], home: HOME }), { name: "space.new", args: { folder: "/code/unlisted", name: "unlisted" } });
+});
+
+// ── Project menu (D11) ─────────────────────────────────────────────────────
+
+test("project menu: Open main, New workspace…, Move to group ▸ (the other groups), Remove from list", () => {
+  const r = registry();
+  assert.deepEqual(projectMenuItems(r, "/code/app").map((i) => i.label), ["Open main", "New workspace…", "Move to group", "Remove from list"]);
+  assert.equal(projectMenuItems(r, "/code/app").find((i) => i.id === "move").disabled, false);
+  assert.deepEqual(projectMenuItems(r, "/code/app", true), [{ id: "move-to", label: "Clients", group: r.groups[1].id }]);
+  assert.deepEqual(projectMenuItems(r, "/code/client", true).map((i) => i.label), ["Projects"]);
+  const one = addProject(emptyRegistry(), { path: "/code/app" });
+  assert.equal(projectMenuItems(one, "/code/app").find((i) => i.id === "move").disabled, true, "no other group to move to");
+  assert.deepEqual(projectMenuItems(r, "/code/unknown"), []);
+});
+
+test("remove from list: its cached worktrees go too, so no space matches it any more (S14, S15, D11)", () => {
+  const spaces = [space("s1", "/code/app")];
+  assert.deepEqual(Object.keys(matchSpaces(CACHE, spaces, [], HOME)), ["s1"]);
+  const cache = withoutProject(CACHE, "/code/app/");
+  assert.deepEqual(Object.keys(cache), ["/code/api", "/code/client"]);
+  assert.deepEqual(matchSpaces(cache, spaces, [], HOME), {});
+  assert.equal(CACHE["/code/app"].length, 2, "the input is not mutated");
+});
+
+test("cache pruning: entries of projects no longer registered are dropped; nothing to drop keeps the same value", () => {
+  assert.deepEqual(Object.keys(pruneCache(CACHE, ["/code/api"])), ["/code/api"]);
+  assert.equal(pruneCache(CACHE, projectPaths(registry())), CACHE);
+});
+
+// ── Worktree engine helpers (D6) ───────────────────────────────────────────
+
+test("watch: a repo with linked worktrees is watched at .git/worktrees, else at .git", () => {
+  assert.deepEqual(watchDirs("/code/app", CACHE["/code/app"]), ["/code/app/.git/worktrees", "/code/app/.git"]);
+  assert.deepEqual(watchDirs("/code/api/", CACHE["/code/api"]), ["/code/api/.git"]);
+  assert.deepEqual(watchDirs("/code/new", undefined), ["/code/new/.git"]);
+});
+
+test("listing every project: at most N at once, all of them, a failure doesn't stop the rest", async () => {
+  let running = 0;
+  let peak = 0;
+  const seen = [];
+  const results = await eachLimit([1, 2, 3, 4, 5, 6, 7], 3, async (n) => {
+    running++;
+    peak = Math.max(peak, running);
+    await new Promise((r) => setTimeout(r, 5));
+    running--;
+    seen.push(n);
+    if (n === 4) throw new Error("boom");
+    return n * 10;
+  });
+  assert.ok(peak <= 3 && peak > 1, `peak ${peak}`);
+  assert.deepEqual(seen.sort(), [1, 2, 3, 4, 5, 6, 7]);
+  assert.deepEqual(results.map((r) => (r.ok ? r.value : "err")), [10, 20, 30, "err", 50, 60, 70]);
+  assert.deepEqual(await eachLimit([], 3, async () => 1), []);
+});
+
+test("project paths: every group's projects, for the engine to list and watch", () => {
+  assert.deepEqual(projectPaths(registry()), ["/code/app", "/code/api", "/code/client"]);
+  assert.deepEqual(projectPaths(emptyRegistry()), []);
+});
