@@ -58,7 +58,8 @@ the same files and run the same commands: see [CONTRACT.md](CONTRACT.md).
     terminals**, "Restarting continues each terminal conversation on the new
     account.": Ask, Always restart or Never restart.
 - **Switch dialog** (Ask): "Switched to {account}", the sessions still
-  running on the previous account with a checkbox each, "Don't ask again
+  running on the previous account with a checkbox each: each shows its last
+  prompt, its terminal's title, and whether it's Working or Idle, live. Then "Don't ask again
   (restart automatically)", **Keep as is** and **Restart N sessions**.
 - **Toasts:** "Restarting N Claude sessions on {account}", "N other sessions
   weren't moved." with **Review**, a terminal waiting for idle, a restart

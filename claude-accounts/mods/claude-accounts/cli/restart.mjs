@@ -49,7 +49,13 @@
 //      runner is spawned.
 //   6. pending-switch.json gets {from, to, at, mode, sessions} when there's
 //      something to say: an onAccount session, or an unreadable or shared
-//      one. `mode` is "ask" or "restart", so the mod (T7's toasts.react)
+//      one. Each session is {terminal, title, prompt, account, group,
+//      reason, status}, what the dialog's row shows (D23, Orca's
+//      SessionRow): title is the terminal's title (hc's, else its
+//      "workspace / tab"), or null; prompt is the conversation's last
+//      prompt (terminals.mjs lastPrompt), or null; status is the session
+//      file's "idle" or "busy" when the switch looked (the dialog then
+//      reads it live), null when there's no session. `mode` is "ask" or "restart", so the mod (T7's toasts.react)
 //      tells them apart: mode "ask" with an onAccount session opens the
 //      confirm view; mode "restart" is the restart toast, and its Review
 //      opens the confirm view on the sessions that aren't onAccount (they're
@@ -107,7 +113,7 @@ import { FILES, cliPath, stateHome } from "./paths.mjs";
 import { failure, isAlive, readJson, render, withLock, writeAtomic } from "./files.mjs";
 import { knownAccounts, readSettings, sameEmail } from "./accounts.mjs";
 import { contractUsage } from "./usage.mjs";
-import { HC_SEND_TIMEOUT_MS, getTerminal, hasTranscript, hc, inspectTerminal, isIdle, listClaudeTerminals } from "./terminals.mjs";
+import { HC_SEND_TIMEOUT_MS, getTerminal, hasTranscript, hc, inspectTerminal, isIdle, lastPrompt, listClaudeTerminals } from "./terminals.mjs";
 
 // Milliseconds. poll: how often a loop re-reads its terminal; shell and
 // claude: D8's step 3 and step 5 caps; shellBack: how long the shell may be
@@ -389,8 +395,9 @@ function runsOnAccount(session, accountId, known) {
   return Boolean(account?.signedIn && !account.signedInAs && orgUuid && orgUuid === system?.orgUuid && sameEmail(account.email, system.email));
 }
 
-// D8's three groups, in pending-switch.json's shape plus what a switch item
-// needs: [{ terminal, title, account, group, reason, sessionId, args }].
+// D8's three groups, in pending-switch.json's shape (but the prompt) plus
+// what a switch item needs: [{ terminal, title, account, group, reason,
+// status, sessionId, args }].
 function classify(scan, from, to, known) {
   const holders = new Map();
   for (const { found } of scan) {
@@ -398,7 +405,13 @@ function classify(scan, from, to, known) {
   }
   const out = [];
   for (const { terminal, where, found } of scan) {
-    const row = { terminal, title: found.title ?? where ?? terminal, account: found.account ?? null };
+    const row = {
+      terminal,
+      title: found.title ?? where ?? null,
+      account: found.account ?? null,
+      // As `terminal <t> --json` says it, which the dialog polls (D23).
+      status: found.kind === "claude" ? (found.session === "idle" ? "idle" : "busy") : null,
+    };
     const cantMove = (reason) => out.push({ ...row, group: "cantMove", reason });
     if (found.kind === "notClaude") continue;
     if (found.kind === "missing" || found.kind === "unreadable") cantMove("unreadable");
@@ -421,7 +434,19 @@ function classify(scan, from, to, known) {
   return out;
 }
 
-const publicSession = ({ terminal, title, account, group, reason }) => ({ terminal, title, account, group, reason });
+// Each listed session's last prompt (D23), read from its transcript. Only
+// listed ones: the target's terminals and keep mode read nothing.
+async function withPrompts(sessions, scan) {
+  const found = new Map(scan.map((s) => [s.terminal, s.found]));
+  return Promise.all(
+    sessions.map(async (s) => {
+      const f = found.get(s.terminal);
+      return { ...s, prompt: f?.kind === "claude" ? await lastPrompt(f.configDir, f.sessionId) : null };
+    }),
+  );
+}
+
+const publicSession = ({ terminal, title, prompt, account, group, reason, status }) => ({ terminal, title, prompt, account, group, reason, status });
 
 export async function afterUse(from, to) {
   if (from === to) return;
@@ -438,7 +463,7 @@ export async function afterUse(from, to) {
       say(`claude-accounts: couldn't list Herdr's terminals (${e.message}); Claude terminals stay where they are.`);
     }
   }
-  const sessions = switchMode === "keep" ? [] : classify(scan, from, to, known);
+  const sessions = switchMode === "keep" ? [] : await withPrompts(classify(scan, from, to, known), scan);
   const onAccount = sessions.filter((s) => s.group === "onAccount");
   const accountOf = new Map(scan.filter((s) => s.found.kind === "claude").map((s) => [s.terminal, s.found.account]));
 

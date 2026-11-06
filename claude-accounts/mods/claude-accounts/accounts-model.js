@@ -22,9 +22,11 @@
 //   removePrompt(account)             Remove's question
 //   signInArgv(cli, target, link)     the tab's command: `login <id|new|default> [--link]`
 //   cliError(result, command)         what a failed CLI run says, or null
-//   confirmModel(pending, accounts, ticked), initialTicked(pending),
+//   confirmModel(pending, accounts, ticked, live), initialTicked(pending),
 //   toggleTicked(…), toggleGroup(…), confirmCommands(choice, {…})
 //                                     the confirm view
+//   statusTerminals(pending), statusArgv(t), withStatus(live, t, result)
+//                                     the Working or Idle it reads while open
 //   REASONS                           why a session can't move, Orca's labels
 //
 // Accounts are store.js's readAccounts() (or its `accounts` list); a
@@ -243,6 +245,11 @@ export const REASONS = Object.freeze({
 });
 const CANT_MOVE = "Can't move";
 const UNREADABLE = "unreadable";
+// Orca's SessionRow: a session with neither a prompt nor a title, and the
+// state of one on the outgoing account (isClaudePaneMidTurn: busy or not).
+const UNTITLED = "Claude session";
+const WORKING = "Working";
+const IDLE = "Idle";
 
 // The groups as the dialog has them: { onAccount, elsewhere, cantMove }.
 // Review (mode "restart": the outgoing sessions are already restarting)
@@ -280,9 +287,16 @@ export function toggleGroup(ticked, terminals) {
 
 const plural = (n, one, other) => (n === 1 ? one : other);
 
-// Everything the dialog shows, for a pending switch (or null: none waiting)
-// and the terminals ticked now.
-export function confirmModel(pending, accounts, ticked) {
+// Everything the dialog shows, for a pending switch (or null: none waiting),
+// the terminals ticked now, and live: { [terminal]: "idle"|"busy" }, what
+// the dialog read since it opened (withStatus), over the switch's status.
+// A row is Orca's SessionRow (ClaudeAccountSwitchSessionTree.tsx, D23):
+// { terminal, title, terminalTitle, reason, checked, fixed }. title is the
+// last prompt, else the terminal's title, else "Claude session";
+// terminalTitle is that title beside a prompt, else null; reason is the
+// right side: why it can't move, the account it's on (Not on …), or, on
+// the outgoing account, Working (busy) or Idle (anything else).
+export function confirmModel(pending, accounts, ticked, live = null) {
   const chosenSet = new Set(Array.isArray(ticked) ? ticked : []);
   const keep = "Keep as is";
   if (!pending) {
@@ -304,12 +318,22 @@ export function confirmModel(pending, accounts, ticked) {
   const listedCount = onAccount.length + elsewhere.length + cantMove.length;
   const chosen = [...onAccount, ...elsewhere].map((s) => s.terminal).filter((t) => chosenSet.has(t));
 
+  const stateOf = (s) => ((isObject(live) && Object.hasOwn(live, s.terminal) ? live[s.terminal] : s.status) === "busy" ? WORKING : IDLE);
   const row = (s, reason, fixed) => {
-    const title = str(s.title) ?? "Claude session";
-    return { terminal: s.terminal, title, sub: title === s.terminal ? null : s.terminal, reason, checked: !fixed && chosenSet.has(s.terminal), fixed };
+    const prompt = str(s.prompt)?.trim() ?? null;
+    const terminalTitle = str(s.title);
+    return {
+      terminal: s.terminal,
+      title: prompt ?? terminalTitle ?? UNTITLED,
+      terminalTitle: prompt ? terminalTitle : null,
+      reason,
+      checked: !fixed && chosenSet.has(s.terminal),
+      fixed,
+    };
   };
   const group = (key, title, sessions, fixed) => {
-    const rows = sessions.map((s) => row(s, fixed ? (REASONS[s.reason] ?? CANT_MOVE) : key === "elsewhere" ? accountLabel(accounts, s.account) : null, fixed));
+    const side = (s) => (fixed ? (REASONS[s.reason] ?? CANT_MOVE) : key === "elsewhere" ? accountLabel(accounts, s.account) : stateOf(s));
+    const rows = sessions.map((s) => row(s, side(s), fixed));
     const ticks = rows.filter((r) => r.checked).length;
     return { key, title, count: rows.length, fixed, state: fixed || ticks === 0 ? "none" : ticks === rows.length ? "all" : "some", sessions: rows };
   };
@@ -349,6 +373,36 @@ export function confirmModel(pending, accounts, ticked) {
       terminals: chosen,
     },
   };
+}
+
+// ── The confirm view's live state (D23) ───────────────────────────────────
+
+// The terminals whose row says Working or Idle, which the dialog reads
+// every 2 s while it's open: the outgoing sessions of an Ask. Review lists
+// none (they're already restarting).
+export function statusTerminals(pending) {
+  return sessionGroups(pending).onAccount.map((s) => s.terminal);
+}
+
+// The CLI run that reads one: `terminal <t> --json` → { status, … }.
+export function statusArgv(terminal) {
+  return ["terminal", terminal, "--json"];
+}
+
+// live after one read of a terminal (exec's result, or what it threw). A
+// read that failed (Claude quit, hc failed, a timeout) or that says nothing
+// new keeps what's shown: the same object back, so the view needn't redraw.
+export function withStatus(live, terminal, result) {
+  const map = isObject(live) ? live : {};
+  if (!isObject(result) || result instanceof Error || result.code !== 0) return map;
+  let status;
+  try {
+    status = JSON.parse(result.stdout)?.status;
+  } catch {
+    return map;
+  }
+  if (status !== "idle" && status !== "busy") return map;
+  return map[terminal] === status ? map : { ...map, [terminal]: status };
 }
 
 // The CLI runs an answer takes, in order (Orca's

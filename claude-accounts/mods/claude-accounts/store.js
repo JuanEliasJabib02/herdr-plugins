@@ -185,7 +185,10 @@ export function readRestart(text) {
 // { from, to, at, sessions: [{ terminal, title, account, group, reason }] },
 // or null when no Ask is waiting: no file, or no target account. A session
 // without a terminal is dropped; an unknown group reads "cantMove", so it is
-// never ticked nor restarted.
+// never ticked nor restarted. A session's `prompt` (its last prompt) and
+// `status` ("idle"|"busy" when the switch looked), which T19 added for the
+// dialog's row (D23), are kept as written, as any field this reader doesn't
+// know: confirmModel reads them, and a file from before has neither.
 
 const GROUPS = ["onAccount", "elsewhere", "cantMove"];
 

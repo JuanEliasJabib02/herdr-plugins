@@ -4,8 +4,13 @@
 // {previous}", "Can't move") with a checkbox each and one per group, "Don't
 // ask again (restart automatically)", "Keep as is" and "Restart {{count}}
 // sessions" ("Restart session" for one or none, disabled for none). The list
-// shows only when more than one session is listed, or on Review. What it
-// says is accounts-model.js's confirmModel; this file draws it and answers.
+// shows only when more than one session is listed, or on Review. A row is
+// Orca's SessionRow (D23): the session's last prompt (else its terminal's
+// title, else "Claude session"), the terminal's title beside a prompt, and
+// at the right why it can't move, the account it's on, or Working or Idle.
+// That state is read again every 2 s while the dialog is open (`terminal
+// <t> --json`), for the sessions on the outgoing account. What it says is
+// accounts-model.js's confirmModel; this file draws it and answers.
 // Owner: T7.
 //   props: { view: "confirm" }
 //
@@ -24,12 +29,14 @@ import { div, svg } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
 import { theme, props, openOverlay, closeOverlay, exec, readTextFile, watchFolder, home, appHome } from "herdr";
 import { MOD, FILES, stateDir, cliPath, readAccounts, readPendingSwitch } from "./store.js";
-import { confirmModel, initialTicked, toggleTicked, toggleGroup, confirmCommands, cliError } from "./accounts-model.js";
+import { confirmModel, initialTicked, toggleTicked, toggleGroup, confirmCommands, cliError, statusTerminals, statusArgv, withStatus } from "./accounts-model.js";
 
 // A watch wake waits this long, so one write's events come as one batch.
 const SETTLE = 150;
 // Without a state folder to watch, it looks again this often.
 const RETRY = 2000;
+// How often the outgoing sessions' Working or Idle is read while open (D23).
+const STATUS_POLL = 2000;
 const SPINNER = Object.freeze(["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]);
 const CHECK = "mods/workspace-chrome/check.svg";
 const MINUS = "mods/workspace-chrome/minus.svg";
@@ -49,6 +56,8 @@ export default class Confirm {
     this.pending = null; // readPendingSwitch(): the question shown
     this.accounts = readAccounts(null);
     this.ticked = [];
+    this.live = {}; // withStatus(): each outgoing session's state, read since the question showed
+    this.polling = false; // a read of those states is on its way
     this.dontAskAgain = false;
     this.busy = false; // an answer is on its way
     this.answered = false; // sent: closing doesn't answer again
@@ -59,8 +68,12 @@ export default class Confirm {
     cx.timer.after(600, () => this.handle.focus());
     cx.spawn(async (cx) => {
       if (await this.reload()) cx.notify();
+      if (this.overlay) this.poll(cx);
     });
-    if (this.overlay) this.watch(cx);
+    if (this.overlay) {
+      this.watch(cx);
+      cx.timer.every(STATUS_POLL, (cx) => this.poll(cx));
+    }
   }
 
   async read(name) {
@@ -87,6 +100,7 @@ export default class Confirm {
       const next = readPendingSwitch(pending);
       if (!next || !this.pending || next.at !== this.pending.at || next.to !== this.pending.to) {
         this.ticked = initialTicked(next);
+        this.live = {};
         this.dontAskAgain = false;
         this.error = null;
       }
@@ -115,6 +129,30 @@ export default class Confirm {
         }
       } catch {
         // The dialog closed, or this build was reloaded: its cx is gone.
+      }
+    });
+  }
+
+  // Reads the outgoing sessions' state once (D23), one read at a time. A
+  // newer question meanwhile starts over with its own.
+  poll(cx) {
+    const terminals = statusTerminals(this.pending);
+    if (this.polling || this.answered || terminals.length === 0) return;
+    this.polling = true;
+    const asked = this.pending;
+    cx.spawn(async (cx) => {
+      try {
+        const cli = cliPath(appHome());
+        const results = await Promise.all(terminals.map((t) => exec(cli, statusArgv(t)).catch((e) => e)));
+        if (!this.pending || this.pending.at !== asked.at || this.pending.to !== asked.to) return;
+        const live = terminals.reduce((map, t, i) => withStatus(map, t, results[i]), this.live);
+        if (live === this.live) return;
+        this.live = live;
+        cx.notify();
+      } catch {
+        // The dialog closed meanwhile: its cx is gone.
+      } finally {
+        this.polling = false;
       }
     });
   }
@@ -200,7 +238,7 @@ export default class Confirm {
 
   render() {
     const t = theme();
-    const m = confirmModel(this.pending, this.accounts, this.ticked);
+    const m = confirmModel(this.pending, this.accounts, this.ticked, this.live);
     const root = v_flex().id("ca-confirm").track_focus(this.handle).on_key_down((e, cx) => this.key(e, cx, m))
       .size_full().min_h(0).bg(t.popover).text_color(t.foreground).text_size(12.5);
     const header = h_flex().flex_none().px(18).pt(16).pb(4).gap(8).items_center()
@@ -241,8 +279,8 @@ export default class Confirm {
           }))
           .child(s.fixed ? div().size(14).flex_none() : this.box(t, s.checked, false))
           .child(div().flex_1().min_w(0).truncate().text_size(12).text_color(s.fixed ? t.muted : t.foreground).child(s.title))
-          .when(Boolean(s.sub), (el) => el.child(div().flex_none().text_size(11).text_color(t.dim).child(s.sub ?? "")))
-          .when(Boolean(s.reason), (el) => el.child(div().flex_none().max_w(170).truncate().text_size(11).text_color(t.dim).child(s.reason ?? "")))),
+          .when(Boolean(s.terminalTitle), (el) => el.child(div().flex_none().max_w(112).truncate().text_size(11).text_color(t.dim).child(s.terminalTitle ?? "")))
+          .when(Boolean(s.reason), (el) => el.child(div().flex_none().max_w(160).truncate().text_size(11).text_color(t.dim).child(s.reason ?? "")))),
       ]));
   }
 

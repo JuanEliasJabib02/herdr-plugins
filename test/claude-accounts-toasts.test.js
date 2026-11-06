@@ -15,6 +15,7 @@ import { react, SEEN_KEY } from "../claude-accounts/mods/claude-accounts/toasts.
 import {
   accountLabel, accountsModel, removePrompt, signInArgv, cliError, signInDone,
   confirmModel, initialTicked, toggleTicked, toggleGroup, confirmCommands,
+  statusTerminals, statusArgv, withStatus,
 } from "../claude-accounts/mods/claude-accounts/accounts-model.js";
 import { readAccounts, readRestart, readPendingSwitch, readSettings } from "../claude-accounts/mods/claude-accounts/store.js";
 
@@ -281,8 +282,9 @@ test("confirm: an Ask with four sessions lists them in Orca's groups, the outgoi
     ["Not on ana@example.com", 1, false, "none"],
     ["Can't move", 1, true, "none"],
   ]);
-  assert.deepEqual(m.groups[1].sessions[0], { terminal: "t21", title: "claude · notes", sub: "t21", reason: "System default", checked: false, fixed: false });
-  assert.deepEqual(m.groups[2].sessions[0], { terminal: "t30", title: "claude", sub: "t30", reason: "No shell to come back to", checked: false, fixed: true });
+  assert.deepEqual(m.groups[0].sessions[0], { terminal: "t12", title: "claude · herdr-plugins", terminalTitle: null, reason: "Idle", checked: true, fixed: false });
+  assert.deepEqual(m.groups[1].sessions[0], { terminal: "t21", title: "claude · notes", terminalTitle: null, reason: "System default", checked: false, fixed: false });
+  assert.deepEqual(m.groups[2].sessions[0], { terminal: "t30", title: "claude", terminalTitle: null, reason: "No shell to come back to", checked: false, fixed: true });
   assert.deepEqual(m.dontAsk, { label: "Don't ask again (restart automatically)", hint: "You can turn this off in Manage Accounts…" });
   assert.equal(m.keep, "Keep as is");
   assert.deepEqual(m.restart, { label: "Restart 2 sessions", enabled: true, terminals: ["t12", "t14"] });
@@ -332,6 +334,61 @@ test("confirm: Orca's reason labels for the sessions that can't move", () => {
   assert.deepEqual(m.groups.at(-1).sessions.map((s) => s.reason), [
     "No shell to come back to", "Can't resume", "Also open in another pane", "Account unknown", "Can't move",
   ]);
+});
+
+// Orca's session row (ClaudeAccountSwitchSessionTree.tsx SessionRow, D23).
+test("confirm (D23): a row's title is its last prompt, else its terminal title, else 'Claude session'; the terminal title shows beside a prompt", () => {
+  const p = pending("ask", [
+    { ...session("t1", "onAccount"), prompt: "fix the login bug" },
+    { ...session("t2", "onAccount", null, ANA, "claude · api"), prompt: "  " },
+    { ...session("t3", "onAccount", null, ANA, null), prompt: null },
+    { ...session("t4", "elsewhere", null, "default", null), prompt: "write the docs" },
+    { ...session("t5", "cantMove", "own-program", null), prompt: "an own-program prompt" },
+  ]);
+  const m = confirmModel(p, accounts(), initialTicked(p));
+  assert.deepEqual(m.groups.flatMap((g) => g.sessions).map((s) => [s.terminal, s.title, s.terminalTitle]), [
+    ["t1", "fix the login bug", "claude · t1"],
+    ["t2", "claude · api", null],
+    ["t3", "Claude session", null],
+    ["t4", "write the docs", null],
+    ["t5", "an own-program prompt", "claude · t5"],
+  ]);
+});
+
+test("confirm (D23): an outgoing session shows Working or Idle, and follows the state read while the dialog is open", () => {
+  const p = pending("ask", [
+    { ...session("t1", "onAccount"), status: "idle" },
+    { ...session("t2", "onAccount"), status: "busy" },
+    session("t3", "onAccount"),
+    { ...session("t4", "elsewhere", null, "default"), status: "busy" },
+    { ...session("t5", "cantMove", "no-session"), status: "busy" },
+  ]);
+  const side = (live) =>
+    Object.fromEntries(confirmModel(p, accounts(), initialTicked(p), live).groups.flatMap((g) => g.sessions).map((s) => [s.terminal, s.reason]));
+  // What the switch saw: busy is Working; anything else is Idle, as Orca reads a pane that isn't mid-turn.
+  assert.deepEqual(side(), { t1: "Idle", t2: "Working", t3: "Idle", t4: "System default", t5: "Can't resume" });
+
+  // While open, the dialog reads `terminal <t> --json` for the outgoing sessions only.
+  assert.deepEqual(statusTerminals(p), ["t1", "t2", "t3"]);
+  assert.deepEqual(statusArgv("t1"), ["terminal", "t1", "--json"]);
+  let live = {};
+  live = withStatus(live, "t1", { code: 0, stdout: '{"account":"a","sessionId":"s","status":"busy","resumable":true}\n', stderr: "" });
+  live = withStatus(live, "t2", { code: 0, stdout: '{"status":"idle"}', stderr: "" });
+  assert.deepEqual(live, { t1: "busy", t2: "idle" });
+  assert.deepEqual(side(live), { t1: "Working", t2: "Idle", t3: "Idle", t4: "System default", t5: "Can't resume" });
+
+  // The same state again, or a read that failed (Claude quit, hc failed, a
+  // timeout), keeps what's shown: the same map back, so nothing redraws.
+  assert.equal(withStatus(live, "t1", { code: 0, stdout: '{"status":"busy"}', stderr: "" }), live);
+  assert.equal(withStatus(live, "t1", { code: 3, stdout: "", stderr: "terminal t1 isn't running Claude\n" }), live);
+  assert.equal(withStatus(live, "t1", { code: 0, stdout: "not json", stderr: "" }), live);
+  assert.equal(withStatus(live, "t1", { code: 0, stdout: '{"status":"asleep"}', stderr: "" }), live);
+  assert.equal(withStatus(live, "t1", new Error("exec: timed out after 30 s")), live);
+
+  // Review lists no outgoing session (they're already restarting), and no
+  // question has none.
+  assert.deepEqual(statusTerminals(pending("restart", [session("t1", "onAccount"), session("t21", "elsewhere", null, "default")])), []);
+  assert.deepEqual(statusTerminals(null), []);
 });
 
 test("confirm: with no question waiting, the model says so", () => {

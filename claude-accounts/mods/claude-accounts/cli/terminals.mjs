@@ -34,6 +34,17 @@
 // profile's projects/ links to ~/.claude/projects), searched over every
 // project folder rather than guessing the slug from the cwd.
 //
+// lastPrompt(configDir, sessionId): the conversation's last prompt, for the
+// switch dialog's row (D23, Orca's agent status `prompt`), or null. It's the
+// last user line of that transcript with text: tool results, meta lines
+// (isMeta, a compaction's summary, a subagent's line), slash commands and
+// their output (`<command-name>…`, `<local-command-stdout>…`), `!` shell
+// lines (`<bash-input>…`) and "[Request interrupted by user…]" don't count.
+// Its text parts are joined, its whitespace runs folded to one space,
+// trimmed, and cut at Orca's 200 characters (AGENT_STATUS_MAX_FIELD_LENGTH).
+// The file is read backwards in chunks, so a long conversation costs only
+// what follows its last prompt. Never throws: anything unreadable is null.
+//
 // listClaudeTerminals(): `hc ls --json`, the live local terminals whose agent
 // is "claude-code" (D7 step 1). Terminals on other machines (`vps/t7`) are
 // left out: their logins are their own (Orca's rule).
@@ -42,7 +53,7 @@
 // passes the terminal after `--`, so a name can't read as a flag.
 
 import { execFile } from "node:child_process";
-import { readFile, readdir, stat } from "node:fs/promises";
+import { open, readFile, readdir, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { parseArgs } from "node:util";
@@ -176,13 +187,102 @@ async function findSession(dirs, pid) {
 // A session id that names a file, never a path.
 const SESSION_ID = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 
-export async function hasTranscript(configDir, sessionId) {
-  if (!configDir || typeof sessionId !== "string" || !SESSION_ID.test(sessionId)) return false;
+// <configDir>/projects/<any>/<sessionId>.jsonl, the first one found, or null.
+async function findTranscript(configDir, sessionId) {
+  if (!configDir || typeof sessionId !== "string" || !SESSION_ID.test(sessionId)) return null;
   const projects = join(configDir, "projects");
   const names = await readdir(projects).catch(() => []);
   const file = `${sessionId}.jsonl`;
   const found = await Promise.all(names.map((name) => stat(join(projects, name, file)).then((st) => st.isFile(), () => false)));
-  return found.some(Boolean);
+  const i = found.indexOf(true);
+  return i < 0 ? null : join(projects, names[i], file);
+}
+
+export async function hasTranscript(configDir, sessionId) {
+  return (await findTranscript(configDir, sessionId)) !== null;
+}
+
+// ── The last prompt (D23) ───────────────────────────────────────────────────
+
+// Orca's AGENT_STATUS_MAX_FIELD_LENGTH: a prompt is a row's title, never a body.
+const PROMPT_MAX = 200;
+// How much of the transcript one read takes, from its end.
+const PROMPT_CHUNK = 64 * 1024;
+const NEWLINE = 0x0a;
+// A user line that holds a slash command, its output or a `!` shell line.
+const COMMAND_TEXT = /^<(command-(name|message|args)|local-command-[a-z-]+|bash-(input|stdout|stderr))>/;
+const INTERRUPTED = /^\[Request interrupted by user[^\]]*\]$/;
+
+// Cut at max UTF-16 units, without leaving half a surrogate pair (Orca's
+// truncatePreservingSurrogates).
+function cutAt(text, max) {
+  if (text.length <= max) return text;
+  let out = text.slice(0, max);
+  const last = out.charCodeAt(out.length - 1);
+  if (last >= 0xd800 && last <= 0xdbff) out = out.slice(0, -1);
+  return out;
+}
+
+// One transcript line (a Buffer) → its prompt, or null when it isn't one.
+function promptOf(line) {
+  // Most lines aren't the user's: skip them before parsing.
+  if (line.length === 0 || !line.includes('"user"')) return null;
+  let entry;
+  try {
+    entry = JSON.parse(line.toString("utf8"));
+  } catch {
+    return null;
+  }
+  if (!entry || entry.type !== "user" || entry.isMeta || entry.isCompactSummary || entry.isSidechain) return null;
+  const content = entry.message?.content;
+  let text;
+  if (typeof content === "string") text = content;
+  else if (Array.isArray(content)) {
+    if (content.some((part) => part?.type === "tool_result")) return null;
+    text = content.filter((part) => part?.type === "text" && typeof part.text === "string").map((part) => part.text).join(" ");
+  } else return null;
+  const oneLine = text.replace(/\s+/g, " ").trim();
+  if (!oneLine || COMMAND_TEXT.test(oneLine) || INTERRUPTED.test(oneLine)) return null;
+  return cutAt(oneLine, PROMPT_MAX).trimEnd();
+}
+
+// The file's last prompt, reading it from its end. `tail` holds the pieces of
+// the line still cut by a chunk's start, joined only once that line is whole,
+// so a long line is never copied once per chunk.
+async function lastPromptIn(file) {
+  const handle = await open(file, "r");
+  try {
+    let end = (await handle.stat()).size;
+    let tail = [];
+    while (end > 0) {
+      const start = Math.max(0, end - PROMPT_CHUNK);
+      const chunk = Buffer.alloc(end - start);
+      const { bytesRead } = await handle.read(chunk, 0, chunk.length, start);
+      const data = chunk.subarray(0, bytesRead);
+      end = start;
+      let cut = data.length;
+      for (let i = data.lastIndexOf(NEWLINE); i >= 0; i = i > 0 ? data.lastIndexOf(NEWLINE, i - 1) : -1) {
+        const line = data.subarray(i + 1, cut);
+        const prompt = promptOf(tail.length ? Buffer.concat([line, ...tail]) : line);
+        if (prompt) return prompt;
+        tail = [];
+        cut = i;
+      }
+      tail.unshift(data.subarray(0, cut));
+    }
+    return promptOf(Buffer.concat(tail));
+  } finally {
+    await handle.close();
+  }
+}
+
+export async function lastPrompt(configDir, sessionId) {
+  try {
+    const file = await findTranscript(configDir, sessionId);
+    return file ? await lastPromptIn(file) : null;
+  } catch {
+    return null;
+  }
 }
 
 // The foreground looks like Claude Code: the native binary (`claude`,
