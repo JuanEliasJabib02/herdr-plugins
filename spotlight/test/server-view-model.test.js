@@ -59,7 +59,7 @@ test("envs: only those with a command, the running one selected, each with its a
   const saved = model({
     settings: settingsOf({ version: 1, repos: { [ROOT]: { envs: { prod: "pnpm start" } } } }),
     detection: { detected: { local: "pnpm local" }, scriptCommands: [] },
-    state: stateWith(repo({ serverEnv: "prod" })),
+    state: stateWith(repo({ envOverride: "prod" })),
   });
   assert.deepEqual(saved.envs.map((e) => [e.env, e.selected, e.command]), [
     ["local", false, "pnpm local"],
@@ -68,6 +68,14 @@ test("envs: only those with a command, the running one selected, each with its a
   assert.deepEqual(model({ detection: { detected: {}, scriptCommands: [] } }).envs, []);
   // Not known yet (detection still running): the saved ones only.
   assert.deepEqual(model({ detection: null }).envs, []);
+});
+
+test("envs: the effective env is selected (the popup's override, else the settings' env), not only the running one (J-002)", () => {
+  const settings = settingsOf({ version: 1, repos: { [ROOT]: { env: "dev" } } });
+  // The server still runs Local (serverEnv), the settings now say Dev.
+  assert.deepEqual(model({ settings }).envs.map((e) => [e.env, e.selected]), [["local", false], ["dev", true]]);
+  const override = model({ settings, state: stateWith(repo({ envOverride: "local", serverEnv: "dev" })) });
+  assert.deepEqual(override.envs.map((e) => [e.env, e.selected]), [["local", true], ["dev", false]]);
 });
 
 test("variant chips: the candidates, the running one selected, the inferred one marked", () => {

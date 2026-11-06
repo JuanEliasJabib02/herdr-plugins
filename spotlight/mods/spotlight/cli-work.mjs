@@ -14,12 +14,16 @@ import { activate, sync, deactivate, assertDeactivatable, readRefs, toSpotlightE
 import { emptyRepo, addNote, reconcileRepo, rememberVariant } from "./store.js";
 import { pidAlive, LockError } from "./locks.js";
 import { repoSettings, normRoot } from "./settings.js";
-import { planServer, lockfileInstalls, missingInstalls, installsFor, chainInstall } from "./server-plan.js";
+import {
+  planServer, lockfileInstalls, missingInstalls, installsFor, chainInstall, detectServerScripts, commandTemplate,
+} from "./server-plan.js";
 import { inspectServer, readServerState, startServer, restartServer, stopServer } from "./server.js";
 import { logPathFor, appendLogHeader, rotateLog } from "./server-log.js";
 import { portUrl } from "./ports.js";
 import { release, pause, regrant, snapshot } from "./queue.js";
-import { decideTurnEnd, activityUpdate, lightingMarker, lightAlive, needsLight, memberLit } from "./cli-turns.mjs";
+import {
+  decideTurnEnd, activityUpdate, lightingMarker, lightAlive, needsLight, memberLit, classifyStep,
+} from "./cli-turns.mjs";
 import { branchOf, hcGet, hcReadText, registeredRoots } from "./cli-env.mjs";
 
 const sha1 = (text) => crypto.createHash("sha1").update(text).digest("hex");
@@ -182,11 +186,30 @@ function serverFailure(r) {
   return `el server no arrancó (${r.reason}${r.message ? `: ${r.message}` : ""})`;
 }
 
+// The env a repo's server should run (J-002): the one picked in the server
+// popup (`spotlight env --env`, the record's envOverride, kept until `toggle`
+// off), else the settings' env, the repo's default. The record's serverEnv
+// only says what runs now.
+export const effectiveEnv = (cx, root, record) => record?.envOverride ?? repoSettings(cx.settings, root).env;
+
+const RUNNING = new Set(["starting", "listening"]);
+
+// Spotlight's server runs in another env than the effective one, and that
+// env starts something: it restarts, as on a command change (D10, J-002).
+// An env with no command leaves the server alone, so nobody retries it.
+export async function envDrift(cx, root, record) {
+  if (!record?.holder || !record.serverCommand || !RUNNING.has(record.serverState)) return false;
+  const env = effectiveEnv(cx, root, record);
+  if (record.serverEnv === env) return false;
+  const { detected } = await detectServerScripts(root, cx.io);
+  return commandTemplate({ settings: repoSettings(cx.settings, root), detected, env }) !== null;
+}
+
 // Plans the repo's server for `workspace` (T5a) and starts it, restarts it
-// (its command changed, installs are pending, or `restart`), or leaves it.
-// Call under the repo's lock. Options:
+// (its command or env changed, installs are pending, or `restart`), or
+// leaves it. Call under the repo's lock. Options:
 //   taskKey      `<lane>/<taskKey>` whose remembered variant applies
-//   envName      the env to run (else the record's, else the settings')
+//   envName      the env to run (else effectiveEnv's)
 //   chosenVariant  a variant picked now (`spotlight env --variant`)
 //   keepVariant  reuse the running server's variant (a restart, a sync)
 //   restart      restart even when nothing changed (`spotlight restart`)
@@ -198,7 +221,7 @@ export async function ensureServer(cx, root, opts = {}) {
   const record = state.repos[root];
   if (!record) return { state: "none" };
   const repoSet = repoSettings(cx.settings, root);
-  const env = envName ?? record.serverEnv ?? repoSet.env;
+  const env = envName ?? effectiveEnv(cx, root, record);
   const chosenVariant = opts.chosenVariant ?? (opts.keepVariant ? record.serverVariant ?? undefined : undefined);
   const plan = await planServer({
     root, workspace, settings: repoSet, env, taskKey, remembered: state.variants, chosenVariant, io: cx.io, git: cx.planGit,
@@ -208,7 +231,7 @@ export async function ensureServer(cx, root, opts = {}) {
     await cx.store.updateState((s) => {
       const r = s.repos[root];
       if (!r) return;
-      Object.assign(r, { serverState: "needs-variant", variantCandidates: plan.candidates, serverEnv: env });
+      Object.assign(r, { serverState: "needs-variant", variantCandidates: plan.candidates });
     });
     return { state: "needs-variant", candidates: plan.candidates };
   }
@@ -223,7 +246,8 @@ export async function ensureServer(cx, root, opts = {}) {
   const seen = await inspectServer(args, cx.serverDeps);
   if (ifRunning && seen.kind !== "spotlight") return { state: "pending" };
   let r;
-  if (seen.kind === "spotlight" && !restart && record.serverCommand === plan.command && pending.length === 0) {
+  const same = record.serverCommand === plan.command && record.serverEnv === plan.env;
+  if (seen.kind === "spotlight" && !restart && same && pending.length === 0) {
     r = { ok: true, started: false, reason: "already-running", terminal: seen.terminal, pid: seen.pid };
   } else if (seen.kind === "spotlight") {
     r = await restartServer(args, cx.serverDeps);
@@ -233,7 +257,8 @@ export async function ensureServer(cx, root, opts = {}) {
   await cx.store.updateState((s) => {
     const rec = s.repos[root];
     if (!rec) return;
-    rec.serverEnv = plan.env;
+    // What runs now (J-002): written only when a server runs in it.
+    if (r.ok) rec.serverEnv = plan.env;
     rec.logPath = logPath;
     if (r.terminal) rec.serverTerminal = r.terminal;
     if (r.ok && r.started) {
@@ -265,8 +290,13 @@ export async function ensureServer(cx, root, opts = {}) {
 // it. `onlyIf(record)`: sync only when it says so (`on`: the task's own
 // holder). A sync that changes nothing writes nothing (D7). A changed
 // pnpm-lock.yaml / uv.lock restarts Spotlight's running server with the
-// install chained (D10).
-export async function syncRepo(cx, root, { force = false, onlyIf } = {}) {
+// install chained (D10), and so does a server running another env than the
+// effective one (J-002: a settings change, picked up by the next `on`,
+// auto-sync, or the reap's detached sync). `lockTimeoutMs`: how long to wait
+// for the repo lock (`on`'s time left, J-001); past it, LockError
+// "lock-timeout".
+export async function syncRepo(cx, root, { force = false, onlyIf, lockTimeoutMs } = {}) {
+  const wait = lockTimeoutMs === undefined ? {} : { timeoutMs: lockTimeoutMs };
   return cx.store.withRepoLock(root, async () => {
     const record = cx.store.readState().repos[root] ?? null;
     if (!record?.holder) return { ok: false, code: "not-active", message: `Spotlight is not on in ${cx.nameOf(root)}.` };
@@ -287,13 +317,17 @@ export async function syncRepo(cx, root, { force = false, onlyIf } = {}) {
       });
       return { ok: false, holder, ...error };
     }
+    // Spotlight's running server only, with its variant (D10).
+    const refreshServer = async () =>
+      ensureServer(cx, root, { workspace: holder, branch: await branchOf(holder), keepVariant: true, ifRunning: true });
     if (result.skipped) {
       if (record.lastError) {
         await cx.store.updateState((s) => {
           if (s.repos[root]) s.repos[root].lastError = null;
         });
       }
-      return { ok: true, skipped: true, holder };
+      const server = (await envDrift(cx, root, record)) ? await refreshServer() : null;
+      return { ok: true, skipped: true, holder, restarted: server?.state === "started" };
     }
     const installs = await lockfileInstalls({ git: cx.planGit, root, fromSha: record.lastSnapshotSha, toSha: result.snapshotSha });
     const now = cx.now();
@@ -304,11 +338,9 @@ export async function syncRepo(cx, root, { force = false, onlyIf } = {}) {
       r.pendingInstalls = installsFor(r.pendingInstalls, installs);
     });
     let server = null;
-    if (installs.length > 0) {
-      server = await ensureServer(cx, root, { workspace: holder, branch: await branchOf(holder), keepVariant: true, ifRunning: true });
-    }
+    if (installs.length > 0 || (await envDrift(cx, root, record))) server = await refreshServer();
     return { ok: true, skipped: false, holder, installs, restarted: server?.state === "started" };
-  });
+  }, wait);
 }
 
 // ── Turning a root off (toggle) ────────────────────────────────────────────
@@ -482,9 +514,11 @@ export function applyTurnEnd(queue, cur, d, qctx) {
 
 // `spotlight reap` (the footer, every 30 s and on terminal changes; D12,
 // D13, D19, D10): refs win; each requesting terminal's turn end (release,
-// pause, or a detached `classify` when the usage is stale); holders'
-// activity; gone servers and log rotation; a regrant (a raised cap); and
-// lights for turns whose marker is missing or whose light died.
+// pause, or a detached `classify` when the usage is stale, spawned again
+// when it died: J-005); holders' activity; gone servers, log rotation and a
+// detached sync for a server running another env than the effective one
+// (J-002); a regrant (a raised cap); and lights for turns whose marker is
+// missing or whose light died.
 // `on` and `off` run the queue part only (`full: false`: turn ends, the
 // regrant, the lights; D13 "checked by on, off and reap"), so the line moves
 // while the footer isn't running; `skip` is the caller's own terminal, whose
@@ -505,7 +539,11 @@ export async function reap(cx, { full = true, skip = null } = {}) {
     if (got.error) continue;
     const term = got.missing ? null : got.terminal;
     let d = decideTurnEnd(req, term, now, undefined);
-    if (d.action === "need-usage") d = decideTurnEnd(req, term, now, await cx.accountUsage(req.terminal));
+    let usage;
+    if (d.action === "need-usage") {
+      usage = await cx.accountUsage(req.terminal);
+      d = decideTurnEnd(req, term, now, usage);
+    }
     let activity = null;
     if (full && req.state === "holding" && term?.state === "live") {
       const statusMs = term.status_ms ?? null;
@@ -515,10 +553,11 @@ export async function reap(cx, { full = true, skip = null } = {}) {
         activity = activityUpdate(req, { statusMs, outputHash: text == null ? undefined : sha1(text) }, now);
       }
     }
-    decisions.push({ req, d, activity });
+    decisions.push({ req, d, activity, term, usage });
   }
 
   const servers = [];
+  const envSyncs = [];
   for (const [root, rec] of full ? Object.entries(state.repos) : []) {
     if (rec.logPath) rotateLog(rec.logPath);
     if (!rec.serverTerminal || rec.serverState === "needs-variant") continue;
@@ -527,6 +566,10 @@ export async function reap(cx, { full = true, skip = null } = {}) {
       cx.serverDeps,
     );
     if (live.state) servers.push({ root, state: live.state, ports: live.ports });
+    // J-002: a server in another env than the effective one restarts through
+    // a detached sync (D18: a restart outlasts the reap's second). A root
+    // with an error waits for it to clear: its sync would fail first.
+    if (live.state && !rec.lastError && (await envDrift(cx, root, { ...rec, serverState: live.state }))) envSyncs.push(root);
   }
 
   const out = await cx.store.updateState((s) => {
@@ -535,20 +578,27 @@ export async function reap(cx, { full = true, skip = null } = {}) {
     const classify = [];
     const counts = { released: 0, paused: 0, classify: 0, reconciled: reconciled.length };
     const find = (t) => queue.requests.find((r) => r.terminal === t);
-    for (const { req, d, activity } of decisions) {
+    for (const { req, d, activity, term, usage } of decisions) {
       const cur = find(req.terminal);
       // Asked again (or left) since the facts were read: its new request rules.
       if (!cur || cur.state !== req.state || cur.taskKey !== req.taskKey || cur.requestTurn !== req.requestTurn) continue;
       if (activity) Object.assign(cur, activity);
+      let decision = d;
       if (d.action === "classify") {
-        if (cur.classifyTurn !== d.turn) {
-          Object.assign(cur, { classifyTurn: d.turn, classifyAt: now, classifyPid: null });
+        // J-005: one classify per turn end, spawned again when it died or
+        // got stuck before deciding, at most CLASSIFY_RESPAWNS times.
+        const step = classifyStep(cur, d.turn, { now, pidAlive });
+        if (step.action === "spawn") {
+          Object.assign(cur, { classifyTurn: d.turn, classifyAt: now, classifyPid: null, classifySpawns: step.spawns });
           classify.push(req.terminal);
           counts.classify += 1;
         }
-        continue;
+        if (step.action !== "fallback") continue;
+        // Every respawn spent: decided with the usage read here, stale as it
+        // is, as a classify whose refresh fails decides with the last data.
+        decision = decideTurnEnd(cur, term, now, { ...usage, fresh: true });
       }
-      const o = applyTurnEnd(queue, cur, d, qctxOf(cx));
+      const o = applyTurnEnd(queue, cur, decision, qctxOf(cx));
       queue = o.queue;
       granted.push(...o.granted);
       counts.released += o.released;
@@ -586,5 +636,6 @@ export async function reap(cx, { full = true, skip = null } = {}) {
       if (r && r.classifyPid == null) r.classifyPid = pid;
     });
   }
+  for (const root of envSyncs) cx.spawn(["sync", "--repo", root]);
   return { ...out.result.counts, lights: out.result.keys.length };
 }

@@ -342,6 +342,34 @@ test("withRepoLock: repo lock then state lock; the reverse order and re-entry ar
   assert.deepEqual(fs.readdirSync(path.join(dir, "locks")), []);
 });
 
+test("withRepoLock: a per-call timeoutMs bounds the wait; 0 tries once (J-001)", async () => {
+  const dir = tmp();
+  const store = createStore({ stateDir: dir, hasServerCommand: noServer, locks: { repo: { timeoutMs: 3000 } } });
+  let release;
+  const held = store.withRepoLock("/code/app", () => new Promise((r) => { release = r; }));
+  await waitFor(() => fs.existsSync(store.repoLockDir("/code/app")));
+  for (const timeoutMs of [0, 300]) {
+    const t0 = Date.now();
+    await assert.rejects(store.withRepoLock("/code/app", () => "never", { timeoutMs }), { code: "lock-timeout" });
+    assert.ok(Date.now() - t0 < 1500, `waited ${Date.now() - t0} ms with timeoutMs ${timeoutMs}`);
+  }
+  release();
+  await held;
+  // A free lock is taken on the one try.
+  assert.equal(await store.withRepoLock("/code/app", () => "ran", { timeoutMs: 0 }), "ran");
+});
+
+test("state.json keeps a repo's envOverride (the server popup's env, J-002): an additive v1 field", async () => {
+  const dir = tmp();
+  const store = createStore({ stateDir: dir, hasServerCommand: noServer });
+  await store.updateState((s) => {
+    s.repos["/code/app"] = { ...emptyRepo(), holder: "/code/app-wt", envOverride: "dev" };
+  });
+  assert.equal(store.readState().repos["/code/app"].envOverride, "dev");
+  const text = JSON.stringify({ version: 1, repos: { "/code/app": { envOverride: "prod" } } });
+  assert.equal(parseState(text).state.repos["/code/app"].envOverride, "prod");
+});
+
 // ── reconcile ──────────────────────────────────────────────────────────────
 
 // T1's readRefs(root) result (sync.js): `active` only when the snapshot,

@@ -14,7 +14,7 @@ import { createStore, appHomeDir } from "./store.js";
 import { gitContext, runGit } from "./sync.js";
 import { hasServerCommand, nodeIo } from "./server-plan.js";
 import { normRoot } from "./settings.js";
-import { taskOf, laneOf } from "./task.js";
+import { taskOf, laneOf, SPACELESS } from "./task.js";
 import { parseAccounts } from "./resume.js";
 
 export const CLI_PATH = fileURLToPath(new URL("./cli.mjs", import.meta.url));
@@ -200,6 +200,34 @@ export async function taskKeyOfWorkspace(workspace, root, shared) {
   const branch = await branchOf(workspace);
   const task = taskOf({ path: workspace, branch, main: normRoot(workspace) === normRoot(root) });
   return task ? `${laneOf(shared?.["projects.v1"], root)}/${task.key}` : null;
+}
+
+// The task of a terminal whose folder names none (J-003): a main checkout
+// (~/.claude), a folder outside git, or a worktree whose branch and folder
+// can't name a task. It still takes a test turn, slot-only (it lights
+// nothing), keyed by its folder, `cwd:<realpath>`, so two terminals in one
+// folder share it; its lane is the projects.v1 group holding the repo the
+// folder is in, else SPACELESS. resolveTask's shape.
+export async function folderTask(cwd, shared) {
+  let dir;
+  try {
+    dir = normRoot(fs.realpathSync(cwd));
+  } catch {
+    dir = normRoot(path.resolve(cwd));
+  }
+  const root = await repoRootOf(dir);
+  return {
+    ok: true,
+    root,
+    workspace: (root && (await checkoutOf(dir))) || dir,
+    branch: null,
+    taskKey: `cwd:${dir}`,
+    label: path.basename(dir) || dir,
+    lane: root ? laneOf(shared?.["projects.v1"], root) : SPACELESS,
+    members: [],
+    skipped: [],
+    slotOnly: true,
+  };
 }
 
 // ── claude-accounts (D13, D15) ─────────────────────────────────────────────

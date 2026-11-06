@@ -57,6 +57,7 @@ Probed 2026-11-06 in Herdr 0.1.13, with a throwaway mod (`zz-sl-cmd-probe`, `{"p
 - `badges.js` (footer copy only) publishes `badges.spotlight` per projects-sidebar's contract: a flashlight (amber on the holder's and the root's rows, dim on the other worktrees of an enabled repo, red on an error), the server (`:3000`, `:3000+1`, `…`, red when stopped or gone) and the queue state (flask, clock + `#N`, pause), at most three per row, written only when the value changes. The model is `badges-model.js`.
 - The server badge's id is the first 12 hex chars of sha1(workspace path), the same id the CLI puts in its error toasts' action (`cli-work.mjs` serverId). `badges-model.js` computes SHA-1 itself, so the id doesn't depend on the runtime's crypto.
 - `autosync.js` watches each holder's folder. It drops batches made only of Orca's ignored folders (`.git`, `node_modules`, `dist`, `build`, `.next`, `.cache`, `target`, `.venv`, `__pycache__`) and test output (`test-results`, `playwright-report`, `blob-report`, `coverage`), at any depth. After 300 ms of quiet it runs `spotlight sync --repo <root> --detach`. The filter is `watch-filter.js`.
+- Env: the settings dialog's env is the repo's default; `spotlight env --env <e>` (the popup) stores an override on the repo's state record until `toggle` off. The effective env is the override, else the setting; when it differs from what runs, the server restarts on the next `on` or sync (the reap spawns one). A repo waiting in `needs-variant` applies a changed env when its variant is picked.
 - The server popup (`server-view.js`, model `server-view-model.js`) runs the CLI for every control. Proyectar igual runs `light --task <k> --force`, which works inline, through `sh -c 'nohup "$0" "$@" … &'`, so exec's 30 s limit can't cut a lighting short. The argv go in as positional args.
 
 ## Continuar and auto-resume
@@ -73,6 +74,12 @@ When an agent's turn ends in an error, a sign-in prompt or a usage limit, its re
   - `timeout`, `landedElsewhere`, `failed` (its `detail` carries the manual `claude --resume <sid>`) and `cancelled`: the agent stays paused with that text on its board row, and the window closes.
   - A terminal that left inside the window is released when the job settles, if the job failed or the terminal is still gone.
 - Auto-resume (settings, off by default): the reap starts `continue --auto` for `limit` pauses only, at most 3 delivered in a row. With no account left it tries again 60 s after the first reset. Each delivered one leaves a toast, "Reanudado con <cuenta>: <tarea>".
-- `spotlight classify --terminal <t>` is spawned by the reap when a turn end needs the account's usage and the usage in `accounts.v1.json` is over 2 min old. It refreshes the usage, then releases the turn or pauses it (`limit`, `signin`, `error`).
+- `spotlight classify --terminal <t>` is spawned by the reap when a turn end needs the account's usage and the usage in `accounts.v1.json` is over 2 min old. It refreshes the usage, then releases the turn or pauses it (`limit`, `signin`, `error`). A classify that died, failed to spawn or got stuck (no answer in 90 s) is spawned again, up to 3 times per turn; after that the reap decides with the last usage it read.
 - An `accounts.v1.json` whose `version` isn't 1 is refused: Continuar says so, and turn ends are decided as without the plugin.
 - Spotlight never runs `claude-accounts use`, since that changes the global active account.
+
+## Terminals with no task
+
+A Herdr terminal on a main checkout or a non-git folder (or a worktree whose branch and folder can't name a task) still gets a test turn: `spotlight on` takes a slot-only turn keyed `cwd:<realpath>`, so two terminals in one folder share it, in the group holding its repo, else `spaceless`. It lights nothing. `on` with no `--terminal` and no `$HC_TERMINAL_ID` exits 2.
+
+A `spotlight on` typed in a plain shell records the shell's pid as the agent, so the prompt coming back doesn't release the turn. A wrapper (`sh -c 'spotlight on; …'`, `make`) records the wrapper's pid and still releases when it ends.

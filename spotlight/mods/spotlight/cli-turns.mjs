@@ -19,6 +19,25 @@ export function inResumeWindow(req, now) {
   return Number.isFinite(req?.resumingUntil) && now < req.resumingUntil;
 }
 
+// The foreground pid a request records (`fgPid`), from the terminal's `hc
+// get --json` at request time (J-004). Typed in a plain shell, `spotlight
+// on` leads the foreground itself: then the terminal's shell pid (hc's
+// `pid`) is recorded, so the prompt coming back after the CLI exits is the
+// same pid and never reads as an agent that left. The CLI is the foreground
+// when it is this process (`self.pid`), its bin/spotlight parent (`self.ppid`
+// with a `spotlight` script in its argv), or any process whose argv runs
+// Spotlight's cli.mjs. An agent's foreground (Claude running `spotlight on`
+// through its own shell) is recorded as it is. null when hc shows none.
+export function requestFgPid(term, { pid, ppid, cliPath } = {}) {
+  const fg = term?.foreground;
+  if (!fg || !isInt(fg.pid)) return null;
+  const argv = Array.isArray(fg.argv) ? fg.argv.map(String) : [];
+  const runsCli = argv.some((a) => a === cliPath || a.endsWith("/spotlight/cli.mjs"));
+  const wrapper = fg.pid === ppid && argv.some((a) => baseName(a) === "spotlight");
+  if (fg.pid === pid || runsCli || wrapper) return isInt(term.pid) ? term.pid : null;
+  return fg.pid;
+}
+
 // The agent that asked is gone from the terminal: a shell now leads its
 // foreground (a `--keep` shell left after the agent died) where another
 // process led it when the terminal asked. A request made from a plain shell
@@ -75,6 +94,36 @@ export function decideTurnEnd(req, term, now, usage) {
   if (!usage.fresh) return { action: "classify", turn: term.turn };
   if (usage.atLimit) return pauseFor("limit", term.turn, msg);
   return stopped ? pauseFor("error", term.turn, msg) : { action: "release", why: "turn-end" };
+}
+
+// ── The detached classify (D13, J-005) ─────────────────────────────────────
+
+// How long a classify may take before it counts as stuck: above its own
+// worst case, `usage --refresh` (20 s) + three `hc get` (10 s each, 0.5 s
+// apart) + the accounts lookup (5 s) + a state lock wait (10 s) = 66 s.
+export const CLASSIFY_STALE_MS = 90_000;
+// Respawns of classify for one turn end, after the first spawn.
+export const CLASSIFY_RESPAWNS = 3;
+
+// What a reap does about a turn end that needs a fresh usage read (D13): the
+// request's classify marks (classifyTurn, classifyAt, classifyPid,
+// classifySpawns) against the turn `decideTurnEnd` returned with "classify".
+//   spawn     a first classify for this turn, or another one when the last
+//             died (its pid is gone, or none came within SPAWN_GRACE_MS: it
+//             failed to spawn) or outlived CLASSIFY_STALE_MS; `spawns`: the
+//             count to record
+//   wait      the last one is still at work
+//   fallback  CLASSIFY_RESPAWNS respawns spent and the last one gone too: the
+//             reap decides with the usage it read, stale as it is (what a
+//             classify does when its own refresh fails)
+export function classifyStep(req, turn, { now, pidAlive }) {
+  if (req?.classifyTurn !== turn) return { action: "spawn", spawns: 1 };
+  const age = now - (Number.isFinite(req.classifyAt) ? req.classifyAt : 0);
+  const alive = isInt(req.classifyPid) ? pidAlive(req.classifyPid) : age < SPAWN_GRACE_MS;
+  if (alive && age < CLASSIFY_STALE_MS) return { action: "wait" };
+  const spawns = isInt(req.classifySpawns) ? req.classifySpawns : 1;
+  if (spawns > CLASSIFY_RESPAWNS) return { action: "fallback" };
+  return { action: "spawn", spawns: spawns + 1 };
 }
 
 // ── Idle (D19) ─────────────────────────────────────────────────────────────

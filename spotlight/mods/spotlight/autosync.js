@@ -21,12 +21,21 @@ import { shouldSync, watchTargets, syncArgv, debouncer, SYNC_DEBOUNCE_MS } from 
 // The footer copy's init context (an AsyncContext, valid across awaits),
 // which owns the holder watches; null in every other copy.
 let owner = null;
-// holder → root: what state.json says now, and what is watched.
+// holder → root: what state.json says now; holder → { root, gen }: what is
+// watched, and by which footer copy.
 let holders = new Map();
 const watching = new Map();
+let generation = 0;
 
+// A new footer copy forgets the earlier copy's watches: a task dropped with
+// its view may never reach its finally, and a stale entry would keep the
+// holder from being watched again. The earlier copy's loops stop when they
+// next wake (their generation is gone).
 export function startAutosync(cx) {
   owner = cx;
+  generation += 1;
+  watching.clear();
+  holders = new Map();
 }
 
 // The holders of a fresh state.json reading (board-model.js readState):
@@ -35,26 +44,27 @@ export function followHolders(state) {
   if (!owner) return;
   holders = new Map(watchTargets(state).map((t) => [t.holder, t.root]));
   for (const [holder, root] of holders) {
-    if (watching.get(holder) === root) continue;
-    watching.set(holder, root);
-    watchHolder(owner, holder, root);
+    if (watching.get(holder)?.root === root) continue;
+    const entry = { root, gen: generation };
+    watching.set(holder, entry);
+    watchHolder(owner, holder, root, entry);
   }
 }
 
-function watchHolder(cx, holder, root) {
+function watchHolder(cx, holder, root, entry) {
   cx.spawn(async (cx) => {
     const bounce = debouncer((ms, fn) => cx.timer.after(ms, fn), SYNC_DEBOUNCE_MS);
     try {
       for (;;) {
         const paths = await watchFolder(holder);
-        if (holders.get(holder) !== root) break;
+        if (entry.gen !== generation || holders.get(holder) !== root) break;
         if (shouldSync(paths, holder)) bounce(root, (cx) => runSync(cx, root));
       }
     } catch (e) {
       // The folder is gone, or this build was reloaded: the next reading starts it again.
       console.log(`spotlight autosync: stopped watching ${holder}: ${e}`);
     } finally {
-      if (watching.get(holder) === root) watching.delete(holder);
+      if (watching.get(holder) === entry) watching.delete(holder);
     }
   });
 }

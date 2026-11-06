@@ -16,7 +16,9 @@
 //
 // state.json, schema v1:
 //   { version: 1,
-//     repos: { <root>: emptyRepo() fields },
+//     repos: { <root>: emptyRepo() fields, plus envOverride? (the env picked
+//              in the server popup, `spotlight env --env`; it wins over
+//              settings' env until `toggle` off drops the record, J-002) },
 //     queue: { requests: [{ terminal, taskKey, lane, members, skipped, requestedAt, requestTurn,
 //                           fgPid, state, slotOnly, grantedAt, pausedAt, pauseReason, pauseMsg,
 //                           resumingUntil, handledTurn, autoResumes, lastActivityAt, outputHash }],
@@ -311,11 +313,15 @@ export function createStore(opts = {}) {
   // Runs fn holding a repo's lock (async work allowed: git, the server).
   // Refused inside the state lock ("lock-order") and inside the same repo's
   // lock ("lock-reentry"); updateState inside it is the intended order.
-  async function withRepoLock(root, fn) {
+  // `opts.timeoutMs` bounds this call's wait (0: one try), for a caller with
+  // a deadline of its own (`on`, J-001); a lock still held then throws
+  // LockError "lock-timeout".
+  async function withRepoLock(root, fn, opts = {}) {
     if (heldLocks().has(stateLockDir)) {
       throw new LockError("lock-order", "A repo lock can't be taken while holding the state lock (order: repo, then state)");
     }
-    return withLock(repoLockDir(root), fn, repoLock);
+    const wait = Number.isFinite(opts.timeoutMs) ? { timeoutMs: Math.max(0, opts.timeoutMs) } : {};
+    return withLock(repoLockDir(root), fn, { ...repoLock, ...wait });
   }
 
   // Refs win (D7): every repo with a record, plus `roots` (e.g. the enabled

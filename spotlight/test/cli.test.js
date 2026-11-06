@@ -13,7 +13,7 @@
 // state.json for it. Nothing here touches a real Herdr terminal.
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
-import { execFile, execFileSync } from "node:child_process";
+import { execFile, execFileSync, spawnSync } from "node:child_process";
 import {
   mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, realpathSync, rmSync, chmodSync, symlinkSync,
 } from "node:fs";
@@ -101,7 +101,9 @@ try {
   const shell = (t) => ({ pid: t.pid, name: "zsh", argv: ["/bin/zsh", "-l"], cwd: t.cwd });
   const view = (t) => {
     if (t.pendingShell !== undefined && t.pendingShell-- <= 0) { t.foreground = shell(t); delete t.pendingShell; }
-    const { pendingShell, serverPorts, ...v } = t;
+    const { pendingShell, serverPorts, callerForeground, ...v } = t;
+    // A command typed in a plain shell leads its foreground: the CLI that called hc.
+    if (callerForeground) v.foreground = { pid: process.ppid, name: "node", argv: ["node"], cwd: t.cwd };
     if (v.state === "finished") delete v.foreground;
     return v;
   };
@@ -848,10 +850,8 @@ test("usage errors exit 2; continue and classify with nothing to act on", async 
   const noTerminal = await w.cli(["on"], { cwd: app.ws["AX-30"] });
   assert.equal(noTerminal.code, 2);
   assert.match(noTerminal.stderr, /--terminal/);
+  // A Herdr terminal outside git takes a slot-only turn (J-003, its own test).
   const t = w.agent(w.dir);
-  const noRepo = await w.cli(["on"], { terminal: t, cwd: w.dir });
-  assert.equal(noRepo.code, 2);
-  assert.match(noRepo.stderr, /not in a git repository/);
   assert.equal((await w.cli(["frobnicate"])).code, 2);
   for (const verb of ["continue", "classify"]) assert.equal((await w.cli([verb])).code, 2, verb);
   // T11: no place in the queue, nothing to continue; no turn end to classify.
@@ -1009,4 +1009,238 @@ test("D13 table: resume window, a gone terminal, an agent that left, re-baselini
   assert.equal(needsLight(done, turn, { now, pidAlive: dead, repos: {} }), false);
   assert.equal(needsLight(done, turn, { now, pidAlive: dead, repos: {}, checkLit: true }), true);
   assert.equal(needsLight(done, turn, { now, pidAlive: dead, repos: { "/r": { holder: "/w" } }, checkLit: true }), false);
+});
+
+// ── Review round 1 (code-review-strict): J-001 … J-005 ─────────────────────
+
+const pidGone = async (pid) => {
+  const end = Date.now() + 5_000;
+  for (;;) {
+    try {
+      process.kill(pid, 0);
+    } catch {
+      return;
+    }
+    if (Date.now() > end) throw new Error(`pid ${pid} still alive`);
+    await sleep(50);
+  }
+};
+
+test("J-001: past its deadline `on` never waits on the repo lock a `light` holds: one 'still being lit' line, the not-ready line, exit 0; a later `on` syncs it", async () => {
+  const w = makeWorld();
+  const app = makeRepo(w, "app", { pkg: DEV, tasks: ["AX-15"] });
+  w.register([{ id: "g1", repos: [app] }]);
+  w.listen(app.root, [3000]);
+  const ws = app.ws["AX-15"];
+  const t = w.agent(ws);
+  // The light holds the repo lock across its slow git step.
+  w.slowGit("stash", 6);
+  const r = await w.cli(["on", "--timeout-ms", "1500"], { terminal: t, cwd: ws });
+  w.slowGit(null);
+  assert.equal(r.code, 0, r.stderr + r.stdout);
+  assert.ok(r.ms < 5500, `on overran its deadline waiting on the repo lock (${r.ms} ms)`);
+  assert.equal(r.stdout.match(/the root is still being lit: run `spotlight on` again to sync it/g)?.length, 1, r.stdout);
+  assert.match(r.stdout, /^Not every server is listening yet\. Read its log, or run `spotlight on` again to keep waiting\.$/m);
+
+  await w.until((s) => s.queue.lighting["g1/AX-15"]?.phase === "done", { what: "the light done" });
+  write(ws, "later.txt", "from the holder\n");
+  const again = await w.cli(["on"], { terminal: t, cwd: ws });
+  assert.equal(again.code, 0, again.stderr + again.stdout);
+  assert.doesNotMatch(again.stdout, /still being lit/);
+  assert.equal(readFileSync(join(app.root, "later.txt"), "utf8"), "from the holder\n");
+});
+
+test("J-002: the settings' env is the default and a change restarts the server on the next `on` or reap; the popup's override wins until toggle off", async () => {
+  const w = makeWorld();
+  const pkg = { scripts: { local: "vite", dev: "vite --mode dev", prod: "vite --mode prod" } };
+  const app = makeRepo(w, "app", { pkg, tasks: ["AX-16"] });
+  w.register([{ id: "g1", repos: [app] }]);
+  w.listen(app.root, [3000]);
+  const ws = app.ws["AX-16"];
+  const t = w.agent(ws);
+  const typed = () => w.hc().sent.map((x) => x.text);
+  const runs = (env) => new RegExp(`/bin/zsh -c 'npm run ${env} --'$`);
+  const record = () => w.state().repos[app.root];
+
+  assert.equal((await w.cli(["on"], { terminal: t, cwd: ws })).code, 0);
+  assert.match(typed().at(-1), runs("local"));
+  assert.equal(record().serverEnv, "local");
+
+  // A settings env change: the next `on` restarts the server in it.
+  w.settings({ repos: { [app.root]: { env: "dev" } } });
+  const on = await w.cli(["on"], { terminal: t, cwd: ws });
+  assert.equal(on.code, 0, on.stderr + on.stdout);
+  assert.match(typed().at(-1), runs("dev"));
+  assert.equal(record().serverEnv, "dev");
+
+  // Another one: the next reap restarts it (detached, D18).
+  w.settings({ repos: { [app.root]: { env: "prod" } } });
+  assert.equal((await w.cli(["reap"])).code, 0);
+  await w.until((s) => s.repos[app.root]?.serverEnv === "prod", { what: "the server in prod after the reap" });
+  assert.match(typed().at(-1), runs("prod"));
+
+  // The popup picks Dev: an override on the state record, over the settings' Prod.
+  const pick = await w.cli(["env", "--workspace", ws, "--env", "dev"]);
+  assert.equal(pick.code, 0, pick.stderr + pick.stdout);
+  assert.equal(record().envOverride, "dev");
+  assert.equal(record().serverEnv, "dev");
+  assert.match(typed().at(-1), runs("dev"));
+  const sent = typed().length;
+  assert.equal((await w.cli(["reap"])).code, 0);
+  assert.equal((await w.cli(["on"], { terminal: t, cwd: ws })).code, 0);
+  await sleep(1500);
+  assert.equal(typed().length, sent, "the override holds: neither the reap nor `on` went back to the settings' env");
+  assert.equal(record().serverEnv, "dev");
+
+  // Toggle off clears the override: the next lighting runs the settings' env.
+  assert.equal((await w.cli(["toggle", "--workspace", ws])).code, 0);
+  await w.until((s) => !s.repos[app.root], { what: "turned off" });
+  const back = await w.cli(["on"], { terminal: t, cwd: ws });
+  assert.equal(back.code, 0, back.stderr + back.stdout);
+  assert.match(typed().at(-1), runs("prod"));
+  assert.equal(record().serverEnv, "prod");
+  assert.equal(record().envOverride ?? null, null);
+});
+
+test("J-003: a Herdr terminal on a main checkout or outside git takes a slot-only turn keyed by its folder; two terminals in one folder share it", async () => {
+  const w = makeWorld();
+  const harness = makeRepo(w, "harness", { pkg: DEV });
+  w.register([{ id: "arrecife", repos: [harness] }]);
+  w.settings({ queue: { perSpace: { arrecife: 1, spaceless: 1 }, cap: 4 } });
+  const slotOnly = (label) => new RegExp(`^No project of ${label} can hold a Spotlight here, so this turn only holds a test slot: run your tests\\.$`, "m");
+  const mine = async (t) => JSON.parse((await w.cli(["status", "--json"], { terminal: t })).stdout).result;
+
+  // A main checkout (as ~/.claude): its group's lane, nothing lit.
+  const t1 = w.agent(harness.root);
+  const main = await w.cli(["on"], { terminal: t1, cwd: harness.root });
+  assert.equal(main.code, 0, main.stderr + main.stdout);
+  assert.match(main.stdout, /^Your test turn for harness is on\.$/m);
+  assert.match(main.stdout, slotOnly("harness"));
+  const req = requestOf(w.state(), t1);
+  assert.equal(req.taskKey, `arrecife/cwd:${harness.root}`);
+  assert.equal(req.lane, "arrecife");
+  assert.equal(req.state, "holding");
+  assert.deepEqual(refsOf(harness.root), []);
+  assert.equal(w.serverTerminal(harness.root), null, "nothing was lit");
+  assert.equal((await mine(t1)).mine.kind, "holding");
+
+  // A second terminal in the same folder joins that task, past the space's limit of 1.
+  const t2 = w.agent(harness.root);
+  const joined = await w.cli(["on", "--timeout-ms", "300"], { terminal: t2, cwd: harness.root });
+  assert.equal(joined.code, 0, joined.stderr + joined.stdout);
+  assert.equal(requestOf(w.state(), t2).taskKey, req.taskKey);
+  const both = await mine(t2);
+  assert.equal(both.mine.kind, "holding");
+  assert.equal(both.turns.length, 1);
+  assert.deepEqual([...both.turns[0].terminals].sort(), [t1, t2].sort());
+
+  // Outside git: the folder's own task, in no space.
+  const plain = join(w.dir, "plain");
+  mkdirSync(plain);
+  const t3 = w.agent(plain);
+  const out = await w.cli(["on"], { terminal: t3, cwd: plain });
+  assert.equal(out.code, 0, out.stderr + out.stdout);
+  assert.match(out.stdout, /^Your test turn for plain is on\.$/m);
+  assert.match(out.stdout, slotOnly("plain"));
+  assert.equal(requestOf(w.state(), t3).taskKey, `spaceless/cwd:${plain}`);
+  assert.equal((await mine(t3)).mine.kind, "holding");
+
+  // No terminal at all is still a usage error.
+  const none = await w.cli(["on"], { cwd: plain });
+  assert.equal(none.code, 2);
+  assert.match(none.stderr, /--terminal/);
+});
+
+test("J-004: `spotlight on` typed in a plain shell records the shell's pid, so the prompt coming back doesn't release the turn", async () => {
+  const { w, repo } = turnWorld();
+  const cwd = repo.ws["AX-20"];
+  let t;
+  let shellPid;
+  w.hcUpdate((s) => {
+    t = `t${s.nextAddr++}`;
+    shellPid = s.nextPid++;
+    s.terminals[t] = {
+      address: t, name: null, labels: {}, cwd, pid: shellPid, state: "live", argv: ["/bin/zsh", "-l"], turn: 0,
+      status: null, status_ms: null, callerForeground: true,
+    };
+  });
+  const r = await w.cli(["on"], { terminal: t, cwd });
+  assert.equal(r.code, 0, r.stderr + r.stdout);
+  assert.equal(requestOf(w.state(), t).fgPid, shellPid);
+  // The CLI exits: the shell's prompt leads the foreground again.
+  w.hcUpdate((s) => {
+    delete s.terminals[t].callerForeground;
+    s.terminals[t].foreground = { pid: shellPid, name: "zsh", argv: ["/bin/zsh", "-l"], cwd };
+  });
+  assert.equal((await w.cli(["reap"])).code, 0);
+  assert.equal(requestOf(w.state(), t)?.state, "holding", "the returning shell is not an agent that left");
+});
+
+test("J-005: a classify that dies is respawned for the same turn and decides it; past the respawn cap the reap decides with the last usage read", async () => {
+  const { w, holding, usage } = turnWorld({ accounts: true });
+  const delay = join(w.app, "claude-accounts", "usage-delay");
+  usage(30, 10 * 60_000);
+  writeFileSync(delay, "30");
+  const t = await holding("AX-20");
+  w.setAgent(t, { turn: 1, status: { app: "claude", state: "done" } });
+  assert.equal((await w.cli(["reap"])).code, 0);
+  const first = requestOf(w.state(), t);
+  assert.ok(Number.isInteger(first.classifyPid) && first.classifyPid > 0, JSON.stringify(first));
+  // It dies (with its stuck usage read) before deciding.
+  process.kill(-first.classifyPid, "SIGKILL");
+  await pidGone(first.classifyPid);
+  writeFileSync(delay, "0");
+  const reap = await w.cli(["reap"]);
+  assert.equal(reap.code, 0, reap.stderr);
+  assert.match(reap.stdout, / 1 to classify,/, "respawned once");
+  await w.until((s) => !requestOf(s, t), { what: "the respawned classify's release", ms: 15_000 });
+
+  // Every respawn spent and the last classify dead: the reap decides with
+  // the usage it has (stale, at 100%: paused for the limit).
+  usage(100, 10 * 60_000);
+  const t2 = await holding("AX-21");
+  w.setAgent(t2, { turn: 1, status: { app: "claude", state: "done" } });
+  const dead = spawnSync(NODE, ["-e", ""]).pid;
+  const s = w.state();
+  Object.assign(requestOf(s, t2), { classifyTurn: 1, classifyAt: Date.now() - 1000, classifyPid: dead, classifySpawns: 4 });
+  w.writeState(s);
+  const last = await w.cli(["reap"]);
+  assert.equal(last.code, 0, last.stderr);
+  assert.match(last.stdout, / 0 to classify,/);
+  const req = requestOf(w.state(), t2);
+  assert.equal(req.state, "paused");
+  assert.equal(req.pauseReason, "limit");
+});
+
+test("J-004, J-005: the pure rules (requestFgPid, classifyStep)", async () => {
+  const { requestFgPid, classifyStep, CLASSIFY_STALE_MS, CLASSIFY_RESPAWNS } = await import("../mods/spotlight/cli-turns.mjs");
+  const self = { pid: 100, ppid: 99, cliPath: "/app/mods/spotlight/cli.mjs" };
+  const term = (foreground) => ({ pid: 10, foreground });
+  // The CLI leads the foreground: its own pid, its bin/spotlight parent, or argv running cli.mjs.
+  assert.equal(requestFgPid(term({ pid: 100, name: "node", argv: ["node"] }), self), 10);
+  assert.equal(requestFgPid(term({ pid: 99, name: "sh", argv: ["/bin/sh", "/Users/u/.local/bin/spotlight", "on"] }), self), 10);
+  assert.equal(requestFgPid(term({ pid: 77, name: "node", argv: ["node", "/elsewhere/mods/spotlight/cli.mjs", "on"] }), self), 10);
+  // An agent leads it: its pid, even when it is the CLI's parent.
+  assert.equal(requestFgPid(term({ pid: 99, name: "claude", argv: ["claude"] }), self), 99);
+  assert.equal(requestFgPid(term({ pid: 55, name: "claude", argv: ["claude"] }), self), 55);
+  assert.equal(requestFgPid({ pid: 10 }, self), null);
+  assert.equal(requestFgPid(null, self), null);
+
+  // classify's bound covers its own worst case: usage --refresh (20 s), three hc gets (10 s each), the accounts lookup (5 s), a state lock (10 s).
+  assert.ok(CLASSIFY_STALE_MS >= 20_000 + 3 * 10_000 + 1_000 + 5_000 + 10_000);
+  assert.equal(CLASSIFY_RESPAWNS, 3);
+  const now = 1_000_000;
+  const alive = () => true;
+  const dead = () => false;
+  const req = (fields) => ({ classifyTurn: 1, classifyAt: now - 1000, classifyPid: 5, classifySpawns: 1, ...fields });
+  assert.deepEqual(classifyStep({}, 1, { now, pidAlive: alive }), { action: "spawn", spawns: 1 });
+  assert.deepEqual(classifyStep(req({ classifyTurn: 0 }), 1, { now, pidAlive: alive }), { action: "spawn", spawns: 1 });
+  assert.deepEqual(classifyStep(req(), 1, { now, pidAlive: alive }), { action: "wait" });
+  assert.deepEqual(classifyStep(req(), 1, { now, pidAlive: dead }), { action: "spawn", spawns: 2 });
+  assert.deepEqual(classifyStep(req({ classifyAt: now - CLASSIFY_STALE_MS }), 1, { now, pidAlive: alive }), { action: "spawn", spawns: 2 });
+  // Spawned a moment ago, its pid not written yet: wait; a pid that never came: spawn again.
+  assert.deepEqual(classifyStep(req({ classifyPid: null }), 1, { now, pidAlive: dead }), { action: "wait" });
+  assert.deepEqual(classifyStep(req({ classifyPid: null, classifyAt: now - 10_000 }), 1, { now, pidAlive: dead }), { action: "spawn", spawns: 2 });
+  assert.deepEqual(classifyStep(req({ classifySpawns: 1 + CLASSIFY_RESPAWNS }), 1, { now, pidAlive: dead }), { action: "fallback" });
+  assert.deepEqual(classifyStep(req({ classifySpawns: 1 + CLASSIFY_RESPAWNS }), 1, { now, pidAlive: alive }), { action: "wait" });
 });

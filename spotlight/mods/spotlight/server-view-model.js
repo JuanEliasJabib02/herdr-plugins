@@ -2,7 +2,8 @@
 // repo, and the CLI argv each control runs. Pure, so `node --test` loads it.
 //   envs      the env radio: Local / Dev / Prod, only those that start
 //             something (T5a's serverEnvsWithCommand over the saved and the
-//             detected commands); the running one selected
+//             detected commands); the effective one selected: the env picked
+//             here before (the record's envOverride), else the settings' env
 //   variants  the variant chips: the plan's candidates while it asks, else
 //             the repo's dev:<v> apps; the running one selected, the
 //             inferred one marked (its note, inferredVariantNote)
@@ -12,7 +13,7 @@
 //             holder's tree over the root), Proyectar igual (a refused
 //             takeover or fresh activation, forced), Apagar igual
 // Changing env or variant runs `spotlight env`, which restarts only a server
-// whose command changes. The popup's props, D22's shape shared with T8's
+// whose command or env changes. The popup's props, D22's shape shared with T8's
 // board row and the toasts' action: { view: "server", repo, workspace }
 // (board.js openServer opens it).
 
@@ -59,7 +60,8 @@ export function serverViewModel({ state, settings, repo, workspace, detection, b
   const target = holder ?? normRoot(workspace ?? root);
   const detected = detection?.detected ?? {};
 
-  const selectedEnv = record?.serverEnv ?? repoSet.env;
+  // J-002: what the server runs next, not only what it runs now (serverEnv).
+  const selectedEnv = record?.envOverride ?? repoSet.env;
   const envs = detection
     ? serverEnvsWithCommand({ settings: repoSet, detected }).map((env) => ({
         env,

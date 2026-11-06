@@ -23,15 +23,16 @@ import { resolveTask } from "./task.js";
 import { request, release, positionOf } from "./queue.js";
 import { readRefs, assertDeactivatable, toSpotlightError } from "./sync.js";
 import { emptyRepo, rememberVariant } from "./store.js";
-import { pidAlive } from "./locks.js";
+import { pidAlive, LockError } from "./locks.js";
 import { normRoot } from "./settings.js";
 import { isSafeVariant, isServerEnv, SERVER_ENVS } from "./server-plan.js";
 import { serverTerminalName, serverLogs, peekServer } from "./server.js";
 import { logPathFor, formatClock } from "./server-log.js";
 import {
   CLI_PATH, makeContext, terminalFacts, hcGet, repoRootOf, checkoutOf, branchOf, taskKeyOfWorkspace, registeredRoots,
+  folderTask,
 } from "./cli-env.mjs";
-import { lightingMarker, needsLight } from "./cli-turns.mjs";
+import { lightingMarker, needsLight, requestFgPid } from "./cli-turns.mjs";
 import {
   formatOn, formatWaiting, formatOff, formatStatus, buildStatus, slotOnlyNote, labelOf, namedBlockers,
 } from "./cli-format.mjs";
@@ -161,17 +162,21 @@ async function verbOn(cx, opts) {
   if (!terminal) return usage("spotlight on: no terminal. Run it in a Herdr terminal ($HC_TERMINAL_ID) or pass --terminal <t>.");
   const deadline = cx.now() + Math.min(opts["timeout-ms"] ?? DEFAULT_ON_TIMEOUT_MS, MAX_ON_TIMEOUT_MS);
   const terminals = await terminalFacts();
-  const task = await resolveTask({
+  let task = await resolveTask({
     cwd: process.cwd(), shared: cx.shared, git: cx.taskGit, enabled: (root) => cx.store.repoEnabled(root, cx.settings), terminals,
   });
-  if (!task.ok) return usage(`spotlight on: ${task.message}`);
+  // J-003: a terminal outside every task (a main checkout, a folder outside
+  // git) still gets a test turn, slot-only, keyed by its folder.
+  if (!task.ok) task = await folderTask(process.cwd(), cx.shared);
   const key = `${task.lane}/${task.taskKey}`;
   const me = (await hcGet(terminal)).terminal ?? null;
   // D13: every `on` re-baselines the turn count and ends Continuar's window.
+  // J-004: typed in a plain shell, the foreground is this CLI: the shell's pid is recorded.
   const ask = {
     terminal, taskKey: key, label: task.label, lane: task.lane, members: task.members, skipped: task.skipped,
     slotOnly: task.slotOnly, root: task.root, workspace: task.workspace,
-    requestTurn: Number.isInteger(me?.turn) ? me.turn : null, fgPid: me?.foreground?.pid ?? null,
+    requestTurn: Number.isInteger(me?.turn) ? me.turn : null,
+    fgPid: requestFgPid(me, { pid: process.pid, ppid: process.ppid, cliPath: CLI_PATH }),
     statusMs: me?.status_ms ?? null, resumingUntil: null, lastActivityAt: cx.now(),
   };
   const askQueue = async () => {
@@ -232,18 +237,27 @@ async function verbOn(cx, opts) {
   }
 
   // D1: the root is the caller's tree when `on` returns, auto-sync or not.
+  // J-001: never past the deadline: the repo lock is waited on for the time
+  // left (one try once it passed); a root whose lock a light still holds is
+  // skipped, and the next `on` syncs it.
   const syncErrors = {};
+  const stillLit = new Set();
   for (const m of turn.members) {
     try {
-      const r = await syncRepo(cx, m.root, { onlyIf: (rec) => (m.workspaces ?? [m.workspace]).includes(rec.holder) });
+      const r = await syncRepo(cx, m.root, {
+        onlyIf: (rec) => (m.workspaces ?? [m.workspace]).includes(rec.holder),
+        lockTimeoutMs: Math.max(0, deadline - cx.now()),
+      });
       if (!r.ok && r.code !== "not-active") syncErrors[m.root] = r.message;
     } catch (e) {
-      syncErrors[m.root] = toSpotlightError(e).message;
+      if (e instanceof LockError && e.code === "lock-timeout") stillLit.add(m.root);
+      else syncErrors[m.root] = toSpotlightError(e).message;
     }
   }
-  const { servers, ready } = await waitForTurnServers(cx, { members: turn.members, key, deadline, syncErrors });
+  const waited = await waitForTurnServers(cx, { members: turn.members, key, deadline, syncErrors });
+  const servers = waited.servers.map((s) => (stillLit.has(s.root) ? { ...s, stillLit: true } : s));
   await recordServers(cx, servers);
-  out(formatOn({ label: task.label, servers, skipped, ready }));
+  out(formatOn({ label: task.label, servers, skipped, ready: waited.ready && stillLit.size === 0 }));
   return 0;
 }
 
@@ -368,8 +382,10 @@ async function verbSync(cx, opts) {
     return 1;
   }
   const holder = path.basename(r.holder);
-  if (r.skipped) out(`Nothing to sync: ${cx.nameOf(root)}'s root already has ${holder}'s files.`);
-  else out(`Synced ${holder} onto ${cx.nameOf(root)}.${r.restarted ? " A lockfile changed: the server restarted with the install first." : ""}`);
+  const why = r.installs?.length > 0 ? " A lockfile changed: the server restarted with the install first." : " The server restarted in its new env.";
+  const restarted = r.restarted ? why : "";
+  if (r.skipped) out(`Nothing to sync: ${cx.nameOf(root)}'s root already has ${holder}'s files.${restarted}`);
+  else out(`Synced ${holder} onto ${cx.nameOf(root)}.${restarted}`);
   return 0;
 }
 
@@ -449,11 +465,13 @@ async function verbEnv(cx, opts) {
   const r = await cx.store.withRepoLock(root, async () => {
     await cx.store.updateState((s) => {
       if (opts.variant && taskKey) rememberVariant(s, `${taskKey}::${normRoot(root)}`, opts.variant);
-      if (opts.env) s.repos[root] = { ...emptyRepo(), ...(s.repos[root] ?? {}), serverEnv: opts.env };
+      // J-002: the popup's pick overrides settings' env until `toggle` off
+      // drops the record; serverEnv stays what runs.
+      if (opts.env) s.repos[root] = { ...emptyRepo(), ...(s.repos[root] ?? {}), envOverride: opts.env };
     });
     const record = cx.store.readState().repos[root];
     if (!record?.holder) return { state: "stored" };
-    // Changing env or variant restarts only a server whose command changes (D22).
+    // Changing env or variant restarts only a server whose command or env changes (D22).
     return ensureServer(cx, root, {
       workspace: record.holder,
       branch: await branchOf(record.holder),
