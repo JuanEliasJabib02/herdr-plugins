@@ -2,13 +2,14 @@
 // keys (lib.js KEYS). Reads are validated (a malformed entry is dropped, a
 // foreign value reads as the empty value, never throws); writes happen only
 // when the value changes, because setShared re-renders every mod. A stored
-// registry that didn't read back as itself is copied to its backup key before
-// the first write over it. Never write from render().
+// registry, or notes value, that didn't read back as itself is copied to its
+// backup key before the first write over it. Never write from render().
 
 import { shared, setShared } from "herdr";
 import {
   KEYS, changed, normPath,
   parseRegistry, registryWrites, parseUi, withCollapsed, withTaskCollapsed, parseCache, parseAgents,
+  parseNotes, withNote, notesFull, notesWrites,
 } from "./lib.js";
 
 function write(key, value) {
@@ -77,6 +78,25 @@ export function saveWorktrees(project, list) {
   const key = normPath(project);
   if (!changed(all[key], list)) return false;
   return saveCache({ ...all, [key]: list });
+}
+
+// ── projects.notes.v1: a task's note (D34) ─────────────────────────────────
+// Read through lib.js noteKeyOf and noteOf; written only by the note dialog.
+
+export const notes = () => parseNotes(shared(KEYS.notes));
+
+// Sets, replaces or (empty) removes a task's note. Like saveRegistry, a
+// stored value that didn't read back as itself goes to
+// projects.notes.v1.backup first, only into an empty backup (lib.js
+// notesWrites). "saved"; "same" when nothing changed; "full" when it is a
+// new note and 500 are stored (nothing is written).
+export function setNote(key, text) {
+  const raw = shared(KEYS.notes);
+  const now = parseNotes(raw);
+  const next = withNote(now, key, text);
+  if (next === now) return notesFull(now, key, text) ? "full" : "same";
+  for (const [k, value] of notesWrites(raw, shared(KEYS.notesBackup), next)) setShared(k, value);
+  return "saved";
 }
 
 // ── projects.agents.v1: the last knownAgents() result ──────────────────────

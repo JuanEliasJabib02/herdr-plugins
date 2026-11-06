@@ -1,12 +1,13 @@
 // T10: Task mode's model (M/task-model.js): a workspace's task key, ported
 // from Orca (D30); the Task-mode tree, lanes regrouped from buildTree (D31);
-// the group menu's items with the Organize toggle (D32).
+// the group menu's items with the Organize toggle (D32); T13: the task
+// menu's items (D35).
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { emptyRegistry, addProject, addGroup, setOrganize } from "../projects-sidebar/mods/projects/lib.js";
 import { buildTree } from "../projects-sidebar/mods/projects/tree-model.js";
 import {
-  findTicket, taskKeyOf, buildTaskTree, groupMenuItems, SERVERS_LANE, NO_TASK_LANE,
+  findTicket, taskKeyOf, buildTaskTree, groupMenuItems, taskMenuItems, SERVERS_LANE, NO_TASK_LANE,
 } from "../projects-sidebar/mods/projects/task-model.js";
 
 const HOME = "/Users/demo";
@@ -201,4 +202,20 @@ test("group menu: Organize by Project and by Task, the current one checked, a se
   const alone = emptyRegistry();
   assert.equal(groupMenuItems(alone.groups[0], alone).at(-1).why, "Last group");
   assert.deepEqual(groupMenuItems(null, r), []);
+});
+
+// ── Task menu (D35, S30) ───────────────────────────────────────────────────
+
+test("task menu: Add note… or Edit note…, a separator, Delete task… in danger, `why` with no workspaces; [] for a lane with no note key", () => {
+  const targets = [{ project: "/code/app", path: `${W}/app/ax-99`, label: "ax-99", projectName: "app" }];
+  assert.deepEqual(taskMenuItems("task:AX-99", { note: null, targets }), [
+    { id: "note", label: "Add note…", why: null },
+    { id: "delete", label: "Delete task…", why: null, separator: true, danger: true },
+  ]);
+  assert.deepEqual(taskMenuItems("task:AX-99", { note: "contratos", targets }).map((it) => it.label), ["Edit note…", "Delete task…"]);
+  assert.equal(taskMenuItems("task:login", { note: null, targets: [] }).at(-1).why, "No workspaces");
+  assert.equal(taskMenuItems("task:login").at(-1).why, "No workspaces", "no targets given");
+  for (const lane of [NO_TASK_LANE, SERVERS_LANE, "task:Constructor", "task:__PROTO__", "login", null]) {
+    assert.deepEqual(taskMenuItems(lane, { note: null, targets }), [], `for ${lane}`);
+  }
 });

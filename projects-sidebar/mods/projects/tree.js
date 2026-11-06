@@ -5,7 +5,9 @@
 // adds a project (D10), "+" on a project opens New workspace; right-click a
 // project for its menu. A group organized by Task (D29–D32) shows task lanes
 // instead of projects, each row naming its project, and the header gets a
-// New workspace "+". Below 160 px of sidebar it is a rail of initials.
+// New workspace "+"; a lane shows its task's note on hover and has a
+// right-click menu (D34, D35). Below 160 px of sidebar it is a rail of
+// initials.
 //
 // This copy is also the worktree engine (D6): it lists every group's
 // projects into projects.cache.v1 at start, re-lists one when its
@@ -18,7 +20,7 @@ import {
   theme, props, notify, run, spaces, panes, agents, focused, layout, home, window, pickFolder, watchFolder,
 } from "herdr";
 import { icon } from "./config.js";
-import { findProject, activeGroup, matchSpaces } from "./lib.js";
+import { findProject, activeGroup, matchSpaces, noteKeyOf, noteOf } from "./lib.js";
 import * as store from "./store.js";
 import { repoOf, listWorktrees } from "./git.js";
 import {
@@ -28,6 +30,7 @@ import { buildTaskTree } from "./task-model.js";
 import { openNewWorkspace } from "./new-workspace.js";
 import { openProjectMenu } from "./project-menu.js";
 import { openWorkspaceMenu } from "./workspace-menu.js";
+import { openTaskMenu } from "./task-menu.js";
 
 // git listings at once (Juan has ~30 projects).
 const LISTERS = 4;
@@ -168,9 +171,10 @@ export default class Tree {
       failed: this.failed,
     };
     const model = byTask ? buildTaskTree({ ...args, tasks: ui.tasks ?? [] }) : buildTree(args);
+    const notes = byTask ? store.notes() : {};
     const body = model.empty
       ? narrow ? [] : [emptyState(t)]
-      : narrow ? model.projects.map((p) => railRow(p, t)) : model.rows.map((r) => row(r, t));
+      : narrow ? model.projects.map((p) => railRow(p, t)) : model.rows.map((r) => row(r, t, notes));
     return v_flex().size_full().min_h(0).bg(t.chrome).text_size(13)
       .child(header(model.group, narrow, byTask, t))
       .child(v_flex().id("projects-list").flex_1().min_h(0).px(narrow ? 0 : 8).pb(14).overflow_y_scrollbar().mode("always")
@@ -223,8 +227,9 @@ function focusedProject() {
   return matchSpaces(store.cache(), all, panes(), home())[active.id]?.project ?? null;
 }
 
-function row(r, t) {
-  if (r.kind === "task") return taskRow(r, t);
+// `notes`: projects.notes.v1, read once per render (Task mode only).
+function row(r, t, notes) {
+  if (r.kind === "task") return taskRow(r, t, notes);
   if (r.kind === "project") return projectRow(r, t);
   if (r.kind === "workspace") return workspaceRow(r, t);
   if (r.kind === "agent") return agentRow(r, t);
@@ -234,12 +239,21 @@ function row(r, t) {
 }
 
 // A task lane (Task mode): fold on click; its count and, folded, its most
-// urgent status.
-function taskRow(l, t) {
+// urgent status. Its task's note, if any, on hover: the note only, no icon
+// (Orca). A ticket or name lane opens the task menu on right-click; No task
+// and Servers have no note key, so neither (D34, D35).
+function taskRow(l, t, notes) {
+  const key = noteKeyOf(l.lane);
+  const note = noteOf(notes, key);
   return h_flex().id(`t:${l.lane}`).h(28).flex_none().px(8).gap(7).items_center().rounded(8)
     .cursor_pointer()
     .hover((s) => s.bg(t.hover))
     .on_click(() => store.toggleTaskCollapsed(l.lane))
+    .when(Boolean(note), (el) => el.tooltip(note))
+    .when(key !== null, (el) => el.on_mouse_down("right", (_e, cx) => {
+      cx.stop_propagation(); // or on_click runs too (ClickEvent carries no button)
+      openTaskMenu(l.lane, l.label);
+    }))
     .child(svg(chrome(l.collapsed ? "chevron-right" : "chevron-down")).size(11).flex_none().text_color(t.dim))
     .child(div().flex_1().min_w(0).truncate().font_semibold().text_color(t.foreground).child(l.label))
     .when(l.collapsed && Boolean(l.status) && l.status !== "idle", (el) => el.child(statusMark(l.status, t)))

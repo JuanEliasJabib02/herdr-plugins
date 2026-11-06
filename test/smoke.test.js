@@ -93,3 +93,21 @@ test("Task mode: lanes, their folding, and New workspace in the header (D31, D32
   assert.match(tree, /"projects-new-workspace"[\s\S]*?openNewWorkspace\(focusedProject\(\)\)/, "the header's New workspace opens the dialog");
   assert.match(src("store.js"), /export function toggleTaskCollapsed/);
 });
+
+test("Task notes and the task menu: a lane's right-click and its tooltip, and their views (D34, D35)", () => {
+  const src = (f) => readFileSync(new URL(`../projects-sidebar/mods/projects/${f}`, import.meta.url), "utf8");
+  const tree = src("tree.js");
+  const start = tree.indexOf("function taskRow(");
+  assert.ok(start >= 0, "tree.js draws task rows in taskRow");
+  const taskRow = tree.slice(start, tree.indexOf("\n}\n", start));
+  assert.match(taskRow, /on_mouse_down\("right"[\s\S]*?cx\.stop_propagation\(\)[\s\S]*?openTaskMenu\(/, "a lane's right-click opens the task menu");
+  assert.match(taskRow, /\.tooltip\(/, "a lane with a note shows it on hover");
+  const main = src("main.js");
+  assert.match(main, /"task-menu":\s*TaskMenu/);
+  assert.match(main, /"task-note":\s*TaskNote/);
+  assert.match(src("task-menu.js"), /taskMenuItems\(/, "the menu's items come from task-model.js");
+  const dialog = src("task-note.js");
+  assert.match(dialog, /modal:\s*true/);
+  assert.match(dialog, /setNote\(/, "Save goes through store.js");
+  assert.match(src("store.js"), /export function setNote/);
+});

@@ -13,6 +13,7 @@ import {
   emptyRegistry, parseRegistry, needsBackup, registryWrites, activeGroup, findProject,
   addProject, removeProject, moveProject, addGroup, renameGroup, deleteGroup, selectGroup, setOrganize,
   parseUi, withCollapsed, withTaskCollapsed, parseCache, parseAgents,
+  noteKeyOf, noteOf, normalizeNote, parseNotes, withNote, notesFull, notesWrites,
   resolveProject, parseWorktrees, listCheckouts,
   matchSpaces, attentionByGroup,
 } from "../projects-sidebar/mods/projects/lib.js";
@@ -31,13 +32,15 @@ const pathsOf = (r, i) => r.groups[i].projects.map((p) => p.path);
 
 // ── Persisted keys ─────────────────────────────────────────────────────────
 
-test("persisted keys: the four versioned names of D3, plus the registry's backup", () => {
+test("persisted keys: the four versioned names of D3, plus the registry's backup, and the task notes with theirs (D34)", () => {
   assert.deepEqual(KEYS, {
     registry: "projects.v1",
     registryBackup: "projects.v1.backup",
     ui: "projects.ui.v1",
     cache: "projects.cache.v1",
     agents: "projects.agents.v1",
+    notes: "projects.notes.v1",
+    notesBackup: "projects.notes.v1.backup",
   });
 });
 
@@ -387,6 +390,100 @@ test("agents cache: keeps knownAgents() entries with a key and a run argv", () =
     claude,
     { ...claude, key: "codex", run: ["codex"] },
   ]);
+});
+
+// ── Task notes (D34, S29, S31, S32) ────────────────────────────────────────
+
+// `n` notes AX-1 … AX-n, each "x".
+const manyNotes = (n) => Object.fromEntries(Array.from({ length: n }, (_, i) => [`AX-${i + 1}`, "x"]));
+
+test("notes: parseNotes keeps usable keys with a non-empty note, each normalized, at most 500; anything else reads as {}", () => {
+  for (const bad of [undefined, null, 3, "AX-1", [], [["AX-1", "contratos"]]]) assert.deepEqual(parseNotes(bad), {}, `for ${JSON.stringify(bad)}`);
+  // JSON.parse, as a stored value arrives: "__proto__" is then an own key.
+  const raw = JSON.parse(JSON.stringify({
+    "AX-3695": "  contratos  ",
+    login: "pagos\n  luego",
+    "AX-7": "x".repeat(40),
+    none: "x", NONE: "x", constructor: "x", Prototype: "x", "": "x",
+    [`${"k".repeat(200)}`]: "long key", [`${"k".repeat(201)}`]: "too long",
+    "AX-1": 7, "AX-2": "   ", "AX-3": null, "AX-4": ["x"],
+  }).replace("{", '{"__proto__":"x",'));
+  assert.ok(Object.hasOwn(raw, "__proto__"), "the fixture has an own __proto__ key");
+  const notes = parseNotes(raw);
+  assert.deepEqual(notes, { "AX-3695": "contratos", login: "pagos luego", "AX-7": "x".repeat(30), ["k".repeat(200)]: "long key" });
+  assert.equal(Object.getPrototypeOf(notes), Object.prototype, "a plain object");
+  const kept = parseNotes(manyNotes(502));
+  assert.equal(Object.keys(kept).length, 500, "at most 500");
+  assert.ok(Object.hasOwn(kept, "AX-500") && !Object.hasOwn(kept, "AX-501"), "the first 500, in stored order");
+});
+
+test("notes: normalizeNote collapses whitespace and newlines to one space, trims, cuts to 30, trims the end again; empty is no note", () => {
+  assert.equal(normalizeNote("  contratos  "), "contratos");
+  assert.equal(normalizeNote("POS\n\n  Action\tWear"), "POS Action Wear", "newlines and runs become one space");
+  assert.equal(normalizeNote("x".repeat(31)), "x".repeat(30), "cut to 30");
+  assert.equal(normalizeNote("x".repeat(30)), "x".repeat(30));
+  assert.equal(normalizeNote(`${"a".repeat(29)} b`), "a".repeat(29), "a cut after a space: the end trimmed again");
+  assert.equal(normalizeNote("🚀".repeat(31)), "🚀".repeat(30), "cut by characters, never inside an emoji");
+  for (const empty of ["", "   ", "\n\t ", null, undefined, 7]) assert.equal(normalizeNote(empty), "", `for ${JSON.stringify(empty)}`);
+});
+
+test("notes: withNote sets, replaces, deletes on empty; the same object when nothing changes and for a new key at 500", () => {
+  const none = {};
+  const one = withNote(none, "AX-1", "  contratos ");
+  assert.deepEqual(one, { "AX-1": "contratos" });
+  assert.deepEqual(none, {}, "never mutates its input");
+  assert.equal(withNote(one, "AX-1", "contratos\n"), one, "the same note once normalized");
+  assert.deepEqual(withNote(one, "AX-1", "pagos"), { "AX-1": "pagos" }, "replaced");
+  assert.deepEqual(withNote(one, "AX-1", "  \n"), {}, "saved empty: removed");
+  assert.equal(withNote(one, "AX-2", ""), one, "removing a note that isn't there");
+  assert.equal(withNote(one, "constructor", "x"), one, "a key noteKeyOf wouldn't give");
+  const full = manyNotes(500);
+  assert.equal(withNote(full, "AX-501", "contratos"), full, "a new key at 500: nothing changes");
+  assert.equal(notesFull(full, "AX-501", "contratos"), true, "and the dialog says why");
+  assert.equal(withNote(full, "AX-1", "pagos")["AX-1"], "pagos", "an existing note still changes at 500");
+  assert.equal(Object.keys(withNote(full, "AX-1", "")).length, 499, "and can be removed");
+  assert.equal(notesFull(full, "AX-1", "pagos"), false);
+  assert.equal(notesFull(full, "AX-501", " "), false, "saving empty is never refused");
+  assert.equal(notesFull(one, "AX-2", "x"), false);
+});
+
+test("notes: notesWrites backs a malformed stored value up first, only into an empty backup; a same value writes nothing", () => {
+  assert.equal(KEYS.notes, "projects.notes.v1");
+  assert.equal(KEYS.notesBackup, "projects.notes.v1.backup");
+  const next = { "AX-1": "contratos" };
+  assert.deepEqual(notesWrites(null, null, next), [[KEYS.notes, next]], "nothing stored: no backup");
+  assert.deepEqual(notesWrites({ "AX-1": "contratos" }, null, next), [], "the same value: nothing to write");
+  assert.deepEqual(notesWrites({ "AX-2": "pagos" }, null, next), [[KEYS.notes, next]], "a clean value needs no backup");
+  // A store of shared() keys, saved through notesWrites as store.js does.
+  const bad = { "AX-1": "contratos", "AX-9": 7 };
+  const kv = new Map([[KEYS.notes, bad]]);
+  const save = (fn) => {
+    const writes = notesWrites(kv.get(KEYS.notes) ?? null, kv.get(KEYS.notesBackup) ?? null, fn(parseNotes(kv.get(KEYS.notes))));
+    for (const [k, v] of writes) kv.set(k, v);
+    return writes.map(([k]) => k);
+  };
+  assert.deepEqual(save((n) => withNote(n, "AX-2", "pagos")), [KEYS.notesBackup, KEYS.notes], "the backup goes first");
+  assert.deepEqual(kv.get(KEYS.notesBackup), bad, "the stored value as it was");
+  assert.deepEqual(kv.get(KEYS.notes), { "AX-1": "contratos", "AX-2": "pagos" });
+  assert.deepEqual(save((n) => withNote(n, "AX-3", "luego")), [KEYS.notes], "a second save leaves the backup alone");
+  kv.set(KEYS.notes, ["foreign"]);
+  assert.deepEqual(save(() => ({ "AX-4": "otra" })), [KEYS.notes], "a filled backup is never written over");
+  assert.deepEqual(kv.get(KEYS.notesBackup), bad);
+});
+
+test("notes: noteKeyOf is the lane without task:, null for No task, Servers or an unusable key; noteOf reads own keys only", () => {
+  assert.equal(noteKeyOf("task:AX-3695"), "AX-3695");
+  assert.equal(noteKeyOf("task:login"), "login");
+  assert.equal(noteKeyOf(`task:${"x".repeat(200)}`), "x".repeat(200));
+  const unusable = ["task:none", "servers", "task:Constructor", "task:__PROTO__", "task:PROTOTYPE", "task:NONE", "task:", `task:${"x".repeat(201)}`, "login", "", null, undefined, 3];
+  for (const lane of unusable) assert.equal(noteKeyOf(lane), null, `for ${JSON.stringify(lane)}`);
+  const notes = parseNotes({ "AX-3695": "contratos" });
+  assert.equal(noteOf(notes, "AX-3695"), "contratos");
+  assert.equal(noteOf(notes, noteKeyOf("task:AX-3695")), "contratos");
+  assert.equal(noteOf(notes, "AX-1"), null);
+  for (const lane of ["task:Constructor", "task:__PROTO__", "task:none", "servers"]) assert.equal(noteOf(notes, noteKeyOf(lane)), null, lane);
+  for (const key of ["constructor", "__proto__", "toString", "hasOwnProperty"]) assert.equal(noteOf(notes, key), null, `${key}: never Object.prototype's`);
+  assert.equal(noteOf(null, "AX-3695"), null);
 });
 
 // ── Repo resolution (D10) and the worktree list (D6) ───────────────────────

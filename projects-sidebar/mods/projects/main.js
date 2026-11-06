@@ -10,6 +10,8 @@
 //   rename-workspace  the Rename dialog (a worktree's branch and folder)
 //   group-menu        a group's right-click menu
 //   group-form        New group / Rename group
+//   task-menu         a task lane's right-click menu (Task mode)
+//   task-note         a task's note
 // Copies never reach into each other: they share state through store.js
 // (setShared re-renders every copy) and act through herdr commands.
 
@@ -23,6 +25,8 @@ import RenameWorkspace from "./rename-workspace.js";
 import Groups, { commands as groupsCommands } from "./groups.js";
 import GroupForm from "./group-form.js";
 import GroupMenu from "./group-menu.js";
+import TaskMenu from "./task-menu.js";
+import TaskNote from "./task-note.js";
 import NewWorkspace, { commands as newWorkspaceCommands } from "./new-workspace.js";
 
 const VIEWS = {
@@ -35,6 +39,8 @@ const VIEWS = {
   "rename-workspace": RenameWorkspace,
   "group-menu": GroupMenu,
   "group-form": GroupForm,
+  "task-menu": TaskMenu,
+  "task-note": TaskNote,
 };
 
 // Every key command of the mod ("projects.<name>" in keys.json, or

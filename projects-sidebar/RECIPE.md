@@ -60,6 +60,17 @@ across repos.
     "Servers". Servers holds each project's main checkout, or "<name> ·
     Loading…" while a project is still listed.
   - Click a lane header to fold it; folds survive a reload.
+  - Right-click a ticket or name lane for its menu: "Add note…" ("Edit
+    note…" once it has one), a separator, then "Delete task…" in the
+    blocked color, dimmed for now ("Coming next"). "No task" and "Servers"
+    have no menu.
+  - A task's note is a word or two to recall it by ("contratos"): a small
+    dialog, "Note for AX-3695", with one input. Enter saves, Esc cancels,
+    and saving it empty removes the note. It is kept as one line of up to
+    30 characters. Hovering the lane shows it as a tooltip, the note only.
+    Notes live in Herdr only, per task across every group, and at most 500
+    are kept: a new one past that is refused ("500 notes is the most;
+    remove one first.").
   - The header gets a branch-icon button, "New workspace", next to Add
     project: the dialog opens on the focused space's project.
 - **Narrow sidebar** (under 160 px wide): projects show as initials ("HP" for
@@ -264,16 +275,19 @@ across repos.
   - `new-workspace` = `new-workspace.js`;
   - `delete-workspace` = `delete-workspace.js`;
   - `rename-workspace` = `rename-workspace.js`;
+  - `task-menu` = `task-menu.js`, `task-note` = `task-note.js`;
   - `project-menu`, `workspace-menu`, `group-menu`, `group-form`.
-  - Pure logic is in `lib.js`, `tree-model.js`, `new-workspace-model.js`,
-    `remove-workspace-model.js` and `rename-workspace-model.js`, tested with
-    `node --test` (Delete's and Rename's against a real git).
+  - Pure logic is in `lib.js`, `tree-model.js`, `task-model.js`,
+    `new-workspace-model.js`, `remove-workspace-model.js` and
+    `rename-workspace-model.js`, tested with `node --test` (Delete's and
+    Rename's against a real git).
   - `store.js` is the only code that touches the shared keys: `projects.v1`
     (groups and projects), `projects.ui.v1` (collapsed), `projects.cache.v1`
-    (worktree lists) and `projects.agents.v1` (`knownAgents()`). A stored
-    `projects.v1` with a malformed group or project keeps the valid rest, and
-    the original is copied to `projects.v1.backup` before the first write
-    over it.
+    (worktree lists), `projects.agents.v1` (`knownAgents()`) and
+    `projects.notes.v1` (task notes). A stored `projects.v1` with a malformed
+    group or project keeps the valid rest, and the original is copied to
+    `projects.v1.backup` before the first write over it; a malformed
+    `projects.notes.v1` goes to `projects.notes.v1.backup` the same way.
   - `config.js` holds `MOD` and `WORKTREE_ROOT` (`~/orca/workspaces`).
 - **Commands:** `projects.add`, `projects.add-here`, `projects.new-workspace`,
   `projects.group1`..`projects.group3`, `projects.ping`. `keys.json` binds

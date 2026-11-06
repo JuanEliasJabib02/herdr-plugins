@@ -3,10 +3,11 @@
 // workspaces in lanes, one per task, instead of under their projects. Here:
 // a workspace's task, ported from Orca (D30); the Task-mode tree, regrouped
 // from tree-model.js buildTree so matching, agents and the rail stay Project
-// mode's (D31); and the group menu's items, with the Organize toggle (D32).
-// tree.js and group-menu.js draw and act on it.
+// mode's (D31); the group menu's items, with the Organize toggle (D32); and
+// a lane's right-click menu, its note and Delete task (D35). tree.js,
+// group-menu.js and task-menu.js draw and act on it.
 
-import { baseName } from "./lib.js";
+import { baseName, noteKeyOf } from "./lib.js";
 import { buildTree, mostUrgent } from "./tree-model.js";
 
 // ── Task keys (D30) ────────────────────────────────────────────────────────
@@ -185,5 +186,21 @@ export function groupMenuItems(group, registry) {
     { id: "organize-task", label: "Organize by Task", mode: "task", checked: mode === "task", why: null },
     { id: "rename", label: "Rename…", why: null, separator: true },
     { id: "delete", label: "Delete group", why },
+  ];
+}
+
+// ── Task menu (D35) ────────────────────────────────────────────────────────
+
+// The right-click menu of a task lane: [{ id, label, why, separator?,
+// danger? }]. "Add note…", or "Edit note…" when the task has one (`note`);
+// then, after a separator, "Delete task…" in the blocked color, whose `why`
+// says "No workspaces" when it has no `targets` (the lane's worktrees, main
+// checkouts excluded). Only a lane with a note key (lib.js noteKeyOf) has a
+// menu: No task and Servers get [], as in Orca.
+export function taskMenuItems(lane, { note = null, targets = [] } = {}) {
+  if (noteKeyOf(lane) === null) return [];
+  return [
+    { id: "note", label: note ? "Edit note…" : "Add note…", why: null },
+    { id: "delete", label: "Delete task…", why: targets?.length ? null : "No workspaces", separator: true, danger: true },
   ];
 }

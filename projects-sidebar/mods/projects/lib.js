@@ -4,9 +4,9 @@
 // (git is passed in), and the matching of Herdr's spaces to workspaces.
 // Every operation returns a new value and never mutates its input. Frozen
 // after T2: later tasks add their pure helpers to their own model files. The
-// one exception is T10, which added two optional fields to the persisted
-// shapes here: a group's `organize` (D29) and the folded Task-mode lanes,
-// `tasks` (D31).
+// exceptions change the persisted keys here: T10 added two optional fields,
+// a group's `organize` (D29) and the folded Task-mode lanes, `tasks` (D31);
+// T13 added the task notes, `projects.notes.v1`, and their helpers (D34).
 
 // ── Persisted keys ─────────────────────────────────────────────────────────
 
@@ -20,6 +20,8 @@ export const KEYS = {
   ui: "projects.ui.v1", // { collapsed: [projectPath], tasks?: [lane] }: tasks, the folded Task-mode lanes, only when there are any
   cache: "projects.cache.v1", // { [projectPath]: [{ path, branch, main }] }
   agents: "projects.agents.v1", // the last knownAgents() result
+  notes: "projects.notes.v1", // { [taskKey]: note }: a task's note, up to 30 chars, at most 500 notes (noteKeyOf, parseNotes)
+  notesBackup: "projects.notes.v1.backup", // the first stored projects.notes.v1 that didn't read back as itself, as it was (notesWrites)
 };
 
 // Whether writing `next` over `prev` changes anything: values are plain
@@ -254,6 +256,109 @@ export function withTaskCollapsed(ui, lane, folded) {
   if (next.length) return { ...ui, tasks: next };
   const { tasks: _, ...without } = ui;
   return without;
+}
+
+// `projects.notes.v1`: one short note per task (S29; S31, S32: a word or two
+// to recall the task by), { [taskKey]: note }. Global like Orca's
+// taskNoteByTaskKey, not per group, and content, not view state, so not in
+// projects.ui.v1. The key is a Task-mode lane without "task:": a ticket
+// ("AX-3695") or a name lane's lowercased name. The tree, the task menu and
+// the note dialog read notes only through noteKeyOf and noteOf.
+
+// A note keeps this many characters (code points: an emoji is never cut in
+// half).
+export const NOTE_LENGTH = 30;
+// At most this many notes are kept: a new one past it would vanish at the
+// next read, so withNote refuses it (Orca's cap).
+export const NOTES_MAX = 500;
+
+// What can't key a note, compared lowercased (Orca's isUsableTaskKey, plus
+// "none", the No task lane's own key): nothing, "none", over 200 chars, or a
+// key that is special on a plain object.
+const SPECIAL_KEYS = new Set(["__proto__", "constructor", "prototype"]);
+function isNoteKey(key) {
+  if (typeof key !== "string") return false;
+  const k = key.toLowerCase();
+  return k !== "" && k !== "none" && k.length <= 200 && !SPECIAL_KEYS.has(k);
+}
+
+// A lane's note key: the lane without "task:", or null for No task, Servers,
+// anything that isn't a task lane, or a key isNoteKey refuses
+// ("task:Constructor", "task:__PROTO__").
+export function noteKeyOf(lane) {
+  if (typeof lane !== "string" || !lane.startsWith("task:")) return null;
+  const key = lane.slice(5);
+  return isNoteKey(key) ? key : null;
+}
+
+// The note stored under `key`, or null. Own keys only (Object.hasOwn, like
+// Orca's getTaskNote), so "constructor" is never Object.prototype's.
+export function noteOf(notes, key) {
+  if (!isObject(notes) || typeof key !== "string" || !Object.hasOwn(notes, key)) return null;
+  return typeof notes[key] === "string" ? notes[key] : null;
+}
+
+// A note as it is stored: every run of whitespace, newlines included, one
+// space; trimmed; cut to NOTE_LENGTH characters; its end trimmed again.
+// "" means no note. Anything but a string is "".
+export function normalizeNote(text) {
+  if (typeof text !== "string") return "";
+  const one = text.replace(/\s+/g, " ").trim();
+  return Array.from(one).slice(0, NOTE_LENGTH).join("").trimEnd();
+}
+
+// A stored `projects.notes.v1` value as notes: the entries with a usable key
+// (isNoteKey) whose value is a string that normalizes to a note, each value
+// normalized, the first NOTES_MAX of them. Anything else reads as {}. Never
+// throws.
+export function parseNotes(value) {
+  if (!isObject(value)) return {};
+  const out = {};
+  let n = 0;
+  for (const [key, raw] of Object.entries(value)) {
+    if (n >= NOTES_MAX) break;
+    if (!isNoteKey(key) || typeof raw !== "string") continue;
+    const note = normalizeNote(raw);
+    if (!note) continue;
+    out[key] = note;
+    n += 1;
+  }
+  return out;
+}
+
+// The notes with `key`'s note set to `text` (normalizeNote), replaced, or
+// deleted when it normalizes to "". The same `notes` when nothing changes,
+// for a key isNoteKey refuses, and for a new key while NOTES_MAX notes are
+// stored (notesFull says so).
+export function withNote(notes, key, text) {
+  if (!isNoteKey(key)) return notes;
+  const note = normalizeNote(text);
+  const has = Object.hasOwn(notes, key);
+  if (!note) {
+    if (!has) return notes;
+    const { [key]: _, ...rest } = notes;
+    return rest;
+  }
+  if (has ? notes[key] === note : Object.keys(notes).length >= NOTES_MAX) return notes;
+  return { ...notes, [key]: note };
+}
+
+// Whether withNote refused `text` for `key` because NOTES_MAX notes are
+// stored: a new key with a note. Saving empty is never refused.
+export const notesFull = (notes, key, text) =>
+  normalizeNote(text) !== "" && !Object.hasOwn(notes, key) && Object.keys(notes).length >= NOTES_MAX;
+
+// The shared() writes that save `next` over the stored `projects.notes.v1`
+// value (`raw`), as ordered [key, value] pairs, like registryWrites: none
+// when `next` is the same value; otherwise `raw` goes to KEYS.notesBackup
+// first when it doesn't read back as itself (parseNotes) and the backup
+// (`backup`) is empty, so the first original survives, and then `next`.
+export function notesWrites(raw, backup, next) {
+  if (!changed(raw, next)) return [];
+  const writes = [];
+  if (raw != null && changed(raw, parseNotes(raw)) && backup == null) writes.push([KEYS.notesBackup, raw]);
+  writes.push([KEYS.notes, next]);
+  return writes;
 }
 
 const isCheckout = (c) => isObject(c) && isAbsolute(c.path) && (c.branch === null || typeof c.branch === "string") && typeof c.main === "boolean";
