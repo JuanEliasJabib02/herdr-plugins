@@ -47,6 +47,21 @@ across repos.
   - Another group's chip gets a dot at its top right when one of its agents
     is blocked or done: `blocked` if any is blocked, else `done`.
   - A "+" (New group) sits on the right.
+- **Task mode** (a group's right-click menu → Organize by Task; Organize by
+  Project brings back the tree above). Each group keeps its own mode.
+  - Instead of projects, the tree shows task lanes: a bold header with a
+    chevron and a count, then that task's workspaces from every project of
+    the group, each with its project's name on the right, dim.
+  - A task is a ticket found in the branch (`feat/ax-3356-fix` → `AX-3356`)
+    or in the folder name. Without one, it is the branch's last segment, so
+    the same branch in two projects (one made with "Also create in") is one
+    task. A name merges whatever its casing.
+  - Lanes go: tickets (newest number first), names (A–Z), "No task",
+    "Servers". Servers holds each project's main checkout, or "<name> ·
+    Loading…" while a project is still listed.
+  - Click a lane header to fold it; folds survive a reload.
+  - The header gets a branch-icon button, "New workspace", next to Add
+    project: the dialog opens on the focused space's project.
 - **Narrow sidebar** (under 160 px wide): projects show as initials ("HP" for
   herdr-plugins) with the most urgent status among their workspaces. Group
   chips shrink to 26 px and center, and "+" hides.
@@ -205,10 +220,12 @@ across repos.
     list, what origin lists), never from its words.
 - **Groups:** F1/F2/F3 (in this layout only) select groups 1–3, and a
   missing group does nothing. "+" opens the form: Enter creates and selects
-  the group, Esc cancels. Right-click a chip: Rename…, or Delete group, which
-  only works on an empty group that isn't the last one.
+  the group, Esc cancels. Right-click a chip: Organize by Project or by Task
+  (the current one checked), Rename…, or Delete group, which only works on
+  an empty group that isn't the last one.
 - **New workspace:**
-  - Opens from a project's "+", the project menu or `projects.new-workspace`
+  - Opens from a project's "+", Task mode's header button, the project menu
+    or `projects.new-workspace`
     (the focused space's project, else the active group's first).
   - Choosing companions: each gets a worktree with the same branch from its
     own default branch, and no space.
@@ -326,6 +343,10 @@ across repos.
 - **Claude Code's history after a move:** Claude Code keeps sessions under
   `~/.claude/projects/<old path with dashes>`, so `claude --continue` in the
   moved folder starts fresh.
+- **In Task mode there are no project rows,** so a project's own menu (Move
+  to group, Remove from list) isn't there: switch the group to Organize by
+  Project to move or remove a project. Collapsing a project also only
+  applies in Project mode.
 - **`herdr-app check` draws only the tree view.** Check the other views
   from a copy whose `main.js` defaults to them.
 - **Limits:**
@@ -367,3 +388,7 @@ across repos.
   pushed with `-u` to a GitHub origin is renamed there too: `git ls-remote
   origin refs/heads/<new>` lists it, `refs/heads/<old>` is gone, and its
   upstream is `origin/<new>`.
+- Right-click the group's chip → Organize by Task: the tree shows task lanes
+  (`test`, `test-2`, … then "Servers" with `main`), each row naming its
+  project. A folded lane stays folded after a reload. Organize by Project
+  brings the tree back.

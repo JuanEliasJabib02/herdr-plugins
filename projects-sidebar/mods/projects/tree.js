@@ -3,7 +3,9 @@
 // spaces (S10, S11). Spaces outside every project show nowhere (S14, S15).
 // Click a workspace to go to its space or open one (D8); "+" in the header
 // adds a project (D10), "+" on a project opens New workspace; right-click a
-// project for its menu. Below 160 px of sidebar it is a rail of initials.
+// project for its menu. A group organized by Task (D29–D32) shows task lanes
+// instead of projects, each row naming its project, and the header gets a
+// New workspace "+". Below 160 px of sidebar it is a rail of initials.
 //
 // This copy is also the worktree engine (D6): it lists every group's
 // projects into projects.cache.v1 at start, re-lists one when its
@@ -16,12 +18,13 @@ import {
   theme, props, notify, run, spaces, panes, agents, focused, layout, home, window, pickFolder, watchFolder,
 } from "herdr";
 import { icon } from "./config.js";
-import { findProject } from "./lib.js";
+import { findProject, activeGroup, matchSpaces } from "./lib.js";
 import * as store from "./store.js";
 import { repoOf, listWorktrees } from "./git.js";
 import {
   buildTree, openAction, railAction, isNarrow, projectPaths, pruneCache, watchDirs, eachLimit, liveFolder, addProjectAt,
 } from "./tree-model.js";
+import { buildTaskTree } from "./task-model.js";
 import { openNewWorkspace } from "./new-workspace.js";
 import { openProjectMenu } from "./project-menu.js";
 import { openWorkspaceMenu } from "./workspace-menu.js";
@@ -140,30 +143,41 @@ export default class Tree {
   render() {
     const t = theme();
     const narrow = isNarrow(layout());
-    const model = buildTree({
-      registry: store.registry(),
+    const registry = store.registry();
+    const ui = store.ui();
+    const byTask = activeGroup(registry)?.organize === "task";
+    const args = {
+      registry,
       cache: store.cache(),
       spaces: spaces(),
       panes: panes(),
       agents: agents(),
-      collapsed: store.ui().collapsed,
+      collapsed: ui.collapsed,
       home: home(),
       now: Date.now(),
       failed: this.failed,
-    });
+    };
+    const model = byTask ? buildTaskTree({ ...args, tasks: ui.tasks ?? [] }) : buildTree(args);
     const body = model.empty
       ? narrow ? [] : [emptyState(t)]
       : narrow ? model.projects.map((p) => railRow(p, t)) : model.rows.map((r) => row(r, t));
     return v_flex().size_full().min_h(0).bg(t.chrome).text_size(13)
-      .child(header(model.group, narrow, t))
+      .child(header(model.group, narrow, byTask, t))
       .child(v_flex().id("projects-list").flex_1().min_h(0).px(narrow ? 0 : 8).pb(14).overflow_y_scrollbar().mode("always").children(body));
   }
 }
 
-function header(group, narrow, t) {
+// In Task mode no project row carries New workspace's "+", so the header
+// does: for the focused space's project (D32, S13).
+function header(group, narrow, byTask, t) {
   return h_flex().h(31).flex_none().items_center().gap(6).text_size(11.5).text_color(t.dim)
     .when(narrow, (el) => el.justify_center())
     .when(!narrow, (el) => el.pl(16).pr(10).child(div().flex_1().min_w(0).truncate().child(group.name === "Projects" ? "Projects" : `Projects · ${group.name}`)))
+    .when(byTask && !narrow, (el) => el.child(div().id("projects-new-workspace").size(26).flex_none().flex().items_center().justify_center().rounded(6)
+      .hover((s) => s.bg(t.hover).text_color(t.foreground))
+      .tooltip("New workspace")
+      .on_click(() => openNewWorkspace(focusedProject()))
+      .child(svg(icon("branch")).size(14))))
     .child(div().id("projects-add").size(26).flex_none().flex().items_center().justify_center().rounded(6)
       .hover((s) => s.bg(t.hover).text_color(t.foreground))
       .tooltip("Add project")
@@ -182,12 +196,36 @@ function emptyState(t) {
       .child("Add project"));
 }
 
+// The project of the focused space (D7), or null: New workspace then starts
+// on the group's first project.
+function focusedProject() {
+  const all = spaces();
+  const active = all.find((s) => s.active);
+  if (!active) return null;
+  return matchSpaces(store.cache(), all, panes(), home())[active.id]?.project ?? null;
+}
+
 function row(r, t) {
+  if (r.kind === "task") return taskRow(r, t);
   if (r.kind === "project") return projectRow(r, t);
   if (r.kind === "workspace") return workspaceRow(r, t);
   if (r.kind === "agent") return agentRow(r, t);
-  const text = r.kind === "missing" ? "Can't read this folder." : "Loading…";
+  const what = r.kind === "missing" ? "Can't read this folder." : "Loading…";
+  const text = r.projectName ? `${r.projectName} · ${what}` : what;
   return div().id(`${r.kind}:${r.project}`).h(28).flex_none().pl(48).flex().items_center().text_size(12).text_color(t.dim).child(text);
+}
+
+// A task lane (Task mode): fold on click; its count and, folded, its most
+// urgent status.
+function taskRow(l, t) {
+  return h_flex().id(`t:${l.lane}`).h(28).flex_none().px(8).gap(7).items_center().rounded(8)
+    .cursor_pointer()
+    .hover((s) => s.bg(t.hover))
+    .on_click(() => store.toggleTaskCollapsed(l.lane))
+    .child(svg(chrome(l.collapsed ? "chevron-right" : "chevron-down")).size(11).flex_none().text_color(t.dim))
+    .child(div().flex_1().min_w(0).truncate().font_semibold().text_color(t.foreground).child(l.label))
+    .when(l.collapsed && Boolean(l.status) && l.status !== "idle", (el) => el.child(statusMark(l.status, t)))
+    .when(l.count > 0, (el) => el.child(div().flex_none().text_size(11.5).text_color(t.dim).child(String(l.count))));
 }
 
 // A project: collapse on click, its menu on right-click, "+" for a new workspace.
@@ -232,6 +270,8 @@ function workspaceRow(w, t) {
     })
     .child(h_flex().w(14).flex_none().items_center().justify_center().child(lead))
     .child(div().flex_1().min_w(0).truncate().text_color(w.open ? t.foreground : t.muted).child(w.label))
+    // Task mode: no project row above names it (Orca's project label).
+    .when(Boolean(w.projectName), (el) => el.child(div().flex_none().max_w(110).truncate().text_size(11.5).text_color(t.dim).child(w.projectName)))
     .when(w.open, (el) => el.child(div().size(6).flex_none().rounded(3).bg(w.selected ? t.accent : t.muted)));
 }
 

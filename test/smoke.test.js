@@ -74,3 +74,22 @@ test("the rename dialog is a view of the mod, and its rename outlives it (D25)",
   assert.match(src("workspace-menu.js"), /openRenameWorkspace\(/, "the menu's Rename… opens it");
   assert.match(src("git.js"), /export const renameWorkspace\b/);
 });
+
+test("the group menu toggles Task mode, and the tree draws it (D31, D32)", () => {
+  const src = (f) => readFileSync(new URL(`../projects-sidebar/mods/projects/${f}`, import.meta.url), "utf8");
+  const menu = src("group-menu.js");
+  assert.match(menu, /groupMenuItems\(/, "the menu's items come from task-model.js");
+  assert.match(menu, /setOrganize\(r, group\.id, "task"\)/);
+  assert.match(menu, /setOrganize\(r, group\.id, "project"\)/);
+  assert.match(menu, /height:\s*200/, "four items and a separator fit");
+});
+
+test("Task mode: lanes, their folding, and New workspace in the header (D31, D32)", () => {
+  const src = (f) => readFileSync(new URL(`../projects-sidebar/mods/projects/${f}`, import.meta.url), "utf8");
+  const tree = src("tree.js");
+  assert.match(tree, /buildTaskTree\(/);
+  assert.match(tree, /r\.kind === "task"/);
+  assert.match(tree, /toggleTaskCollapsed\(/);
+  assert.match(tree, /"projects-new-workspace"[\s\S]*?openNewWorkspace\(focusedProject\(\)\)/, "the header's New workspace opens the dialog");
+  assert.match(src("store.js"), /export function toggleTaskCollapsed/);
+});

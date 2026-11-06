@@ -8,7 +8,7 @@
 import { shared, setShared } from "herdr";
 import {
   KEYS, changed, normPath,
-  parseRegistry, registryWrites, parseUi, withCollapsed, parseCache, parseAgents,
+  parseRegistry, registryWrites, parseUi, withCollapsed, withTaskCollapsed, parseCache, parseAgents,
 } from "./lib.js";
 
 function write(key, value) {
@@ -39,7 +39,7 @@ export function updateRegistry(fn) {
   return next;
 }
 
-// ── projects.ui.v1: collapsed projects ─────────────────────────────────────
+// ── projects.ui.v1: collapsed projects, folded Task lanes ──────────────────
 
 export const ui = () => parseUi(shared(KEYS.ui));
 
@@ -51,6 +51,12 @@ export const isCollapsed = (path) => ui().collapsed.includes(normPath(path));
 
 export function toggleCollapsed(path) {
   return saveUi(withCollapsed(ui(), path, !isCollapsed(path)));
+}
+
+// A Task-mode lane (D31): `task:<key>`, `task:none` or `servers`.
+export function toggleTaskCollapsed(lane) {
+  const now = ui();
+  return saveUi(withTaskCollapsed(now, lane, !(now.tasks ?? []).includes(lane)));
 }
 
 // ── projects.cache.v1: each project's worktree list ────────────────────────
