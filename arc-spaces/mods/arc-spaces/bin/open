@@ -5,38 +5,62 @@
 # Everything else on this Mac that runs `open`, and anything that goes wrong,
 # ends in the real one.
 #
-# ARC_SPACES_OPEN, _OSASCRIPT, _HERDR, _APP and _TIMEOUT are for the tests.
+# ARC_SPACES_OPEN, _OSASCRIPT, _HERDR, _HC, _APP, _TIMEOUT and _LOOKUP_TIMEOUT
+# are for the tests.
 
 real=${ARC_SPACES_OPEN:-/usr/bin/open}
 
-# Only Herdr's own clicks. Terminals run under herdr-core, so a shell's or an
-# agent's `open` has another parent and goes through, as it does in Orca.
-parent=$(ps -o comm= -p "$PPID" 2>/dev/null)
-case $parent in
-  */Herdr.app/Contents/MacOS/Herdr | */herdr-app) ;;
-  *) exec "$real" "$@" ;;
-esac
+# A link is one http(s) URL. Every other call goes through before any work.
 [ $# -eq 1 ] || exec "$real" "$@"
 case $1 in
   http://* | https://*) ;;
   *) exec "$real" "$@" ;;
 esac
 
+# Only Herdr's own clicks. Terminals run under herdr-core, so a shell's or an
+# agent's `open` has another parent and goes through, as it does in Orca.
+parent=$(/bin/ps -o comm= -p "$PPID" 2>/dev/null)
+case $parent in
+  */Herdr.app/Contents/MacOS/Herdr | */herdr-app) ;;
+  *) exec "$real" "$@" ;;
+esac
+
+# Runs a command for at most $1 seconds. A command that can't start fails too.
+limit() { /usr/bin/perl -e 'alarm shift; exec { $ARGV[0] } @ARGV or exit 127' "$@"; }
+
+listing=$(limit "${ARC_SPACES_LOOKUP_TIMEOUT:-3}" "${ARC_SPACES_HERDR:-$parent}" ls 2>/dev/null) || exec "$real" "$@"
+
+# Where the shown space is now, as projects-sidebar's placeOf: its first
+# terminal's live folder (herdr-core's record, which Herdr reads), else the
+# folder it was made in. A space on another machine has no terminal looked at.
+live=
+for terminal in $(printf '%s\n' "$listing" | jq -r '[.spaces[]? | select(.active == true)][0]
+    | select((.machine // null) == null) | .tabs[]?.terminals[]?.terminal | strings' 2>/dev/null); do
+  record=$(limit "${ARC_SPACES_LOOKUP_TIMEOUT:-3}" "${ARC_SPACES_HC:-hc}" get "$terminal" 2>/dev/null) || break
+  live=$(printf '%s\n' "$record" | jq -r '.foreground.cwd // .cwd // empty | strings' 2>/dev/null)
+  [ -n "$live" ] && break
+done
+
 # The Arc space, or nothing when it's off, the group has no name, or anything
-# here fails. Asked at the click, so it can't be stale: the shown space's folder
-# gives the project (the longest checkout holding it, as projects-sidebar's
-# matchSpaces), the project gives the group. A space outside every group, or on
-# another machine, uses the active group, as Orca does.
+# here fails. Asked at the click, so it can't be stale: the place gives the
+# project (the longest checkout holding it, as projects-sidebar's matchSpaces),
+# the project gives the group. A space outside every group, or on another
+# machine, uses the active group, as Orca does.
 home=${HERDR_APP_HOME:-"$HOME/.config/herdr-app"}
-space=$("${ARC_SPACES_HERDR:-$parent}" ls 2>/dev/null | jq -r --slurpfile shared "$home/shared.json" '
-  def norm: if type == "string" and . != "" then (sub("/+$"; "") | if . == "" then "/" else . end) else "" end;
+space=$(printf '%s\n' "$listing" | jq -r --arg live "$live" --arg userhome "$HOME" --slurpfile shared "$home/shared.json" '
+  # projects-sidebar normPath: forward slashes, ~ expanded, no trailing slash.
+  def norm: if type == "string" and . != "" then
+      (gsub("\\\\"; "/")
+       | if $userhome != "" and (. == "~" or startswith("~/")) then ($userhome | sub("/+$"; "")) + .[1:] else . end
+       | sub("/+$"; "") | if . == "" then "/" else . end)
+    else "" end;
   def inside($dir): . == $dir or startswith(if $dir == "/" then "/" else $dir + "/" end);
   $shared[0] as $s
   | ($s["arc-spaces.v1"] // {}) as $config
   | select($config.enabled == true)
   | $s["projects.v1"] as $registry
   | ([.spaces[] | select(.active == true)][0]) as $shown
-  | (if ($shown.machine // null) == null then ($shown.folder | norm) else "" end) as $at
+  | (if ($shown.machine // null) != null then "" elif $live != "" then $live else $shown.folder end | norm) as $at
   | ([($s["projects.cache.v1"] // {}) | to_entries[] | (.key | norm) as $project | .value[]?
       | {project: $project, path: (.path | norm)}
       | select(.path as $path | $path != "" and ($at | inside($path)))]
@@ -54,8 +78,9 @@ fi
 
 # Orca's script (src/main/arc-space-url-open.ts). The URL and the name go as
 # arguments, so neither can become script text. The limit: the first use waits
-# on macOS's Automation prompt, and a hung Arc must not eat the click.
-/usr/bin/perl -e 'alarm shift; exec @ARGV' "${ARC_SPACES_TIMEOUT:-10}" "${ARC_SPACES_OSASCRIPT:-/usr/bin/osascript}" \
+# on macOS's Automation prompt, and a hung Arc must not eat the click. As in
+# Orca, a click that runs out of time also goes to the real open.
+limit "${ARC_SPACES_TIMEOUT:-10}" "${ARC_SPACES_OSASCRIPT:-/usr/bin/osascript}" \
   -e 'on run argv' \
   -e 'set targetUrl to item 1 of argv' \
   -e 'set spaceName to item 2 of argv' \

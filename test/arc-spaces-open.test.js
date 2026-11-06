@@ -32,6 +32,18 @@ const logOf = (name) => {
 const lsAnswer = (spaces) => tool("herdr", `cat <<'EOF'\n${JSON.stringify({ spaces })}\nEOF`);
 
 const space = (folder, extra = {}) => ({ id: `s-${folder}`, folder, machine: null, active: true, tabs: [], ...extra });
+// A space's tabs holding these terminals, in order, as `ls` lists them.
+const withTerminals = (...addresses) => ({ tabs: [{ id: "tb1", terminals: addresses.map((terminal) => ({ terminal })) }] });
+
+// What herdr-core's `hc get <terminal>` answers, per terminal; any other
+// terminal fails. Each call's terminal is logged.
+const hcAnswer = (records) => tool("hc", [
+  `printf '%s\\n' "$2" >> "${join(dir, "hc.log")}"`,
+  "case $2 in",
+  ...Object.entries(records).map(([terminal, record]) => `  ${terminal}) cat <<'EOF'\n${JSON.stringify(record)}\nEOF\n  ;;`),
+  "  *) exit 1 ;;",
+  "esac",
+].join("\n"));
 
 const GROUPS = {
   version: 1,
@@ -70,10 +82,12 @@ function run(args, { parent = herdrParent, env = {} } = {}) {
       ARC_SPACES_OPEN: join(dir, "real-open"),
       ARC_SPACES_OSASCRIPT: join(dir, "osascript"),
       ARC_SPACES_HERDR: join(dir, "herdr"),
+      ARC_SPACES_HC: join(dir, "hc"),
       ARC_SPACES_APP: join(dir, "Arc.app"),
       // Under the whole suite macOS can take over 10 s to run a new script, so
-      // the real limit would stop the fake osascript and fail the test.
+      // the real limits would stop the fakes and fail the test.
       ARC_SPACES_TIMEOUT: "300",
+      ARC_SPACES_LOOKUP_TIMEOUT: "300",
       ...env,
     },
   });
@@ -107,6 +121,7 @@ beforeEach(() => {
   otherParent = "/bin/bash";
   recorder("real-open");
   recorder("osascript");
+  hcAnswer({});
   lsAnswer([space("/repos/action")]);
   writeShared(shared());
 });
@@ -246,6 +261,62 @@ test("no valid active group: the first group", () => {
   assertRouted("Action");
 });
 
+// ── Where the space is now (projects-sidebar's placeOf) ────────────────────
+
+test("a space whose terminal moved into a checkout belongs to that checkout's group", () => {
+  lsAnswer([space("/repos/ag", withTerminals("t1"))]);
+  hcAnswer({ t1: { address: "t1", cwd: "/repos/ag", foreground: { name: "zsh", cwd: "/work/action/feature" } } });
+  run([URL_A]);
+  assertRouted("Action");
+});
+
+test("a space made outside every group joins the group its terminal moved into", () => {
+  lsAnswer([space("/Users/someone", withTerminals("t1"))]);
+  hcAnswer({ t1: { cwd: "/Users/someone", foreground: { cwd: "/repos/ag/web" } } });
+  run([URL_A]);
+  assertRouted("Bulbasour");
+});
+
+test("with no foreground, the terminal's own folder", () => {
+  lsAnswer([space("/Users/someone", withTerminals("t1"))]);
+  hcAnswer({ t1: { cwd: "/repos/action", foreground: null } });
+  run([URL_A]);
+  assertRouted("Action");
+});
+
+test("the first terminal with a folder counts", () => {
+  lsAnswer([space("/Users/someone", withTerminals("t1", "t2", "t3"))]);
+  hcAnswer({ t1: { foreground: null }, t2: { cwd: "/repos/ag" }, t3: { cwd: "/repos/action" } });
+  run([URL_A]);
+  assertRouted("Bulbasour");
+  assert.deepEqual(logOf("hc"), ["t1", "t2"]);
+});
+
+test("hc failing: the folder the space was made in", () => {
+  lsAnswer([space("/repos/ag", withTerminals("t1"))]);
+  tool("hc", "exit 1");
+  run([URL_A]);
+  assertRouted("Bulbasour");
+});
+
+test("a space on another machine: its terminals aren't asked", () => {
+  lsAnswer([space("/repos/action", { machine: "vps", ...withTerminals("vps/t1") })]);
+  hcAnswer({ "vps/t1": { cwd: "/repos/ag" } });
+  run([URL_A]);
+  assertRouted("Personal");
+  assert.equal(logOf("hc"), null);
+});
+
+test("~ in a stored path is the home folder, as projects-sidebar reads it", () => {
+  writeShared(shared(undefined, {
+    "projects.v1": { ...GROUPS, groups: [{ id: "g1", name: "Action Experience", projects: [{ path: "~/repos/action" }] }, ...GROUPS.groups.slice(1)] },
+    "projects.cache.v1": { "~/repos/action": [{ path: "~/repos/action/" }] },
+  }));
+  lsAnswer([space(join(dir, "repos/action/src"))]);
+  run([URL_A]);
+  assertRouted("Action");
+});
+
 test("the name is trimmed", () => {
   writeShared(shared({ enabled: true, names: { ...NAMES, g1: "  Action " } }));
   run([URL_A]);
@@ -282,11 +353,25 @@ test("a script failure (a space Arc doesn't have): the real open", () => {
 });
 
 test("a hung Arc: stopped at the limit, then the real open", () => {
-  tool("osascript", "exec sleep 600");
+  tool("osascript", `echo started > "${join(dir, "osascript.log")}"\nexec sleep 600`);
   const started = Date.now();
   run([URL_A], { env: { ARC_SPACES_TIMEOUT: "1" } });
   assert.ok(Date.now() - started < 300_000, "it must not wait for the sleep to end");
+  assert.deepEqual(logOf("osascript"), ["started"], "Arc was asked");
   assert.deepEqual(logOf("real-open"), [URL_A]);
+});
+
+test("an osascript that can't start: the real open", () => {
+  run([URL_A], { env: { ARC_SPACES_OSASCRIPT: join(dir, "no-such-osascript") } });
+  assertPassedThrough([URL_A]);
+});
+
+test("a hung Herdr ls: stopped at the limit, then the real open", () => {
+  tool("herdr", "exec sleep 600");
+  const started = Date.now();
+  run([URL_A], { env: { ARC_SPACES_LOOKUP_TIMEOUT: "1" } });
+  assert.ok(Date.now() - started < 300_000, "it must not wait for the sleep to end");
+  assertPassedThrough([URL_A]);
 });
 
 test("Herdr's ls failing: the real open", () => {

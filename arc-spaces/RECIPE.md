@@ -17,15 +17,18 @@ browser, and links from any other app open as they always did.
 
 ```sh
 scripts/install.sh arc-spaces
+sudo mkdir -p /usr/local/bin
 sudo ln -s ~/.config/herdr-app/mods/arc-spaces/bin/open /usr/local/bin/open
 herdr-app do mod.open '{"name":"arc-spaces"}'
 ```
 
-The second line needs your password: `/usr/local/bin` belongs to root, and
-it's the folder that comes before `/usr/bin` on Herdr's PATH. Check that yours
-does with `zsh -lc 'which open'`, which should print `/usr/local/bin/open`.
+The `sudo` lines need your password: `/usr/local/bin` belongs to root, and
+it's the folder that comes before `/usr/bin` on Herdr's PATH (`mkdir` only
+matters on a Mac that doesn't have it yet). Check that yours does with
+`zsh -lc 'which open'`, which should print `/usr/local/bin/open`. If you set
+`HERDR_APP_HOME`, link the `bin/open` under it instead.
 
-The dialog from the third line is where you turn it on and type, for each
+The dialog from the last line is where you turn it on and type, for each
 group, the exact name of its Arc space. It's off until you do, and a group
 without a name opens links as usual. The first click asks macOS for permission
 for Herdr to control Arc; that click may open in Arc as usual while you answer.
@@ -34,9 +37,11 @@ for Herdr to control Arc; that click may open in Arc as usual while you answer.
 
 Herdr opens a clicked link by running `open <url>`, by name. The wrapper is
 found first and acts only when Herdr itself ran it with one http(s) link. It
-asks Herdr which space is shown, finds that space's group, and runs Orca's
-AppleScript on Arc. Anything else, and anything that fails (the space doesn't
-exist in Arc, Arc doesn't answer within 10 seconds), goes to `/usr/bin/open`.
+asks Herdr which space is shown and where it is now (its first terminal's
+folder, the way the projects sidebar places it), finds that place's group, and
+runs Orca's AppleScript on Arc. Anything else, and anything that fails (the
+space doesn't exist in Arc, Herdr doesn't answer within 3 seconds or Arc within
+10), goes to `/usr/bin/open`.
 
 | | Where the link opens |
 |---|---|
@@ -63,4 +68,5 @@ scripts/install.sh --uninstall arc-spaces
 ```
 
 Removing only the plugin is safe too: a link pointing nowhere is skipped, and
-`open` finds `/usr/bin/open`.
+`open` finds `/usr/bin/open`. A shell that already ran `open` may remember the
+old path and say it's missing: `hash -r`, or a new terminal, fixes it.

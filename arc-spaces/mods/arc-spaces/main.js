@@ -10,8 +10,12 @@ import { KEY, GROUPS_KEY, LINK, parseConfig, withEnabled, withName, groupsOf, is
 
 const config = () => parseConfig(shared(KEY));
 
-function save(next) {
-  if (next !== config()) setShared(KEY, next);
+// `change` gets the stored config and returns the next one; withEnabled and
+// withName return the same object when nothing changes, so nothing is written.
+function save(change) {
+  const current = config();
+  const next = change(current);
+  if (next !== current) setShared(KEY, next);
 }
 
 export default class ArcSpaces extends View {
@@ -33,7 +37,7 @@ export default class ArcSpaces extends View {
 
   newInput(groupId) {
     const state = InputState.new({ value: config().names[groupId] ?? "", placeholder: "Arc space name" });
-    state.on("change", () => save(withName(config(), groupId, state.value())));
+    state.on("change", () => save((current) => withName(current, groupId, state.value())));
     state.on("focus", (_e, cx) => {
       this.focusedGroup = groupId;
       cx.notify();
@@ -59,7 +63,7 @@ export default class ArcSpaces extends View {
     const toggle = h_flex().id("arc-spaces-toggle").flex_none().w(28).h(16).p(2).rounded(8).cursor_pointer()
       .bg(enabled ? t.accent : t.input)
       .when(enabled, (el) => el.justify_end())
-      .on_click(() => save(withEnabled(config(), !enabled)))
+      .on_click(() => save((current) => withEnabled(current, !current.enabled)))
       .child(div().size(12).rounded(6).bg(enabled ? t.accent_foreground : t.background));
 
     const row = (group) => h_flex().items_center().gap(10)
