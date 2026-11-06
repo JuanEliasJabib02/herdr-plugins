@@ -4,7 +4,7 @@
 //                     level, Detailed or Compact, and state (usage, stale,
 //                     signed out, error, loading, empty); the popover's Usage
 //                     header, mode toggle and Claude row; the panel's card and
-//                     its Claude Account list. Plus where an overlay opens
+//                     its Other accounts list. Plus where an overlay opens
 //                     over the footer, and how the footer applies
 //                     toasts.react.
 //
@@ -284,23 +284,20 @@ test("panel: Claude · Updated 3m ago, the active account's card with Session, W
   assert.equal(m.manage, "Manage Accounts…");
 });
 
-test("panel: the Claude Account list, System default first, ✓ on the active one, wk and Fable bars on the others", () => {
+test("panel (S9): the list has only the other accounts, System default first, wk and Fable bars; the card shows the active one", () => {
   const m = panelModel({ doc: DOC, now: NOW });
-  assert.equal(m.heading, "Claude Account");
+  assert.equal(m.card.label, "ana@example.com");
+  assert.equal(m.heading, "Other accounts");
   assert.deepEqual(m.rows.map((r) => [r.id, r.label, r.active]), [
     ["default", "System default", false],
-    [ANA, "ana@example.com", true],
     [BEN, "ben@example.org", false],
   ]);
-  const [def, ana, ben] = m.rows;
+  const [def, ben] = m.rows;
   // System default's login lapsed: Orca's hint, and the row signs it in.
   assert.equal(def.hint, "Sign in again to use this account");
   assert.equal(def.signIn, "default");
   assert.deepEqual(def.bars, []);
   assert.equal(def.disabled, false);
-  // The active row has no bars and can't be picked again.
-  assert.deepEqual(ana.bars, []);
-  assert.equal(ana.disabled, true);
   // S1: `[red bar] 94% used wk` and `[bar] 42% used Fable`; monthly stays out
   // while there's a weekly window (InlineUsageBars).
   assert.deepEqual(ben.bars.map((b) => [b.text, b.fill, b.color]), [["94% used wk", 94, "blocked"], ["42% used Fable", 42, "muted"]]);
@@ -314,7 +311,7 @@ const elsewhere = { signedInAs: "dee@example.com", needsSignIn: true, usage: NO_
 
 test("panel (S8): a folder signed in as someone else keeps its saved email, names the login, signs in, and has no bars", () => {
   const m = panelModel({ doc: docWith(ANA, { [BEN]: elsewhere }), now: NOW });
-  const ben = m.rows[2];
+  const ben = m.rows[1];
   assert.deepEqual(
     [ben.label, ben.hint, ben.signIn, ben.bars, ben.status, ben.active, ben.disabled],
     ["ben@example.org", "Now signed in as dee@example.com", BEN, [], null, false, false],
@@ -322,10 +319,11 @@ test("panel (S8): a folder signed in as someone else keeps its saved email, name
   assert.equal(m.rows[0].hint, "Sign in again to use this account", "a lapsed login keeps Orca's hint");
   // Its row reads like itself even when the login it holds is another row's.
   const taken = panelModel({ doc: docWith(ANA, { [BEN]: { ...elsewhere, signedInAs: "ana@example.com" } }), now: NOW });
-  assert.deepEqual(taken.rows.map((r) => r.label), ["System default", "ana@example.com", "ben@example.org"]);
-  assert.equal(taken.rows[2].hint, "Now signed in as ana@example.com");
+  assert.deepEqual(taken.rows.map((r) => r.label), ["System default", "ben@example.org"]);
+  assert.equal(taken.rows[1].hint, "Now signed in as ana@example.com");
 
-  // Active: its card has its name and no numbers, and its row still signs in.
+  // Active: its card has its name and no numbers, and its row stays, because
+  // it's the only way to sign in (S9's exception).
   const active = panelModel({ doc: docWith(BEN, { [BEN]: elsewhere }), now: NOW });
   assert.equal(active.card.label, "ben@example.org");
   assert.deepEqual(active.card.windows, []);
@@ -346,11 +344,11 @@ test("panel rows: a session bar counts down, monthly alone shows, an error witho
     default: { needsSignIn: false, usage: { ...NO_USAGE, monthly: w(12) } },
   });
   const m = panelModel({ doc, now: NOW });
-  assert.deepEqual(m.rows[2].bars.map((b) => b.text), ["30% used 47m", "10% used wk"]);
+  assert.deepEqual(m.rows[1].bars.map((b) => b.text), ["30% used 47m", "10% used wk"]);
   assert.deepEqual(m.rows[0].bars.map((b) => b.text), ["12% used 30d"]);
   assert.equal(m.rows[0].signIn, null);
   const failed = docWith(ANA, { [BEN]: { usage: NO_USAGE, error: "network" } });
-  assert.equal(panelModel({ doc: failed, now: NOW }).rows[2].status, "Network issue");
+  assert.equal(panelModel({ doc: failed, now: NOW }).rows[1].status, "Network issue");
   assert.ok(panelModel({ doc: DOC, now: NOW, busy: true }).rows.every((r) => r.disabled));
 });
 
@@ -393,8 +391,11 @@ test("panel card without numbers: Sign in again, an error, loading; Not yet upda
 
   const alone = readAccounts({ active: "default", accounts: [{ id: "default", isDefault: true, usage: { session: w(5) }, usageUpdatedAt: NOW }] });
   const m = panelModel({ doc: alone, now: NOW });
-  assert.deepEqual(m.rows.map((r) => [r.label, r.active]), [["System default", true]]);
+  assert.deepEqual(m.rows, []);
   assert.equal(m.empty, "No other accounts");
+  // Alone and needing to sign in: its row stays, and nothing else is there.
+  const lapsed = panelModel({ doc: docWith("default", { default: { needsSignIn: true } }), now: NOW });
+  assert.ok(lapsed.rows.some((r) => r.id === "default" && r.active && r.signIn === "default"));
   const nothing = panelModel({ doc: readAccounts(null), now: NOW });
   assert.equal(nothing.card, null);
   assert.equal(nothing.updated, "Not yet updated");
@@ -1115,28 +1116,28 @@ test("panel view: it has the height it opened at, or a popup, which takes its co
   assert.equal(find(view.render(), "ca-panel").calls.h[0], spec.height - PANEL.frame);
 });
 
-test("panel view (S1): Claude Updated 3m ago, the card's windows, Claude Account with ✓ and the others' bars, Manage Accounts…", async () => {
+// The icons an element draws.
+function checksIn(e) {
+  if (typeof e !== "object" || e === null) return [];
+  return [...(e.kind === "svg" ? [e.arg] : []), ...e.kids.flatMap(checksIn)];
+}
+
+test("panel view (S1): Claude Updated 3m ago, the card's windows, Other accounts with their bars (S9), Manage Accounts…", async () => {
   const { view } = await panel();
   const root = view.render();
   const text = textOf(root);
-  assert.ok(text.startsWith("Claude Updated 3m ago ana@example.com Session 41% used Resets in 3h 2m Weekly 65% used Resets in 4d 6h Fable 22% used Resets in 4d 6h Claude Account"), text);
+  assert.ok(text.startsWith("Claude Updated 3m ago ana@example.com Session 41% used Resets in 3h 2m Weekly 65% used Resets in 4d 6h Fable 22% used Resets in 4d 6h Other accounts"), text);
   assert.ok(text.endsWith("ben@example.org 94% used wk 42% used Fable Manage Accounts…"), text);
   assert.ok(find(root, "ca-panel-refresh"));
-  // ✓ only on the active account; its row can't be picked again.
-  const active = find(root, `ca-panel-row-${ANA}`);
-  assert.equal(active.handlers.click, undefined);
-  const checks = [];
-  const walk = (e) => {
-    if (typeof e !== "object" || e === null) return;
-    if (e.kind === "svg") checks.push(e.arg);
-    e.kids.forEach(walk);
-  };
-  walk(active);
-  assert.deepEqual(checks, ["mods/workspace-chrome/check.svg"]);
-  checks.length = 0;
-  walk(find(root, `ca-panel-row-${BEN}`));
-  assert.deepEqual(checks, []);
+  // The card has the active account: no row of its own, so no ✓ to draw.
+  assert.equal(find(root, `ca-panel-row-${ANA}`), null);
+  assert.deepEqual(checksIn(find(root, `ca-panel-row-${BEN}`)), []);
   assert.equal(withText(root, "94% used wk").calls.text_color[0], "#muted");
+});
+
+test("panel view (S9): an active account that needs signing in keeps its row, with its ✓", async () => {
+  const { view } = await panel(liveDoc(ANA, { [ANA]: elsewhere }));
+  assert.deepEqual(checksIn(find(view.render(), `ca-panel-row-${ANA}`)), ["mods/workspace-chrome/check.svg"]);
 });
 
 test("panel view (S8): a folder signed in as someone else draws its saved email, the login, Sign in and no bars; a click opens the sign-in tab", async () => {
@@ -1249,7 +1250,7 @@ test("panel view: Manage Accounts… opens the accounts view; No other accounts 
 
   const alone = JSON.stringify({ version: 1, active: "default", accounts: [{ id: "default", isDefault: true, usage: { session: w(5) }, usageUpdatedAt: Date.now() }] });
   const { view: v2 } = await panel(alone);
-  assert.match(textOf(v2.render()), /System default No other accounts Manage Accounts…/);
+  assert.match(textOf(v2.render()), /Other accounts No other accounts Manage Accounts…/);
 });
 
 test("panel view: without an overlay (herdr-app check) it runs nothing", async () => {

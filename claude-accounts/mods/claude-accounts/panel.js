@@ -1,10 +1,11 @@
 // The Claude panel (S1, Image #2): `Claude  Updated 3m ago` (or "Not yet
 // updated"), the active account's card (Session, Weekly, Fable, Monthly and
 // credits when present, and the refresh-failed marker on cached data), then
-// the `Claude Account` list: System default plus each account, ✓ on the active
-// one, the inactive ones with their `wk` and `Fable` bars, "No other accounts"
-// when there are none. Orca's ClaudeSwitcherForOwner.tsx; what it says is
-// footer-model.js's, this file draws it. Owner: T6.
+// the `Other accounts` list: System default and each saved account but the
+// active one, with their `wk` and `Fable` bars, "No other accounts" when
+// there are none. An active account that needs signing in keeps its row, with
+// its ✓. Orca's ClaudeSwitcherForOwner.tsx, without its row for the active
+// account (S9); what it says is footer-model.js's, this file draws it. Owner: T6.
 //   props: { view: "panel", anchor, text, height } (panelSpec)
 //
 // A click on an account runs `use`, and the panel stays open on the new one, as

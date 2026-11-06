@@ -416,9 +416,13 @@ export function panelModel({ doc, now = Date.now(), busy = false, error = null }
     updated: formatUpdated(active?.usageUpdatedAt ?? null, now),
     refreshTip: REFRESH_TIP,
     card: active ? card(active, now) : null,
-    heading: "Claude Account",
-    rows: accounts.map((a) => accountRow(a, a.id === active?.id, now, busy === true)),
-    empty: accounts.some((a) => !a.isDefault) ? null : "No other accounts",
+    heading: "Other accounts",
+    // The card has the active account (S9). Its row stays only to sign it in,
+    // since nothing else in the panel does.
+    rows: accounts
+      .filter((a) => a.id !== active?.id || a.needsSignIn)
+      .map((a) => accountRow(a, a.id === active?.id, now, busy === true)),
+    empty: accounts.some((a) => a.id !== active?.id) ? null : "No other accounts",
     error,
     manage: "Manage Accounts…",
   };

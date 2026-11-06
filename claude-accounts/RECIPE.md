@@ -33,9 +33,10 @@ the same files and run the same commands: see [CONTRACT.md](CONTRACT.md).
 - **Claude panel:** "Claude · Updated 3m ago" (or "Not yet updated"). The
   active account's card: Session, Weekly and Fable, each "N% used · Resets
   in …", plus the monthly spend and credits when the account has them. Then
-  the `Claude Account` list: System default and each saved account, ✓ on
-  the active one, and the others with their `wk` and `Fable` bars. Click one
-  to switch. An account whose login lapsed says "Sign in again to use this
+  the `Other accounts` list: System default and each saved account but the
+  active one, with their `wk` and `Fable` bars. Click one to switch. An
+  active account that needs signing in keeps its row, with its ✓, to do it
+  from there. An account whose login lapsed says "Sign in again to use this
   account", and its row opens the sign-in tab. One whose folder got someone
   else's login (a `/login` inside its Claude) keeps its saved email and says
   "Now signed in as {login}", with no bars, because those numbers aren't its
