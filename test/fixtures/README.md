@@ -34,3 +34,7 @@ cache figures that cover only part of the range's tokens (`cacheCoverage`
 0.7182).
 Its token counts add up across `daily`, `byAccount`, `byModel` and
 `byProject`.
+D24's figures too: turn figures (zero-cache-read turns and cost) that start
+later still (`turnFiguresSince`) and cover less (`turnFiguresCoverage`
+0.6504), sessions and turns per model and per project, and a recent session
+from a pre-v4 line, whose input, output, cache read and cache write are null.

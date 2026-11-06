@@ -10,6 +10,11 @@
 //                      model, project and account, the time to each limit
 //                      and recent sessions, plus "Updated Xm ago" while a run
 //                      goes (the stale label).
+// claude-accounts T20b (S7 S6, D24): Orca's eight cards in Orca's order, its
+// cost format and unpriced suffix, by model and by project with sessions and
+// turns, recent sessions with Orca's seven columns, a "since" and coverage
+// note per group of figures, and "n/a" for each key an older claude-usage
+// doesn't print.
 //
 // Every CLI run is the installed form, the bin through its shebang, inside a
 // sandbox of its own: HOME and CLAUDE_ACCOUNTS_HOME are tmp folders and
@@ -27,7 +32,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { readDetails } from "../claude-accounts/mods/claude-accounts/store.js";
 import {
-  RANGES, pickRange, formatTokens, formatCount, formatActiveTime, chartBars, detailsModel,
+  RANGES, pickRange, formatTokens, formatCount, formatActiveTime, formatCost, chartBars, detailsModel,
 } from "../claude-accounts/mods/claude-accounts/details-model.js";
 
 // Dates are local, as in Herdr's runtime: read in Bogota, the fixtures' zone.
@@ -409,57 +414,160 @@ test("numbers: Orca's token format, counts with separators, active time in hours
   assert.equal(formatActiveTime(undefined), "n/a");
 });
 
-test("the fixture's 7 days: Updated, the cards and the cache figures", () => {
+// Orca's eight cards, in Orca's order (ClaudeUsagePane.tsx:168-237).
+const ORCA_CARDS = ["input", "output", "cacheRead", "cacheWrite", "reuse", "zeroCacheRead", "sessions", "cost"];
+// Orca's recent sessions headings (ClaudeUsageDetails.tsx:65-73).
+const ORCA_HEADINGS = ["Last active", "Project", "Model", "Turns", "Input", "Output", "Cache"];
+const card = (m, key) => m.report.cards.find((c) => c.key === key);
+
+// The fixture as an older claude-usage prints it: none of D24's keys.
+function olderResult() {
+  const old = structuredClone(USAGE);
+  delete old.turnFiguresSince;
+  for (const key of ["output", "sessions", "zeroCacheReadResponses", "turnResponses", "estimatedCostUsd", "unpricedModels", "turnFiguresCoverage"]) delete old.totals[key];
+  for (const row of old.byModel) delete row.sessions;
+  for (const row of old.byProject) delete row.responses;
+  for (const row of old.recentSessions) for (const key of ["responses", "input", "output", "cacheRead", "cacheWrite"]) delete row[key];
+  return old;
+}
+
+test("the fixture's 7 days: Updated, Orca's eight cards in Orca's order, then Herdr's tokens and active time", () => {
   const m = model(ranOnce());
   assert.equal(m.status, "Updated just now");
   assert.equal(m.running, false);
   assert.equal(m.error, null);
   assert.equal(m.notice, null);
+  assert.deepEqual(m.report.cards.map((c) => c.key), ORCA_CARDS);
   assert.deepEqual(m.report.cards.map((c) => [c.label, c.value]), [
-    ["Tokens", "18.5M"],
-    ["Sessions / Turns", "26 / 2,310"],
-    ["Active time", "42h"],
-  ]);
-  assert.deepEqual(m.report.cache.cards.map((c) => [c.label, c.value]), [
     ["Input tokens", "1.5M"],
+    ["Output tokens", "9.9M"],
     ["Cache read", "15.2M"],
     ["Cache write", "1.9M"],
     ["Cache reuse rate", "91%"],
+    ["Zero-cache-read turns", "4%"],
+    ["Sessions / Turns", "26 / 2,310"],
+    ["Est. API-equivalent cost", "$412.37"],
   ]);
-  assert.equal(m.report.cache.explanation, "Cache reuse rate is calculated as cache read tokens / (input tokens + cache read tokens).");
+  assert.equal(card(m, "input").hint, "Input tokens not read from the cache.");
+  assert.equal(card(m, "zeroCacheRead").hint, "61 of 1,480 turns read nothing from the cache.");
+  assert.equal(card(m, "cost").hint, null, "every model in range is priced");
+  // Herdr's own figures after Orca's: how its tokens are counted, and active time.
+  assert.deepEqual(m.report.extras.map((c) => [c.key, c.label, c.value]), [
+    ["tokens", "Tokens", "18.5M"],
+    ["active", "Active time", "42h"],
+  ]);
+  assert.equal(m.report.extras[0].hint, "Input, output and cache write tokens. Cache reads aren't counted.");
+  assert.equal(m.report.explanation, "Cache reuse rate is calculated as cache read tokens / (input tokens + cache read tokens).");
   // No reuse rate (neither input nor cache read): Orca's n/a.
   const none = model(ranOnce({ ...USAGE, totals: { ...USAGE.totals, reuseRate: null } }));
-  assert.equal(none.report.cache.cards.find((c) => c.key === "reuse").value, "n/a");
+  assert.equal(card(none, "reuse").value, "n/a");
 });
 
-test("since <date>: cache figures that start after the range does say so, with the share of tokens they cover", () => {
+test("zero-cache-read turns: v5 zero-cache turns over v5 turns, Orca's rounded percent; n/a without v5 turns", () => {
+  const zero = (totals) => card(model(ranOnce({ ...USAGE, totals: { ...USAGE.totals, ...totals } })), "zeroCacheRead");
+  assert.equal(zero({ zeroCacheReadResponses: 37, turnResponses: 1480 }).value, "3%", "2.5% rounds up, as Math.round does");
+  assert.equal(zero({ zeroCacheReadResponses: 0, turnResponses: 1480 }).value, "0%");
+  const empty = zero({ zeroCacheReadResponses: 0, turnResponses: 0 });
+  assert.equal(empty.value, "n/a", "no v5 turns in range");
+  assert.equal(empty.hint, null);
+  assert.equal(zero({ zeroCacheReadResponses: 1, turnResponses: 1 }).hint, "1 of 1 turn read nothing from the cache.");
+});
+
+test("est. API-equivalent cost: Orca's formatCost, and '• excludes unpriced models' only on a total that exists", () => {
+  assert.equal(formatCost(null), "n/a");
+  assert.equal(formatCost(undefined), "n/a");
+  assert.equal(formatCost(0.0042), "$0.0042");
+  assert.equal(formatCost(0), "$0.0000");
+  assert.equal(formatCost(0.01), "$0.01");
+  assert.equal(formatCost(12.344), "$12.34");
+  assert.equal(formatCost(412.37), "$412.37");
+
+  const cost = (totals) => card(model(ranOnce({ ...USAGE, totals: { ...USAGE.totals, ...totals } })), "cost");
+  const unpriced = cost({ unpricedModels: ["opus-4-x", "mystery"] });
+  assert.equal(unpriced.label, "Est. API-equivalent cost • excludes unpriced models");
+  assert.equal(unpriced.value, "$412.37");
+  assert.equal(unpriced.hint, "Not priced: opus-4-x, mystery.");
+
+  // Nothing priced: no total, so nothing to exclude from (unpriced-cost-label.ts).
+  const nothing = cost({ estimatedCostUsd: null, unpricedModels: ["mystery"] });
+  assert.equal(nothing.label, "Est. API-equivalent cost");
+  assert.equal(nothing.value, "n/a");
+  assert.equal(nothing.hint, "Not priced: mystery.");
+  assert.equal(cost({ estimatedCostUsd: 0.0042 }).value, "$0.0042");
+});
+
+test("since <date>: each group of figures says when its data starts, with the share of tokens it covers", () => {
   const m = model(ranOnce());
-  assert.equal(m.report.cache.since, "since Nov 3");
-  assert.equal(m.report.cache.coverage, "Cache figures cover only sessions still on disk: 72% of this range's tokens.");
+  assert.deepEqual(m.report.cards.map((c) => [c.key, c.since]), [
+    ["input", "since Nov 3"],
+    ["output", "since Nov 3"],
+    ["cacheRead", "since Nov 3"],
+    ["cacheWrite", "since Nov 3"],
+    ["reuse", "since Nov 3"],
+    ["zeroCacheRead", "since Nov 4"],
+    ["sessions", null],
+    ["cost", "since Nov 4"],
+  ]);
+  assert.deepEqual(m.report.coverage, [
+    "Input, output and cache figures cover only sessions still on disk: 72% of this range's tokens.",
+    "Zero-cache-read turns and cost cover only sessions still on disk: 65% of this range's tokens.",
+  ]);
   assert.equal(m.report.recent.description, "Cache reuse rate: 91% (since Nov 3)");
 
-  const whole = model(ranOnce({ ...USAGE, cacheSince: "2026-10-01", totals: { ...USAGE.totals, cacheCoverage: 1 } }));
-  assert.equal(whole.report.cache.since, null, "the cache figures start before the range");
-  assert.equal(whole.report.cache.coverage, null);
+  const whole = model(ranOnce({
+    ...USAGE,
+    cacheSince: "2026-10-01",
+    turnFiguresSince: "2026-10-31",
+    totals: { ...USAGE.totals, cacheCoverage: 1, turnFiguresCoverage: 1 },
+  }));
+  assert.ok(whole.report.cards.every((c) => c.since === null), "both groups start on or before the range's first day");
+  assert.deepEqual(whole.report.coverage, []);
   assert.equal(whole.report.recent.description, "Cache reuse rate: 91%");
-  assert.equal(model(ranOnce({ ...USAGE, cacheSince: "2026-10-31" })).report.cache.since, null, "the range's first day");
-  assert.equal(model(ranOnce({ ...USAGE, cacheSince: null })).report.cache.since, null);
+
+  const tiny = model(ranOnce({ ...USAGE, totals: { ...USAGE.totals, cacheCoverage: 0.9996, turnFiguresCoverage: 0.004 } }));
+  assert.deepEqual(tiny.report.coverage, [
+    "Input, output and cache figures cover only sessions still on disk: 99% of this range's tokens.",
+    "Zero-cache-read turns and cost cover only sessions still on disk: <1% of this range's tokens.",
+  ]);
+  const noDays = model(ranOnce({ ...USAGE, cacheSince: null, turnFiguresSince: null }));
+  assert.ok(noDays.report.cards.every((c) => c.since === null));
+});
+
+test("an older claude-usage without D24's keys: each figure it doesn't print reads n/a", () => {
+  const m = model(ranOnce(olderResult()));
+  assert.deepEqual(m.report.cards.map((c) => c.key), ORCA_CARDS);
+  assert.deepEqual(m.report.cards.map((c) => [c.label, c.value]), [
+    ["Input tokens", "1.5M"],
+    ["Output tokens", "n/a"],
+    ["Cache read", "15.2M"],
+    ["Cache write", "1.9M"],
+    ["Cache reuse rate", "91%"],
+    ["Zero-cache-read turns", "n/a"],
+    ["Sessions / Turns", "n/a / 2,310"],
+    ["Est. API-equivalent cost", "n/a"],
+  ]);
+  assert.equal(card(m, "zeroCacheRead").since, null);
+  assert.deepEqual(m.report.coverage, ["Input, output and cache figures cover only sessions still on disk: 72% of this range's tokens."]);
+  assert.deepEqual(m.report.byModel.rows.map((r) => r.sub), ["n/a sessions • 1,620 turns", "n/a sessions • 690 turns"]);
+  assert.deepEqual(m.report.byProject.rows.map((r) => r.sub), ["14 sessions • n/a turns", "9 sessions • n/a turns", "3 sessions • n/a turns • no longer on disk"]);
+  assert.deepEqual(m.report.recent.headings, ORCA_HEADINGS);
+  assert.deepEqual(m.report.recent.rows[0].cells, ["Nov 6, 4:17 PM", "herdr-plugins", "opus", "n/a", "n/a", "n/a", "n/a"]);
 });
 
 test("a path:null project: named by its slug, marked as no longer on disk, still counted", () => {
   const m = model(ranOnce());
   const rows = m.report.byProject.rows;
   assert.deepEqual(rows.map((r) => [r.label, r.value, r.sub, r.gone]), [
-    ["herdr-plugins", "9.8M", "14 sessions", false],
-    ["orca", "6.6M", "9 sessions", false],
-    ["-Users-ana-src-old-app", "2.1M", "3 sessions • no longer on disk", true],
+    ["herdr-plugins", "9.8M", "14 sessions • 1,240 turns", false],
+    ["orca", "6.6M", "9 sessions • 830 turns", false],
+    ["-Users-ana-src-old-app", "2.1M", "3 sessions • 240 turns • no longer on disk", true],
   ]);
   assert.equal(rows[0].hint, "/Users/ana/src/herdr-plugins");
   assert.equal(rows[2].hint, "Its transcripts are gone from disk; Claude's folder name stands in for the project.");
   assert.ok(Math.abs(rows[2].share - 2100000 / 18450000) < 1e-9);
   assert.equal(m.report.byProject.top, "Top project: herdr-plugins");
   assert.equal(m.report.recent.rows[2].cells[1], "-Users-ana-src-old-app");
-  assert.equal(model(ranOnce({ ...USAGE, byProject: [{ project: "x", path: null, tokens: 1, sessions: 1 }] })).report.byProject.rows[0].sub, "1 session • no longer on disk");
+  assert.equal(model(ranOnce({ ...USAGE, byProject: [{ project: "x", path: null, tokens: 1, sessions: 1, responses: 1 }] })).report.byProject.rows[0].sub, "1 session • 1 turn • no longer on disk");
 });
 
 test("the stale label: while a run goes, or after one fails, the last result shows with its own age", () => {
@@ -501,7 +609,9 @@ test("an empty range says Orca's empty message; a partial result still draws", (
 
   const partial = model(ranOnce({ version: 1, totals: { tokens: 5 } }));
   assert.equal(partial.notice, null);
-  assert.deepEqual(partial.report.cards.map((c) => c.value), ["5", "0 / n/a", "n/a"]);
+  assert.deepEqual(partial.report.cards.map((c) => c.value), ["n/a", "n/a", "n/a", "n/a", "n/a", "n/a", "n/a / n/a", "n/a"]);
+  assert.deepEqual(partial.report.extras.map((c) => c.value), ["5", "n/a"]);
+  assert.deepEqual(partial.report.coverage, []);
   assert.equal(partial.report.byModel.top, "Top model: n/a");
   assert.deepEqual(partial.report.daily.bars, []);
   assert.equal(partial.report.limits.empty, "No limits recorded in this range.");
@@ -540,17 +650,17 @@ test("the daily chart over 90 days: weekly bars ending today, at most 8 labels",
   assert.equal(chartBars(daily.slice(0, 31)).bars.length, 31, "a month is daily");
 });
 
-test("by model, by account: top row, tokens, turns and the share of the range", () => {
+test("by model: Orca's sessions • turns under each row; by account keeps its turns; top row and share of the range", () => {
   const { byModel, byAccount } = model(ranOnce()).report;
   assert.equal(byModel.title, "By model");
   assert.equal(byModel.top, "Top model: opus");
-  assert.deepEqual(byModel.rows.map((r) => [r.label, r.value, r.sub]), [["opus", "14.1M", "1,620 turns"], ["sonnet", "4.4M", "690 turns"]]);
+  assert.deepEqual(byModel.rows.map((r) => [r.label, r.value, r.sub]), [["opus", "14.1M", "19 sessions • 1,620 turns"], ["sonnet", "4.4M", "7 sessions • 690 turns"]]);
   assert.ok(Math.abs(byModel.rows[0].share - 14100000 / 18450000) < 1e-9);
   assert.equal(byAccount.title, "By account");
   assert.equal(byAccount.top, "Top account: ana@example.com");
   assert.deepEqual(byAccount.rows.map((r) => [r.label, r.value, r.sub]), [["ana@example.com", "12.3M", "1,540 turns"], ["ben@example.org", "6.2M", "770 turns"]]);
-  const odd = model(ranOnce({ ...USAGE, byModel: [{ model: null, tokens: 10, responses: 1 }] })).report.byModel.rows[0];
-  assert.deepEqual([odd.label, odd.sub], ["Unknown", "1 turn"]);
+  const odd = model(ranOnce({ ...USAGE, byModel: [{ model: null, tokens: 10, responses: 1, sessions: 1 }] })).report.byModel.rows[0];
+  assert.deepEqual([odd.label, odd.sub], ["Unknown", "1 session • 1 turn"]);
 });
 
 test("the time to each limit: per account, 5-hour and weekly, hits and the average time to reach it", () => {
@@ -565,14 +675,25 @@ test("the time to each limit: per account, 5-hour and weekly, hits and the avera
   assert.deepEqual(one[0].cells.map((c) => c.text), ["Not hit", "1 hit"]);
 });
 
-test("recent sessions: last active, project, model, account, duration and tokens", () => {
+test("recent sessions: Orca's seven columns; a session without cache figures reads n/a; its account and length on hover", () => {
   const { recent } = model(ranOnce()).report;
   assert.equal(recent.title, "Recent sessions");
-  assert.deepEqual(recent.headings, ["Last active", "Project", "Model", "Account", "Duration", "Tokens"]);
-  assert.deepEqual(recent.rows[0].cells, ["Nov 6, 4:17 PM", "herdr-plugins", "opus", "ana@example.com", "3h 17m", "1.5M"]);
+  assert.deepEqual(recent.headings, ORCA_HEADINGS);
+  assert.deepEqual(recent.rows.map((r) => r.cells), [
+    ["Nov 6, 4:17 PM", "herdr-plugins", "opus", "212", "64.0k", "1.2M", "6.6M"],
+    ["Nov 6, 9:40 AM", "orca", "sonnet", "58", "21.0k", "312.0k", "2.2M"],
+    // A frozen pre-v4 line: its turns, and no cache figures.
+    ["Nov 2, 12:00 PM", "-Users-ana-src-old-app", "opus", "31", "n/a", "n/a", "n/a"],
+  ]);
   assert.equal(recent.rows[0].key, "3f1c2b7e-8a4d-4e55-9a51-0c2d6f1b7a10");
-  const short = model(ranOnce({ ...USAGE, recentSessions: [{ id: "s", project: null, account: null, model: null, startedAt: NOW - 30_000, endedAt: NOW, tokens: 12 }] }));
-  assert.deepEqual(short.report.recent.rows[0].cells, ["Nov 6, 4:20 PM", "Unknown", "Unknown", "Unknown", "<1m", "12"]);
+  assert.equal(recent.rows[0].hint, "ana@example.com · 3h 17m");
+  assert.equal(recent.rows[1].hint, "ben@example.org · 1h 40m");
+  const short = model(ranOnce({ ...USAGE, recentSessions: [{ id: "s", project: null, account: null, model: null, startedAt: NOW - 30_000, endedAt: NOW, tokens: 12, responses: 1, input: 3, output: 9, cacheRead: 0, cacheWrite: 0 }] }));
+  assert.deepEqual(short.report.recent.rows[0].cells, ["Nov 6, 4:20 PM", "Unknown", "Unknown", "1", "3", "9", "0"]);
+  assert.equal(short.report.recent.rows[0].hint, "Unknown · <1m");
+  // Cache is read + write: one of them missing is n/a, never half a sum.
+  const half = model(ranOnce({ ...USAGE, recentSessions: [{ ...USAGE.recentSessions[0], cacheWrite: null }] }));
+  assert.equal(half.report.recent.rows[0].cells[6], "n/a");
   assert.equal(recent.empty, null);
 });
 

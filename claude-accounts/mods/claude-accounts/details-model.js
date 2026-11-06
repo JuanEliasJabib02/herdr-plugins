@@ -1,30 +1,45 @@
-// What the Usage details & history window draws (S7, D11), from details.json
-// (store.readDetails) and the range picked. Pure: no herdr or gpui-kit
-// import, so `node --test` loads it. Owner: T10.
+// What the Usage details & history window draws (S7, D11, D24), from
+// details.json (store.readDetails) and the range picked. Pure: no herdr or
+// gpui-kit import, so `node --test` loads it. Owners: T10, T20b.
 //
 // The window is Orca's Claude usage pane (renderer/src/components/stats/
 // ClaudeUsagePane.tsx and ClaudeUsageDetails.tsx, under
 // ~/Desktop/Software/Sideprojects/orca/src), with Orca's copy where Orca has
 // it, fed by claude-usage --json (one result per range). Orca's "Orca
-// worktrees only" scope and its share card aren't ported (D11). Its figures
-// map onto claude-usage's: tokens are input + cache write + output (cache
-// reads aren't counted), turns are responses, and the cache figures (input,
-// cache read, cache write, the reuse rate) cover only the v4 cache lines:
-// labeled "since <date>" when they start after the range does, with a note
-// of the share of the range's tokens they cover (format.js). Beyond Orca:
-// usage by account, the time to each limit, active time, the session's
-// account and duration, and charts for 30, 90 days and all time (weekly bars
-// past a month; Orca draws the last 10 days only).
+// worktrees only" scope and its share card aren't ported (D11).
+//
+// Orca's eight cards come first, in Orca's order: Input tokens, Output
+// tokens, Cache read, Cache write, Cache reuse rate, Zero-cache-read turns,
+// Sessions / Turns and Est. API-equivalent cost. Its figures map onto
+// claude-usage's, which has one group of figures per cache version:
+// - input, output, cache read, cache write and the reuse rate come from v4+
+//   cache lines: cacheSince and totals.cacheCoverage;
+// - zero-cache-read turns (v5 zero-cache responses over v5 responses) and
+//   the cost (priced by claude-usage, formatted with Orca's formatCost) come
+//   from v5 lines: turnFiguresSince and totals.turnFiguresCoverage;
+// - sessions and turns (responses) count every line.
+// A group whose data starts after the range does is labeled "since <date>"
+// on each of its cards, and one that covers part of the range's tokens gets
+// a note with the share. A key an older claude-usage doesn't print reads
+// "n/a". By model and By project keep claude-usage's tokens (input + cache
+// write + output, every line; Orca's are input + output) with Orca's
+// "N sessions • N turns", and a session's model is the one with the most
+// tokens (Orca's is the last turn's): D24. Recent sessions has Orca's seven
+// columns. Beyond Orca: the tokens and active time cards, usage by account,
+// the time to each limit, a session's account and length on hover, and
+// charts for 30, 90 days and all time (weekly bars past a month; Orca draws
+// the last 10 days only).
 //
 //   RANGES, DEFAULT_RANGE, RANGE_LABELS   the picker: Orca's 7d, 30d, 90d, all
 //   pickRange(value)                      a known range, else the default
 //   formatTokens(n)                       Orca's "18.5M", "1.5k", "999", plus "4.8B"
 //   formatCount(n)                        "2,310"
+//   formatCost(usd)                       Orca's "$0.0042", "$12.34", "n/a"
 //   formatActiveTime(seconds)             "45m", "3h 5m", "42h"
 //   chartBars(daily)                      the daily chart's bars
 //   detailsModel({ details, range, now, execError })   the whole window
 
-import { formatCoverage, formatDate, formatDuration, formatSince, formatUpdated } from "./format.js";
+import { formatDate, formatDuration, formatSince, formatUpdated } from "./format.js";
 
 export const RANGES = Object.freeze(["7", "30", "90", "all"]);
 export const DEFAULT_RANGE = "7";
@@ -75,6 +90,13 @@ export function formatCount(n) {
   return sign + String(Math.round(Math.abs(n))).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
 }
 
+// Orca's formatCost (stats/usage-formatters.ts): "$0.0042" under a cent,
+// else "$12.34"; "n/a" for no figure (claude-usage's null: nothing priced).
+export function formatCost(value) {
+  if (!isNumber(value)) return "n/a";
+  return value < 0.01 ? `$${value.toFixed(4)}` : `$${value.toFixed(2)}`;
+}
+
 // claude-usage's active seconds: "45m" under an hour, "3h 5m" under ten,
 // then whole hours ("42h": active time reads better in hours than in days).
 export function formatActiveTime(seconds) {
@@ -87,7 +109,10 @@ export function formatActiveTime(seconds) {
   return `${Math.round(seconds / 3600)}h`;
 }
 
+// "1 turn", "2,310 turns", or "n/a turns" for a count claude-usage didn't print.
 const plural = (n, one, many) => (n === 1 ? `1 ${one}` : `${formatCount(n)} ${many}`);
+// Orca's usageRowCounts (UsageBreakdownSection.tsx): "14 sessions • 1,240 turns".
+const counts = (sessions, turns) => `${plural(sessions, "session", "sessions")} • ${plural(turns, "turn", "turns")}`;
 const share = (part, whole) => (isNumber(part) && isNumber(whole) && whole > 0 ? Math.max(0, Math.min(1, part / whole)) : 0);
 // Orca's reuse rate: Math.round(rate * 100)%, or n/a.
 const reuse = (rate) => (isNumber(rate) ? `${Math.round(rate * 100)}%` : "n/a");
@@ -150,12 +175,13 @@ function breakdown(title, topLabel, rows) {
   return { title, top: `${topLabel} ${rows[0]?.label ?? "n/a"}`, rows };
 }
 
+// A session counts under the model with the most of its tokens (D24).
 function byModel(result, total) {
   return breakdown("By model", "Top model:", list(result.byModel).map((r) => ({
     key: `m:${r.model}`,
     label: text(r.model) ?? "Unknown",
     value: formatTokens(r.tokens),
-    sub: isNumber(r.responses) ? plural(r.responses, "turn", "turns") : "",
+    sub: counts(r.sessions, r.responses),
     share: share(r.tokens, total),
     hint: null,
     gone: false,
@@ -169,12 +195,12 @@ const GONE_HINT = "Its transcripts are gone from disk; Claude's folder name stan
 function byProject(result, total) {
   return breakdown("By project", "Top project:", list(result.byProject).map((r) => {
     const path = text(r.path);
-    const sessions = isNumber(r.sessions) ? plural(r.sessions, "session", "sessions") : "";
+    const sub = counts(r.sessions, r.responses);
     return {
       key: `p:${path ?? r.project}`,
       label: text(r.project) ?? "Unknown",
       value: formatTokens(r.tokens),
-      sub: path ? sessions : [sessions, "no longer on disk"].filter(Boolean).join(" • "),
+      sub: path ? sub : `${sub} • no longer on disk`,
       share: share(r.tokens, total),
       hint: path ?? GONE_HINT,
       gone: !path,
@@ -228,8 +254,13 @@ function limits(result) {
   };
 }
 
-// Orca's UsageRecentSessionsTable, with claude-usage's columns: no turns,
-// input or output per session, but its account and how long it ran.
+// Orca's UsageRecentSessionsTable with its seven columns: Last active,
+// Project, Model, Turns, Input, Output, and Cache (read + write). A session
+// from a line without cache figures (pre-v4) has null for those four: n/a.
+// Its account and how long it ran, which Orca doesn't have, are the row's
+// hint.
+const RECENT_HEADINGS = Object.freeze(["Last active", "Project", "Model", "Turns", "Input", "Output", "Cache"]);
+
 function recent(result, reuseText, since) {
   const rows = list(result.recentSessions).map((s) => ({
     key: text(s.id) ?? `${s.startedAt}`,
@@ -237,58 +268,114 @@ function recent(result, reuseText, since) {
       formatDate(s.endedAt) ?? "—",
       text(s.project) ?? "Unknown",
       text(s.model) ?? "Unknown",
-      text(s.account) ?? "Unknown",
-      formatSpan(isNumber(s.endedAt) && isNumber(s.startedAt) ? s.endedAt - s.startedAt : null),
-      formatTokens(s.tokens),
+      formatCount(s.responses),
+      formatTokens(s.input),
+      formatTokens(s.output),
+      isNumber(s.cacheRead) && isNumber(s.cacheWrite) ? formatTokens(s.cacheRead + s.cacheWrite) : "n/a",
     ],
+    hint: `${text(s.account) ?? "Unknown"} · ${formatSpan(isNumber(s.endedAt) && isNumber(s.startedAt) ? s.endedAt - s.startedAt : null)}`,
   }));
   return {
     title: "Recent sessions",
     // Orca's "Cache reuse rate:" line, with the cache figures' "since".
     description: `Cache reuse rate: ${reuseText}${since ? ` (${since})` : ""}`,
-    headings: ["Last active", "Project", "Model", "Account", "Duration", "Tokens"],
+    headings: [...RECENT_HEADINGS],
     rows,
     empty: rows.length ? null : "No sessions in this range.",
   };
 }
 
-// ── The window ───────────────────────────────────────────────────────────────
+// ── The cards ────────────────────────────────────────────────────────────────
 
 const EXPLANATION = "Cache reuse rate is calculated as cache read tokens / (input tokens + cache read tokens).";
+const COST_LABEL = "Est. API-equivalent cost";
+
+// "since Nov 3" when a group's first day (cacheSince, turnFiguresSince)
+// comes after the range's, else null.
+function sinceLabel(day, from, now) {
+  const first = text(day);
+  return first && from && first > from ? formatSince(first, now) : null;
+}
+
+// The note under a group of figures that covers only part of the range's
+// tokens (totals.cacheCoverage, totals.turnFiguresCoverage: 0–1), with the
+// group named: format.js's formatCoverage rule. null when it covers it all
+// (1) or the range has no tokens (null). The share never reads 100% while
+// below 1, nor 0% above 0.
+function coverageNote(what, coverage) {
+  if (!isNumber(coverage) || coverage >= 1) return null;
+  const c = Math.max(0, coverage);
+  const pct = Math.round(c * 100);
+  const part = c > 0 && pct === 0 ? "<1" : String(Math.min(99, pct));
+  return `${what} cover only sessions still on disk: ${part}% of this range's tokens.`;
+}
+
+// Orca's Zero-cache-read turns: zero-cache turns over turns, rounded, or n/a
+// with none. Both counts are claude-usage's v5 ones (zeroCacheReadResponses
+// over turnResponses), so the hint says the base.
+function zeroCacheRead(totals) {
+  const zero = totals.zeroCacheReadResponses;
+  const turns = totals.turnResponses;
+  if (!isNumber(zero) || !isNumber(turns) || turns <= 0) return { value: "n/a", hint: null };
+  return {
+    value: `${Math.round((zero / turns) * 100)}%`,
+    hint: `${formatCount(zero)} of ${plural(turns, "turn", "turns")} read nothing from the cache.`,
+  };
+}
+
+// Orca's cost card: formatCost, and unpricedCostLabel's suffix
+// (stats/unpriced-cost-label.ts). "Excludes" promises a remainder, so only a
+// total that exists gets it. The hint names the models left out.
+function cost(totals) {
+  const unpriced = (Array.isArray(totals.unpricedModels) ? totals.unpricedModels : []).map(text).filter(Boolean);
+  const value = totals.estimatedCostUsd;
+  return {
+    label: unpriced.length && isNumber(value) ? `${COST_LABEL} • excludes unpriced models` : COST_LABEL,
+    value: formatCost(value),
+    hint: unpriced.length ? `Not priced: ${unpriced.join(", ")}.` : null,
+  };
+}
+
+// ── The window ───────────────────────────────────────────────────────────────
 
 function report(result, now) {
   const totals = isObject(result.totals) ? result.totals : {};
   const total = totals.tokens;
-  let sessions = 0;
-  for (const p of list(result.byProject)) if (isNumber(p.sessions)) sessions += p.sessions;
   const from = text(result.range?.from);
-  const cacheSince = text(result.cacheSince);
-  const since = cacheSince && from && cacheSince > from ? formatSince(cacheSince, now) : null;
+  const cacheSince = sinceLabel(result.cacheSince, from, now);
+  const turnSince = sinceLabel(result.turnFiguresSince, from, now);
   const reuseText = reuse(totals.reuseRate);
+  const zero = zeroCacheRead(totals);
+  const price = cost(totals);
   return {
+    // Orca's eight, in Orca's order (ClaudeUsagePane.tsx:168-237).
     cards: [
-      { key: "tokens", label: "Tokens", value: formatTokens(total), hint: "Input, output and cache write tokens. Cache reads aren't counted." },
-      { key: "sessions", label: "Sessions / Turns", value: `${formatCount(sessions)} / ${formatCount(totals.responses)}`, hint: null },
-      { key: "active", label: "Active time", value: formatActiveTime(totals.seconds), hint: "Time active in your own sessions; claude -p runs aren't counted." },
+      { key: "input", label: "Input tokens", value: formatTokens(totals.input), hint: "Input tokens not read from the cache.", since: cacheSince },
+      { key: "output", label: "Output tokens", value: formatTokens(totals.output), hint: null, since: cacheSince },
+      { key: "cacheRead", label: "Cache read", value: formatTokens(totals.cacheRead), hint: null, since: cacheSince },
+      { key: "cacheWrite", label: "Cache write", value: formatTokens(totals.cacheWrite), hint: null, since: cacheSince },
+      { key: "reuse", label: "Cache reuse rate", value: reuseText, hint: null, since: cacheSince },
+      { key: "zeroCacheRead", label: "Zero-cache-read turns", value: zero.value, hint: zero.hint, since: turnSince },
+      { key: "sessions", label: "Sessions / Turns", value: `${formatCount(totals.sessions)} / ${formatCount(totals.responses)}`, hint: null, since: null },
+      { key: "cost", label: price.label, value: price.value, hint: price.hint, since: turnSince },
     ],
-    cache: {
-      title: "Cache",
-      since,
-      coverage: formatCoverage(totals.cacheCoverage),
-      explanation: EXPLANATION,
-      cards: [
-        { key: "input", label: "Input tokens", value: formatTokens(totals.input), hint: "Input tokens not read from the cache." },
-        { key: "cacheRead", label: "Cache read", value: formatTokens(totals.cacheRead), hint: null },
-        { key: "cacheWrite", label: "Cache write", value: formatTokens(totals.cacheWrite), hint: null },
-        { key: "reuse", label: "Cache reuse rate", value: reuseText, hint: null },
-      ],
-    },
+    // Herdr's own: every line's tokens, as By model and By project count
+    // them, and the active time.
+    extras: [
+      { key: "tokens", label: "Tokens", value: formatTokens(total), hint: "Input, output and cache write tokens. Cache reads aren't counted.", since: null },
+      { key: "active", label: "Active time", value: formatActiveTime(totals.seconds), hint: "Time active in your own sessions; claude -p runs aren't counted.", since: null },
+    ],
+    coverage: [
+      coverageNote("Input, output and cache figures", totals.cacheCoverage),
+      coverageNote("Zero-cache-read turns and cost", totals.turnFiguresCoverage),
+    ].filter(Boolean),
+    explanation: EXPLANATION,
     daily: chartBars(result.daily),
     byModel: byModel(result, total),
     byProject: byProject(result, total),
     byAccount: byAccount(result, total),
     limits: limits(result),
-    recent: recent(result, reuseText, since),
+    recent: recent(result, reuseText, cacheSince),
   };
 }
 
@@ -305,8 +392,11 @@ function report(result, now) {
 //             while the first run goes, "No usage read for this range yet."
 //             when none has, or Orca's empty message for a range with no
 //             tokens; null when there's a report.
-// - report    { cards, cache, daily, byModel, byProject, byAccount, limits,
-//             recent }, or null.
+// - report    { cards, extras, coverage, explanation, daily, byModel,
+//             byProject, byAccount, limits, recent }, or null. cards are
+//             Orca's eight and extras Herdr's two, each { key, label,
+//             value, hint, since }; coverage holds the notes of the groups
+//             that cover part of the range.
 export function detailsModel({ details, range, now = Date.now(), execError = null } = {}) {
   const key = pickRange(range);
   const entry = isObject(details?.ranges?.[key]) ? details.ranges[key] : {};

@@ -66,15 +66,20 @@ the same files and run the same commands: see [CONTRACT.md](CONTRACT.md).
   that failed with the `claude --resume <session>` command to run by hand,
   and "Sign-in link copied. Open it in a private window to sign in with a
   different account."
-- **Usage details & history** (a window): 7, 30 or 90 days or all time;
-  usage by model, by project and by account; cache read, cache write and
-  reuse rate, as Orca computes it (labelled "since <date>" when the range
-  starts before the cache figures do, with a note of the share of tokens they
-  cover when some sessions are gone from disk); recent sessions; a daily
-  chart; and how often and how fast each account hits its 5-hour and weekly
-  limits. Opening it, picking a range or Refresh reads that range again; the
-  last result stays, with "Updated Xm ago", until the new one lands. Orca's
-  "Orca worktrees only" scope and share card aren't ported.
+- **Usage details & history** (a window): 7, 30 or 90 days or all time.
+  Orca's eight cards: input and output tokens, cache read, cache write, cache
+  reuse rate, zero-cache-read turns, sessions / turns, and the estimated
+  API-equivalent cost ("• excludes unpriced models" when some model has no
+  price); then total tokens and active time. Each group of figures says
+  "since <date>" when the range starts before its data does, with a note of
+  the share of tokens it covers when some sessions are gone from disk. Usage
+  by model and by project (sessions and turns) and by account; recent
+  sessions in Orca's columns (turns, input, output, cache), with the account
+  and length on hover; a daily chart; and how often and how fast each account
+  hits its 5-hour and weekly limits. A figure an older claude-usage doesn't
+  print reads "n/a". Opening it, picking a range or Refresh reads that range
+  again; the last result stays, with "Updated Xm ago", until the new one
+  lands. Orca's "Orca worktrees only" scope and share card aren't ported.
 
 **How it behaves**
 

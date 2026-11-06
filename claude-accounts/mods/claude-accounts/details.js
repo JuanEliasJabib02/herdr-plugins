@@ -1,11 +1,12 @@
-// Usage details & history (S7, D11), a window: Orca's Claude usage pane
+// Usage details & history (S7, D11, D24), a window: Orca's Claude usage pane
 // (renderer/src/components/stats/ClaudeUsagePane.tsx and its
 // ClaudeUsageDetails) fed by claude-usage --json. The range picker (7, 30,
-// 90 days, all time), the cards, the cache figures ("since <date>" and the
-// coverage note when they don't cover the range), the daily chart, by
-// model, by project and by account, the time to each limit, and recent
-// sessions. What it says is details-model.js's; this file only draws it.
-// Owner: T10.
+// 90 days, all time), Orca's eight cards in a grid of four columns with
+// Herdr's tokens and active time under them (each card with its group's
+// "since <date>", and a coverage note per group that doesn't cover the
+// range), the daily chart, by model, by project and by account, the time to
+// each limit, and recent sessions in Orca's seven columns. What it says is
+// details-model.js's; this file only draws it. Owners: T10, T20b.
 //   props: { view: "details" }
 //
 // Data: details.json, which `claude-accounts details --range <r>` fills in
@@ -34,6 +35,8 @@ const RETRY = 2000;
 const TICK = 60_000;
 // The chart's bar area, in px.
 const CHART_H = 110;
+// Cards per row: Orca's widest grid (xl:grid-cols-4).
+const CARDS_PER_ROW = 4;
 // The refresh spinner, drawn natively (frames()).
 const SPINNER = Object.freeze(["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]);
 
@@ -180,14 +183,7 @@ export default class Details {
 
   report(r, t) {
     return [
-      h_flex().gap(8).children(r.cards.map((c) => card(c, t))),
-      v_flex().gap(6)
-        .child(h_flex().gap(6).items_center()
-          .child(div().text_size(13).font_semibold().child(r.cache.title))
-          .when(Boolean(r.cache.since), (el) => el.child(div().text_size(11.5).text_color(t.dim).child(r.cache.since))))
-        .child(h_flex().gap(8).children(r.cache.cards.map((c) => card(c, t))))
-        .when(Boolean(r.cache.coverage), (el) => el.child(div().px(1).text_size(11.5).text_color(t.muted).child(r.cache.coverage)))
-        .child(div().px(1).text_size(11.5).text_color(t.dim).child(r.cache.explanation)),
+      cardGrid(r, t),
       chart(r.daily, t),
       h_flex().gap(10).items_start()
         .child(this.breakdown("model", r.byModel, t))
@@ -241,12 +237,30 @@ function section(t, title, sub) {
       .when(Boolean(sub), (el) => el.child(div().text_size(11.5).text_color(t.dim).truncate().child(sub))));
 }
 
-// Orca's StatCard: the value large, its label under it.
+// Orca's StatCard: the value large, its label under it (it wraps: the cost's
+// "• excludes unpriced models" is longer than a card), then its group's
+// "since <date>" when there is one.
 function card(c, t) {
   return v_flex().id(`ca-details-card-${c.key}`).flex_1().min_w(0).px(12).py(9).gap(1).rounded(8).border_1().border_color(t.border).bg(t.background)
     .when(Boolean(c.hint), (el) => el.tooltip(c.hint))
     .child(div().text_size(17).font_semibold().truncate().child(c.value))
-    .child(div().text_size(11).text_color(t.dim).truncate().child(c.label));
+    .child(div().text_size(11).text_color(t.dim).child(c.label))
+    .when(Boolean(c.since), (el) => el.child(div().text_size(10.5).text_color(t.muted).truncate().child(c.since)));
+}
+
+// Orca's eight cards, then Herdr's two, CARDS_PER_ROW to a row, a short row
+// padded so its cards keep the grid's widths; the coverage notes and Orca's
+// explanation line under them.
+function cardGrid(r, t) {
+  const all = [...r.cards, ...r.extras];
+  const rows = [];
+  for (let i = 0; i < all.length; i += CARDS_PER_ROW) rows.push(all.slice(i, i + CARDS_PER_ROW));
+  return v_flex().gap(8)
+    .children(rows.map((row) => h_flex().gap(8).items_stretch()
+      .children(row.map((c) => card(c, t)))
+      .children(Array.from({ length: CARDS_PER_ROW - row.length }, () => div().flex_1().min_w(0)))))
+    .children(r.coverage.map((note) => div().px(1).text_size(11.5).text_color(t.muted).child(note)))
+    .child(div().px(1).text_size(11.5).text_color(t.dim).child(r.explanation));
 }
 
 // A row's share of the range, 0–1.
@@ -281,14 +295,16 @@ function limitsSection(l, t) {
       .child(div().flex_1().min_w(0).truncate().text_color(c.text === "Not hit" ? t.dim : t.foreground).child(c.text)))))));
 }
 
-// Orca's UsageRecentSessionsTable, with this window's columns.
+// Orca's UsageRecentSessionsTable: Last active, Project, Model, Turns,
+// Input, Output, Cache. The counts are right-aligned.
 const COLUMNS = Object.freeze([
   { w: 112 },
   { flex: true },
-  { w: 70 },
-  { flex: true },
-  { w: 64 },
+  { w: 96 },
   { w: 52, right: true },
+  { w: 58, right: true },
+  { w: 58, right: true },
+  { w: 58, right: true },
 ]);
 
 function cell(i, value, t, head) {
@@ -307,6 +323,7 @@ function recentSection(r, t) {
     .child(h_flex().py(5).text_size(11).border_b(1).border_color(t.border)
       .children(r.headings.map((h, i) => cell(i, h, t, true))))
     .children(r.rows.map((row, n) => h_flex().id(`ca-details-session-${row.key}`).py(5)
+      .when(Boolean(row.hint), (s) => s.tooltip(row.hint))
       .when(n < r.rows.length - 1, (s) => s.border_b(1).border_color(t.border))
       .children(row.cells.map((v, i) => cell(i, v, t, false))))));
 }
