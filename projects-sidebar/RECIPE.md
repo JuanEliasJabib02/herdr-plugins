@@ -131,6 +131,10 @@ across repos.
   shown one, else the first). If it has none, opens a space there named
   after its label. Click an agent row: focuses that agent's pane. Click a
   project row: collapse or expand, remembered.
+- **Drag a project row** (Project mode) up or down onto another project row:
+  a line marks where it lands, and on release the project moves there within
+  its group, remembered. Leaving the list cancels the drag; a drag that ends
+  on its own row changes nothing and doesn't fold it.
 - **Add project** (header "+", or the empty state's button): a folder
   picker. The repo's main checkout is added to the active group, even if
   you picked a linked worktree or a subfolder. A folder that isn't a repo is

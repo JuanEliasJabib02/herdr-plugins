@@ -485,6 +485,26 @@ export function renameOutcome(r, { label, path, open }) {
 
 // ── Project menu (D11) ─────────────────────────────────────────────────────
 
+// D33 (S28): drag a project row to reorder its group. Moves `path` right
+// before `target`, or right after it with `after`, within the project's own
+// group. Nothing to move (the same place, a target in another group, an
+// unknown path) → the same registry. Only the order of group.projects
+// changes, so the stored value keeps its format.
+export function reorderProject(registry, path, target, after) {
+  const from = normPath(path);
+  const to = normPath(target);
+  const found = findProject(registry, from);
+  if (!found || from === to) return registry;
+  const list = found.group.projects;
+  if (!list.some((p) => p.path === to)) return registry;
+  const moved = list.find((p) => p.path === from);
+  const rest = list.filter((p) => p !== moved);
+  const at = rest.findIndex((p) => p.path === to) + (after ? 1 : 0);
+  const next = [...rest.slice(0, at), moved, ...rest.slice(at)];
+  if (next.every((p, k) => p === list[k])) return registry;
+  return { ...registry, groups: registry.groups.map((g) => (g.id === found.group.id ? { ...g, projects: next } : g)) };
+}
+
 // The right-click menu of a project: [{ id, label, disabled?, group? }].
 // `move`: the Move to group submenu, the other groups. Unknown project: [].
 export function projectMenuItems(registry, path, move = false) {

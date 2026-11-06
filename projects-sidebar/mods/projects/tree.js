@@ -22,7 +22,7 @@ import { findProject, activeGroup, matchSpaces } from "./lib.js";
 import * as store from "./store.js";
 import { repoOf, listWorktrees } from "./git.js";
 import {
-  buildTree, openAction, railAction, isNarrow, projectPaths, pruneCache, watchDirs, eachLimit, liveFolder, addProjectAt,
+  buildTree, openAction, railAction, isNarrow, projectPaths, pruneCache, watchDirs, eachLimit, liveFolder, addProjectAt, reorderProject,
 } from "./tree-model.js";
 import { buildTaskTree } from "./task-model.js";
 import { openNewWorkspace } from "./new-workspace.js";
@@ -39,6 +39,16 @@ const SETTLE = 500;
 
 // Herdr's shipped chrome icons (chevrons, the spinner): there in every install.
 const chrome = (name) => `mods/workspace-chrome/${name}.svg`;
+
+// D33 (S28): the project row being dragged, { from, y, moving, over, after },
+// built from mouse events (gpui-kit has no element drag): a press on a
+// project row starts it, 4 px of travel makes it a drag, the rows under the
+// pointer mark where it lands, the list's mouse up moves the project.
+let drag = null;
+// A drag just ended: the row's click that comes with the mouse up mustn't
+// also fold it.
+let dragged = false;
+const DRAG_START = 4;
 
 export default class Tree {
   init(_props, cx) {
@@ -163,7 +173,15 @@ export default class Tree {
       : narrow ? model.projects.map((p) => railRow(p, t)) : model.rows.map((r) => row(r, t));
     return v_flex().size_full().min_h(0).bg(t.chrome).text_size(13)
       .child(header(model.group, narrow, byTask, t))
-      .child(v_flex().id("projects-list").flex_1().min_h(0).px(narrow ? 0 : 8).pb(14).overflow_y_scrollbar().mode("always").children(body));
+      .child(v_flex().id("projects-list").flex_1().min_h(0).px(narrow ? 0 : 8).pb(14).overflow_y_scrollbar().mode("always")
+        .on_mouse_up("left", (_e, cx) => drop(cx))
+        // Leaving the list (or the window) cancels a drag.
+        .on_hover((hovered, cx) => {
+          if (hovered || !drag) return;
+          drag = null;
+          cx.notify();
+        })
+        .children(body));
   }
 }
 
@@ -229,11 +247,46 @@ function taskRow(l, t) {
 }
 
 // A project: collapse on click, its menu on right-click, "+" for a new workspace.
+// The list's mouse up: a drag onto another project row moves the project
+// there (D33); one that ended on its own row only stops the fold.
+function drop(cx) {
+  const d = drag;
+  drag = null;
+  if (!d?.moving) return;
+  dragged = true;
+  if (d.over && d.over !== d.from) store.updateRegistry((r) => reorderProject(r, d.from, d.over, d.after));
+  cx.notify();
+}
+
 function projectRow(p, t) {
-  return h_flex().id(`p:${p.path}`).h(28).flex_none().px(8).gap(7).items_center().rounded(8)
+  const landing = Boolean(drag?.moving) && drag.over === p.path && drag.from !== p.path;
+  return h_flex().id(`p:${p.path}`).relative().h(28).flex_none().px(8).gap(7).items_center().rounded(8)
     .cursor_pointer()
     .hover((s) => s.bg(t.hover))
-    .on_click(() => store.toggleCollapsed(p.path))
+    .when(Boolean(drag?.moving) && drag.from === p.path, (el) => el.opacity(0.45))
+    .on_click(() => {
+      if (drag?.moving || dragged) {
+        dragged = false;
+        return;
+      }
+      store.toggleCollapsed(p.path);
+    })
+    .on_mouse_down("left", (e) => {
+      drag = { from: p.path, y: e.position.y, moving: false, over: null, after: false };
+      dragged = false;
+    })
+    .on_mouse_move((e, cx) => {
+      if (!drag) return;
+      if (!drag.moving && Math.abs(e.position.y - drag.y) < DRAG_START) return;
+      const after = e.local_position.y >= (e.bounds?.height ?? 28) / 2;
+      if (drag.moving && drag.over === p.path && drag.after === after) return;
+      drag = { ...drag, moving: true, over: p.path, after };
+      cx.notify();
+    })
+    // Where the dragged project lands: a line above or below this row.
+    .when(landing, (el) => el.child(div().absolute().left(6).right(6).h(2).rounded(1).bg(t.accent)
+      .when(drag.after, (d) => d.bottom(-1))
+      .when(!drag.after, (d) => d.top(-1))))
     .on_mouse_down("right", (_e, cx) => {
       cx.stop_propagation(); // or on_click runs too (ClickEvent carries no button)
       openProjectMenu(p.path);

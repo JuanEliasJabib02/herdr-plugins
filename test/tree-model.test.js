@@ -4,13 +4,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
-  emptyRegistry, addProject, addGroup, selectGroup, matchSpaces,
+  emptyRegistry, addProject, addGroup, selectGroup, matchSpaces, setOrganize, parseRegistry, needsBackup,
 } from "../projects-sidebar/mods/projects/lib.js";
 import {
   buildTree, openAction, openMainAction, railAction, workspaceLabel, workspaceMenuItems, initials, mostUrgent,
   agentTitle, ago, isNarrow, projectMenuItems, withoutProject, pruneCache, projectPaths,
   watchDirs, eachLimit, liveFolder, addProjectAt, deletePrompt, deleteOutcome, terminalsStaying,
-  renamePrompt, renameOutcome,
+  renamePrompt, renameOutcome, reorderProject,
 } from "../projects-sidebar/mods/projects/tree-model.js";
 
 const HOME = "/Users/demo";
@@ -632,3 +632,51 @@ test("rename outcome (T9c 21, 9): changed shows the fresh check; a remote done w
   const finishing = renameOutcome({ ...there, err: "GitHub is still finishing the rename." }, open);
   assert.deepEqual(finishing.toast, { title: "Renamed login to feat/signup", body: "Renamed on GitHub too. Its folder is now signup. GitHub is still finishing the rename.", level: "warning" });
 });
+
+// ── Drag to reorder (D33, S28) ─────────────────────────────────────────────
+
+// One group with a, b, c (in that order), plus Clients with client.
+function three() {
+  let r = registry();
+  r = addProject(r, { path: "/code/web" }, r.groups[0].id);
+  return r;
+}
+const order = (r, i = 0) => r.groups[i].projects.map((p) => p.path);
+
+test("reorder: before or after a target in the same group (D33)", () => {
+  const r = three();
+  assert.deepEqual(order(r), ["/code/app", "/code/api", "/code/web"]);
+  assert.deepEqual(order(reorderProject(r, "/code/web", "/code/app", false)), ["/code/web", "/code/app", "/code/api"]);
+  assert.deepEqual(order(reorderProject(r, "/code/app", "/code/api", true)), ["/code/api", "/code/app", "/code/web"]);
+  assert.deepEqual(order(reorderProject(r, "/code/app", "/code/web", true)), ["/code/api", "/code/web", "/code/app"]);
+  assert.deepEqual(order(reorderProject(r, "/code/web/", "/code/api", false)), ["/code/app", "/code/web", "/code/api"], "paths are normalized");
+});
+
+test("reorder: nothing moves → the same registry (D33)", () => {
+  const r = three();
+  assert.equal(reorderProject(r, "/code/app", "/code/app", false), r, "onto itself");
+  assert.equal(reorderProject(r, "/code/app", "/code/api", false), r, "already right before it");
+  assert.equal(reorderProject(r, "/code/api", "/code/app", true), r, "already right after it");
+  assert.equal(reorderProject(r, "/code/app", "/code/client", false), r, "a target in another group");
+  assert.equal(reorderProject(r, "/code/nope", "/code/app", false), r, "an unknown project");
+  assert.equal(reorderProject(r, "/code/app", "/code/nope", false), r, "an unknown target");
+});
+
+test("reorder: other groups, the mode and the stored value are kept (D33, D29)", () => {
+  const r = setOrganize(three(), "g1", "task");
+  const next = reorderProject(r, "/code/web", "/code/app", false);
+  assert.deepEqual(order(next, 1), ["/code/client"]);
+  assert.equal(next.groups[0].organize, "task");
+  assert.equal(next.activeGroup, r.activeGroup);
+  const stored = JSON.parse(JSON.stringify(next));
+  assert.deepEqual(parseRegistry(stored), next);
+  assert.equal(needsBackup(stored, parseRegistry(stored)), false, "a reordered registry reads back as itself");
+});
+
+test("reorder: the drag is wired into the tree (D33)", async () => {
+  const { readFileSync } = await import("node:fs");
+  const tree = readFileSync(new URL("../projects-sidebar/mods/projects/tree.js", import.meta.url), "utf8");
+  assert.match(tree, /on_mouse_move\(/);
+  assert.match(tree, /reorderProject\(/);
+});
+
