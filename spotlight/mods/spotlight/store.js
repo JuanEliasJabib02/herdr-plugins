@@ -18,7 +18,9 @@
 //   { version: 1,
 //     repos: { <root>: emptyRepo() fields, plus envOverride? (the env picked
 //              in the server popup, `spotlight env --env`; it wins over
-//              settings' env until `toggle` off drops the record, J-002) },
+//              settings' env until `toggle` off drops the record, J-002) and
+//              envFailed? (the env a start or restart couldn't run: the reap
+//              doesn't try it again, J-009; a started server clears it) },
 //     queue: { requests: [{ terminal, taskKey, lane, members, skipped, requestedAt, requestTurn,
 //                           fgPid, state, slotOnly, grantedAt, pausedAt, pauseReason, pauseMsg,
 //                           resumingUntil, handledTurn, autoResumes, lastActivityAt, outputHash }],
@@ -148,7 +150,7 @@ export function rememberVariant(state, key, variant) {
 
 // ── Reconcile ──────────────────────────────────────────────────────────────
 
-const ROOT_DIVERGED = "The repository root moved off the Spotlight snapshot.";
+const ROOT_DIVERGED = "El root se movió del snapshot de Spotlight.";
 const ORPHAN_REFS =
   "Spotlight refs are in this repository with no record of who holds them; turning Spotlight off restores the root from them.";
 

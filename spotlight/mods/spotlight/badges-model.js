@@ -12,8 +12,9 @@
 //   cleared); written only when it changes (setShared re-renders every mod).
 //
 // Icons only, words in the tooltip (S11, S12), in this order on a row:
-//   1. flashlight  accent on the holder's row and the root's (Orca's amber
-//                  root bar), dim on the other workspaces of an enabled
+//   1. flashlight  working on the holder's row and the root's (amber, Orca's
+//                  root bar; Herdr's accent is blue in its default theme),
+//                  dim on the other workspaces of an enabled
 //                  repo, blocked (red) on an error. A click toggles that
 //                  workspace (`spotlight toggle --workspace <path>`).
 //   2. server      on the holder's and the root's rows while Spotlight is on
@@ -157,6 +158,16 @@ const ERROR_TEXT = {
   "operation-in-progress": "Merge o rebase en curso: termínalo y se sincroniza",
 };
 
+// An async check that may throw, at once or later (Herdr's fs throws at once
+// for a path outside the window's home): anything thrown reads `fallback`.
+export async function attempt(check, fallback) {
+  try {
+    return await check();
+  } catch {
+    return fallback;
+  }
+}
+
 export const errorText = (error) => ERROR_TEXT[error?.code] ?? `Spotlight: ${oneLine(error?.message ?? error?.code ?? "error")}`;
 
 function badge({ icon, text, tone, tooltip, action }) {
@@ -176,7 +187,7 @@ function litFlashlight(record, at, { bin, root }) {
   if (record.lastError) return badge({ icon: "flashlight", tone: "blocked", tooltip: errorText(record.lastError), action: toggle(bin, at) });
   const synced = Number.isFinite(record.lastSyncAt) ? ` · sincronizado ${clock(record.lastSyncAt)}` : "";
   const who = at === root ? ` · ${baseName(record.holder)}` : "";
-  return badge({ icon: "flashlight", tone: "accent", tooltip: `Spotlight${who}${synced}`, action: toggle(bin, at) });
+  return badge({ icon: "flashlight", tone: "working", tooltip: `Spotlight${who}${synced}`, action: toggle(bin, at) });
 }
 
 // 2. The server badge of a lit repo's holder or root row.

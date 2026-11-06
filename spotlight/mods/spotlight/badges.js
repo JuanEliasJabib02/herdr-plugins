@@ -18,7 +18,7 @@ import { repoSettings, repoEnabledFrom, normRoot } from "./settings.js";
 import { hasServerCommand } from "./server-plan.js";
 import { cliPathOf } from "./board-model.js";
 import { readFiles, watchState, openServer } from "./board.js";
-import { buildBadges, nextPublish, parseProjects, parseCache } from "./badges-model.js";
+import { buildBadges, nextPublish, parseProjects, parseCache, attempt } from "./badges-model.js";
 import { modIo } from "./server-view-model.js";
 import { followHolders } from "./autosync.js";
 
@@ -70,8 +70,8 @@ async function enabledRoots(projects, settings) {
     const envs = JSON.stringify(repo.envs);
     let f = facts.get(root);
     if (!f || now - f.at > FACTS_TTL_MS || f.envs !== envs) {
-      const gitRepo = await fs.exists(`${root}/.git`).catch(() => false);
-      const hasCommand = gitRepo ? Boolean(await hasServerCommand(root, io, repo).catch(() => false)) : false;
+      const gitRepo = await attempt(() => fs.exists(`${root}/.git`), false);
+      const hasCommand = gitRepo ? Boolean(await attempt(() => hasServerCommand(root, io, repo), false)) : false;
       f = { at: now, envs, gitRepo, hasCommand };
       facts.set(root, f);
     }

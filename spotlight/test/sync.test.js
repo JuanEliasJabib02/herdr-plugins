@@ -373,7 +373,7 @@ describe("sync engine (D8)", () => {
     write(root, "a.txt", "edited-directly-in-root\n");
     write(wt, "a.txt", "wt-change\n");
 
-    await rejectsCode(sync(ctx, root, wt), "root-diverged", /tracked changes/);
+    await rejectsCode(sync(ctx, root, wt), "root-diverged", /cambios hechos fuera del workspace/);
     await rejectsCode(deactivate(ctx, root), "root-diverged");
     assert.equal(read(root, "a.txt"), "edited-directly-in-root\n");
 
@@ -393,7 +393,7 @@ describe("sync engine (D8)", () => {
     run(root, "add", "root-commit.txt");
     run(root, "commit", "-qm", "committed in the root");
     write(wt, "a.txt", "wt-change\n");
-    await rejectsCode(sync(ctx, root, wt), "root-diverged", /moved off the Spotlight snapshot/);
+    await rejectsCode(sync(ctx, root, wt), "root-diverged", /se movió del snapshot de Spotlight/);
   });
 
   test("root-diverged: turn-off's refusals are checked without touching the root", async () => {
@@ -437,7 +437,7 @@ describe("sync engine (D8)", () => {
     await assert.rejects(activate(ctx, root, wt), (e) => {
       assert.equal(e.code, "untracked-collision");
       assert.deepEqual([...e.paths].sort(), names);
-      assert.match(e.message, /s1\.txt, s2\.txt, s3\.txt, s4\.txt, s5\.txt \(\+2 more\)/);
+      assert.match(e.message, /s1\.txt, s2\.txt, s3\.txt, s4\.txt, s5\.txt \(\+2 más\)/);
       return true;
     });
     assert.equal(read(root, "s1.txt"), "precious-untracked\n");

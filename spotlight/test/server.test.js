@@ -34,7 +34,9 @@ const zshWords = (line) =>
 // A typed `script …` line becomes the foreground with zsh's argv; an
 // interrupt hands the prompt back after `lingers` more reads (live, `script`
 // was still the foreground right after `hc interrupt` said "stopped").
-function fakeHc({ lingers = 1, ports = {}, readText = "" } = {}) {
+// `shellReads`: a terminal `hc run` makes shows `startupFg` (none, as live) for
+// that many reads before its shell is up.
+function fakeHc({ lingers = 1, ports = {}, readText = "", shellReads = null, startupFg = null } = {}) {
   const terms = new Map();
   const calls = [];
   const sent = [];
@@ -92,6 +94,10 @@ function fakeHc({ lingers = 1, ports = {}, readText = "" } = {}) {
         }
         const [k, ...v] = opt("--label").split("=");
         const made = add({ name, labels: { [k]: v.join("=") }, cwd: opt("--cwd") });
+        if (shellReads !== null) {
+          made.foreground = startupFg;
+          made.pendingShell = shellReads;
+        }
         return ok({ address: made.address, agent: "zsh", cwd: made.cwd, name, state: "live", turn: 0 });
       }
       case "send": {
@@ -320,6 +326,59 @@ test("startServer: in a fresh terminal it types the wrapped line, logs a header,
   // A second start finds Spotlight's own server and types nothing.
   const again = await startServer({ root: ROOT, terminal: "t1", line: "pnpm dev", logPath, serverPid: r.pid }, { exec: hc.exec, ...fakeClock() });
   assert.deepEqual({ ok: again.ok, started: again.started, reason: again.reason }, { ok: true, started: false, reason: "already-running" });
+  assert.equal(hc.sent.length, 1);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("startServer: waits for a new terminal's shell before typing (hc shows no foreground for its first moments)", async () => {
+  const dir = tmp();
+  const logPath = join(dir, "app.log");
+  const hc = fakeHc({ shellReads: 3 });
+  const r = await startServer({ root: ROOT, line: "pnpm dev", logPath }, { exec: hc.exec, ...fakeClock() });
+  assert.deepEqual({ ok: r.ok, started: r.started, created: r.created }, { ok: true, started: true, created: true });
+  assert.deepEqual(hc.sent, [{ terminal: "t1", text: wrapServerLine("pnpm dev", logPath) }]);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("startServer: a child of a new terminal's rc files in front isn't a busy terminal", async () => {
+  const dir = tmp();
+  const logPath = join(dir, "app.log");
+  const hc = fakeHc({ shellReads: 2, startupFg: { pid: 77, name: "brew", argv: ["brew", "shellenv"], cwd: ROOT } });
+  const r = await startServer({ root: ROOT, line: "pnpm dev", logPath }, { exec: hc.exec, ...fakeClock() });
+  assert.deepEqual({ ok: r.ok, started: r.started }, { ok: true, started: true });
+  assert.equal(hc.sent.length, 1);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("startServer: a new terminal whose shell never shows types nothing, and the wait ends", async () => {
+  const dir = tmp();
+  const hc = fakeHc({ shellReads: 1_000_000 });
+  const r = await startServer({ root: ROOT, line: "pnpm dev", logPath: join(dir, "app.log") }, { exec: hc.exec, ...fakeClock() });
+  assert.deepEqual({ ok: r.ok, reason: r.reason }, { ok: false, reason: "unreadable" });
+  assert.deepEqual(hc.sent, []);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("startServer: a terminal that was already there is read once, with no wait", async () => {
+  const dir = tmp();
+  const hc = fakeHc();
+  const t = hc.add({ name: serverTerminalName(ROOT), labels: { [SERVER_LABEL]: ROOT } });
+  t.foreground = null;
+  const clock = fakeClock();
+  const before = clock.now();
+  const r = await startServer({ root: ROOT, terminal: t.address, line: "pnpm dev", logPath: join(dir, "app.log") }, { exec: hc.exec, ...clock });
+  assert.deepEqual({ ok: r.ok, reason: r.reason }, { ok: false, reason: "unreadable" });
+  assert.equal(clock.now(), before);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("restartServer: a closed terminal is made again and the server starts once its shell is up", async () => {
+  const dir = tmp();
+  const logPath = join(dir, "app.log");
+  const hc = fakeHc({ shellReads: 3 });
+  const r = await restartServer({ root: ROOT, terminal: "t9", line: "pnpm dev", logPath }, { exec: hc.exec, ...fakeClock() });
+  assert.deepEqual({ ok: r.ok, started: r.started, created: r.created }, { ok: true, started: true, created: true });
+  assert.equal(hc.verbs().includes("interrupt"), false);
   assert.equal(hc.sent.length, 1);
   rmSync(dir, { recursive: true, force: true });
 });

@@ -257,15 +257,15 @@ export async function ensureServer(cx, root, opts = {}) {
   await cx.store.updateState((s) => {
     const rec = s.repos[root];
     if (!rec) return;
-    // What runs now (J-002): written only when a server runs in it.
-    if (r.ok) rec.serverEnv = plan.env;
     rec.logPath = logPath;
     if (r.terminal) rec.serverTerminal = r.terminal;
     if (r.ok && r.started) {
+      // serverEnv says what runs now (J-002, J-008): written only when it starts.
       Object.assign(rec, {
-        serverCommand: plan.command, serverVariant: plan.variant, serverPid: r.pid ?? null, serverStartedAt: now,
+        serverCommand: plan.command, serverEnv: plan.env, serverVariant: plan.variant, serverPid: r.pid ?? null, serverStartedAt: now,
         serverState: "starting", pendingInstalls: [], variantCandidates: [],
       });
+      delete rec.envFailed;
       if (taskKey && plan.variant && (plan.source === "inferred" || plan.source === "chosen")) {
         rememberVariant(s, `${taskKey}::${normRoot(root)}`, plan.variant);
       }
@@ -276,6 +276,7 @@ export async function ensureServer(cx, root, opts = {}) {
       rec.variantCandidates = [];
     } else {
       rec.serverState = r.reason === "terminal-gone" ? "gone" : "stopped";
+      if (rec.serverEnv !== plan.env) rec.envFailed = plan.env;
       addNote(s, { repo: root, text: `${cx.nameOf(root)}: ${serverFailure(r)}`, toast: true }, now);
     }
   });
@@ -567,9 +568,15 @@ export async function reap(cx, { full = true, skip = null } = {}) {
     );
     if (live.state) servers.push({ root, state: live.state, ports: live.ports });
     // J-002: a server in another env than the effective one restarts through
-    // a detached sync (D18: a restart outlasts the reap's second). A root
-    // with an error waits for it to clear: its sync would fail first.
-    if (live.state && !rec.lastError && (await envDrift(cx, root, { ...rec, serverState: live.state }))) envSyncs.push(root);
+    // a detached sync (D18: a restart outlasts the reap's second). Only
+    // Spotlight's own server, never a foreign process holding a port. A root
+    // with an error waits for it to clear: its sync would fail first. An env
+    // that couldn't run isn't tried again from here (J-009): `on`, a sync or
+    // Reiniciar do.
+    if (
+      live.owner === "spotlight" && !rec.lastError && rec.envFailed !== effectiveEnv(cx, root, rec) &&
+      (await envDrift(cx, root, { ...rec, serverState: live.state }))
+    ) envSyncs.push(root);
   }
 
   const out = await cx.store.updateState((s) => {

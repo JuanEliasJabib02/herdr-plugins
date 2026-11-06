@@ -13,6 +13,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   sha1Hex, serverIdOf, parseProjects, parseCache, buildBadges, nextPublish, canonicalJson,
+  attempt,
 } from "../mods/spotlight/badges-model.js";
 import { cliPathOf, readState, readSettings } from "../mods/spotlight/board-model.js";
 import { serverId } from "../mods/spotlight/cli-work.mjs";
@@ -152,10 +153,10 @@ test("holder and root rows: amber flashlight, the server's port, and the holder'
   assert.deepEqual(icons(value[BACK]), ["flashlight", "server"]);
 
   const [light, server, flask] = value[B1];
-  assert.equal(light.tone, "accent");
+  assert.equal(light.tone, "working", "amber: Herdr's accent is blue in its default theme");
   assert.equal(light.tooltip, "Spotlight · sincronizado 22:58:04");
   assert.deepEqual(light.action, { exec: [BIN, "toggle", "--workspace", B1] });
-  assert.equal(value[BACK][0].tone, "accent");
+  assert.equal(value[BACK][0].tone, "working");
   assert.equal(value[BACK][0].tooltip, "Spotlight · ax-3447 · sincronizado 22:58:04");
   assert.deepEqual(value[BACK][0].action, { exec: [BIN, "toggle", "--workspace", BACK] });
 
@@ -219,6 +220,12 @@ test("dim flashlights on the other workspaces of enabled repos; none on disabled
   // other: not enabled.
   assert.equal(value[OTHER], undefined);
   assert.equal(value[O1], undefined);
+});
+
+test("attempt: a check that throws, at once or later, reads as the fallback", async () => {
+  assert.equal(await attempt(async () => true, false), true);
+  assert.equal(await attempt(() => { throw new Error("outside the window's home"); }, false), false);
+  assert.equal(await attempt(async () => { throw new Error("no such file"); }, false), false);
 });
 
 test("an error turns the flashlight red with its text; a root with an error and no holder opens the popup", () => {

@@ -142,7 +142,7 @@ try {
     }
     case "interrupt":
       if (!t) { missing(); break; }
-      if (t.foreground && t.foreground.pid !== t.pid) t.pendingShell = 1;
+      if (t.foreground && t.foreground.pid !== t.pid && !t.ignoresInterrupt) t.pendingShell = 1;
       out(0, { key: "ctrl+c", outcome: "stopped" });
       break;
     case "rm":
@@ -1100,6 +1100,76 @@ test("J-002: the settings' env is the default and a change restarts the server o
   assert.match(typed().at(-1), runs("prod"));
   assert.equal(record().serverEnv, "prod");
   assert.equal(record().envOverride ?? null, null);
+});
+
+test("J-008: a foreign process in the server terminal leaves the recorded env alone: nothing ran in the new one", async () => {
+  const w = makeWorld();
+  const pkg = { scripts: { local: "vite", dev: "vite --mode dev" } };
+  const app = makeRepo(w, "app", { pkg, tasks: ["AX-17"] });
+  w.register([{ id: "g1", repos: [app] }]);
+  w.listen(app.root, [3000]);
+  const ws = app.ws["AX-17"];
+  const t = w.agent(ws);
+  assert.equal((await w.cli(["on"], { terminal: t, cwd: ws })).code, 0);
+  const record = () => w.state().repos[app.root];
+  assert.equal(record().serverEnv, "local");
+
+  const server = w.serverTerminal(app.root);
+  w.hcUpdate((s) => {
+    s.terminals[server.address].foreground = { pid: s.nextPid++, name: "vim", argv: ["vim"], cwd: app.root };
+  });
+  const sent = w.hc().sent.length;
+  await w.cli(["env", "--workspace", ws, "--env", "dev"]);
+  assert.equal(w.hc().sent.length, sent, "nothing typed over the foreign process");
+  assert.equal(record().envOverride, "dev");
+  assert.equal(record().serverEnv, "local", "serverEnv says what ran");
+});
+
+test("J-009: env drift the reap can't resolve isn't retried: a foreign process is never synced for, a server that ignores Ctrl-C isn't interrupted again", async () => {
+  const w = makeWorld();
+  const pkg = { scripts: { local: "vite", dev: "vite --mode dev" } };
+  const app = makeRepo(w, "app", { pkg, tasks: ["AX-18"] });
+  w.register([{ id: "g1", repos: [app] }]);
+  w.listen(app.root, [3000]);
+  const ws = app.ws["AX-18"];
+  const t = w.agent(ws);
+  assert.equal((await w.cli(["on"], { terminal: t, cwd: ws })).code, 0);
+  const record = () => w.state().repos[app.root];
+  const server = w.serverTerminal(app.root).address;
+  const interrupts = () => w.hc().calls.filter((c) => c[0] === "interrupt").length;
+  const own = w.hc().terminals[server].foreground;
+
+  // Someone else's process holds a port there: the reap leaves it, no detached sync.
+  w.hcUpdate((s) => {
+    s.terminals[server].foreground = { pid: s.nextPid++, name: "script", argv: ["script", "-q", "/other.log", "x"], cwd: app.root };
+  });
+  w.settings({ repos: { [app.root]: { env: "dev" } } });
+  assert.equal((await w.cli(["reap"])).code, 0);
+  const calls = w.hc().calls.length;
+  await sleep(1500);
+  assert.equal(w.hc().calls.length, calls, "no sync was spawned for a foreign process");
+
+  // Spotlight's server again, and it ignores Ctrl-C: one try, then the reap stops.
+  w.hcUpdate((s) => {
+    s.terminals[server].foreground = own;
+    s.terminals[server].ignoresInterrupt = true;
+  });
+  assert.equal((await w.cli(["reap"])).code, 0);
+  await w.until((s) => s.repos[app.root]?.envFailed === "dev", { what: "the failed restart's mark" });
+  assert.equal(interrupts(), 1);
+  assert.equal(record().serverEnv, "local");
+  assert.equal((await w.cli(["reap"])).code, 0);
+  await sleep(1500);
+  assert.equal(interrupts(), 1, "the reap didn't interrupt it again");
+
+  // Ctrl-C works again: Reiniciar runs the env asked for, and the mark goes.
+  w.hcUpdate((s) => {
+    delete s.terminals[server].ignoresInterrupt;
+  });
+  const again = await w.cli(["restart", "--repo", app.root]);
+  assert.equal(again.code, 0, again.stderr + again.stdout);
+  assert.equal(record().serverEnv, "dev");
+  assert.equal(record().envFailed ?? null, null);
 });
 
 test("J-003: a Herdr terminal on a main checkout or outside git takes a slot-only turn keyed by its folder; two terminals in one folder share it", async () => {

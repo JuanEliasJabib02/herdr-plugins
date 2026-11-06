@@ -301,10 +301,10 @@ async function assertNoUntrackedCollisions(ctx, rootPath, snapshotSha, untracked
   const paths = raw.split("\0").filter((p) => p.length > 0 && untrackedPaths.has(p));
   if (paths.length === 0) return;
   const shown = paths.slice(0, 5).join(", ");
-  const more = paths.length > 5 ? ` (+${paths.length - 5} more)` : "";
+  const more = paths.length > 5 ? ` (+${paths.length - 5} más)` : "";
   throw new SpotlightError(
     "untracked-collision",
-    `Untracked files in the repository root would be overwritten by the workspace snapshot: ${shown}${more}. Move or delete them, or force the sync to overwrite.`,
+    `Hay archivos sin seguimiento en el root que el snapshot del workspace sobrescribiría: ${shown}${more}. Muévelos o bórralos, o fuerza el sync para sobrescribirlos.`,
     { paths },
   );
 }
@@ -314,16 +314,16 @@ function assertRootOnSnapshot(refs, rootStatus, turningOff = false) {
     throw new SpotlightError(
       "root-diverged",
       turningOff
-        ? "The repository root moved off the Spotlight snapshot (a commit or checkout happened there). Turning Spotlight off would discard it."
-        : "The repository root moved off the Spotlight snapshot (commit or checkout happened there).",
+        ? "El root se movió del snapshot de Spotlight (hubo un commit o un checkout ahí). Apagar Spotlight lo descartaría."
+        : "El root se movió del snapshot de Spotlight (hubo un commit o un checkout ahí).",
     );
   }
   if (rootStatus.trackedDirty) {
     throw new SpotlightError(
       "root-diverged",
       turningOff
-        ? "The repository root has tracked changes made outside the Spotlight workspace. Turning Spotlight off would discard them."
-        : "The repository root has tracked changes that were made outside the Spotlight workspace.",
+        ? "El root tiene cambios hechos fuera del workspace de Spotlight. Apagar Spotlight los descartaría."
+        : "El root tiene cambios hechos fuera del workspace de Spotlight.",
     );
   }
 }

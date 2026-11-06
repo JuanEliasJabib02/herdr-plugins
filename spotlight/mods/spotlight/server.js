@@ -34,6 +34,9 @@ const SHELL_ARGV = ["/bin/zsh", "-l"];
 
 // Polling while a typed line forks or an interrupted server lets go.
 const POLL_MS = 250;
+// A terminal just made: how long its login shell may take to lead. hc shows no
+// foreground for its first moments (live: none at +326 ms, zsh at +612 ms).
+const SHELL_MS = 5000;
 // After typing: how long to look for `script` in front to record its pid.
 const SEEN_MS = 3000;
 // After an interrupt: how long the prompt may take to come back. Live, hc
@@ -302,7 +305,12 @@ function note(logPath, { workspace, branch }, event, deps) {
 async function typeWhenIdle(a, deps) {
   const { terminal, created, command, wrapped, logPath, serverPid, event } = a;
   const head = { workspace: a.workspace, branch: a.branch };
-  const seen = await inspectServer({ terminal, logPath, serverPid }, deps);
+  const args = { terminal, logPath, serverPid };
+  // A new terminal holds nothing of anyone else's yet: what leads it before
+  // its shell is its rc files' children, so that wait goes on too.
+  const seen = created
+    ? await inspectUntil(args, deps, (s) => s.kind !== "unknown" && s.kind !== "foreign", SHELL_MS)
+    : await inspectServer(args, deps);
   if (seen.kind === "gone") return { ok: false, reason: "terminal-gone", terminal };
   if (seen.kind === "unknown") {
     note(logPath, head, NOTES.unreadable, deps);
