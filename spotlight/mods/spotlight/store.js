@@ -19,8 +19,10 @@
 //     repos: { <root>: emptyRepo() fields, plus envOverride? (the env picked
 //              in the server popup, `spotlight env --env`; it wins over
 //              settings' env until `toggle` off drops the record, J-002) and
-//              envFailed? (the env a start or restart couldn't run: the reap
-//              doesn't try it again, J-009; a started server clears it) },
+//              envFailed? and envFailedAt? (the env a start or restart
+//              couldn't run, and when: the reap doesn't try it again until
+//              settings.json is saved after that, J-009, J-011; a started
+//              server clears both) },
 //     queue: { requests: [{ terminal, taskKey, lane, members, skipped, requestedAt, requestTurn,
 //                           fgPid, state, slotOnly, grantedAt, pausedAt, pauseReason, pauseMsg,
 //                           resumingUntil, handledTurn, autoResumes, lastActivityAt, outputHash }],
@@ -436,6 +438,15 @@ export function createStore(opts = {}) {
     return repoEnabledFrom(repo, facts);
   }
 
+  // When the mod last saved settings.json (ms), or 0 when it never did.
+  function settingsSavedAt() {
+    try {
+      return fs.statSync(paths.settingsPath).mtimeMs;
+    } catch {
+      return 0;
+    }
+  }
+
   return {
     paths,
     repoLockDir,
@@ -444,6 +455,7 @@ export function createStore(opts = {}) {
     withRepoLock,
     reconcile,
     readSettings,
+    settingsSavedAt,
     isHarnessRoot,
     isRegistered,
     repoEnabled,

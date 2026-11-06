@@ -3,7 +3,10 @@
 //   envs      the env radio: Local / Dev / Prod, only those that start
 //             something (T5a's serverEnvsWithCommand over the saved and the
 //             detected commands); the effective one selected: the env picked
-//             here before (the record's envOverride), else the settings' env
+//             here before (the record's envOverride), else the settings' env;
+//             `running` on the env the server still runs when that differs
+//   envNote   the selected env couldn't start (the record's envFailed): what
+//             runs instead and how to try again; else null
 //   variants  the variant chips: the plan's candidates while it asks, else
 //             the repo's dev:<v> apps; the running one selected, the
 //             inferred one marked (its note, inferredVariantNote)
@@ -23,6 +26,8 @@ import { pickPort, portUrl } from "./ports.js";
 
 const ENV_LABELS = { local: "Local", dev: "Dev", prod: "Prod" };
 const FORCE_CODES = new Set(["root-diverged", "untracked-collision"]);
+// A server that's up (state.json's serverState).
+const RUNNING = new Set(["starting", "listening"]);
 
 const baseName = (p) => normRoot(p).split("/").filter(Boolean).pop() ?? p;
 
@@ -62,12 +67,21 @@ export function serverViewModel({ state, settings, repo, workspace, detection, b
 
   // J-002: what the server runs next, not only what it runs now (serverEnv).
   const selectedEnv = record?.envOverride ?? repoSet.env;
+  const up = RUNNING.has(record?.serverState) && record?.serverEnv && record.serverEnv !== selectedEnv;
+  const runningEnv = up ? record.serverEnv : null;
+  const envName = (env) => ENV_LABELS[env] ?? env;
+  let envNote = null;
+  if (record?.envFailed && record.envFailed === selectedEnv && record.serverEnv !== selectedEnv) {
+    const still = runningEnv ? `: el server sigue en ${envName(runningEnv)}` : "";
+    envNote = `${envName(selectedEnv)} no arrancó${still}. Reiniciar lo intenta otra vez.`;
+  }
   const envs = detection
     ? serverEnvsWithCommand({ settings: repoSet, detected }).map((env) => ({
         env,
         label: ENV_LABELS[env] ?? env,
         command: commandTemplate({ settings: repoSet, detected, env }),
         selected: env === selectedEnv,
+        running: env === runningEnv,
         argv: [bin, "env", "--workspace", target, "--env", env],
       }))
     : [];
@@ -115,6 +129,7 @@ export function serverViewModel({ state, settings, repo, workspace, detection, b
     needsVariant: asking,
     error,
     envs,
+    envNote,
     variants: chips,
     urls,
     actions,

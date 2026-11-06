@@ -1199,6 +1199,22 @@ test("J-009: env drift the reap can't resolve isn't retried: a foreign process i
   assert.equal(retried.code, 0, retried.stderr + retried.stdout);
   assert.match(retried.stdout, /^Nothing to sync: .* The server did not restart \(still-running\)\.$/m);
 
+  // J-011: back to Local, then Dev saved again: a save after the failure is a
+  // new ask, so the reap tries it once more (and only once).
+  assert.equal(interrupts(), 2, "the sync's own try");
+  w.settings({ repos: { [app.root]: { env: "local" } } });
+  assert.equal((await w.cli(["reap"])).code, 0);
+  await sleep(1500);
+  assert.equal(interrupts(), 2, "Local runs already: the reap left it");
+  const savedAt = Date.now();
+  w.settings({ repos: { [app.root]: { env: "dev" } } });
+  assert.equal((await w.cli(["reap"])).code, 0);
+  await w.until((s) => s.repos[app.root]?.envFailedAt >= savedAt, { what: "the reap's retry after the save" });
+  assert.equal(interrupts(), 3);
+  assert.equal((await w.cli(["reap"])).code, 0);
+  await sleep(1500);
+  assert.equal(interrupts(), 3, "no second retry without another save");
+
   // Ctrl-C works again: Reiniciar runs the env asked for, and the mark goes.
   w.hcUpdate((s) => {
     delete s.terminals[server].ignoresInterrupt;

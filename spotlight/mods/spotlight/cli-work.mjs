@@ -267,6 +267,7 @@ export async function ensureServer(cx, root, opts = {}) {
         serverState: "starting", pendingInstalls: [], variantCandidates: [],
       });
       delete rec.envFailed;
+      delete rec.envFailedAt;
       if (taskKey && plan.variant && (plan.source === "inferred" || plan.source === "chosen")) {
         rememberVariant(s, `${taskKey}::${normRoot(root)}`, plan.variant);
       }
@@ -278,7 +279,7 @@ export async function ensureServer(cx, root, opts = {}) {
     } else {
       // A server that ignored Ctrl-C keeps the state it had: it's still up.
       if (r.reason !== "still-running") rec.serverState = r.reason === "terminal-gone" ? "gone" : "stopped";
-      if (rec.serverEnv !== plan.env) rec.envFailed = plan.env;
+      if (rec.serverEnv !== plan.env) Object.assign(rec, { envFailed: plan.env, envFailedAt: now });
       addNote(s, { repo: root, text: `${cx.nameOf(root)}: ${serverFailure(r)}`, toast: true }, now);
     }
   });
@@ -584,6 +585,8 @@ export async function reap(cx, { full = true, skip = null } = {}) {
 
   const servers = [];
   const envSyncs = [];
+  // J-011: a settings save after a failed env is a new ask for it.
+  const savedAt = full ? cx.store.settingsSavedAt() : 0;
   for (const [root, rec] of full ? Object.entries(state.repos) : []) {
     if (rec.logPath) rotateLog(rec.logPath);
     if (!rec.serverTerminal || rec.serverState === "needs-variant") continue;
@@ -596,10 +599,11 @@ export async function reap(cx, { full = true, skip = null } = {}) {
     // a detached sync (D18: a restart outlasts the reap's second). Only
     // Spotlight's own server, never a foreign process holding a port. A root
     // with an error waits for it to clear: its sync would fail first. An env
-    // that couldn't run isn't tried again from here (J-009): `on`, a sync or
-    // Reiniciar do.
+    // that couldn't run isn't tried again from here (J-009) until settings
+    // are saved after that (J-011); `on`, a sync or Reiniciar always do.
+    const gaveUp = rec.envFailed === effectiveEnv(cx, root, rec) && !(savedAt > (rec.envFailedAt ?? 0));
     if (
-      live.owner === "spotlight" && !rec.lastError && rec.envFailed !== effectiveEnv(cx, root, rec) &&
+      live.owner === "spotlight" && !rec.lastError && !gaveUp &&
       (await envDrift(cx, root, { ...rec, serverState: live.state }))
     ) envSyncs.push(root);
   }

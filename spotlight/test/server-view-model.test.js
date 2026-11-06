@@ -78,6 +78,28 @@ test("envs: the effective env is selected (the popup's override, else the settin
   assert.deepEqual(override.envs.map((e) => [e.env, e.selected]), [["local", true], ["dev", false]]);
 });
 
+test("envs: an env that didn't start says so, and the env still running is marked (the selection stays what was asked)", () => {
+  const settings = settingsOf({ version: 1, repos: { [ROOT]: { env: "dev" } } });
+  const failed = model({ settings, state: stateWith(repo({ envFailed: "dev", envFailedAt: 5 })) });
+  assert.deepEqual(failed.envs.map((e) => [e.env, e.selected, e.running]), [["local", false, true], ["dev", true, false]]);
+  assert.equal(failed.envNote, "Dev no arrancó: el server sigue en Local. Reiniciar lo intenta otra vez.");
+
+  // Asked but not tried yet (the next reap restarts it): marked, no note.
+  const pending = model({ settings });
+  assert.deepEqual(pending.envs.map((e) => e.running), [true, false]);
+  assert.equal(pending.envNote, null);
+
+  // What runs is what's asked: nothing to mark. A stale mark for another env says nothing.
+  const same = model({ state: stateWith(repo({ envFailed: "dev" })) });
+  assert.deepEqual(same.envs.map((e) => e.running), [false, false]);
+  assert.equal(same.envNote, null);
+
+  // Nothing running: no env is marked; a failed start still says so.
+  const down = model({ settings, state: stateWith(repo({ serverState: "stopped", serverEnv: null, envFailed: "dev" })) });
+  assert.deepEqual(down.envs.map((e) => e.running), [false, false]);
+  assert.equal(down.envNote, "Dev no arrancó. Reiniciar lo intenta otra vez.");
+});
+
 test("variant chips: the candidates, the running one selected, the inferred one marked", () => {
   const plain = model();
   assert.deepEqual(plain.variants.map((v) => [v.variant, v.label, v.selected, v.inferred]), [

@@ -143,7 +143,8 @@ export default class ServerView {
       })
       .child(div().flex_none().text_color(e.selected ? t.accent : t.dim).child(e.selected ? "●" : "○"))
       .child(div().flex_none().w(40).child(e.label))
-      .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.dim).child(e.command ?? ""));
+      .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.dim).child(e.command ?? ""))
+      .when(e.running, (el) => el.child(div().flex_none().text_size(10).text_color(t.dim).child("corriendo")));
 
     const chip = (v) => h_flex()
       .id(`sv-variant-${v.variant}`)
@@ -194,6 +195,7 @@ export default class ServerView {
         .child(div().text_size(11).text_color(t.dim).truncate().child(m.error?.message ?? ""))))
       .when(this.detection === null, (el) => el.child(div().text_size(11).text_color(t.dim).child("Leyendo package.json…")))
       .when(m.envs.length > 0, (el) => el.child(label("Entorno")).children(m.envs.map(envRow)))
+      .when(Boolean(m.envNote), (el) => el.child(div().text_size(11).text_color(t.blocked).child(m.envNote)))
       .when(m.variants.length > 0, (el) => el
         .child(label(m.needsVariant ? "Elige una variante" : "Variante"))
         .child(h_flex().flex_wrap().gap(6).children(m.variants.map(chip))))
