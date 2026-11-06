@@ -6,7 +6,7 @@ and when each one resets. A popover and a panel show every account. Manage
 Accounts signs accounts in, adds and removes them, and picks which one new
 Claude terminals start on. When you switch accounts while Claude is running
 in terminals, those conversations can restart on the new account. A details
-window shows usage by model, project and account over 7, 30 or 90 days.
+window shows usage by model, project and account over 7, 30 or 90 days or all time.
 
 All the logic is a command-line program, `claude-accounts`, that ships inside
 the mod. The mod only draws and runs it. Other plugins (Spotlight first) read
@@ -57,8 +57,11 @@ the same files and run the same commands: see [CONTRACT.md](CONTRACT.md).
   usage by model, by project and by account; cache read, cache write and
   reuse rate, as Orca computes it (labelled "since <date>" when the range
   starts before the cache figures do, with a note of the share of tokens they
-  cover when some sessions are gone from disk); recent sessions; a daily chart; and how often and how fast
-  each account hits its 5-hour and weekly limits.
+  cover when some sessions are gone from disk); recent sessions; a daily
+  chart; and how often and how fast each account hits its 5-hour and weekly
+  limits. Opening it, picking a range or Refresh reads that range again; the
+  last result stays, with "Updated Xm ago", until the new one lands. Orca's
+  "Orca worktrees only" scope and share card aren't ported.
 
 **How it behaves**
 
@@ -113,6 +116,14 @@ the same files and run the same commands: see [CONTRACT.md](CONTRACT.md).
     resumed agent never gets its first task again.
   - A terminal whose program is Claude itself (no shell to come back to)
     can't move, and says so.
+  - A terminal whose Claude has nothing to resume yet (no message since it
+    started or since `/clear`) isn't restarted. It counts as one Claude
+    couldn't move, as in Orca.
+  - If Claude refuses the resume line (say, the conversation isn't there),
+    the restart fails within seconds with Claude's own message and the line
+    to run by hand, instead of waiting out the 2-minute limit.
+  - A later switch moves restarts still waiting for idle to the account
+    selected then, and drops the ones whose terminal is already on it.
 
 **Install**
 
@@ -141,7 +152,8 @@ scripts/install.sh claude-accounts
     `confirm` = `confirm.js`, `details` = `details.js` (a window).
   - Pure modules, tested with `node --test`: `store.js` (reading the CLI's
     files), `format.js` (percent, durations, dates, colors, error copy,
-    density, "since <date>" and the cache-coverage note) and `toasts.js`.
+    density, "since <date>" and the cache-coverage note), `details-model.js`
+    (what the details window draws) and `toasts.js`.
 - **CLI `mods/claude-accounts/bin/claude-accounts`** (Node, `cli/*.mjs`).
   Every command takes `--json`:
 
@@ -155,9 +167,10 @@ scripts/install.sh claude-accounts
   | `settings [set switchMode ask\|restart\|keep]` | reads or sets the switch setting |
   | `usage [--refresh] [--account <id>]` | the usage, fetched when due |
   | `terminal <t>` | a Herdr terminal's account, session and status |
-  | `restart --cancel <t>` | drops a terminal's queued restart |
+  | `restart --cancel <t>` | cancels a terminal's restart or job that hasn't stopped Claude yet |
+  | `restart --answer keep\|restart [--terminal <t>]...` | the switch dialog's answer: keep, or restart the ticked sessions |
   | `resume --terminal <t> --account <id\|default> [--message <text>] [--wait <s>]` | restarts one terminal on an account and sends a message; `--status <job>`, `--cancel <job>` |
-  | `details --range <7\|30\|90\|all>` | refreshes the details window's data |
+  | `details --range <7\|30\|90\|all>` | refreshes one range of the details window in the background: it returns at once, and a run already going is returned, not started twice |
   | `--version` | its version |
 
   Exit codes: 0 ok, 1 any other failure (a state file that can't be read,
@@ -196,9 +209,9 @@ overwritten.
 | `accounts.v1.json` | what other plugins read: every account with its usage ([CONTRACT.md](CONTRACT.md)) |
 | `usage-state.json` | when each account was fetched, its last data, and its failures |
 | `restart.json` | the queued restarts and `resume` jobs, with their progress |
-| `pending-switch.json` | a switch waiting in the switch dialog |
+| `pending-switch.json` | what the last switch found: the sessions on the previous account and the others (`mode` ask: the switch dialog's question; `mode` restart: the restart notice and its Review list) |
 | `live/` | the statusline's latest limits, one file per account |
-| `details.json` | the details window's last results per range |
+| `details.json` | the details window's last result per range, kept while a new run goes and after one fails |
 | `login-link` | a captured sign-in link |
 | `lock/` | the lock |
 

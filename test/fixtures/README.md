@@ -17,7 +17,7 @@ which is signed in as the same email as a saved account.
 | `settings.json` | `{switchMode}`: `ask`, `restart` or `keep` |
 | `accounts.v1.json` | the published state other plugins read (`claude-accounts/CONTRACT.md`) |
 | `restart.json` | switch items and `resume` jobs, one per state worth reading: queued, waitingIdle (claimed), done, failed, timeout, cancelled |
-| `pending-switch.json` | an Ask waiting for the confirm view: two sessions `onAccount`, one `elsewhere`, one `cantMove` |
+| `pending-switch.json` | an Ask (`mode: "ask"`) waiting for the confirm view: two sessions `onAccount`, one `elsewhere`, one `cantMove` |
 | `details.json` | the details cache: range 7 done, 30 running, 90 failed, `all` never run |
 | `login-link` | a captured sign-in URL, no newline |
 | `live/5ba6c07f.json` | a statusline drop for `ana@example.com` (the file name is sha256 of its config dir, first 8 hex) |

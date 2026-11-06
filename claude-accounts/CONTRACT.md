@@ -120,7 +120,7 @@ The account a Herdr terminal (`t12`, as `hc ls` names it) is running Claude
 on:
 
 ```text
-{"account": "<id>" | "default" | null, "sessionId": "<Claude session id>", "status": "busy" | "idle"}
+{"account": "<id>" | "default" | null, "sessionId": "<Claude session id>", "status": "busy" | "idle", "resumable": true | false}
 ```
 
 It's read live from Claude's own session file (`<configDir>/sessions/<pid>.json`
@@ -128,7 +128,14 @@ of the terminal's foreground Claude), never cached, so it holds after a
 `/clear`, a restart or a typed `CLAUDE_CONFIG_DIR`. `account` is null when
 that session lives in a config folder no account has. A terminal that is
 missing or isn't running Claude exits 3; one whose Claude has no session file
-yet exits 2.
+yet exits 2. When hc itself fails, it exits 1. `status` is `idle` when
+Claude's session file says idle, and `busy` otherwise.
+
+`resumable` is true when the session's transcript exists
+(`<configDir>/projects/*/<sessionId>.jsonl`, links followed), so `claude
+--resume` can continue it. A Claude that hasn't saved a message yet (just
+started, or right after `/clear`) is `resumable: false`; the exit is 0
+either way.
 
 To tell "limit" from "error" for a terminal, look its account up in the file:
 
@@ -159,7 +166,10 @@ conversation (`claude --resume <session>`), then sends `--message` as if you
 typed it. It never changes the active account.
 
 - It checks what needs no waiting and fails at once with 2, 3, 5, 7, 8 or
-  64.
+  64, and 1 when hc can't read the terminal. It exits 2 when the
+  terminal's conversation has no transcript yet ("there's no conversation
+  to resume yet in terminal <t>: …"), unless the terminal already runs on
+  `--account`, where only `--message` is sent.
 - Otherwise it queues a job, starts a detached process for it, and exits 0
   in under a second with `{"job": "<id>"}`.
 - The job waits for that Claude to be idle (however long it takes), stops
@@ -192,6 +202,20 @@ typed it. It never changes the active account.
 | `failed` | yes | 9 | It couldn't go on. `detail` says why, with the `claude --resume <session>` command to run by hand. |
 | `cancelled` | yes | 10 | Cancelled before Claude was stopped. |
 
+- A `failed` or `timeout` job's `detail` reads `<why>: <line>`, where
+  `<line>` is what to type in that terminal to finish by hand:
+  `CLAUDE_ACCOUNTS_DIR=<folder> claude <flags> --resume <session>`.
+- `failed` (9) also covers two more cases:
+  - right before Claude is stopped, the session has no transcript any more.
+    Claude is not stopped, and `detail` is "there's no conversation to resume
+    yet in terminal <t>: Claude hasn't saved session <id> (it has no
+    messages)", with no line after it;
+  - Claude refuses the resume line: the shell is back for 5 seconds with no
+    new Claude. `detail` is the last line Claude printed (e.g. "No
+    conversation found with session ID: <id>"), or "no new Claude came up
+    after the resume line", followed by `: <line to run by hand>`.
+- `--status` exits with the job's code once the job is final (0, 4, 6, 9 or
+  10), and 0 while it runs. `--wait <s>` works here too.
 - An unknown job exits 7.
 - Jobs outlive a Herdr restart: they live in the plugin's state folder and
   their process runs outside Herdr.
@@ -202,7 +226,10 @@ typed it. It never changes the active account.
 
 ### `resume --cancel <job>`
 
-Cancels a job that hasn't stopped Claude yet; it ends as `cancelled`.
+Cancels a job that hasn't stopped Claude yet; it ends as `cancelled`. Exits
+0 when the job ends up cancelled (cancelling twice is fine), 1 when it can't
+be cancelled any more (Claude was already stopped, or the job already
+ended), and 7 for an unknown job. With `--json` it prints the job's status.
 
 ### Exit codes
 
@@ -210,7 +237,7 @@ Cancels a job that hasn't stopped Claude yet; it ends as `cancelled`.
 |---|---|
 | 0 | OK, job accepted, or job done |
 | 1 | Any other failure (a state file that can't be read, a failed sign-in); stderr says which |
-| 2 | No session id |
+| 2 | No session id for the terminal, or nothing to resume yet: the conversation has no transcript (Claude hasn't saved a message) |
 | 3 | Terminal missing or not running Claude |
 | 4 | Timeout |
 | 5 | The account needs sign-in |
