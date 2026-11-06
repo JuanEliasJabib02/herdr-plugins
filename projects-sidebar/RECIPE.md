@@ -13,7 +13,8 @@ across repos.
 **What you see**
 
 - **Sidebar column** (layout `projects`, a clone of Herdr's `main`): the
-  brand block, then the projects tree where Spaces was, Herdr's agents list,
+  brand block, then the projects tree where Spaces was, the agents list
+  (Herdr's, with the tree's working mark),
   the groups bar (44 px), then the footer. Background `chrome`, text 13 px
   in the person's UI font.
 - **Projects tree:**
@@ -180,7 +181,8 @@ across repos.
   place, in Claude's orange (`working`; Herdr's `spin()` turns at about 30 fps, which stutters),
   "!" (`blocked`), or a dot (`done`).
   Idle and unknown show the home or branch icon. A project row that is
-  collapsed shows the most urgent status among its workspaces.
+  collapsed shows the most urgent status among its workspaces. The agents
+  list's working agents show the same glyphs in the same orange.
 - **Click a workspace:** selects its space (when two spaces share it, the
   shown one, else the first). If it has none, opens a space there named
   after its label. Click an agent row: focuses that agent's pane. Click a
@@ -284,7 +286,12 @@ across repos.
      (`…/app/feat-login` → `…/app/signup`). A new listing decides; if git
      kept the folder, a toast says why. Otherwise the folder stays, and the
      row shows the new branch anyway.
-  6. The fresh list is stored, so the row changes at once.
+  6. Once the branch is renamed here, the workspace's spaces still named
+     after the old branch (its last segment, the name a click gave them)
+     take the new one with `space.rename`, so the agents list, which shows
+     space names, says what the tree says. A space you named otherwise
+     keeps its name, and so does one nobody named.
+  7. The fresh list is stored, so the row changes at once.
   - While it runs, Esc, Cancel and clicks do nothing. It runs in a task no
     view owns, so it finishes even if the dialog closes; the outcome is then
     a toast.
@@ -329,8 +336,15 @@ across repos.
   is a row: `workspace-status` (weight 1), then `{ "mod": "spotlight",
   "props": { "view": "footer" } }` (px 40, the spotlight plugin's test-queue
   flask), then `{ "mod": "claude-accounts", "props": { "view": "footer" } }`
-  (weight 1), Claude's usage at its right as in Orca. Preview
-  `layouts/projects.svg`.
+  (weight 1), Claude's usage at its right as in Orca. Block `agents` →
+  `{ "mod": "projects-agents" }`. Preview `layouts/projects.svg`.
+- **Mod `mods/projects-agents/`:** a copy of Herdr 0.1.13's shipped
+  `agents` mod, made the way `mod.clone` makes one (`mod.json` records
+  `cloned_from: { name: "agents", version: "0.1.13" }`, and the sort menu
+  opens `projects-agents`'s own overlay). The only change: a working agent's
+  mark is the projects tree's glyphs in Claude's orange instead of Herdr's
+  spinner. Herdr never updates this copy, so a newer Herdr's changes to its
+  agents list don't reach it. Herdr's Apache 2.0 license is in the folder.
 - **Mod `mods/projects/`** (`mod.json` `{ "place": "none" }`), one mod in
   views picked by `props.view`:
   - none = `tree.js` (the tree; the only copy that reads key commands);

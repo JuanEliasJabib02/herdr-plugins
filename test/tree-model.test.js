@@ -11,7 +11,7 @@ import {
   buildTree, openAction, openMainAction, railAction, workspaceLabel, workspaceMenuItems, initials, mostUrgent,
   agentTitle, ago, isNarrow, projectMenuItems, withoutProject, pruneCache, projectPaths,
   watchDirs, eachLimit, liveFolder, addProjectAt, deletePrompt, deleteOutcome, terminalsStaying,
-  renamePrompt, renameOutcome, reorderProject,
+  renamePrompt, renameOutcome, reorderProject, spaceRenames,
 } from "../projects-sidebar/mods/projects/tree-model.js";
 
 const HOME = "/Users/demo";
@@ -705,3 +705,41 @@ test("reorder: the drag is wired into the tree (D33)", async () => {
   assert.match(tree, /reorderProject\(/);
 });
 
+// S39: after a rename, the spaces named after the old branch take the new name.
+test("spaceRenames: a space the mod named after the old branch takes the new name (S39)", () => {
+  const at = "/w/app/resume-previous";
+  const matches = { s1: { project: "/r/app", path: at } };
+  const spaces = [{ id: "s1", name: "resume-previous", named: true }];
+  assert.deepEqual(
+    spaceRenames({ path: at, before: "resume-previous", after: "agent-doc-open-endpoint", spaces, matches }),
+    [{ id: "s1", name: "agent-doc-open-endpoint" }],
+  );
+  assert.deepEqual(
+    spaceRenames({ path: at, before: "juan/feat-a", after: "juan/feat-b", spaces: [{ id: "s1", name: "feat-a", named: true }], matches }),
+    [{ id: "s1", name: "feat-b" }],
+    "a namespaced branch: the label is its last segment, as openAction named it",
+  );
+});
+
+test("spaceRenames: a space someone named otherwise, an unnamed one, and another workspace's keep their names (S39)", () => {
+  const at = "/w/app/old";
+  const matches = { mine: { path: at }, unnamed: { path: at }, other: { path: "/w/app/else" }, s1: { path: at } };
+  const spaces = [
+    { id: "mine", name: "my notes", named: true },
+    { id: "unnamed", name: "old", named: false },
+    { id: "other", name: "old", named: true },
+    { id: "loose", name: "old", named: true },
+    { id: "s1", name: "old", named: true },
+  ];
+  assert.deepEqual(spaceRenames({ path: at, before: "old", after: "new", spaces, matches }), [{ id: "s1", name: "new" }]);
+});
+
+test("spaceRenames: nothing to rename when the label stays or an input is missing (S39)", () => {
+  const at = "/w/app/feat";
+  const matches = { s1: { path: at } };
+  const spaces = [{ id: "s1", name: "feat", named: true }];
+  assert.deepEqual(spaceRenames({ path: at, before: "user/feat", after: "other/feat", spaces, matches }), [], "same last segment");
+  assert.deepEqual(spaceRenames({ path: at, before: null, after: "x", spaces, matches }), []);
+  assert.deepEqual(spaceRenames({ path: at, before: "feat", after: "x", spaces: null, matches }), []);
+  assert.deepEqual(spaceRenames({ path: at, before: "feat", after: "x", spaces, matches: null }), []);
+});
