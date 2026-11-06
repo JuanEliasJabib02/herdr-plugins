@@ -3,8 +3,8 @@
 // workspaces and agents) from the registry, the worktree cache and Herdr's
 // live spaces; what a click opens (D8); Add project (D10) with the herdr side
 // passed in; the project and workspace menus' items; what the Delete and
-// Rename dialogs say and what their outcomes do (D22, D25); the narrow rail;
-// and the helpers of the worktree engine (D6). tree.js, the menus,
+// Rename dialogs say and what their outcomes do (D22, D25, D28); the narrow
+// rail; and the helpers of the worktree engine (D6). tree.js, the menus,
 // delete-workspace.js and rename-workspace.js draw and act on it.
 
 import { normPath, baseName, placeOf, activeGroup, findProject, addProject, matchSpaces } from "./lib.js";
@@ -346,6 +346,20 @@ const STUCK = ["missing", "main", "detached"];
 // Refusals the live line already says ("Type a new name for the branch.").
 const UNNAMED = ["empty", "unchanged"];
 
+// renameCheck refusals of what origin has, whatever name is typed (D28):
+// shown until a check says otherwise, with the input still there.
+const ORIGIN_STUCK = ["unreachable", "pushed-elsewhere", "no-push"];
+
+// What Rename does on origin, said before Rename (D28): GitHub renames it
+// too, a copy is pushed, or origin no longer has it. "" for a branch no
+// remote has. `name`: the new name, null while none is typed.
+function originLine(origin, old, name) {
+  if (!origin?.published) return "";
+  if (origin.route === "github") return `Renames it on GitHub too (${origin.repo.owner}/${origin.repo.repo}).`;
+  if (origin.route === "copy") return `Pushes a copy ${name ? `as ${name}` : "under the new name"}; origin keeps ${old}.`;
+  return origin.gone ? `origin no longer has ${old}: renames it here only.` : "";
+}
+
 // Why the folder can't move, or "" when it can (D25, D26 step 3). git's own
 // reasons first, since closing a terminal wouldn't move a locked folder.
 // null while git hasn't answered.
@@ -363,17 +377,23 @@ function folderStays(check, spaces, terminals) {
 //     cache), null when unknown; text: the name input as typed;
 //   check: removalCheck's answer on open (null while asking): whether git
 //     lets the folder move (locked, submodules);
-//   live: the last renameCheck answer, { status, reason, err, text }, text
-//     being what it checked; null before the first;
+//   live: the last renameCheck answer, { status, reason, err, origin,
+//     folderTaken, newPath, text }, text being what it checked; null before
+//     the first. It is asked with moveFolder false, so a taken folder comes
+//     back as folderTaken and refuses here only when the folder would move;
 //   spaces: how many spaces show the workspace; terminals: terminal panes in
 //     its folder. Either keeps the folder where it is.
-// Resolves { label, title, path, branch, name, line, moveFolder, reason,
-// checking, ready, button, editable }: branch: the branch now (the input's
-// prefill); name: what the text becomes (renameTarget); line: the live line,
-// "branch <old> → <new> · folder <new>" or "· folder stays <old> (<why>)";
-// moveFolder: what renameWorkspace gets; reason: a refusal, of the workspace
-// (detached, the main checkout: no input, no Rename) or of the typed name
-// (pushed, taken), shown before Enter; ready: Enter may rename.
+// Resolves { label, title, path, branch, name, line, remote, warnings,
+// moveFolder, reason, checking, ready, button, editable }: branch: the
+// branch now (the input's prefill); name: what the text becomes
+// (renameTarget); line: the live line, "branch <old> → <new> · folder <new>"
+// or "· folder stays <old> (<why>)"; remote: what Rename does on origin
+// (D28), "" when nothing; warnings: the PRs GitHub closes; moveFolder: what
+// renameWorkspace gets; reason: a refusal, of the workspace (detached, the
+// main checkout: no input, no Rename; origin unreachable, pushed elsewhere,
+// no push access) or of the typed name (on origin, taken), shown before
+// Enter; ready: Enter may rename; button: "Rename", "Rename anyway" (a PR
+// closes) or null.
 export function renamePrompt({ path, row, text, check, live, spaces, terminals, home }) {
   const at = normPath(path);
   const label = row ? workspaceLabel({ ...row, path: normPath(row.path) || at }) : baseName(at);
@@ -381,9 +401,18 @@ export function renamePrompt({ path, row, text, check, live, spaces, terminals, 
   const folder = baseName(at);
   const target = renameTarget(text, old);
   const stuck = live?.status === "refused" && STUCK.includes(live.reason);
-  const refusal = !stuck && live?.status === "refused" && live.text === text && !UNNAMED.includes(live.reason) ? live.err : "";
   const why = folderStays(check, spaces, terminals);
   const moveFolder = why === "";
+  const current = Boolean(live) && live.text === text;
+  const originStuck = !stuck && live?.status === "refused" && ORIGIN_STUCK.includes(live.reason);
+  let refusal = "";
+  if (originStuck) refusal = live.err;
+  else if (current && live.status === "refused" && live.reason === "folder-exists") refusal = moveFolder ? live.err : "";
+  else if (current && live.status === "refused" && !STUCK.includes(live.reason) && !UNNAMED.includes(live.reason)) refusal = live.err;
+  else if (current && live.status === "ok" && live.folderTaken && moveFolder) refusal = `${live.newPath} already exists.`;
+  const origin = stuck || originStuck ? null : live?.origin ?? null;
+  const named = Boolean(target.name) && !target.unchanged;
+  const warnings = origin?.route === "github" ? origin.prs.map((pr) => `GitHub closes PR #${pr.number} when its branch is renamed.`) : [];
   let line = "";
   if (!stuck && (!target.name || target.unchanged)) line = "Type a new name for the branch.";
   else if (!stuck && old) {
@@ -403,13 +432,15 @@ export function renamePrompt({ path, row, text, check, live, spaces, terminals, 
     branch: old,
     name: target.name,
     line,
+    remote: old ? originLine(origin, old, named ? target.name : null) : "",
+    warnings,
     moveFolder,
     // With no branch known (the tree hasn't listed it) and git unable to
     // list, the check's own reason says why Rename stays off.
     reason: stuck ? live.err : refusal || (!old && check?.failed ? check.reason : ""),
     checking: !check,
     ready: Boolean(check) && !stuck && !refusal && Boolean(old) && Boolean(target.name) && !target.unchanged,
-    button: stuck ? null : "Rename",
+    button: stuck ? null : warnings.length ? "Rename anyway" : "Rename",
     editable: !stuck,
   };
 }
@@ -420,22 +451,32 @@ export function renamePrompt({ path, row, text, check, live, spaces, terminals, 
 //   dialog is still there.
 // A rename closes the dialog (the row has its new name); it posts a toast
 // while open only when something went other than asked (git kept the folder,
-// the old upstream stayed). A refusal stays in the dialog as `live`, the
-// refusal the dialog shows (said once); a failure as `error`. Once the
-// dialog closed (Esc during the rename), every outcome is a toast.
+// the old upstream stayed, GitHub is still finishing). A remote rename or
+// copy whose local `branch -m` then failed (D28: branch is still the old
+// one) closes it too, with a toast that says how to finish: a second Rename
+// would find origin already has the name. "changed" (D28: what origin has
+// moved since the dialog checked) stays in it, with the fresh check as
+// `live`. A refusal stays in the dialog as `live`, the refusal the dialog
+// shows (said once); a failure as `error`. Once the dialog closed (Esc
+// during the rename), every outcome is a toast.
 export function renameOutcome(r, { label, path, open }) {
+  if (r?.status === "renamed" && r.name && r.branch !== r.name) {
+    return { close: open, toast: { title: `Didn't rename ${label} here`, body: r.err, level: "warning" }, error: "", live: null };
+  }
   if (r?.status === "renamed") {
     const folder = baseName(normPath(path));
+    const there = r.remote === "renamed" ? "Renamed on GitHub too." : r.remote === "copied" ? `origin has a copy as ${r.branch}.` : "";
     const where = r.folder === "moved"
       ? `Its folder is now ${baseName(folderFor(path, r.branch))}.`
       : r.folder === "kept" ? `Its folder stays ${folder}:` : `Its folder stays ${folder}.`;
-    const body = [where, r.err].filter(Boolean).join(" ");
+    const body = [there, where, r.err].filter(Boolean).join(" ");
     const warn = r.folder === "kept" || Boolean(r.err);
     const toast = { title: `Renamed ${label} to ${r.branch}`, body, level: warn ? "warning" : "success" };
     return { close: open, toast: open && !warn ? null : toast, error: "", live: null };
   }
   const err = r?.err || "git couldn't rename it.";
   if (!open) return { close: false, toast: { title: `Didn't rename ${label}`, body: err, level: r?.status === "failed" ? "error" : "warning" }, error: "", live: null };
+  if (r?.status === "changed") return { close: false, toast: null, error: err, live: r.check ?? null };
   // An empty or unchanged name the live line would hide (the branch changed
   // outside meanwhile) is said as an error instead.
   if (r?.status === "refused" && !UNNAMED.includes(r.reason)) return { close: false, toast: null, error: "", live: { status: "refused", reason: r.reason, err } };

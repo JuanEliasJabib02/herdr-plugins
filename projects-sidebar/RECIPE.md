@@ -75,9 +75,19 @@ across repos.
     - under it, a live line: "branch <old> → <new> · folder <new>", or
       "· folder stays <old> (a terminal is open there)", "(locked by git)"
       or "(has submodules)";
-    - a refusal in `blocked` once git has checked the typed name: "Already
-      pushed as origin/<b>: renaming would split it from GitHub.", "Branch
-      <new> already exists." or "<path> already exists.";
+    - for a pushed branch, from the moment it opens, what Rename does on
+      origin: "Renames it on GitHub too (<owner>/<repo>).", "Pushes a copy
+      as <new>; origin keeps <old>." or "origin no longer has <old>: renames
+      it here only.";
+    - an open pull request from the branch, in `blocked`: "GitHub closes PR
+      #<n> when its branch is renamed.", and the button reads "Rename
+      anyway";
+    - a refusal in `blocked` once git has checked the typed name: "origin
+      already has <new>.", "Branch <new> already exists." or "<path> already
+      exists." (only when the folder would move); and, whatever the name:
+      "Couldn't reach origin: <git's first line>.", "Also pushed as
+      <remote>/<old>: renaming would split it." or "You can't push to
+      <owner>/<repo>.";
     - a detached worktree has no input and no Rename: "<label> is detached
       or in the middle of a rebase.";
     - footer: Cancel, and Rename (solid), off until git has answered
@@ -145,25 +155,54 @@ across repos.
   keeps its namespace. On open the dialog asks git whether the folder can
   move (a fresh `worktree list`: the lock, and submodule checkouts as Delete
   counts them), and it checks the typed name a moment after typing stops.
+  - **A pushed branch** (a copy on a remote, or an upstream of its own
+    name) is decided by what origin has, read once with `git ls-remote
+    origin refs/heads/<old> refs/heads/<new>` (exact names, so
+    `someone/<new>` doesn't count):
+    - origin has `<new>` → refused;
+    - another remote has `<old>` too → refused, since renaming would split
+      it;
+    - origin no longer has `<old>` (a merged PR's deleted branch) → renamed
+      here only, and its upstream is unset;
+    - origin has `<old>` and is GitHub (`git remote get-url origin`, with
+      `ssh -G` for an ssh alias) and `gh api repos/<o>/<r>` says you can
+      push → the GitHub path, with the open PRs from `<old>` listed;
+    - no `gh`, not logged in, an origin that isn't GitHub, or a PR list
+      that fails → the copy path; `gh` saying you can't push → refused;
+    - origin unreachable → refused.
+
+    A branch that was never pushed (one that only tracks `origin/main`
+    included) needs no network.
+
   Enter then runs, in this order:
   1. It checks again, on a fresh list: a worktree of the project, on a
-     branch; the branch not pushed (no `<remote>/<b>` on any remote, no
-     upstream of its own name); the new branch and the new folder free.
-     Otherwise nothing runs, and the dialog says why.
-  2. `git branch -m <old> <new>` in the main checkout. An upstream with
-     another name (the `origin/main` a new workspace starts from) is unset,
-     so a push never lands there.
-  3. The folder moves only when no space and no terminal is in it:
+     branch; the new branch free here and on origin; the new folder free
+     when the folder would move. If what origin has, or its open PRs,
+     changed since the dialog showed them, nothing runs and the dialog
+     shows the new state. Otherwise nothing runs, and the dialog says why.
+  2. On origin first, for a pushed branch: on GitHub, `gh api -X POST
+     repos/<o>/<r>/branches/<old>/rename`; on the copy path, `git fetch` of
+     origin's `<old>`, then `git push` of that same commit as `<new>`
+     (nothing unpushed goes up; your hooks run). Origin's state then
+     decides, looked at again for a few seconds while GitHub finishes. If
+     origin doesn't show `<new>`, nothing changes here.
+  3. `git branch -m <old> <new>` in the main checkout. If that fails after
+     origin is done, a toast says how to finish it by hand.
+  4. The upstream: `origin/<new>` after a remote step (written as config,
+     then that one branch is fetched); otherwise an upstream with another
+     name (the `origin/main` a new workspace starts from) is unset, so a
+     push never lands there.
+  5. The folder moves only when no space and no terminal is in it:
      `git worktree move` to a sibling named after the branch's last segment
      (`…/app/feat-login` → `…/app/signup`). A new listing decides; if git
      kept the folder, a toast says why. Otherwise the folder stays, and the
      row shows the new branch anyway.
-  4. The fresh list is stored, so the row changes at once.
+  6. The fresh list is stored, so the row changes at once.
   - While it runs, Esc, Cancel and clicks do nothing. It runs in a task no
     view owns, so it finishes even if the dialog closes; the outcome is then
     a toast.
   - Like Delete, every outcome is read from git's state (the refs, the
-    list), never from its words.
+    list, what origin lists), never from its words.
 - **Groups:** F1/F2/F3 (in this layout only) select groups 1–3, and a
   missing group does nothing. "+" opens the form: Enter creates and selects
   the group, Esc cancels. Right-click a chip: Rename…, or Delete group, which
@@ -229,7 +268,15 @@ across repos.
     (network) and `worktree add`. Delete adds `status --porcelain`,
     `rev-parse --git-path modules`, `ls-files --stage -z`, `worktree remove`
     and `branch -d`. Rename adds `config --get` (the branch's upstream),
-    `branch -m`, `branch --unset-upstream` and `worktree move`.
+    `branch -m`, `branch --unset-upstream` and `worktree move`; for a
+    pushed branch, `ls-remote origin` (network), `remote get-url origin`,
+    `fetch origin` of one branch, `push origin` (the copy), `config
+    --replace-all` (the upstream) and `update-ref -d` (the local
+    `origin/<old>` GitHub renamed away).
+  - `gh api` (Rename of a pushed branch on GitHub): `repos/<o>/<r>` (can
+    you push), `repos/<o>/<r>/pulls` (open PRs from the branch) and
+    `branches/<old>/rename`, run in the repo with your gh account.
+  - `ssh -G <host>`, to read which host an ssh alias of origin's URL is.
   - `test -e`, to check whether a folder exists.
 - **Art:** its own Lucide-style icons in `icons/` (folder, branch, home,
   plus, code, copy), plus chevrons, check, x, square-pen and spinner from
@@ -238,9 +285,10 @@ across repos.
 **Watch out**
 
 - **This mod runs git and reaches the network:** `git fetch origin` in
-  every repo you create in. It reads repo folders outside its own and writes
-  worktrees under `~/orca/workspaces`. Change `WORKTREE_ROOT` in `config.js`
-  to put them elsewhere.
+  every repo you create in, and `ls-remote`, `fetch`, `push` and `gh` when
+  you rename a pushed branch. It reads repo folders outside its own and
+  writes worktrees under `~/orca/workspaces`. Change `WORKTREE_ROOT` in
+  `config.js` to put them elsewhere.
 - **Install by copying.** Herdr doesn't load a mod folder that is a
   symlink ("no mod folder …"). `scripts/install.sh` copies the files and
   lists them in `<home>/.herdr-plugins/projects-sidebar.txt`.
@@ -262,13 +310,19 @@ across repos.
 - **`branch -d` keeps squash-merged branches.** A branch merged on GitHub by
   squash or rebase isn't merged for git, so it stays ("Kept branch <b>").
   Delete it yourself with `git branch -D` once you're sure.
-- **Rename never touches a pushed branch.** A branch with a copy on a remote,
-  or an upstream of its own name, is refused ("Already pushed as
-  origin/<b>: renaming would split it from GitHub."): the remote would keep
-  the old name.
+- **Rename can change GitHub:** it runs `gh` with your account, and GitHub
+  closes a PR opened from the renamed branch. Without `gh` it pushes a copy;
+  it never deletes the old branch.
+- **A branch on two remotes isn't renamed** ("Also pushed as
+  <remote>/<old>: renaming would split it."), and neither is one whose new
+  name origin already has.
+- **GitHub renames in the background.** If it hasn't shown the new name
+  after a few seconds, nothing changes here and the dialog says how to
+  check (`git ls-remote origin refs/heads/<new>`) and finish (`git branch -m
+  <old> <new>`).
 - **The folder stays** while a space or a terminal is in it, or while the
-  worktree is locked or has submodules. The branch is still renamed, and
-  the row shows it.
+  worktree is locked or has submodules, even when a folder with the new
+  name exists. The branch is still renamed, and the row shows it.
 - **Claude Code's history after a move:** Claude Code keeps sessions under
   `~/.claude/projects/<old path with dashes>`, so `claude --continue` in the
   moved folder starts fresh.
@@ -309,5 +363,7 @@ across repos.
   "Delete anyway"; a locked one has no Delete.
 - Right-click a throwaway worktree → Rename… → a new name → Enter: with no
   terminal in it, its branch and its folder take the name. With a space
-  open there, the folder stays and the row shows the new name. A pushed
-  branch is refused.
+  open there, the folder stays and the row shows the new name. A branch
+  pushed with `-u` to a GitHub origin is renamed there too: `git ls-remote
+  origin refs/heads/<new>` lists it, `refs/heads/<old>` is gone, and its
+  upstream is `origin/<new>`.

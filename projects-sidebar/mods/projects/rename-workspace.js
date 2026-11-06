@@ -3,15 +3,19 @@
 // untouched prefill never renames; each `/` segment of what is typed is
 // slugged like D12, so a namespace survives. On open it asks git, with T7's
 // removalCheck, whether the folder can move (a locked worktree or one with
-// submodules can't), and it checks the typed name with renameCheck once
-// typing stops, so a pushed or taken name shows before Enter. The folder
-// moves only when no space and no terminal is in it; otherwise it stays and
-// the row shows the new branch (D27). Enter runs renameWorkspace (D26) in a
-// task no view owns, like the Delete dialog: Herdr's Esc may close even a
-// modal dialog, and a closed dialog's own tasks are cancelled after 250 ms.
-// Its outcome goes to the dialog while it is open, else to a toast. What it
-// says and what an outcome does live in tree-model.js (renamePrompt,
-// renameOutcome).
+// submodules can't), and it checks the typed name with renameCheck at once
+// and again once typing stops, so a name origin or the repo already has
+// shows before Enter. For a pushed branch that check also reads what origin
+// has (D28), so the dialog says before Rename whether GitHub renames it too,
+// a copy is pushed, or it is renamed here only, and which open PR GitHub
+// would close ("Rename anyway"). The folder moves only when no space and no
+// terminal is in it; otherwise it stays and the row shows the new branch
+// (D27). Enter runs renameWorkspace (D26, D28) with what the dialog showed
+// (`seen`), in a task no view owns, like the Delete dialog: Herdr's Esc may
+// close even a modal dialog, and a closed dialog's own tasks are cancelled
+// after 250 ms, while GitHub may take a few seconds. Its outcome goes to the
+// dialog while it is open, else to a toast. What it says and what an
+// outcome does live in tree-model.js (renamePrompt, renameOutcome).
 
 import { div } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input } from "gpui-base";
@@ -122,9 +126,12 @@ export default class RenameWorkspace {
     cx.spawn(async (cx) => {
       if (delay) await cx.sleep(delay);
       if (seq !== this.seq) return;
-      const r = await renameCheck({ project: this.project, path: this.path, name: text });
+      // moveFolder false: a taken folder comes back as folderTaken, and the
+      // prompt refuses it only while the folder would move (D25).
+      const r = await renameCheck({ project: this.project, path: this.path, name: text, moveFolder: false });
       if (seq !== this.seq) return;
-      this.live = { status: r.status, reason: r.reason, err: r.err, text };
+      const { status, reason, err, origin, folderTaken, newPath } = r;
+      this.live = { status, reason, err, origin, folderTaken, newPath, text };
       if (!this.prompt().editable) this.handle.focus();
       cx.notify();
     });
@@ -144,29 +151,42 @@ export default class RenameWorkspace {
     });
   }
 
+  // Enter may run: the prompt says so, and git has answered once, so the
+  // request can carry what the dialog showed.
+  canSubmit(shown) {
+    return !this.busy && shown.ready && Boolean(this.live);
+  }
+
   submit(cx) {
     const shown = this.prompt();
-    if (this.busy || !shown.ready) return;
+    if (!this.canSubmit(shown)) return;
     const { project, path, text } = this;
     // D26 step 3: decided now, from the spaces and terminals open now.
     const moveFolder = shown.moveFolder;
+    // D28: what origin's path and PRs looked like to the person; the model
+    // runs nothing remote when the fresh check differs.
+    const origin = this.live.origin;
+    const seen = { route: origin?.route ?? "local", prs: (origin?.prs ?? []).map((pr) => pr.number) };
     this.busy = true;
     this.error = "";
     cx.notify();
     let settle;
     const settled = new Promise((resolve) => { settle = resolve; });
-    cx.spawn(async () => {
+    cx.spawn(async (bg) => {
       let r;
       try {
-        r = await renameWorkspace({ project, path, name: text, moveFolder });
+        // bg: this task's cx, whose sleep spaces the looks at origin.
+        r = await renameWorkspace({ project, path, name: text, moveFolder, seen }, bg);
       } catch (e) {
-        r = { status: "failed", reason: null, branch: null, folder: null, err: String(e?.message ?? e), list: null };
+        r = { status: "failed", reason: null, branch: null, name: null, folder: null, err: String(e?.message ?? e), list: null, remote: null, prs: [], check: null };
       }
       // D26 step 4 (D23 step 5): the row changes at once.
       if (r.list) store.saveWorktrees(project, r.list);
       this.busy = false;
       const out = renameOutcome(r, { label: shown.label, path, open: !this.gone });
-      if (out.live) this.live = { ...out.live, text };
+      // A refusal keeps the path the dialog last read from origin; "changed"
+      // brings the fresh one.
+      if (out.live) this.live = { origin: this.live?.origin, ...out.live, text };
       this.error = out.error;
       if (out.close) closeOverlay(this.overlay);
       if (out.toast) notify(out.toast);
@@ -219,12 +239,14 @@ export default class RenameWorkspace {
         .child(Input.new(this.input).h(36).px(10).rounded(8).border_1().border_color(this.inputFocused ? t.accent : t.input)
           .bg(t.background).text_size(12.8).text_color(t.foreground))
         .when(Boolean(p.line), (el) => el.child(div().pt(6).text_size(11.5).text_color(t.dim).child(p.line))))
+      .when(Boolean(p.remote), (el) => el.child(div().pt(4).text_size(11.5).text_color(t.muted).child(p.remote)))
+      .children(p.warnings.map((w) => line(w, t.blocked)))
       .when(Boolean(p.reason), (el) => el.child(line(p.reason, t.blocked)))
       .when(p.checking, (el) => el.child(line("Checking with git…", t.dim)))
       .when(Boolean(this.error), (el) => el.child(line(this.error, t.blocked)));
     const footer = h_flex().px(18).py(14).gap(8).items_center().justify_end().border_t_1().border_color(t.border)
       .child(button("rw-cancel", "Cancel", false, !this.busy, () => this.dismiss()))
-      .when(Boolean(p.button), (el) => el.child(button("rw-rename", this.busy ? "Renaming…" : p.button, true, p.ready && !this.busy, (cx) => this.submit(cx))));
+      .when(Boolean(p.button), (el) => el.child(button("rw-rename", this.busy ? "Renaming…" : p.button, true, this.canSubmit(p), (cx) => this.submit(cx))));
     return root.child(header(p.title)).child(body).child(footer);
   }
 }

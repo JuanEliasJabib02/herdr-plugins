@@ -508,7 +508,7 @@ test("rename dialog: the folder stays while a space or a terminal is in it, or w
 });
 
 test("rename dialog: a refusal of the typed name shows before Enter; detached, the main checkout or a stray path have no Rename (S22, D25)", () => {
-  const pushed = { status: "refused", reason: "published", err: "Already pushed as origin/feat/login: renaming would split it from GitHub.", text: "feat/signup" };
+  const pushed = { status: "refused", reason: "remote-exists", err: "origin already has feat/signup.", text: "feat/signup" };
   const p = rprompt({ text: "feat/signup", live: pushed });
   assert.deepEqual([p.reason, p.ready, p.button, p.editable], [pushed.err, false, "Rename", true]);
   const other = rprompt({ text: "feat/other", live: pushed });
@@ -558,4 +558,77 @@ test("rename outcome: a refusal stays in the dialog as its reason, a failure as 
   assert.equal(renameOutcome({ status: "failed", err: "" }, open).error, "git couldn't rename it.");
   const already = { status: "refused", reason: "unchanged", branch: "feat/signup", folder: null, err: "The branch is already feat/signup.", list: [] };
   assert.deepEqual(renameOutcome(already, open), { close: false, toast: null, error: already.err, live: null }, "a refusal the live line hides is said as an error");
+});
+
+// ── Rename of a pushed branch (T9c, D28) ───────────────────────────────────
+
+const ORIGIN = { published: true, route: "github", gone: false, repo: { owner: "acme", repo: "shop" }, prs: [], sha: "s1" };
+const ok = (over = {}) => ({ status: "ok", reason: null, err: "", folderTaken: false, newPath: "/Users/demo/orca/workspaces/app/signup", origin: ORIGIN, text: "feat/signup", ...over });
+
+test("rename dialog (T9c 17): a pushed branch states the path on open, before a name is typed (S23, D28)", () => {
+  const onOpen = (origin) => rprompt({ live: { status: "refused", reason: "unchanged", err: "The branch is already feat/login.", origin, text: "feat/login" } });
+  const github = onOpen(ORIGIN);
+  assert.equal(github.remote, "Renames it on GitHub too (acme/shop).");
+  assert.equal(github.line, "Type a new name for the branch.", "the name line is unchanged");
+  assert.equal(onOpen({ ...ORIGIN, route: "copy", repo: null }).remote, "Pushes a copy under the new name; origin keeps feat/login.");
+  assert.equal(onOpen({ ...ORIGIN, route: "local", gone: true, repo: null, sha: null }).remote, "origin no longer has feat/login: renames it here only.");
+  assert.equal(onOpen({ ...ORIGIN, published: false, route: "local", repo: null, sha: null }).remote, "", "a branch no remote has: nothing to say");
+  assert.equal(rprompt().remote, "", "before git answers");
+  const typed = rprompt({ text: "feat/signup", live: ok({ origin: { ...ORIGIN, route: "copy", repo: null } }) });
+  assert.equal(typed.remote, "Pushes a copy as feat/signup; origin keeps feat/login.");
+  assert.equal(rprompt({ text: "feat/other", live: ok() }).remote, "Renames it on GitHub too (acme/shop).", "the path doesn't depend on the name: an older check says it");
+});
+
+test("rename dialog (T9c 13): an open PR from the branch is warned about and Rename reads 'Rename anyway'; none, or the copy path, no warning (S23, D28)", () => {
+  const pr = { number: 12, url: "https://github.example/acme/shop/pull/12" };
+  const warned = rprompt({ text: "feat/signup", live: ok({ origin: { ...ORIGIN, prs: [pr] } }) });
+  assert.deepEqual(warned.warnings, ["GitHub closes PR #12 when its branch is renamed."]);
+  assert.deepEqual([warned.button, warned.ready], ["Rename anyway", true]);
+  const quiet = rprompt({ text: "feat/signup", live: ok() });
+  assert.deepEqual([quiet.warnings, quiet.button], [[], "Rename"]);
+  const copy = rprompt({ text: "feat/signup", live: ok({ origin: { ...ORIGIN, route: "copy", repo: null, prs: [] } }) });
+  assert.deepEqual([copy.warnings, copy.button, copy.remote], [[], "Rename", "Pushes a copy as feat/signup; origin keeps feat/login."], "a PR list that failed: only the copy path");
+});
+
+test("rename dialog (T9c): origin unreachable, pushed elsewhere or no push access refuse whatever is typed; the input stays (D28)", () => {
+  for (const [reason, err] of [
+    ["unreachable", "Couldn't reach origin: fatal: x."],
+    ["pushed-elsewhere", "Also pushed as github/feat/login: renaming would split it."],
+    ["no-push", "You can't push to acme/shop."],
+  ]) {
+    const live = { status: "refused", reason, err, text: "feat/login" };
+    const p = rprompt({ text: "feat/later", live });
+    assert.deepEqual([p.reason, p.ready, p.editable, p.button], [err, false, true, "Rename"], reason);
+    const carried = rprompt({ text: "feat/later", live: { ...live, origin: { ...ORIGIN, prs: [{ number: 3, url: "u" }] } } });
+    assert.deepEqual([carried.remote, carried.warnings], ["", []], "a path read earlier isn't stated under a refusal of origin");
+  }
+});
+
+test("rename dialog (T9c 16): a taken folder only refuses when the folder would move; with a terminal there, only the branch is renamed (D25)", () => {
+  const taken = ok({ folderTaken: true, origin: { ...ORIGIN, published: false, route: "local", repo: null } });
+  const moving = rprompt({ text: "feat/signup", live: taken });
+  assert.deepEqual([moving.reason, moving.ready], ["/Users/demo/orca/workspaces/app/signup already exists.", false]);
+  const staying = rprompt({ text: "feat/signup", live: taken, spaces: 1 });
+  assert.deepEqual([staying.reason, staying.ready, staying.moveFolder], ["", true, false]);
+  assert.equal(staying.line, "branch feat/login → feat/signup · folder stays feat-login (a terminal is open there)");
+  const atClick = { status: "refused", reason: "folder-exists", err: "/w/app/signup already exists.", text: "feat/signup" };
+  assert.equal(rprompt({ text: "feat/signup", live: atClick, check: { ...CHECK, locked: true, deletable: false } }).ready, true, "locked: the folder stays, the name is free");
+});
+
+test("rename outcome (T9c 21, 9): changed shows the fresh check; a remote done with the local branch left behind says how to finish (D28)", () => {
+  const open = { label: "login", path: LOGIN, open: true };
+  const closed = { ...open, open: false };
+  const fresh = { status: "ok", reason: null, err: "", origin: { ...ORIGIN, prs: [{ number: 7, url: "u" }] } };
+  const changed = { status: "changed", reason: "prs", branch: "feat/login", name: "feat/signup", folder: null, err: "PR #7 was opened from feat/login since the dialog checked it.", list: [], remote: null, prs: [], check: fresh };
+  assert.deepEqual(renameOutcome(changed, open), { close: false, toast: null, error: changed.err, live: fresh });
+  assert.deepEqual(renameOutcome(changed, closed).toast, { title: "Didn't rename login", body: changed.err, level: "warning" });
+  const fix = "Renamed on GitHub to feat/signup, but the local branch is still feat/login: run `git branch -m feat/login feat/signup`.";
+  const split = { status: "renamed", reason: null, branch: "feat/login", name: "feat/signup", folder: "stays", err: fix, list: [], remote: "renamed", prs: [] };
+  assert.deepEqual(renameOutcome(split, open), { close: true, toast: { title: "Didn't rename login here", body: fix, level: "warning" }, error: "", live: null });
+  const there = { status: "renamed", reason: null, branch: "feat/signup", name: "feat/signup", folder: "moved", err: "", list: [], remote: "renamed", prs: [] };
+  assert.deepEqual(renameOutcome(there, open), { close: true, toast: null, error: "", live: null }, "as the dialog said");
+  assert.equal(renameOutcome(there, closed).toast.body, "Renamed on GitHub too. Its folder is now signup.");
+  assert.equal(renameOutcome({ ...there, remote: "copied" }, closed).toast.body, "origin has a copy as feat/signup. Its folder is now signup.");
+  const finishing = renameOutcome({ ...there, err: "GitHub is still finishing the rename." }, open);
+  assert.deepEqual(finishing.toast, { title: "Renamed login to feat/signup", body: "Renamed on GitHub too. Its folder is now signup. GitHub is still finishing the rename.", level: "warning" });
 });
