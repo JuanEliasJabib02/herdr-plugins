@@ -393,9 +393,17 @@ function sandbox({ active = A, switchMode = "ask", timing = {} } = {}) {
   };
   // A terminal whose shell has nothing in the foreground.
   s.shell = (t) => s.world(t, { address: t, pid: ++shellPids, claude: null, own: false, argv: [], where: `ws / ${t}` });
-  s.home = home;
   s.world = (t, value) => writeFileSync(join(world, "terminals", `${t}.json`), JSON.stringify(value));
   s.worldOf = (t) => JSON.parse(readFileSync(join(world, "terminals", `${t}.json`), "utf8"));
+
+  // The login a saved account's folder holds, and writing one: a /login.
+  s.loginOf = (id) => JSON.parse(readFileSync(join(dirs[id], ".claude.json"), "utf8")).oauthAccount;
+  s.setLogin = (id, oauthAccount) => writeFileSync(join(dirs[id], ".claude.json"), JSON.stringify({ oauthAccount }));
+  s.systemLogin = (oauthAccount) => writeFileSync(join(home, ".claude.json"), JSON.stringify({ oauthAccount }));
+  s.editRegistry = (edit) => {
+    const file = join(state, "accounts.json");
+    writeFileSync(file, `${JSON.stringify(JSON.parse(readFileSync(file, "utf8")).map(edit), null, 2)}\n`);
+  };
 
   const lines = (name) => {
     const file = join(world, name);
@@ -642,9 +650,11 @@ test("use, Ask: --answer restart queues only the listed sessions that were ticke
   assert.deepEqual(s.queue().filter((i) => i.state !== "done"), []);
 });
 
-test("use, Always restart: a session on another folder with the outgoing account's login moves with it", async () => {
+// ── Which account a session runs on (D18, Orca's isClaudePaneOnAccount) ────
+
+test("use, Always restart: a session on System default with the outgoing account's login and org moves with it", async () => {
   const s = sandbox({ active: A, switchMode: "restart" });
-  writeFileSync(join(s.home, ".claude.json"), JSON.stringify({ oauthAccount: { emailAddress: "ANA@example.com" } }));
+  s.systemLogin(s.loginOf(A));
   const onDefault = s.term("t1", { on: "default" });
   const other = s.term("t2", { on: C });
   s.json(["use", B]);
@@ -655,6 +665,72 @@ test("use, Always restart: a session on another folder with the outgoing account
   await until(() => s.item((i) => i.id === item.id && i.state === "done"), WAIT, "t1's restart");
   assert.ok(!alive(onDefault.pid));
   assert.ok(alive(other.pid), "another login stays");
+});
+
+test("use: a session on System default with the target's login and org is already there, and is left alone", async () => {
+  const s = sandbox({ active: A, switchMode: "restart" });
+  s.systemLogin(s.loginOf(B));
+  const onDefault = s.term("t1", { on: "default" });
+  s.term("t2", { on: A, status: "busy", state: "working" });
+  s.json(["use", B]);
+  assert.deepEqual(s.pending().sessions.map((x) => x.terminal), ["t2"], "t1 isn't listed");
+  assert.deepEqual(s.queue().map((i) => i.terminal), ["t2"]);
+  assert.ok(alive(onDefault.pid));
+  s.json(["restart", "--cancel", "t2"]);
+});
+
+test("use: a waiting restart is dropped when its System default session has the new target's login (afterUse)", async () => {
+  const s = sandbox({ active: A, switchMode: "restart" });
+  s.systemLogin(s.loginOf(A));
+  const onDefault = s.term("t1", { on: "default", status: "busy", state: "working" });
+  s.json(["use", B]);
+  await until(() => s.item((i) => i.terminal === "t1" && i.state === "waitingIdle"), WAIT, "t1 waiting");
+  s.json(["use", A]);
+  assert.deepEqual(s.queue(), [], "t1 already runs on A's login");
+  assert.ok(alive(onDefault.pid));
+});
+
+test("use: a saved folder with the outgoing account's login stays elsewhere: a saved folder counts only as itself", () => {
+  const s = sandbox({ active: A, switchMode: "ask" });
+  // Two saved accounts may share a login on purpose: C is Ana's too.
+  s.setLogin(C, s.loginOf(A));
+  s.editRegistry((a) => (a.id === C ? { ...a, email: "ana@example.com" } : a));
+  const onC = s.term("t1", { on: C });
+  const onA = s.term("t2", { on: A });
+  s.json(["use", B]);
+  const sessions = Object.fromEntries(s.pending().sessions.map((x) => [x.terminal, x.group]));
+  assert.deepEqual(sessions, { t1: "elsewhere", t2: "onAccount" });
+  assert.ok(alive(onC.pid) && alive(onA.pid));
+});
+
+test("use: a missing org never matches, on either side, and neither does an account signed in as someone else", () => {
+  // System default has Ana's email and no org.
+  const noOrg = sandbox({ active: A, switchMode: "ask" });
+  noOrg.systemLogin({ emailAddress: "ANA@example.com" });
+  noOrg.term("t1", { on: "default" });
+  noOrg.term("t2", { on: A });
+  noOrg.json(["use", B]);
+  assert.deepEqual(Object.fromEntries(noOrg.pending().sessions.map((x) => [x.terminal, x.group])), { t1: "elsewhere", t2: "onAccount" });
+
+  // A's folder has no org, and neither does what was saved.
+  const noSavedOrg = sandbox({ active: A, switchMode: "ask" });
+  noSavedOrg.systemLogin(noSavedOrg.loginOf(A));
+  noSavedOrg.setLogin(A, { emailAddress: "ana@example.com" });
+  noSavedOrg.term("t1", { on: "default" });
+  noSavedOrg.term("t2", { on: A });
+  noSavedOrg.json(["use", B]);
+  assert.deepEqual(Object.fromEntries(noSavedOrg.pending().sessions.map((x) => [x.terminal, x.group])), { t1: "elsewhere", t2: "onAccount" });
+
+  // Saved as Ana with her org, but A's folder holds Ben's login now.
+  const taken = sandbox({ active: A, switchMode: "ask" });
+  const anaLogin = taken.loginOf(A);
+  taken.systemLogin(anaLogin);
+  taken.editRegistry((a) => (a.id === A ? { ...a, orgUuid: anaLogin.organizationUuid } : a));
+  taken.setLogin(A, taken.loginOf(B));
+  taken.term("t1", { on: "default" });
+  taken.term("t2", { on: A });
+  taken.json(["use", B]);
+  assert.deepEqual(Object.fromEntries(taken.pending().sessions.map((x) => [x.terminal, x.group])), { t1: "elsewhere", t2: "onAccount" });
 });
 
 test("use, Ask: --answer restart takes a terminal's name as well as its address", async () => {
@@ -819,12 +895,15 @@ test("landedElsewhere (6): the new Claude's session file lies in another account
 
 test("resume through exec returns its job at once even when hc send sleeps; the job resumes, sends the message, and leaves active alone", async () => {
   const s = sandbox({ active: A });
-  // Each hc send takes 3 s: a resume that waited on it couldn't be back in 2.
-  const t1 = s.term("t1", { on: A, sendSleep: 3 });
+  // Each hc send takes this long: a resume that waited on it couldn't be back
+  // sooner, however loaded the machine is, and a loaded machine stays well
+  // under it.
+  const SEND_SLEEP_S = 8;
+  const t1 = s.term("t1", { on: A, sendSleep: SEND_SLEEP_S });
   const before = s.active();
   const r = await s.exec(["resume", "--terminal", "t1", "--account", B, "--message", "di hola", "--json"]);
   assert.equal(r.status, 0, r.stderr);
-  assert.ok(r.ms < 2000, `returned in ${r.ms} ms`);
+  assert.ok(r.ms < SEND_SLEEP_S * 1000, `returned in ${r.ms} ms, under the ${SEND_SLEEP_S} s its hc send takes`);
   const { job } = JSON.parse(r.stdout);
   assert.match(job, /^rs-[0-9a-f]{8}$/);
   const queued = s.item((i) => i.id === job);
@@ -841,6 +920,22 @@ test("resume through exec returns its job at once even when hc send sleeps; the 
   assert.deepEqual(s.sends("t1").map((x) => x.text.startsWith("CLAUDE_ACCOUNTS_DIR=") ? "line" : x.text), ["line", "di hola"]);
   assert.equal(s.json(["terminal", "t1"]).account, B);
   assert.equal(s.active(), before, "resume never writes active");
+});
+
+test("resume and restart --cancel take a terminal's name: one terminal named two ways gets one job, kept under its address", async () => {
+  const s = sandbox({ active: A });
+  const t1 = s.term("t1", { on: A, status: "busy", state: "working" });
+  s.world("named", s.worldOf("t1"));
+  const first = s.json(["resume", "--terminal", "named", "--account", B]);
+  const second = s.json(["resume", "--terminal", "t1", "--account", B]);
+  assert.equal(second.job, first.job, "one job");
+  assert.deepEqual(s.queue().map((i) => i.terminal), ["t1"]);
+  assert.equal(s.status(first.job).terminal, "t1");
+  assert.equal(s.json(["resume", "--terminal", "named", "--account", B]).job, first.job);
+
+  assert.deepEqual(s.json(["restart", "--cancel", "named"]), { cancelled: [first.job] });
+  assert.equal(s.status(first.job).state, "cancelled");
+  assert.ok(alive(t1.pid), "Claude wasn't stopped");
 });
 
 test("the typed line: CLAUDE_ACCOUNTS_DIR and every kept arg survive a real shell exactly; injections and the first prompt are gone", async () => {

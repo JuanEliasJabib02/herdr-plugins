@@ -18,10 +18,14 @@
 // knownAccounts(home): { active: "<id>" | "default", activeConfigDir,
 // accounts: [...] }, System default first, then the registry in its order.
 // T3 and T4 read the accounts through it. Each account: { id, email, org,
-// orgUuid, configDir (null for System default, else the exact string),
+// orgUuid (a saved account's as saved, System default's its login's),
+// configDir (null for System default, else the exact string),
 // lastAuthenticatedAt, source: "orca" | "herdr" | "system", isDefault,
-// signedIn (its folder's .claude.json names a login), duplicateOf (System
-// default only: the saved account signed in as the same email, else null) }.
+// signedIn (its folder's .claude.json names a login), login (that login:
+// { email, org, orgUuid }, or null), signedInAs (a saved account whose folder
+// holds another login than the saved one: that login's email, else null,
+// D17), duplicateOf (System default only: the saved account saved with the
+// same email, else null) }.
 //
 // readSettings(home): { switchMode }, "ask" when unset (Orca's default).
 
@@ -36,6 +40,7 @@ import { parseArgs, promisify } from "node:util";
 import { FILES, claudeStateFile, defaultConfigDir, orcaRoots, profilesHome, stateHome } from "./paths.mjs";
 import { failure, readJson, rebuildContract, render, withLock, writeAtomic } from "./files.mjs";
 import { afterUse } from "./restart.mjs";
+import { forgetUsage } from "./usage.mjs";
 
 const execFileP = promisify(execFile);
 
@@ -100,7 +105,7 @@ function print(json, value, human) {
 
 // A trimmed non-empty string, else null (Orca's `text` schema).
 const text = (value) => (typeof value === "string" && value.trim() ? value.trim() : null);
-const sameEmail = (a, b) => Boolean(a && b && a.trim().toLowerCase() === b.trim().toLowerCase());
+export const sameEmail = (a, b) => Boolean(a && b && a.trim().toLowerCase() === b.trim().toLowerCase());
 // Orca's isSameClaudeLogin: missing organization ids permit an email-only match.
 export const sameLogin = (a, b) =>
   sameEmail(a?.email, b?.email) && (!a.orgUuid || !b.orgUuid || a.orgUuid === b.orgUuid);
@@ -277,22 +282,24 @@ export async function knownAccounts(home = stateHome(), env = process.env) {
   const saved = registry.map((a) => {
     const configDir = typeof a.configDir === "string" && a.configDir ? a.configDir : null;
     const login = configDir ? folderLogin(configDir, env) : null;
-    // A /login in a Claude running on the folder changes who it's signed in as
-    // without telling anyone: then the folder says who it is. Otherwise the
-    // saved names stay, fresher than the ones the folder kept.
-    const stored = { email: text(a.email), org: text(a.org), orgUuid: text(a.orgUuid) };
-    const who = login && !sameLogin(login, stored) ? login : stored;
+    const email = text(a.email);
+    const orgUuid = text(a.orgUuid);
     return {
       id: a.id,
-      email: who.email,
-      org: who.org,
-      orgUuid: who.orgUuid,
+      email,
+      org: text(a.org),
+      orgUuid,
       configDir,
       lastAuthenticatedAt: Number.isFinite(a.lastAuthenticatedAt) ? a.lastAuthenticatedAt : null,
       // Anything but "herdr" keeps its folder on remove.
       source: a.source === "herdr" ? "herdr" : "orca",
       isDefault: false,
       signedIn: Boolean(login),
+      login,
+      // A /login in a Claude running on the folder changes who it's signed in
+      // as without telling anyone. The account keeps its name, this says who's
+      // there now, and it needs a sign-in (D17).
+      signedInAs: login && email && !sameLogin(login, { email, orgUuid }) ? login.email : null,
       duplicateOf: null,
     };
   });
@@ -310,6 +317,8 @@ export async function knownAccounts(home = stateHome(), env = process.env) {
     source: "system",
     isDefault: true,
     signedIn: Boolean(system),
+    login: system,
+    signedInAs: null,
     duplicateOf: duplicate?.id ?? null,
   };
   // A config dir no saved account has reads as System default.
@@ -346,8 +355,9 @@ async function writeActive(target) {
     const known = await knownAccounts(home);
     const account = known.accounts.find((a) => a.id === target);
     if (!account) throw unknownAccount(target);
-    // Orca refuses a saved account whose folder holds no login.
-    if (!account.isDefault && !account.signedIn) throw failure(NEEDS_SIGN_IN, 5);
+    // Orca refuses a saved account whose folder holds no login; here one that
+    // holds someone else's too (D17).
+    if (!account.isDefault && (!account.signedIn || account.signedInAs)) throw failure(NEEDS_SIGN_IN, 5);
     const next = account.configDir ?? "";
     if (next !== known.activeConfigDir) {
       await writeAtomic(pathOf(home, FILES.active), next);
@@ -648,7 +658,10 @@ export async function login(args) {
     if (!signedIn) throw failure(NO_EMAIL);
 
     await withLock(home, async () => {
-      if (account.isDefault) return rebuildContract(home);
+      if (account.isDefault) {
+        await forgetUsage(home, account.id);
+        return rebuildContract(home);
+      }
       const registry = (await readRegistry(home)) ?? [];
       const now = Date.now();
       if (account.isNew) {
@@ -673,6 +686,8 @@ export async function login(args) {
       }
       await writeAtomic(pathOf(home, FILES.accounts), render(registry));
       registered = true;
+      // Whatever was read before this sign-in may be another login's.
+      if (!account.isNew) await forgetUsage(home, account.id);
       return rebuildContract(home);
     });
     print(

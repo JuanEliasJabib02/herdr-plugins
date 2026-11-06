@@ -281,7 +281,7 @@ export default class Accounts {
   }
 
   // The left part of a row: a click picks it, unless it can't be picked.
-  pick(t, id, enabled, title, badges, subtitle) {
+  pick(t, id, enabled, title, badges, subtitle, hint = null) {
     const running = this.busy === `select:${id}`;
     return v_flex().id(`ca-accounts-pick-${id}`).flex_1().min_w(0).gap(2)
       .when(enabled && !this.busy, (el) => el.cursor_pointer().on_click((_e, cx) => this.select(cx, id)))
@@ -289,7 +289,8 @@ export default class Accounts {
         .child(div().min_w(0).truncate().font_medium().child(title))
         .children(badges.map((b) => this.badge(t, b)))
         .when(running, (el) => el.child(div().w(10).flex_none().text_color(t.muted).frames(SPINNER, 90).child(SPINNER[0]))))
-      .child(div().truncate().text_size(11.5).text_color(t.dim).child(subtitle));
+      .child(div().truncate().text_size(11.5).text_color(t.dim).child(subtitle))
+      .when(Boolean(hint), (el) => el.child(div().truncate().text_size(11.5).text_color(t.muted).child(hint ?? "")));
   }
 
   systemDefaultRow(t, m) {
@@ -304,7 +305,7 @@ export default class Accounts {
   accountRow(t, m, row) {
     return this.card(t, `ca-accounts-row-${row.id}`, row.active)
       .when(row.canSelect && !this.busy, (el) => el.hover((s) => s.bg(t.hover)))
-      .child(this.pick(t, row.id, row.canSelect, row.email, row.badges, row.subtitle))
+      .child(this.pick(t, row.id, row.canSelect, row.email, row.badges, row.subtitle, row.hint))
       .child(h_flex().flex_none().gap(4).items_center()
         .child(this.splitButton(t, `signin:${row.id}`, m.signInAgain, m.copyLink, "ghost", !this.busy,
           (cx) => this.signIn(cx, row.id, false), (cx) => this.signIn(cx, row.id, true)))

@@ -302,17 +302,103 @@ test("import-orca again: new Orca accounts and fresh metadata come in; active, s
 
 // ── System default ─────────────────────────────────────────────────────────
 
-test("a saved account shows what its folder is signed in as now; a folder with no login keeps what was saved", () => {
+test("a folder signed in as someone else (S8): the account keeps its saved names, signedInAs says who's there, and it needs sign-in", () => {
   const s = sandbox();
   orcaProfile(s.home, A, BEN); // A /login inside its Claude: saved as Ana, signed in as Ben.
   orcaProfile(s.home, B);
-  orcaDb(s.home, { claudeManagedAccounts: [orcaRow(A, ANA, 1), orcaRow(B, BEN, 2)] });
+  orcaProfile(s.home, C, { ...BEN, emailAddress: "cal@example.net" });
+  orcaDb(s.home, { claudeManagedAccounts: [orcaRow(A, ANA, 1), orcaRow(B, BEN, 2), orcaRow(C, { ...BEN, emailAddress: "cal@example.net" }, 3)] });
   const doc = listJson(s);
-  assert.equal(byId(doc, A).email, BEN.emailAddress);
-  assert.equal(byId(doc, A).label, BEN.emailAddress);
-  assert.equal(byId(doc, A).org, BEN.organizationName);
-  assert.equal(byId(doc, B).email, BEN.emailAddress, "no login in the folder: the saved email");
-  assert.equal(byId(doc, B).needsSignIn, true);
+  const a = byId(doc, A);
+  assert.deepEqual([a.label, a.email, a.org], [ANA.emailAddress, ANA.emailAddress, ANA.organizationName]);
+  assert.equal(a.signedInAs, BEN.emailAddress);
+  assert.equal(a.needsSignIn, true);
+  // No login in the folder: what was saved, and nobody to name.
+  assert.deepEqual([byId(doc, B).email, byId(doc, B).signedInAs, byId(doc, B).needsSignIn], [BEN.emailAddress, null, true]);
+  // Its own login: nothing changes.
+  assert.deepEqual([byId(doc, C).email, byId(doc, C).signedInAs, byId(doc, C).needsSignIn], ["cal@example.net", null, false]);
+  assert.equal(byId(doc, "default").signedInAs, null);
+  assert.equal(new Set(doc.accounts.map((x) => x.label)).size, doc.accounts.length, "no two rows read the same because of it");
+});
+
+test("signedInAs: the same email in another org is another login; a missing org id on either side isn't, nor is a change of case; no saved email has nothing to compare", () => {
+  const s = sandbox();
+  const entry = (id, email, orgUuid, login) => ({ id, email, org: null, orgUuid, configDir: signedInDir(join(s.box, "dirs", id), login), lastAuthenticatedAt: 1, source: "orca" });
+  const D = "dddddddd-4444-4444-8444-444444444444";
+  const E = "eeeeeeee-5555-4555-8555-555555555555";
+  writeRegistry(s, [
+    entry(A, "ana@example.com", ORG_A, { emailAddress: "ana@example.com", organizationUuid: ORG_B }),
+    entry(B, "ben@example.org", null, { emailAddress: "ben@example.org", organizationUuid: ORG_B }),
+    entry(C, "cal@example.net", ORG_A, { emailAddress: "cal@example.net" }),
+    entry(D, "dee@example.com", ORG_A, { emailAddress: " DEE@Example.com", organizationUuid: ORG_A }),
+    entry(E, null, null, { emailAddress: "eve@example.com" }),
+  ]);
+  const doc = listJson(s);
+  assert.deepEqual(doc.accounts.slice(1).map((a) => a.signedInAs), ["ana@example.com", null, null, null, null]);
+  assert.deepEqual(doc.accounts.slice(1).map((a) => a.needsSignIn), [true, false, false, false, false]);
+});
+
+test("duplicateOf compares saved emails: a folder holding System default's login isn't a duplicate of it", () => {
+  const s = sandbox();
+  orcaProfile(s.home, A, BEN); // Saved as Ana, signed in as Ben.
+  orcaDb(s.home, { claudeManagedAccounts: [orcaRow(A, ANA, 1)] });
+  writeFileSync(join(s.home, ".claude.json"), JSON.stringify({ oauthAccount: BEN }));
+  assert.equal(byId(listJson(s), "default").duplicateOf, null);
+  writeFileSync(join(s.home, ".claude.json"), JSON.stringify({ oauthAccount: ANA }));
+  assert.equal(byId(listJson(s), "default").duplicateOf, A);
+});
+
+test("a folder signed in as someone else: `use` refuses it with 5, and signing in through the plugin updates the saved names", () => {
+  const s = sandbox();
+  const dir = orcaProfile(s.home, A, BEN);
+  orcaProfile(s.home, B, BEN);
+  orcaDb(s.home, { claudeManagedAccounts: [orcaRow(A, ANA, 1), orcaRow(B, BEN, 2)], activeClaudeManagedAccountId: B });
+  listJson(s);
+  const refused = s.cli(["use", A]);
+  assert.equal(refused.status, 5);
+  assert.match(refused.stderr, /Sign in to this Claude account again before selecting it\./);
+  assert.notEqual(s.read("active"), dir);
+
+  const signed = s.cli(["login", A], { FAKE_EMAIL: "ana.new@example.com", FAKE_ORG: "New Org", FAKE_ORG_UUID: ORG_A });
+  assert.equal(signed.status, 0, signed.stderr);
+  const a = byId(listJson(s), A);
+  assert.deepEqual([a.label, a.email, a.org, a.signedInAs, a.needsSignIn], ["ana.new@example.com", "ana.new@example.com", "New Org", null, false]);
+  assert.equal(s.cli(["use", A]).status, 0);
+});
+
+test("a successful login clears that account's usage: nothing read before it shows, for a saved account and for System default", () => {
+  const s = sandbox();
+  const dir = orcaProfile(s.home, A, ANA);
+  writeFileSync(join(s.home, ".claude.json"), JSON.stringify({ oauthAccount: BEN }));
+  orcaDb(s.home, { claudeManagedAccounts: [orcaRow(A, ANA, 1)] });
+  listJson(s);
+  const now = Date.now();
+  const resetsAt = now + 3_600_000;
+  const entry = {
+    usage: { session: { percent: 50, resetsAt }, weekly: null, fable: { percent: 22, resetsAt }, monthly: null },
+    credits: { balance: 5, limit: 10 },
+    source: "fetch",
+    usageUpdatedAt: now,
+    checkedAt: now,
+  };
+  writeFileSync(join(s.state, "usage-state.json"), JSON.stringify({ version: 1, accounts: { [A]: entry, default: entry } }));
+  // The last drop of the login going away, never merged: live/ keeps it.
+  const fiveHour = { five_hour: { used_percentage: 77, resets_at: Math.ceil(resetsAt / 1000) } };
+  mkdirSync(join(s.state, "live"), { recursive: true });
+  writeFileSync(join(s.state, "live", "a.json"), JSON.stringify({ configDir: dir, at: now - 1000, rate_limits: fiveHour }));
+  writeFileSync(join(s.state, "live", "default.json"), JSON.stringify({ configDir: null, at: now - 1000, rate_limits: fiveHour }));
+  assert.equal(byId(listJson(s), A).usage.session.percent, 50, "read before the sign-in");
+
+  for (const target of [A, "default"]) {
+    const r = s.cli(["login", target], { FAKE_EMAIL: "new@example.com" });
+    assert.equal(r.status, 0, r.stderr);
+  }
+  const empty = { session: null, weekly: null, fable: null, monthly: null };
+  const after = JSON.parse(s.cli(["usage", "--json"]).stdout);
+  for (const id of [A, "default"]) {
+    assert.deepEqual(byId(after, id).usage, empty, `${id}: no number from before`);
+    assert.deepEqual([byId(after, id).credits, byId(after, id).usageUpdatedAt], [null, null]);
+  }
 });
 
 test("System default comes from ~/.claude.json, and flags a saved account with the same email (Orca's notice)", () => {
@@ -748,6 +834,76 @@ test("the lock: one left by a dead process, or older than 60 s, is removed", () 
   assert.equal(r2.status, 0, r2.stderr);
   assert.ok(!existsSync(lock));
   assert.deepEqual(JSON.parse(s.read("settings.json")), { switchMode: "ask" });
+});
+
+test("the lock: a folder with no pid file is dead after 2 s, not after 60 s, and a fresh one is waited for", () => {
+  const s = sandbox();
+  listJson(s);
+  const lock = join(s.state, "lock");
+  mkdirSync(lock); // Its process died before it wrote its pid.
+  const t0 = Date.now();
+  const r = s.cli(["settings", "set", "switchMode", "keep"]);
+  const ms = Date.now() - t0;
+  assert.equal(r.status, 0, r.stderr);
+  assert.ok(ms >= 1900, `waited out the grace: ${ms} ms`);
+  assert.ok(!existsSync(lock));
+  assert.deepEqual(JSON.parse(s.read("settings.json")), { switchMode: "keep" });
+});
+
+// A script that makes writing the lock's pid file fail, then takes the lock.
+// `body` runs with `withLock` and `home`; it prints what the test checks.
+function lockScript(s, failWith, body) {
+  const script = join(s.box, "pid-fails.mjs");
+  writeFileSync(script, `
+    import fsp from "node:fs/promises";
+    import { syncBuiltinESMExports } from "node:module";
+    const real = fsp.writeFile;
+    let failures = 1;
+    fsp.writeFile = async (path, ...rest) => {
+      if (String(path).endsWith("/lock/pid") && failures-- > 0) ${failWith}
+      return real(path, ...rest);
+    };
+    syncBuiltinESMExports();
+    const { withLock } = await import(${JSON.stringify(FILES_MJS)});
+    const home = process.argv[2];
+    ${body}
+  `);
+  const r = spawnSync(process.execPath, [script, s.state], { encoding: "utf8", timeout: 30000 });
+  assert.equal(r.status, 0, r.stderr);
+  return r.stdout;
+}
+
+test("the lock: a pid that can't be written takes its folder with it, so nobody waits on it", () => {
+  const s = sandbox();
+  mkdirSync(s.state, { recursive: true });
+  const out = lockScript(s, `throw Object.assign(new Error("no space"), { code: "ENOSPC" });`, `
+    const first = await withLock(home, async () => "held").catch((e) => e.code);
+    const { existsSync } = await import("node:fs");
+    console.log(JSON.stringify({ first, left: existsSync(home + "/lock") }));
+  `);
+  assert.deepEqual(JSON.parse(out), { first: "ENOSPC", left: false });
+});
+
+test("the lock: a holder too slow to write its pid, whose folder was broken meanwhile, takes the lock again", () => {
+  const s = sandbox();
+  mkdirSync(s.state, { recursive: true });
+  const out = lockScript(s, `{ await fsp.rm(String(path).slice(0, -"/pid".length), { recursive: true }); throw Object.assign(new Error("gone"), { code: "ENOENT" }); }`, `
+    const first = await withLock(home, async () => "held").catch((e) => e.code);
+    console.log(JSON.stringify({ first }));
+  `);
+  assert.deepEqual(JSON.parse(out), { first: "held" });
+  assert.ok(!existsSync(join(s.state, "lock")), "released");
+});
+
+// ── The stated Node version ────────────────────────────────────────────────
+
+test("the stated Node version covers module.registerHooks (22.15): package.json and the docs agree", () => {
+  assert.equal(JSON.parse(readFileSync(join(repo, "package.json"), "utf8")).engines.node, ">=22.15");
+  for (const doc of [CONTRACT_MD, join(repo, "claude-accounts/RECIPE.md")]) {
+    const text = readFileSync(doc, "utf8");
+    assert.match(text, /Node 22\.15 or newer/, doc);
+    assert.doesNotMatch(text, /Node 22 or newer/, doc);
+  }
 });
 
 test("a corrupt accounts.json gives a clear error and is never overwritten", () => {

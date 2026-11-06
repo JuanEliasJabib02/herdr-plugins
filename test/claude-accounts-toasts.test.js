@@ -385,8 +385,8 @@ test("accounts: one row per saved account: email, This device, org · date, Acti
     canSignIn: true,
   });
   assert.deepEqual(m.rows, [
-    { id: ANA, email: "ana@example.com", badges: ["This device", "Active"], subtitle: "Example Org · Oct 29, 1:53 PM", active: true, needsSignIn: false, canSelect: false },
-    { id: BEN, email: "ben@example.org", badges: ["This device"], subtitle: "Acme · Nov 2, 5:25 PM", active: false, needsSignIn: false, canSelect: true },
+    { id: ANA, email: "ana@example.com", badges: ["This device", "Active"], subtitle: "Example Org · Oct 29, 1:53 PM", hint: null, active: true, needsSignIn: false, canSelect: false },
+    { id: BEN, email: "ben@example.org", badges: ["This device"], subtitle: "Acme · Nov 2, 5:25 PM", hint: null, active: false, needsSignIn: false, canSelect: true },
   ]);
   assert.equal(m.empty, null);
 });
@@ -429,8 +429,26 @@ test("accounts: a row that needs sign-in says Orca's line and can't be picked; S
   assert.equal(m.systemDefault.canSelect, false);
   assert.equal(m.systemDefault.canSignIn, true, "no login at all: Sign in again");
   assert.equal(m.duplicate, null);
-  assert.deepEqual(m.rows[1], { id: BEN, email: "ben@example.org", badges: ["This device"], subtitle: "Sign in again to use this account", active: false, needsSignIn: true, canSelect: false });
+  assert.deepEqual(m.rows[1], { id: BEN, email: "ben@example.org", badges: ["This device"], subtitle: "Sign in again to use this account", hint: null, active: false, needsSignIn: true, canSelect: false });
   assert.equal(m.rows[0].subtitle, "Example Org · Oct 29, 1:53 PM");
+});
+
+test("accounts (S8): a folder signed in as someone else keeps its saved email, and says so under its org and date; it can't be picked", () => {
+  const doc = accounts();
+  doc.accounts[2] = { ...doc.accounts[2], needsSignIn: true, signedInAs: "dee@example.com" };
+  const m = accountsModel({ accounts: doc });
+  assert.deepEqual(m.rows[1], {
+    id: BEN,
+    email: "ben@example.org",
+    badges: ["This device"],
+    subtitle: "Acme · Nov 2, 5:25 PM",
+    hint: "Now signed in as dee@example.com",
+    active: false,
+    needsSignIn: true,
+    canSelect: false,
+  });
+  assert.equal(m.rows[0].hint, null, "an account with its own login has no hint");
+  assert.equal(accountLabel(doc, BEN), "ben@example.org", "the switch dialog and the toasts name it the same");
 });
 
 test("accounts: no saved account is 'No other accounts'; no date shows the org alone", () => {

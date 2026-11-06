@@ -14,7 +14,11 @@
 // account. usage {session, weekly, fable, monthly} each {percent, resetsAt}
 // or null; a window past its reset is dropped, and so is the whole last data
 // once it outlives D4's expiry. errorDetail is the raw text format.js's
-// errorCopy shows where Orca does (missing-scope's message), or null.
+// errorCopy shows where Orca does (missing-scope's message), or null. An
+// account whose folder holds someone else's login (signedInAs, D17), or whose
+// entry was read from a login its folder no longer holds, has nothing.
+//
+// forgetUsage(home, id): a successful sign-in empties that account's entry.
 //
 // parseUsageResponse(data) → { usage, credits }: the endpoint's JSON in
 // Orca's order (claude-oauth-usage-request.ts, claude-usage-window.ts,
@@ -24,13 +28,19 @@
 // usage-state.json is this module's own: { version: 1, accounts: { <id>:
 // entry } }, an entry being { usage, credits, source: "fetch"|"live"|null,
 // usageUpdatedAt, error, errorDetail, needsSignIn, checkedAt, failureStreak,
-// retryAt, liveAt, claim: {pid, at}|null } (epoch ms throughout).
+// retryAt, liveAt, claim: {pid, at}|null, login: {email, orgUuid}|null }
+// (epoch ms throughout).
 //   - usageUpdatedAt: when the data shown was read (a good fetch, or the
 //     drop it came from); checkedAt: when the last fetch ended, good or not.
 //   - claim: the fetch claim (D2). It's taken under the lock, the Keychain
 //     and the network run with the lock released, and the merge locks again.
 //     A claim whose pid is dead, or older than 15 s, is void.
-//   - liveAt: the newest drop merged, so a drop is merged once.
+//   - liveAt: the newest drop merged or ignored, so a drop is merged once.
+//   - login: the folder's login when the data shown was read; null when
+//     there's no record yet (an entry from before this field, or no data).
+//     An entry with another login's record is emptied, keeping only a claim,
+//     and every drop on disk stays out: none says whose it was. Its account
+//     is due at once.
 // Tokens are never written, printed or logged: an error text that quotes the
 // token (a server echoing it) has it replaced before it's kept.
 
@@ -40,7 +50,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { parseArgs } from "node:util";
 import { FILES, stateHome, usageUrl } from "./paths.mjs";
 import { failure, isAlive, readJson, rebuildContract, render, withLock, writeAtomic } from "./files.mjs";
-import { knownAccounts } from "./accounts.mjs";
+import { knownAccounts, sameLogin } from "./accounts.mjs";
 import { readCredentials } from "./keychain.mjs";
 
 // ── Orca's numbers (service/service-types.ts, claude-oauth-usage-request.ts) ─
@@ -223,10 +233,13 @@ const blankEntry = () => ({
   retryAt: null,
   liveAt: null,
   claim: null,
+  login: null,
 });
 
 const time = (v) => (finite(v) ? v : null);
 const readWindow = (w) => (isObject(w) && finite(w.percent) ? { percent: Math.round(clamp(w.percent)), resetsAt: time(w.resetsAt) } : null);
+const loginRecord = (l) =>
+  isObject(l) && typeof l.email === "string" && l.email ? { email: l.email, orgUuid: typeof l.orgUuid === "string" && l.orgUuid ? l.orgUuid : null } : null;
 
 // An entry as written, every field checked: a wrong type is its empty value.
 function readEntry(raw) {
@@ -247,8 +260,20 @@ function readEntry(raw) {
     retryAt: time(e.retryAt),
     liveAt: time(e.liveAt),
     claim,
+    login: loginRecord(e.login),
   };
 }
+
+// An entry read from a login the folder no longer holds. With no record, or
+// no login in the folder right now, there's nothing to compare.
+const fromAnotherLogin = (entry, account) => Boolean(entry?.login && account.login && !sameLogin(entry.login, account.login));
+
+// An entry that says nothing, and takes no drop already on disk.
+const forgotten = (entry, now) => ({ ...blankEntry(), claim: entry?.claim ?? null, liveAt: now });
+
+// An entry something was read into: what a folder holding someone else's
+// login can't keep, even for when it has its own login back.
+const hasReads = (entry) => entry.checkedAt !== null || entry.usageUpdatedAt !== null;
 
 // { state, text }: the parsed state and the file's text as rendered, so a
 // save that changes nothing writes nothing (no watch event for the footer).
@@ -307,10 +332,12 @@ const dropAccount = (accounts, drop) =>
 // One drop into its account's entry (ingestLiveClaudeRateLimits): each
 // window unless it's stale, Fable and credits kept from the last fetch. A
 // drop newer than the last fetch also clears that fetch's error: Claude just
-// ran a turn on this login.
-function mergeDrop(entry, drop, now) {
+// ran a turn on this login. A folder holding someone else's login only marks
+// the drop as seen (D17): those numbers aren't this account's, now or later.
+function mergeDrop(entry, drop, now, account) {
   if (entry.liveAt !== null && drop.at <= entry.liveAt) return;
   entry.liveAt = drop.at;
+  if (account.signedInAs) return;
   const current = visible(entry, now);
   const keepIfNewer = (incoming, previous) => {
     if (!incoming || isStaleWindow(previous, incoming, now)) return null;
@@ -334,6 +361,7 @@ function mergeDrop(entry, drop, now) {
     credits: current.credits,
     source: "live",
     usageUpdatedAt: Math.max(current.usageUpdatedAt ?? 0, drop.at),
+    login: loginRecord(account.login) ?? entry.login,
   });
 }
 
@@ -368,14 +396,20 @@ async function claim(run, targets, all) {
     const { state, text } = await loadState(run.home);
     if (all) {
       for (const id of Object.keys(state.accounts)) if (!all.some((a) => a.id === id)) delete state.accounts[id];
+      for (const account of all) {
+        const entry = state.accounts[account.id];
+        if (account.signedInAs ? entry && hasReads(entry) : fromAnotherLogin(entry, account)) state.accounts[account.id] = forgotten(entry, now);
+      }
       for (const drop of await readDrops(run.home)) {
         const account = dropAccount(all, drop);
-        if (account) mergeDrop((state.accounts[account.id] ??= blankEntry()), drop, now);
+        if (account) mergeDrop((state.accounts[account.id] ??= blankEntry()), drop, now, account);
       }
     }
     const mine = [];
     const busy = [];
     for (const account of targets) {
+      // Its token is someone else's: those numbers aren't its own (D17).
+      if (account.signedInAs) continue;
       const entry = state.accounts[account.id];
       if (entry && claimLive(entry.claim, now)) {
         busy.push(account);
@@ -488,7 +522,8 @@ async function readAccount(account, signal, env) {
 }
 
 // A read's result into its entry (applyStalePolicy, resolveClaudeFetchApply).
-function applyRead(entry, result, now) {
+// login: the folder's login when the read was claimed.
+function applyRead(entry, result, now, login) {
   entry.checkedAt = now;
   if (result.ok) {
     Object.assign(entry, {
@@ -501,6 +536,7 @@ function applyRead(entry, result, now) {
       needsSignIn: false,
       failureStreak: 0,
       retryAt: null,
+      login: loginRecord(login),
     });
     return;
   }
@@ -522,7 +558,7 @@ async function readAndMerge(run, { account, at }, signal) {
   await withLock(run.home, async () => {
     const { state, text } = await loadState(run.home);
     const entry = (state.accounts[account.id] ??= blankEntry());
-    if (!result.aborted) applyRead(entry, result, Date.now());
+    if (!result.aborted) applyRead(entry, result, Date.now(), account.login);
     if (entry.claim?.pid === process.pid && entry.claim.at === at) entry.claim = null;
     await saveState(run.home, state, text);
   });
@@ -594,10 +630,20 @@ export async function usage(args) {
   return 4;
 }
 
+export async function forgetUsage(home, id) {
+  await withLock(home, async () => {
+    const { state, text } = await loadState(home);
+    state.accounts[id] = forgotten(state.accounts[id], Date.now());
+    await saveState(home, state, text);
+  });
+}
+
 export async function contractUsage(home, account) {
   const { state } = await loadState(home);
   const entry = state.accounts[account.id];
-  if (!entry) return { usage: null, credits: null, error: null, errorDetail: null, needsSignIn: null, usageUpdatedAt: null };
+  if (!entry || account.signedInAs || fromAnotherLogin(entry, account)) {
+    return { usage: null, credits: null, error: null, errorDetail: null, needsSignIn: null, usageUpdatedAt: null };
+  }
   const shown = visible(entry, Date.now());
   return {
     usage: shown.usage,

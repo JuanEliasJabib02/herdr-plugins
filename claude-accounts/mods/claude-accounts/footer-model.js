@@ -338,14 +338,17 @@ export function popupModel({ doc, mode = "verbose", now = Date.now() } = {}) {
 //          or why there are none.
 //   rows   System default, then each account, in the file's order: { id,
 //          label, active, hint, signIn, bars, status, disabled }. An account
-//          whose login lapsed has Orca's hint and signs in when picked;
-//          an inactive one has its bars [{ key, text, fill, color }] or its
-//          error's label. busy (a switch running) disables every row.
+//          whose login lapsed has Orca's hint and signs in when picked; one
+//          whose folder holds someone else's login (signedInAs, D17) does too,
+//          and its hint names that login. An inactive one has its bars
+//          [{ key, text, fill, color }] or its error's label. busy (a switch
+//          running) disables every row.
 //   empty  "No other accounts" when there's no saved account.
 //   error  why the last switch failed (useFailure), or null. Its line scrolls
 //          with the list, so it adds no height.
 
 const SIGN_IN_HINT = "Sign in again to use this account";
+const nowSignedInAs = (login) => `Now signed in as ${login}`;
 
 // USD as Orca's formatCurrencyAmount writes it in en-US ("$1,234.50"),
 // without Intl, as format.js does.
@@ -397,7 +400,7 @@ function accountRow(a, active, now, busy) {
     id: a.id,
     label: accountLabel(a),
     active,
-    hint: signIn ? SIGN_IN_HINT : null,
+    hint: signIn ? (a.signedInAs ? nowSignedInAs(a.signedInAs) : SIGN_IN_HINT) : null,
     signIn,
     bars,
     status: !active && !signIn && bars.length === 0 && a.error ? errorCopy(a.error, a.errorDetail).label : null,

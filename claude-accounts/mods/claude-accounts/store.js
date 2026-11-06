@@ -74,7 +74,7 @@ function parseObject(text) {
 // account: { id, label, email, org, configDir, isDefault, needsSignIn, error,
 //   usage: { session, weekly, fable, monthly } each { percent, resetsAt } or
 //   null, credits: { balance, limit } or null, usageUpdatedAt,
-//   lastAuthenticatedAt }
+//   lastAuthenticatedAt, signedInAs }
 // A file of a later version (renamed or removed fields, D9) reads as no
 // file. An entry without an id is dropped. `error` is D4's enum: any other
 // value reads "unavailable", as D9 tells readers to. A percent is clamped to
@@ -115,6 +115,7 @@ function readAccount(a) {
     credits: readCredits(a.credits),
     usageUpdatedAt: num(a.usageUpdatedAt),
     lastAuthenticatedAt: num(a.lastAuthenticatedAt),
+    signedInAs: str(a.signedInAs),
   };
 }
 

@@ -121,11 +121,15 @@ export function accountsModel({ accounts, settings, dismissed = null, signingIn 
       const isActive = a.id === active;
       const needsSignIn = a.needsSignIn === true;
       const date = formatDate(a.lastAuthenticatedAt);
+      // Its folder holds someone else's login (D17): the row is still this
+      // account's, so it keeps its org and date, and says who's there.
+      const signedInAs = needsSignIn ? str(a.signedInAs) : null;
       return {
         id: a.id,
         email: str(a.email) ?? str(a.label) ?? UNNAMED,
         badges: isActive ? [THIS_DEVICE, "Active"] : [THIS_DEVICE],
-        subtitle: needsSignIn ? "Sign in again to use this account" : [str(a.org), date].filter(Boolean).join(" · "),
+        subtitle: needsSignIn && !signedInAs ? "Sign in again to use this account" : [str(a.org), date].filter(Boolean).join(" · "),
+        hint: signedInAs ? `Now signed in as ${signedInAs}` : null,
         active: isActive,
         needsSignIn,
         // Orca disables picking an account that needs sign-in (the CLI's

@@ -1,8 +1,9 @@
 // The state folder's writes and its lock (D2). Owner: T2.
 //
 // - withLock(home, fn): runs fn under `mkdir <home>/lock` plus a `pid` file
-//   in it, and returns fn's result. A lock whose pid is dead, or older than
-//   60 s, is removed. Held only to claim and to merge: never across the
+//   in it, and returns fn's result. A lock whose pid is dead, older than 60 s,
+//   or with no pid file 2 s after it was made, is removed. Held only to claim
+//   and to merge: never across the
 //   Keychain, the network or a terminal's wait. It's reentrant within one
 //   async flow (a rebuildContract inside a held lock doesn't wait on itself),
 //   and two flows of one process still take turns.
@@ -32,6 +33,9 @@ import { knownAccounts } from "./accounts.mjs";
 
 // D2: a lock older than this is removed, whoever holds it.
 const LOCK_STALE_MS = 60_000;
+// A holder writes its pid right after making the folder: past this, a folder
+// with no pid file is a process that died in between.
+const LOCK_NO_PID_MS = 2_000;
 
 // An error main.mjs reports as `claude-accounts <command>: <message>` and
 // exits with: no stack, the code D9's table gives (1 for any other failure).
@@ -59,12 +63,19 @@ export async function withLock(home, fn) {
 async function acquire(lock) {
   const token = `${process.pid}\n${randomUUID()}\n`;
   for (;;) {
+    let made = false;
     try {
       await mkdir(lock);
+      made = true;
       await writeFile(join(lock, "pid"), token);
       return token;
     } catch (e) {
-      if (e.code !== "EEXIST") throw e;
+      // A holder too slow to write its pid: its folder was broken meanwhile,
+      // and may be someone else's by now. It goes back in line.
+      if (made && e.code === "ENOENT") continue;
+      // Any other failed write leaves no folder for the others to wait on.
+      if (made) await rm(lock, { recursive: true, force: true }).catch(() => {});
+      if (made || e.code !== "EEXIST") throw e;
     }
     const owner = await lockOwner(lock);
     if (owner && isStale(owner)) await breakLock(lock, owner);
@@ -78,17 +89,20 @@ async function release(lock, token) {
 }
 
 // Who holds a lock: its pid file's text and the folder's age. Null when the
-// lock is gone. A pid file not written yet reads as "" (a fresh lock).
+// lock is gone. A pid file not there, or not written yet, reads as ""; text is
+// null when it can't be read, which says nothing about its holder.
 async function lockOwner(lock) {
   const [text, st] = await Promise.all([
-    readFile(join(lock, "pid"), "utf8").catch(() => ""),
+    readFile(join(lock, "pid"), "utf8").catch((e) => (e.code === "ENOENT" ? "" : null)),
     stat(lock).catch(() => null),
   ]);
   return st ? { text, pid: Number.parseInt(text, 10), at: st.mtimeMs } : null;
 }
 
 function isStale(owner) {
-  if (Date.now() - owner.at > LOCK_STALE_MS) return true;
+  const age = Date.now() - owner.at;
+  if (age > LOCK_STALE_MS) return true;
+  if (owner.text === "") return age > LOCK_NO_PID_MS;
   return Number.isInteger(owner.pid) && owner.pid > 0 && !isAlive(owner.pid);
 }
 
@@ -167,8 +181,9 @@ function contractAccount(account, usage) {
     org: account.org ?? null,
     configDir: account.isDefault ? null : (account.configDir ?? null),
     isDefault: account.isDefault === true,
-    // A folder with no login needs one whatever usage says (Orca's rule).
-    needsSignIn: account.signedIn !== true || u.needsSignIn === true,
+    // A folder with no login, or someone else's, needs one whatever usage says
+    // (Orca's rule, D17).
+    needsSignIn: account.signedIn !== true || Boolean(account.signedInAs) || u.needsSignIn === true,
     error: u.error ?? null,
     errorDetail: u.errorDetail ?? null,
     usage: Object.fromEntries(WINDOWS.map((w) => [w, u.usage?.[w] ?? null])),
@@ -176,6 +191,7 @@ function contractAccount(account, usage) {
     usageUpdatedAt: u.usageUpdatedAt ?? null,
     lastAuthenticatedAt: account.lastAuthenticatedAt ?? null,
     duplicateOf: account.duplicateOf ?? null,
+    signedInAs: account.signedInAs ?? null,
   };
 }
 

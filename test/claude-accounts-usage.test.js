@@ -192,6 +192,12 @@ function seed(s, accounts) {
 }
 const stateOf = (s) => JSON.parse(readFileSync(join(s.state, "usage-state.json"), "utf8"));
 
+// What a folder's .claude.json says now: a /login inside its Claude.
+function signIn(s, id, email, orgUuid) {
+  const dir = s.dirs[id] ?? s.home;
+  writeFileSync(join(dir, ".claude.json"), JSON.stringify({ oauthAccount: { emailAddress: email, organizationName: "Example Org", organizationUuid: orgUuid } }));
+}
+
 // A statusline drop in live/ (D16).
 function drop(s, name, value) {
   mkdirSync(join(s.state, "live"), { recursive: true });
@@ -679,6 +685,121 @@ describe("usage", { concurrency: 8, timeout: 60_000 }, () => {
       assert.equal(api.requests.length, 0);
       assert.deepEqual([byId(doc, A).usage.session.percent, byId(doc, A).error], [55, null]);
       assert.deepEqual([byId(doc, B).usage.session.percent, byId(doc, B).error], [12, "network"]);
+    });
+  });
+
+  // ── Whose numbers these are (D17, M-3) ─────────────────────────────────
+
+  const EMPTY = { session: null, weekly: null, fable: null, monthly: null };
+  const ana = (now, extra = {}) => ({
+    usage: { session: win(50, RESET_5H), weekly: win(60, RESET_WK), fable: win(22, RESET_WK), monthly: null },
+    credits: { balance: 5, limit: 10 },
+    source: "fetch",
+    usageUpdatedAt: now - MIN,
+    checkedAt: now - MIN,
+    ...extra,
+  });
+  const session = (percent) => ({ five_hour: { used_percentage: percent, resets_at: RESET_5H_S } });
+
+  it("a folder signed in as someone else: its usage reads as none, it isn't fetched, and its drop is ignored, even once the folder has its login back", async () => {
+    const s = sandbox();
+    const now = Date.now();
+    signIn(s, A, "ben@example.org", null);
+    seed(s, { [A]: ana(now, { checkedAt: now - 10 * MIN }), [B]: { checkedAt: now - MIN }, default: { checkedAt: now - MIN } });
+    drop(s, "a.json", { configDir: s.dirs[A], at: now - 1000, rate_limits: session(80) });
+    const api = await okEndpoint();
+    await withEndpoint(api, async () => {
+      for (const args of [["usage", "--json"], ["usage", "--refresh", "--account", A, "--json"], ["list", "--json"]]) {
+        const a = byId(await usageDoc(s, args, { url: api.url }), A);
+        assert.deepEqual([a.label, a.email, a.signedInAs, a.needsSignIn], ["ana@example.com", "ana@example.com", "ben@example.org", true], args.join(" "));
+        assert.deepEqual(a.usage, EMPTY, args.join(" "));
+        assert.deepEqual([a.credits, a.usageUpdatedAt, a.error, a.errorDetail], [null, null, null, null], args.join(" "));
+      }
+      assert.ok(!api.requests.some((r) => r.token === TOKEN[A]), "never fetched");
+
+      // A /login back to Ana: Ben's drop stays out, and she's read again.
+      signIn(s, A, "ana@example.com", null);
+      const a = byId(await usageDoc(s, ["usage", "--account", A, "--json"], { url: api.url }), A);
+      assert.deepEqual([a.signedInAs, a.needsSignIn, a.usage.session], [null, false, win(41, RESET_5H)]);
+      assert.deepEqual(a.credits, null);
+    });
+  });
+
+  it("a good read records the login it was read from; a merged drop records the folder's login", async () => {
+    const s = sandbox();
+    signIn(s, A, "ana@example.com", "org-ana");
+    const now = Date.now();
+    seed(s, { [B]: { checkedAt: now - MIN }, default: { checkedAt: now - MIN } });
+    drop(s, "b.json", { configDir: s.dirs[B], at: now - 1000, rate_limits: session(40) });
+    const api = await okEndpoint();
+    await withEndpoint(api, async () => {
+      await usageDoc(s, ["usage", "--json"], { url: api.url });
+      assert.deepEqual(stateOf(s).accounts[A].login, { email: "ana@example.com", orgUuid: "org-ana" });
+      assert.deepEqual(stateOf(s).accounts[B].login, { email: "ben@example.org", orgUuid: null });
+    });
+  });
+
+  it("an entry read from another login counts as empty and due, Retry-After aside, on System default and on a saved account; one with no record is kept", async () => {
+    const s = sandbox();
+    const now = Date.now();
+    signIn(s, A, "ana@example.com", "org-new"); // Same email, another org: another login.
+    signIn(s, "default", "zed@example.com", null);
+    seed(s, {
+      default: ana(now, { login: { email: "dee@example.com", orgUuid: null }, retryAt: now + 60 * MIN }),
+      [A]: ana(now, { login: { email: "ana@example.com", orgUuid: "org-old" } }),
+      [B]: ana(now),
+    });
+    // Without a read, nothing from the old login shows.
+    const listed = await listDoc(s);
+    assert.deepEqual(byId(listed, "default").usage, EMPTY);
+    assert.deepEqual([byId(listed, "default").credits, byId(listed, "default").usageUpdatedAt], [null, null]);
+    assert.deepEqual(byId(listed, A).usage, EMPTY);
+    assert.equal(byId(listed, B).usage.session.percent, 50, "no record yet: kept");
+
+    const api = await okEndpoint(7, 8, 9);
+    await withEndpoint(api, async () => {
+      const doc = await usageDoc(s, ["usage", "--json"], { url: api.url });
+      assert.deepEqual(api.requests.map((r) => r.token).sort(), [TOKEN.default, TOKEN[A]].sort(), "both due at once, B isn't");
+      for (const id of ["default", A]) {
+        assert.equal(byId(doc, id).usage.session.percent, 7);
+        assert.equal(byId(doc, id).credits, null, "the old login's credits are gone");
+      }
+      assert.deepEqual(stateOf(s).accounts.default.login, { email: "zed@example.com", orgUuid: null });
+      assert.equal(stateOf(s).accounts.default.retryAt, null);
+      assert.equal(byId(doc, B).usage.session.percent, 50);
+    });
+  });
+
+  it("a folder that holds no login right now keeps its entry: there's nothing to compare it with", async () => {
+    const s = sandbox();
+    const now = Date.now();
+    rmSync(join(s.dirs[A], ".claude.json"));
+    seed(s, { [A]: ana(now, { login: { email: "ana@example.com", orgUuid: null } }), [B]: { checkedAt: now - MIN }, default: { checkedAt: now - MIN } });
+    assert.equal(byId(await listDoc(s), A).usage.session.percent, 50);
+  });
+
+  it("mergeDrop after a login change: the old login's last drop stays out, and a new one merges over nothing, below the old numbers, with no old Fable or credits", async () => {
+    const s = sandbox();
+    const now = Date.now();
+    signIn(s, "default", "zed@example.com", null);
+    seed(s, {
+      default: ana(now, { login: { email: "dee@example.com", orgUuid: null } }),
+      [A]: { checkedAt: now - MIN },
+      [B]: { checkedAt: now - MIN },
+    });
+    // Written by the old login's Claude before the /login, never merged.
+    drop(s, "default.json", { configDir: null, at: now - 1000, rate_limits: session(90) });
+    const api = await endpoint((req, res) => reply(res, 500, "{}"));
+    await withEndpoint(api, async () => {
+      const first = await usageDoc(s, ["usage", "--json"], { url: api.url });
+      assert.deepEqual(byId(first, "default").usage, EMPTY, "the read failed, and nothing is left");
+      assert.equal(api.requests.length, 1);
+
+      drop(s, "default.json", { configDir: null, at: Date.now() + 5000, rate_limits: session(5) });
+      const second = await usageDoc(s, ["usage", "--json"], { url: api.url });
+      assert.deepEqual(byId(second, "default").usage, { ...EMPTY, session: win(5, RESET_5H) });
+      assert.equal(byId(second, "default").credits, null);
+      assert.deepEqual(stateOf(s).accounts.default.login, { email: "zed@example.com", orgUuid: null });
     });
   });
 

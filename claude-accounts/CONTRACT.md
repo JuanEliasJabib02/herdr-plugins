@@ -47,22 +47,24 @@ change without notice.
 |---|---|---|
 | `id` | string | The account's uuid, or `"default"`. |
 | `label` | string | What to show: `"System default"`, or the account's email. |
-| `email` | string or null | The email its folder is signed in as now (a `/login` inside its Claude changes it), or the one saved when the folder has no login; null when System default has no login. |
+| `email` | string or null | The email the account was saved with (see `signedInAs` when its folder holds another login); System default's login, null when it has none. |
 | `org` | string or null | The organization's name. |
 | `configDir` | string or null | Its Claude config folder, the exact `CLAUDE_CONFIG_DIR` its Claude runs with (never normalized). Null for System default. |
 | `isDefault` | boolean | True for System default only. |
-| `needsSignIn` | boolean | Its login is missing or lapsed: Claude can't run on it until you sign in again (the plugin shows "Sign in again"). |
+| `needsSignIn` | boolean | Its login is missing or lapsed, or its folder holds someone else's (`signedInAs`): Claude can't run on this account until you sign in again (the plugin shows "Sign in again"). |
 | `error` | string or null | Why the last usage read failed (see Error values below); null when it worked. The last good `usage` stays alongside. |
 | `errorDetail` | string or null | The error's own text where the plugin shows it: the server's message for a login without the profile scope (`unavailable`), or an unexpected failure's text (`refreshFailed`). Null otherwise. |
 | `usage` | object | `{session, weekly, fable, monthly}`, each a usage window (below) or null when Claude doesn't report it for this account. |
 | `credits` | `{balance, limit}` or null | Extra-usage credits, when the account has them. |
 | `usageUpdatedAt` | epoch ms or null | When this account's usage was last read; null before the first read. |
 | `lastAuthenticatedAt` | epoch ms or null | Its last sign-in. Null when unknown, and for System default. |
-| `duplicateOf` | string or null | System default only: the id of a saved account signed in as the same email (Orca's "System default is signed in as …, which is also a saved account" notice). Null on every other account. |
+| `duplicateOf` | string or null | System default only: the id of a saved account saved with the same email (Orca's "System default is signed in as …, which is also a saved account" notice). Null on every other account. |
+| `signedInAs` | string or null | The email its folder is signed in as, when that's another login than the saved one (a `/login` inside its Claude changes it without telling anyone); null otherwise, and always for System default. While it's set the account keeps its `label` and `email`, `needsSignIn` is true, and `usage`, `credits`, `error`, `errorDetail` and `usageUpdatedAt` are empty, because those numbers aren't this account's. |
 
 The windows: `session` is the 5-hour limit, `weekly` the 7-day limit on all
 models, `fable` the weekly Fable limit, and `monthly` the monthly spend
-limit.
+limit. When a folder's login changes (System default's too), its windows
+empty until it's read again: no number survives from the old login.
 
 ### Each usage window
 
@@ -88,7 +90,7 @@ Treat a value you don't know as `unavailable`.
 ## The program: `claude-accounts`
 
 Installed at `~/.config/herdr-app/mods/claude-accounts/bin/claude-accounts`
-(Node 22 or newer). Run it with an argv (a mod's `exec`), never through a
+(Node 22.15 or newer). Run it with an argv (a mod's `exec`), never through a
 shell string.
 
 - Every command takes `--json`: its result is one JSON value on stdout.
@@ -150,14 +152,18 @@ jq --arg a "$account" '.accounts[] | select(.id == $a) | {usage, error, needsSig
 
 Makes an account the active one, then applies the switch setting (Ask,
 Always restart or Never restart) to the Claude terminals still on the
-previous one.
+previous one. A terminal on a saved account's folder counts only as that
+account. One on System default counts as System default, and also as a saved
+account signed in to the same login: both have an org id, the same org and
+the same email.
 
 ```text
 {"from": "<id>" | "default", "to": "<id>" | "default", "switchMode": "ask" | "restart" | "keep"}
 ```
 
-An unknown account exits 7. A saved account whose folder has no login exits
-5 ("Sign in to this Claude account again before selecting it.").
+An unknown account exits 7. A saved account whose folder has no login, or
+someone else's (`signedInAs`), exits 5 ("Sign in to this Claude account again
+before selecting it.").
 
 ### `resume --terminal <t> --account <id|default> [--message <text>] [--wait <s>] --json`
 
@@ -165,6 +171,9 @@ Restarts the Claude in terminal `<t>` on an account, continuing its
 conversation (`claude --resume <session>`), then sends `--message` as if you
 typed it. It never changes the active account.
 
+- `<t>` is a terminal's address or a name `hc` knows it by. The job is kept
+  under its address, so one terminal named two ways gets one job, and
+  `--status` reports the address.
 - It checks what needs no waiting and fails at once with 2, 3, 5, 7, 8 or
   64, and 1 when hc can't read the terminal. It exits 2 when the
   terminal's conversation has no transcript yet ("there's no conversation

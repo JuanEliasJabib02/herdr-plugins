@@ -36,14 +36,15 @@
 //      when its terminal is now on `to`; the others follow `to` (an accepted
 //      restart relaunches on whatever is selected when it runs).
 //   3. switchMode keep: nothing else.
-//   4. The Claude terminals (D7) split into onAccount (on `from`), elsewhere
-//      (on another account) and cantMove: reason "own-program" (Claude is
+//   4. The Claude terminals (D7) split into onAccount (on `from`, as D18's
+//      runsOnAccount reads it), elsewhere (on another account) and cantMove:
+//      reason "own-program" (Claude is
 //      the terminal's program), "no-session" (no session file, or a session
 //      with no transcript yet: nothing to resume, Orca's rule), "shared-session" (another
 //      terminal holds the same session id), "unknown-account" (its session
 //      lives in a folder no account has) or "unreadable" (hc couldn't read
-//      it: Orca's "Couldn't check N terminals"). Terminals already on `to`
-//      aren't listed.
+//      it: Orca's "Couldn't check N terminals"). Terminals already on `to`,
+//      as D18 reads it too, aren't listed.
 //   5. restart: each onAccount terminal is queued as a switch item, and a
 //      runner is spawned.
 //   6. pending-switch.json gets {from, to, at, mode, sessions} when there's
@@ -104,7 +105,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { parseArgs } from "node:util";
 import { FILES, cliPath, stateHome } from "./paths.mjs";
 import { failure, isAlive, readJson, render, withLock, writeAtomic } from "./files.mjs";
-import { knownAccounts, readSettings, sameLogin } from "./accounts.mjs";
+import { knownAccounts, readSettings, sameEmail } from "./accounts.mjs";
 import { contractUsage } from "./usage.mjs";
 import { HC_SEND_TIMEOUT_MS, getTerminal, hasTranscript, hc, inspectTerminal, isIdle, listClaudeTerminals } from "./terminals.mjs";
 
@@ -372,14 +373,25 @@ async function scanTerminals(known) {
   );
 }
 
+// D18, Orca's isClaudePaneOnAccount: whether a session (the account of the
+// folder it runs in, null for a folder no account has) runs on an account. A
+// saved folder counts only as itself: two saved accounts may share a login on
+// purpose. System default counts as "default", and as a saved account signed
+// in to the same login, since it spends the same limits: the same email and
+// the same org, a missing org never matching, because one email can hold
+// personal and team logins.
+function runsOnAccount(session, accountId, known) {
+  if (session !== "default") return session !== null && session === accountId;
+  if (accountId === "default") return true;
+  const system = known.accounts.find((a) => a.isDefault);
+  const account = known.accounts.find((a) => a.id === accountId);
+  const orgUuid = account?.orgUuid ?? account?.login?.orgUuid;
+  return Boolean(account?.signedIn && !account.signedInAs && orgUuid && orgUuid === system?.orgUuid && sameEmail(account.email, system.email));
+}
+
 // D8's three groups, in pending-switch.json's shape plus what a switch item
 // needs: [{ terminal, title, account, group, reason, sessionId, args }].
 function classify(scan, from, to, known) {
-  // A session on another folder with the outgoing account's login spends the
-  // same limits, so it moves with it (System default and a saved account can
-  // hold one login).
-  const accountById = new Map(known.accounts.map((a) => [a.id, a]));
-  const leaving = (account) => account === from || sameLogin(accountById.get(account), accountById.get(from));
   const holders = new Map();
   for (const { found } of scan) {
     if (found.kind === "claude") holders.set(found.sessionId, (holders.get(found.sessionId) ?? 0) + 1);
@@ -391,7 +403,7 @@ function classify(scan, from, to, known) {
     if (found.kind === "notClaude") continue;
     if (found.kind === "missing" || found.kind === "unreadable") cantMove("unreadable");
     else if (found.kind === "noSession") cantMove("no-session");
-    else if (found.account === to) continue;
+    else if (runsOnAccount(found.account, to, known)) continue;
     else if (found.ownProgram) cantMove("own-program");
     else if (found.account === null) cantMove("unknown-account");
     else if (!found.resumable) cantMove("no-session");
@@ -399,7 +411,7 @@ function classify(scan, from, to, known) {
     else {
       out.push({
         ...row,
-        group: leaving(found.account) ? "onAccount" : "elsewhere",
+        group: runsOnAccount(found.account, from, known) ? "onAccount" : "elsewhere",
         reason: null,
         sessionId: found.sessionId,
         args: keptArgs(found.argv),
@@ -436,7 +448,7 @@ export async function afterUse(from, to) {
     doc.items = doc.items.filter((item) => {
       if (item.kind !== "switch" || !NOT_STARTED.has(item.state)) return true;
       write = true;
-      if (accountOf.get(item.terminal) === to) return false;
+      if (runsOnAccount(accountOf.get(item.terminal) ?? null, to, known)) return false;
       Object.assign(item, { to, updatedAt: now });
       return true;
     });
@@ -484,10 +496,11 @@ export async function restart(args) {
 async function cancelTerminal(terminalId, json) {
   const home = stateHome();
   const known = await knownAccounts(home);
+  const address = await addressOf(terminalId);
   const cancelled = await underLock(home, known, timing(), async (doc, now) => {
     const ids = [];
     for (const item of doc.items) {
-      if (item.terminal !== terminalId || !NOT_STARTED.has(item.state)) continue;
+      if (item.terminal !== address || !NOT_STARTED.has(item.state)) continue;
       finalize(item, "cancelled", null, now);
       ids.push(item.id);
     }
@@ -499,8 +512,9 @@ async function cancelTerminal(terminalId, json) {
   return 0;
 }
 
-// The question lists addresses; `--terminal` takes a name too, as every other
-// command does.
+// The queue and the question hold addresses; a `--terminal` takes a name too,
+// so one terminal named two ways is one terminal. A terminal hc can't read
+// keeps what was given, for the command's own error.
 async function addressOf(t) {
   try {
     return (await getTerminal(t))?.address ?? t;
@@ -850,9 +864,10 @@ async function report(home, known, t, id, { wait, json }) {
 }
 
 // An account that can't run Claude until it signs in (the published
-// needsSignIn: a folder with no login, or usage's lapsed-login flag).
+// needsSignIn: a folder with no login, someone else's, or usage's lapsed-login
+// flag).
 async function needsSignIn(home, account) {
-  if (account.signedIn !== true) return true;
+  if (account.signedIn !== true || account.signedInAs) return true;
   const usage = await contractUsage(home, account).catch(() => null);
   return usage?.needsSignIn === true;
 }
@@ -888,9 +903,9 @@ export async function resume(args) {
     return cancelJob(home, known, t, values.cancel, values.json);
   }
 
-  const terminalId = values.terminal;
-  if (!terminalId || !values.account) throw usageError(RESUME_USAGE);
+  if (!values.terminal || !values.account) throw usageError(RESUME_USAGE);
   const known = await knownAccounts(home);
+  const terminalId = await addressOf(values.terminal);
   const live = await underLock(home, known, t, async (doc) => ({
     result: doc.items.find((item) => item.terminal === terminalId && item.kind === "resume" && isLive(item)) ?? null,
   }));

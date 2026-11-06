@@ -36,12 +36,16 @@ the same files and run the same commands: see [CONTRACT.md](CONTRACT.md).
   the `Claude Account` list: System default and each saved account, ✓ on
   the active one, and the others with their `wk` and `Fable` bars. Click one
   to switch. An account whose login lapsed says "Sign in again to use this
-  account", and its row opens the sign-in tab. "No other accounts" when
-  there are none.
+  account", and its row opens the sign-in tab. One whose folder got someone
+  else's login (a `/login` inside its Claude) keeps its saved email and says
+  "Now signed in as {login}", with no bars, because those numbers aren't its
+  own; its row opens the sign-in tab too. "No other accounts" when there are
+  none.
 - **Manage Accounts** (a dialog):
   - One row per account: its email, "This device", `org · date` of its last
-    sign-in, `Sign in again ▾` (its menu: "Copy sign-in link instead") and
-    `Remove`. Then `Add account ▾`, with the same menu.
+    sign-in ("Now signed in as {login}" under it when its folder got someone
+    else's login), `Sign in again ▾` (its menu: "Copy sign-in link instead")
+    and `Remove`. Then `Add account ▾`, with the same menu.
   - "System default: {email}" / "Use your current {email} Claude login.",
     and Orca's notice when System default is signed in as an email that is
     also a saved account.
@@ -86,8 +90,8 @@ the same files and run the same commands: see [CONTRACT.md](CONTRACT.md).
     account-bound key (as Orca does). It's kept only when the sign-in
     succeeds with an email and org that aren't saved yet; otherwise the
     folder goes.
-  - An account whose folder holds no login can't be picked until it signs
-    in again, as in Orca.
+  - An account whose folder holds no login, or someone else's, can't be
+    picked until it signs in again, as in Orca.
   - **Sign in** opens a Herdr tab running `claude auth login`. Closing the
     tab cancels it. "Copy sign-in link instead" puts the one-click link on
     the clipboard instead of opening the browser.
@@ -104,6 +108,10 @@ the same files and run the same commands: see [CONTRACT.md](CONTRACT.md).
     state folder. Fable comes from polling only.
   - Logins are never refreshed, written or logged: Claude Code owns them. An
     account whose login lapsed shows "Sign in again".
+  - Numbers belong to the login they were read from. When a folder's login
+    changes (System default's too), or after a sign-in here, its numbers go
+    and it's read again. A folder holding someone else's login isn't read at
+    all, and its statusline drops are ignored.
 - **Which account a terminal runs.** Inside Herdr, the `claude` launcher
   starts each new Claude on the active account. A running terminal's
   account is the config folder holding its live session file.
@@ -111,6 +119,10 @@ the same files and run the same commands: see [CONTRACT.md](CONTRACT.md).
   - Always restart: every Claude terminal on the previous account restarts
     on the new one, continuing its conversation. Ask: the switch dialog
     first. Never restart: they stay as they are.
+  - A terminal on a saved account's folder counts only as that account. One
+    on System default also counts as a saved account signed in to the same
+    login (same email and same org, as in Orca): it moves when you leave that
+    account, and stays when you switch to it.
   - A restart waits until that terminal's Claude is idle, however long it
     takes, stops it, types `CLAUDE_ACCOUNTS_DIR=<folder> claude <its flags>
     --resume <session>` in the same shell, and checks the new Claude landed
@@ -143,7 +155,7 @@ scripts/install.sh claude-accounts
 - Live numbers between polls need the statusline drop in
   `~/.claude/statusline.sh`.
 - Usage details & history runs `~/.local/bin/claude-usage --json`.
-- Node 22 or newer on the PATH Herdr's `exec` sees.
+- Node 22.15 or newer on the PATH Herdr's `exec` sees.
 
 **Built from**
 
@@ -213,7 +225,7 @@ overwritten.
 | `active` | the active account's config folder, the exact string; empty for System default |
 | `settings.json` | the switch setting: `ask`, `restart` or `keep` |
 | `accounts.v1.json` | what other plugins read: every account with its usage ([CONTRACT.md](CONTRACT.md)) |
-| `usage-state.json` | when each account was fetched, its last data, and its failures |
+| `usage-state.json` | when each account was fetched, its last data, the login that data was read from, and its failures |
 | `restart.json` | the queued restarts and `resume` jobs, with their progress |
 | `pending-switch.json` | what the last switch found: the sessions on the previous account and the others (`mode` ask: the switch dialog's question; `mode` restart: the restart notice and its Review list) |
 | `live/` | the statusline's latest limits, one file per account |

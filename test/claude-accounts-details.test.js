@@ -84,8 +84,12 @@ const alive = (pid) => {
 
 // ── The sandbox ────────────────────────────────────────────────────────────
 
+// How long the fake claude-usage waits at most for its gate. A CLI run that
+// waited for it couldn't be back sooner, however loaded the machine is.
+const GATE_MS = 10_000;
+
 // A fake claude-usage. It appends its args to $FAKE_OUT/calls and its pid to
-// $FAKE_OUT/pids, waits for $FAKE_GATE to exist (at most 10 s) when set,
+// $FAKE_OUT/pids, waits for $FAKE_GATE to exist (at most GATE_MS) when set,
 // writes $FAKE_STDERR to stderr, prints $FAKE_STDOUT_FILE (default: the
 // claude-usage fixture), and exits $FAKE_EXIT.
 const FAKE_USAGE = `#!/bin/sh
@@ -93,7 +97,7 @@ printf '%s\\n' "$*" >> "$FAKE_OUT/calls"
 echo $$ >> "$FAKE_OUT/pids"
 if [ -n "\${FAKE_GATE:-}" ]; then
   i=0
-  while [ ! -f "$FAKE_GATE" ] && [ $i -lt 200 ]; do sleep 0.05; i=$((i + 1)); done
+  while [ ! -f "$FAKE_GATE" ] && [ $i -lt ${GATE_MS / 50} ]; do sleep 0.05; i=$((i + 1)); done
 fi
 [ -n "\${FAKE_STDERR:-}" ] && printf '%s\\n' "$FAKE_STDERR" >&2
 cat "\${FAKE_STDOUT_FILE:-$FAKE_FIXTURE}"
@@ -184,7 +188,7 @@ test("details --range 7 runs claude-usage --json --last 7 detached: it returns a
   s.env.FAKE_GATE = s.gate;
   const r = s.cli(["details", "--range", "7", "--json"]);
   assert.equal(r.status, 0, r.stderr);
-  assert.ok(r.ms < 2000, `returned in ${r.ms} ms while claude-usage still runs`);
+  assert.ok(r.ms < GATE_MS, `returned in ${r.ms} ms, while claude-usage still waits for its gate`);
   const out = JSON.parse(r.stdout);
   assert.equal(out.range, "7");
   assert.equal(out.started, true);

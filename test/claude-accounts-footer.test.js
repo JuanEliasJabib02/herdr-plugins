@@ -309,6 +309,37 @@ test("panel: the Claude Account list, System default first, ✓ on the active on
   assert.equal(m.empty, null);
 });
 
+// A folder signed in as someone else, as accounts.v1.json has it (D17).
+const elsewhere = { signedInAs: "dee@example.com", needsSignIn: true, usage: NO_USAGE, credits: null, error: null, errorDetail: null, usageUpdatedAt: null };
+
+test("panel (S8): a folder signed in as someone else keeps its saved email, names the login, signs in, and has no bars", () => {
+  const m = panelModel({ doc: docWith(ANA, { [BEN]: elsewhere }), now: NOW });
+  const ben = m.rows[2];
+  assert.deepEqual(
+    [ben.label, ben.hint, ben.signIn, ben.bars, ben.status, ben.active, ben.disabled],
+    ["ben@example.org", "Now signed in as dee@example.com", BEN, [], null, false, false],
+  );
+  assert.equal(m.rows[0].hint, "Sign in again to use this account", "a lapsed login keeps Orca's hint");
+  // Its row reads like itself even when the login it holds is another row's.
+  const taken = panelModel({ doc: docWith(ANA, { [BEN]: { ...elsewhere, signedInAs: "ana@example.com" } }), now: NOW });
+  assert.deepEqual(taken.rows.map((r) => r.label), ["System default", "ana@example.com", "ben@example.org"]);
+  assert.equal(taken.rows[2].hint, "Now signed in as ana@example.com");
+
+  // Active: its card has its name and no numbers, and its row still signs in.
+  const active = panelModel({ doc: docWith(BEN, { [BEN]: elsewhere }), now: NOW });
+  assert.equal(active.card.label, "ben@example.org");
+  assert.deepEqual(active.card.windows, []);
+  assert.equal(active.card.credits, null);
+  assert.equal(active.card.notice.label, "Sign in again");
+  assert.deepEqual([active.rows[2].label, active.rows[2].hint, active.rows[2].signIn, active.rows[2].bars, active.rows[2].disabled], ["ben@example.org", "Now signed in as dee@example.com", BEN, [], false]);
+  assert.equal(footerModel({ doc: docWith(BEN, { [BEN]: elsewhere }), width: 400, now: NOW }).kind, "signIn");
+});
+
+test("readAccounts: signedInAs is a login's email or null, on any account of an older or a broken file", () => {
+  const got = readAccounts({ accounts: [{ id: "a", signedInAs: "dee@example.com" }, { id: "b", signedInAs: 3 }, { id: "c", signedInAs: "" }, { id: "d" }] });
+  assert.deepEqual(got.accounts.map((a) => a.signedInAs), ["dee@example.com", null, null, null]);
+});
+
 test("panel rows: a session bar counts down, monthly alone shows, an error without numbers says its label; busy disables all", () => {
   const doc = docWith(ANA, {
     [BEN]: { usage: { session: w(30, NOW + 47 * MIN), weekly: w(10), fable: null, monthly: null } },
@@ -589,7 +620,7 @@ const FAKES = {
     export const PathBuilder = { stroke: () => globalThis.__caFake.path(), fill: () => globalThis.__caFake.path() };
     export class View {}`,
   "gpui-base": `const k = (n) => (...a) => globalThis.__caFake.el(n, ...a);
-    export const v_flex = k("v_flex"), h_flex = k("h_flex"), Popover = k("Popover");`,
+    export const v_flex = k("v_flex"), h_flex = k("h_flex"), Popover = Object.assign(k("Popover"), { new: k("Popover") });`,
 };
 registerHooks({
   resolve: (spec, ctx, next) => (Object.hasOwn(FAKES, spec) ? { url: `fake:${spec}`, shortCircuit: true } : next(spec, ctx)),
@@ -1106,6 +1137,32 @@ test("panel view (S1): Claude Updated 3m ago, the card's windows, Claude Account
   walk(find(root, `ca-panel-row-${BEN}`));
   assert.deepEqual(checks, []);
   assert.equal(withText(root, "94% used wk").calls.text_color[0], "#muted");
+});
+
+test("panel view (S8): a folder signed in as someone else draws its saved email, the login, Sign in and no bars; a click opens the sign-in tab", async () => {
+  const { view, world } = await panel(liveDoc(ANA, { [BEN]: elsewhere }));
+  const row = find(view.render(), `ca-panel-row-${BEN}`);
+  assert.equal(textOf(row), "ben@example.org Now signed in as dee@example.com Sign in");
+  row.handlers.click({}, world.cx);
+  await flush();
+  assert.deepEqual(world.tabs(), [signInTab(CLI, BEN)]);
+});
+
+test("accounts view (S8): the row draws its saved email, its org and date, then the login, and signs in again", async () => {
+  const { default: Accounts } = await import("../claude-accounts/mods/claude-accounts/accounts.js");
+  const world = newWorld({ files: { "accounts.v1.json": liveDoc(ANA, { [BEN]: elsewhere }) } });
+  const view = new Accounts();
+  view.init({}, world.cx);
+  await flush();
+  const row = find(view.render(), `ca-accounts-row-${BEN}`);
+  const text = textOf(row);
+  assert.ok(text.startsWith("ben@example.org This device Acme · "), text);
+  assert.ok(text.includes("Now signed in as dee@example.com"), text);
+  assert.ok(text.includes("Sign in again"), text);
+  assert.doesNotMatch(text, /Sign in again to use this account/);
+  assert.equal(find(row, `ca-accounts-pick-${BEN}`).handlers.click, undefined, "it can't be picked");
+  // An account with its own login draws no such line.
+  assert.doesNotMatch(textOf(find(view.render(), `ca-accounts-row-${ANA}`)), /Now signed in as/);
 });
 
 test("panel view: opening it asks for the usage that's due", async () => {
