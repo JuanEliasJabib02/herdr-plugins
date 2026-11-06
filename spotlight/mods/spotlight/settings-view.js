@@ -16,6 +16,7 @@ import { theme, props, closeOverlay, shared, appHome, home, readTextFile, writeT
 import { ENVS, parseSettings, repoSettings } from "./settings.js";
 import { lanesOf, reposOf, toForm, applyForm, enabledChoice, isHarnessRoot, serializeSettings } from "./settings-form.js";
 import { hasServerCommand } from "./server-plan.js";
+import { cliPathOf } from "./board-model.js";
 
 const ENV_LABEL = { local: "Local", dev: "Dev", prod: "Prod" };
 
@@ -59,14 +60,8 @@ async function isGitRepo(root) {
   }
 }
 
-// `spotlight reap`, from PATH or where the installer links it.
-async function runReap() {
-  try {
-    return await exec("spotlight", ["reap"]);
-  } catch {
-    return exec(`${home()}/.local/bin/spotlight`, ["reap"]);
-  }
-}
+// `spotlight reap`, the CLI inside this mod's folder (as the board and the reaper run it).
+const runReap = () => exec(cliPathOf(appHome()), ["reap"]);
 
 export default class SettingsView {
   init(_props, cx) {
