@@ -2,8 +2,10 @@
 // `node --test` can load it: the rows of the active group (projects, their
 // workspaces and agents) from the registry, the worktree cache and Herdr's
 // live spaces; what a click opens (D8); Add project (D10) with the herdr side
-// passed in; the project menu's items; the narrow rail; and the helpers of
-// the worktree engine (D6). tree.js and project-menu.js draw and act on it.
+// passed in; the project and workspace menus' items; what the Delete dialog
+// says and what its outcome does (D22); the narrow rail; and the helpers of
+// the worktree engine (D6). tree.js, the menus and delete-workspace.js draw
+// and act on it.
 
 import { normPath, baseName, placeOf, activeGroup, findProject, addProject, matchSpaces } from "./lib.js";
 
@@ -230,15 +232,104 @@ export async function addProjectAt(folder, io) {
 
 // ── Workspace menu (D20) ───────────────────────────────────────────────────
 
-// The right-click menu of a workspace row: [{ id, label, text }]. Copy Path
-// and Copy Worktree Name (its folder's name, not the branch) on every
-// checkout. Unknown row: [].
+// The right-click menu of a workspace row: [{ id, label, text?, separator?,
+// danger? }]. Copy Path and Copy Worktree Name (its folder's name, not the
+// branch) on every checkout; on a worktree that isn't the main checkout,
+// after a separator, Delete… in the blocked color (S20, S21). The main
+// checkout is never deleted. Unknown row: [].
 export function workspaceMenuItems(row) {
   if (!row?.path) return [];
   return [
     { id: "copy-path", label: "Copy Path", text: row.path },
     { id: "copy-name", label: "Copy Worktree Name", text: baseName(row.path) },
+    ...(row.main ? [] : [{ id: "delete", label: "Delete…", separator: true, danger: true }]),
   ];
+}
+
+// ── Delete dialog (D22) ────────────────────────────────────────────────────
+
+// A path as people read it: the home folder as ~.
+function tilde(path, home) {
+  const h = normPath(home);
+  if (!h || h === "/") return path;
+  return path === h ? "~" : path.startsWith(`${h}/`) ? `~${path.slice(h.length)}` : path;
+}
+
+// How many terminals are in the folder at `path` (or below it) and stay open
+// because their space isn't one that closes: panes() whose cwd is there,
+// on this computer, outside the `closing` space ids. Mod panes have no
+// terminal and don't count.
+export function terminalsStaying(path, closing, spaces, panes, home) {
+  const dir = normPath(path, home);
+  if (!dir) return 0;
+  const shut = new Set(closing ?? []);
+  const spaceOf = new Map();
+  for (const s of spaces ?? []) for (const t of s.tabs ?? []) spaceOf.set(t.id, s);
+  return (panes ?? []).filter((p) => {
+    const s = spaceOf.get(p.tab);
+    if (!p.terminal || !s || shut.has(s.id) || (s.machine ?? null) !== null) return false;
+    const at = normPath(p.cwd, home);
+    return at === dir || at.startsWith(`${dir}/`);
+  }).length;
+}
+
+// What the Delete dialog says about the workspace at `path` (D22).
+//   row: its { path, branch, main } (the check's fresh list, else the cache),
+//     null when unknown; check: removalCheck's answer, null while asking;
+//   spaces: how many of its spaces close; terminals: terminalsStaying().
+// Resolves { label, title, path, branch, notes, warnings, reason, checking,
+// ready, button }: notes are what closes or stays; warnings what is lost;
+// reason why it can't run (locked, git unanswered, not a worktree); ready:
+// Delete may run; button: "Delete", "Delete anyway" (changes or submodules:
+// a forced remove), or null when it can't run at all.
+export function deletePrompt({ path, row, check, spaces, terminals, home }) {
+  const at = normPath(path);
+  const label = row ? workspaceLabel({ ...row, path: normPath(row.path) || at }) : baseName(at);
+  const notes = [];
+  if (spaces === 1) notes.push("Its space closes, with its agents.");
+  else if (spaces > 1) notes.push(`Its ${spaces} spaces close, with their agents.`);
+  if (terminals === 1) notes.push("1 more terminal is in this folder and stays open.");
+  else if (terminals > 1) notes.push(`${terminals} more terminals are in this folder and stay open.`);
+  const can = Boolean(check?.deletable);
+  const warnings = [];
+  if (can && check.changes) warnings.push(`${label} has changes that aren't committed. They'll be lost.`);
+  if (can && check.submodules) warnings.push(`${label} has submodules. They're deleted too.`);
+  return {
+    label,
+    title: `Delete ${label}?`,
+    path: tilde(at, home),
+    branch: row ? (row.branch ? `Branch ${row.branch}` : "Detached HEAD") : "",
+    notes,
+    warnings,
+    reason: check && !can ? check.reason : "",
+    checking: !check,
+    ready: can,
+    button: check && !can ? null : warnings.length ? "Delete anyway" : "Delete",
+  };
+}
+
+// What a removeWorkspace result (remove-workspace-model.js) does to the
+// dialog, and the toast it posts: { close, toast, error, check }.
+//   open: the dialog is still there. While it is, a removal closes it (the
+//   row is gone) and only a branch that stays gets a toast; any other
+//   outcome stays in it as `error`. Once it closed (Esc during the delete),
+//   every outcome is a toast.
+//   check: the fresh check the dialog shows from now on ("changed", "locked",
+//   "refused"), null to keep its own (after "failed" Delete can run again).
+export function deleteOutcome(r, { label, open }) {
+  const b = r?.check?.branch;
+  const into = r?.check?.mainBranch ?? "the main checkout";
+  if (r?.status === "removed") {
+    const kept = r.branch === "kept" ? `It isn't merged into ${into}.` : r.branch === "in-use" ? "Another workspace has it checked out." : "";
+    if (open) return { close: true, toast: kept ? { title: `Kept branch ${b}`, body: kept } : null, error: "", check: null };
+    const body = kept ? `Kept branch ${b}: ${kept[0].toLowerCase()}${kept.slice(1)}` : r.branch === "deleted" ? `Branch ${b} too.` : "";
+    return { close: false, toast: { title: `Deleted ${label}`, body, level: "success" }, error: "", check: null };
+  }
+  const err = r?.err || "git couldn't delete it.";
+  if (!open) return { close: false, toast: { title: `Didn't delete ${label}`, body: err, level: r?.status === "failed" ? "error" : "warning" }, error: "", check: null };
+  const fresh = ["changed", "locked", "refused"].includes(r?.status) && r.check ? r.check : null;
+  // A lock or a refusal is the fresh check's own reason: said once.
+  return { close: false, toast: null, error: fresh?.reason === err ? "" : err, check: fresh };
 }
 
 // ── Project menu (D11) ─────────────────────────────────────────────────────

@@ -54,7 +54,10 @@ export function toggleCollapsed(path) {
 }
 
 // ── projects.cache.v1: each project's worktree list ────────────────────────
-// Written by the tree copy only, and only when a list changes.
+// Written by the tree copy (the worktree engine), and by the overlays that
+// change one project's list: the project menu's Remove from list drops it,
+// the Delete dialog stores the fresh list git gave after removing a worktree,
+// so the row goes at once. Only when a list changes.
 
 export const cache = () => parseCache(shared(KEYS.cache));
 

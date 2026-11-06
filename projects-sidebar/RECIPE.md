@@ -26,8 +26,9 @@ across repos.
     - Leading icon: the agent's status mark while one of its spaces is
       working, blocked or done; otherwise a home icon on the main checkout and
       a branch icon on the others.
-    - Label: the branch on the main checkout, the folder name on the others.
-      It is bright when the workspace has a space.
+    - Label: the branch on the main checkout. On the others, the branch's
+      last segment (`user/feat-x` → `feat-x`), or the folder name when
+      detached. It is bright when the workspace has a space.
     - A dot on the right when a space is open there: `accent` while shown,
       `muted` otherwise.
     - The shown workspace has a `selected` background.
@@ -62,10 +63,26 @@ across repos.
   - "Give the agent access to these worktrees": a checkbox, shown when a
     companion is chosen.
   - Footer: "Create more", Cancel, and Create ⌘↵.
-- **Overlays:** the project menu is a 220 × 300 popup: Open main, New
-  workspace…, Move to group ▸, Remove from list. The group menu is a 210 ×
-  104 popup: Rename…, Delete group. The New / Rename group form is a 380 ×
-  214 dialog.
+- **Overlays:**
+  - The project menu is a 220 × 300 popup: Open main, New workspace…, Move to
+    group ▸, Remove from list.
+  - The workspace menu is a 220-wide popup: Copy Path, Copy Worktree Name
+    and, on a worktree that isn't the main checkout, Delete… after a
+    separator, in `blocked`.
+  - The Delete dialog is a 380 × 320 modal:
+    - always: "Delete <label>?", the path with `~`, and "Branch <b>" or
+      "Detached HEAD";
+    - when they apply: "Its N spaces close, with their agents." and "N more
+      terminals are in this folder and stay open.";
+    - changes or submodules: "<label> has changes that aren't committed.
+      They'll be lost." or "<label> has submodules. They're deleted too." in
+      `blocked`, and the button reads "Delete anyway";
+    - locked: "Locked by git: <reason>. Unlock it with `git worktree unlock
+      <path>`." and no Delete button;
+    - footer: Cancel, and Delete as a `blocked` outline button, off until git
+      has answered ("Checking with git…"), "Deleting…" while it runs.
+  - The group menu is a 210 × 104 popup: Rename…, Delete group. The New /
+    Rename group form is a 380 × 214 dialog.
 
 **How it behaves**
 
@@ -85,6 +102,30 @@ across repos.
 - **Right-click a project:** opens the project menu. "Remove from list"
   forgets the project and never touches files, worktrees or spaces. "Move
   to group ▸" lists the other groups.
+- **Right-click a workspace:** opens the workspace menu. Copy Path and Copy
+  Worktree Name (the folder's name) go to the clipboard, and a toast says
+  "Copied".
+- **Delete…** (never on the main checkout): the dialog asks git first, on a
+  fresh `worktree list`: the lock, `status` with untracked files, and
+  submodule checkouts as git counts them. Delete then runs, in this order:
+  1. It checks again. A path that isn't a worktree of the project, a lock,
+     or changes or submodules the dialog didn't show: nothing runs, and the
+     dialog says why.
+  2. The workspace's spaces close (`space.close`, confirmed), with their
+     agents. It waits until they are gone, 3 s at most.
+  3. `git worktree remove` runs in the main checkout, with `--force` only
+     after "Delete anyway". A new listing decides: still listed means the
+     error stays in the dialog.
+  4. The branch: `git branch -d`, never `-D`. It is skipped when detached or
+     checked out in another worktree. A branch git doesn't see as merged
+     stays, and a toast reads "Kept branch <b>".
+  5. The fresh list is stored, so the row goes at once.
+  - While it runs, Esc, Cancel and clicks do nothing. It runs in a task no
+    view owns, so it finishes even if the dialog closes; the outcome is then
+    a toast.
+  - Every outcome is read from git's state (the list, the refs, the exit
+    code), never from its words, which change with the locale and the
+    version.
 - **Groups:** F1/F2/F3 (in this layout only) select groups 1–3, and a
   missing group does nothing. "+" opens the form: Enter creates and selects
   the group, Esc cancels. Right-click a chip: Rename…, or Delete group, which
@@ -123,9 +164,11 @@ across repos.
   - none = `tree.js` (the tree; the only copy that reads key commands);
   - `groups` = `groups.js`;
   - `new-workspace` = `new-workspace.js`;
-  - `project-menu`, `group-menu`, `group-form`.
-  - Pure logic is in `lib.js`, `tree-model.js` and `new-workspace-model.js`,
-    tested with `node --test`.
+  - `delete-workspace` = `delete-workspace.js`;
+  - `project-menu`, `workspace-menu`, `group-menu`, `group-form`.
+  - Pure logic is in `lib.js`, `tree-model.js`, `new-workspace-model.js` and
+    `remove-workspace-model.js`, tested with `node --test` (Delete's against
+    a real git).
   - `store.js` is the only code that touches the shared keys: `projects.v1`
     (groups and projects), `projects.ui.v1` (collapsed), `projects.cache.v1`
     (worktree lists) and `projects.agents.v1` (`knownAgents()`). A stored
@@ -138,17 +181,19 @@ across repos.
   F1–F3 in section `layout:projects`.
 - **Herdr functions:** `spaces`, `panes`, `agents`, `focused`,
   `knownAgents`, `layout`, `window`, `home`, `pickFolder`, `watchFolder`,
-  `exec`, `run` (`space.select`, `space.new`, `pane.focus`), `openOverlay`,
-  `closeOverlay`, `shared`, `setShared`, `notify`, `theme`, `props`,
-  `nextCommand`.
+  `exec`, `run` (`space.select`, `space.new`, `space.close`, `pane.focus`),
+  `openOverlay`, `closeOverlay`, `shared`, `setShared`, `notify`, `theme`,
+  `props`, `nextCommand`.
 - **Programs it runs:**
   - `git`, in the registered repos: `rev-parse --git-common-dir`,
     `worktree list --porcelain`, `for-each-ref`, `show-ref`, `fetch origin`
-    (network) and `worktree add`.
+    (network) and `worktree add`. Delete adds `status --porcelain`,
+    `rev-parse --git-path modules`, `ls-files --stage -z`, `worktree remove`
+    and `branch -d`.
   - `test -e`, to check whether a folder exists.
 - **Art:** its own Lucide-style icons in `icons/` (folder, branch, home,
-  plus, code), plus chevrons, check and spinner from Herdr's `workspace-chrome`
-  and agent icons from Herdr's `icons/`.
+  plus, code, copy), plus chevrons, check, x and spinner from Herdr's
+  `workspace-chrome` and agent icons from Herdr's `icons/`.
 
 **Watch out**
 
@@ -166,6 +211,17 @@ across repos.
 - **Merging `keys.json`:** F1–F3 need the plugin's `keys.json` merged into
   yours. Once edited, your keys.json no longer receives Herdr's new default
   shortcuts. In this layout, F2 replaces Herdr's `tab.rename`.
+- **Delete deletes.** It removes the worktree's folder, its uncommitted
+  work after "Delete anyway", and its merged branch. Its spaces close with
+  their agents, including an agent session running in that worktree.
+- **exec's 30 s limit:** `git worktree remove` on a big worktree can hit it.
+  The dialog then says "git didn't finish; the folder may be partly deleted.
+  Check `git worktree list` in <project>."
+- **Locked worktrees** are never deleted from here. Run `git worktree unlock
+  <path>` first.
+- **`branch -d` keeps squash-merged branches.** A branch merged on GitHub by
+  squash or rebase isn't merged for git, so it stays ("Kept branch <b>").
+  Delete it yourself with `git branch -D` once you're sure.
 - **`herdr-app check` draws only the tree view.** Check the other views
   from a copy whose `main.js` defaults to them.
 - **Limits:**
@@ -173,7 +229,8 @@ across repos.
   - Branch names have no user prefix and are slugged to 48 characters.
   - Linear, GitLab and fetching issue titles aren't supported; such a link
     is named by its slug.
-  - Worktrees are never deleted from here.
+  - The main checkout is never deleted, and a branch only when git sees it
+    merged.
   - Two chosen projects with the same folder name (`/a/web`, `/b/web`) would
     land on the same worktree path: the dialog says so and Create stays off.
 
@@ -197,3 +254,6 @@ across repos.
 - Creating `demo` with one companion makes `~/orca/workspaces/<repo>/demo`
   in both repos, on branch `demo`. It opens one space, and its agent was
   started with `--add-dir` for the companion.
+- Right-click a throwaway worktree → Delete… → Delete: its space closes, and
+  its folder, its row and its merged branch are gone. A dirty one asks
+  "Delete anyway"; a locked one has no Delete.

@@ -52,3 +52,13 @@ test("the workspace menu is a view of the mod (D20)", () => {
   assert.match(src("tree.js"), /openWorkspaceMenu\(/, "a workspace row's right-click opens it");
 });
 
+test("the delete dialog is a view of the mod, and its delete outlives it (D22)", () => {
+  const src = (f) => readFileSync(new URL(`../projects-sidebar/mods/projects/${f}`, import.meta.url), "utf8");
+  assert.match(src("main.js"), /"delete-workspace":\s*DeleteWorkspace/);
+  const dialog = src("delete-workspace.js");
+  assert.match(dialog, /export default class DeleteWorkspace/);
+  assert.match(dialog, /modal:\s*true/);
+  assert.match(dialog, /\{\s*owner:\s*null\s*\}/, "the sequence runs in a task no view owns");
+  assert.match(src("workspace-menu.js"), /openDeleteWorkspace\(/, "the menu's Delete… opens it");
+});
+

@@ -9,7 +9,7 @@ import {
 import {
   buildTree, openAction, openMainAction, railAction, workspaceLabel, workspaceMenuItems, initials, mostUrgent,
   agentTitle, ago, isNarrow, projectMenuItems, withoutProject, pruneCache, projectPaths,
-  watchDirs, eachLimit, liveFolder, addProjectAt,
+  watchDirs, eachLimit, liveFolder, addProjectAt, deletePrompt, deleteOutcome, terminalsStaying,
 } from "../projects-sidebar/mods/projects/tree-model.js";
 
 const HOME = "/Users/demo";
@@ -329,9 +329,123 @@ test("labels: another worktree by its branch's last segment, so a rename shows w
 test("workspace menu: Copy Path and Copy Worktree Name, on main and on the others", () => {
   const ids = (row) => workspaceMenuItems(row).map((i) => `${i.id}:${i.label}`);
   assert.deepEqual(ids({ path: "/code/app", branch: "main", main: true }), ["copy-path:Copy Path", "copy-name:Copy Worktree Name"]);
-  assert.deepEqual(ids({ path: "/w/app/feat-login", branch: "feat/login", main: false }), ["copy-path:Copy Path", "copy-name:Copy Worktree Name"]);
+  assert.deepEqual(ids({ path: "/w/app/feat-login", branch: "feat/login", main: false }).slice(0, 2), ["copy-path:Copy Path", "copy-name:Copy Worktree Name"]);
   const [path, name] = workspaceMenuItems({ path: "/w/app/feat-login", branch: "feat/login", main: false });
   assert.equal(path.text, "/w/app/feat-login");
   assert.equal(name.text, "feat-login", "the worktree name is the folder's, not the branch's");
   assert.deepEqual(workspaceMenuItems(null), []);
+});
+
+test("workspace menu: Delete… last, after a separator, on a worktree; never on the main checkout (S20, S21)", () => {
+  const items = workspaceMenuItems({ path: "/w/app/feat-login", branch: "feat/login", main: false });
+  const del = items.at(-1);
+  assert.equal(`${del.id}:${del.label}`, "delete:Delete…");
+  assert.equal(del.separator, true, "a separator sets it apart");
+  assert.equal(del.danger, true, "drawn in the blocked color");
+  assert.equal(del.text, undefined, "nothing to copy");
+  assert.ok(!workspaceMenuItems({ path: "/code/app", branch: "main", main: true }).some((i) => i.id === "delete"), "the main checkout is never deleted");
+});
+
+// ── Delete dialog (D22) ────────────────────────────────────────────────────
+
+const LOGIN = "/Users/demo/orca/workspaces/app/feat-login";
+const ROW = { path: LOGIN, branch: "feat/login", main: false };
+const CHECK = {
+  deletable: true, reason: "", failed: false, locked: false, lockReason: null, changes: false, submodules: false,
+  branch: "feat/login", mainBranch: "main", list: [{ path: "/code/app", branch: "main", main: true }, ROW],
+};
+const prompt = (over = {}) => deletePrompt({ path: LOGIN, row: ROW, check: CHECK, spaces: 0, terminals: 0, home: HOME, ...over });
+
+test("delete dialog: what it says first, and Delete stays off until git answers (S21, D22)", () => {
+  const asking = prompt({ check: null });
+  assert.equal(asking.title, "Delete login?", "the row's label (D27)");
+  assert.equal(asking.path, "~/orca/workspaces/app/feat-login");
+  assert.equal(asking.branch, "Branch feat/login");
+  assert.equal(asking.checking, true);
+  assert.equal(asking.ready, false, "no Delete before the check");
+  assert.equal(asking.button, "Delete");
+
+  const clean = prompt();
+  assert.deepEqual([clean.checking, clean.ready, clean.button, clean.reason], [false, true, "Delete", ""]);
+  assert.deepEqual(clean.notes, []);
+  assert.deepEqual(clean.warnings, []);
+
+  const detached = prompt({ row: { path: LOGIN, branch: null, main: false }, check: { ...CHECK, branch: null } });
+  assert.equal(detached.branch, "Detached HEAD");
+  assert.equal(detached.title, "Delete feat-login?", "detached: the folder's name");
+});
+
+test("delete dialog: its spaces close with their agents, other terminals in the folder stay (D22)", () => {
+  assert.deepEqual(prompt({ spaces: 2, terminals: 3 }).notes, [
+    "Its 2 spaces close, with their agents.",
+    "3 more terminals are in this folder and stay open.",
+  ]);
+  assert.deepEqual(prompt({ spaces: 1, terminals: 1 }).notes, [
+    "Its space closes, with its agents.",
+    "1 more terminal is in this folder and stays open.",
+  ]);
+});
+
+test("delete dialog: changes or submodules ask for Delete anyway; locked, failed or the main checkout have no Delete (S21, D22)", () => {
+  const dirty = prompt({ check: { ...CHECK, changes: true } });
+  assert.deepEqual(dirty.warnings, ["login has changes that aren't committed. They'll be lost."]);
+  assert.equal(dirty.button, "Delete anyway");
+  const subs = prompt({ check: { ...CHECK, submodules: true } });
+  assert.deepEqual(subs.warnings, ["login has submodules. They're deleted too."]);
+  assert.equal(subs.button, "Delete anyway");
+
+  const reason = `Locked by git: on a USB disk. Unlock it with \`git worktree unlock ${LOGIN}\`.`;
+  const locked = prompt({ check: { ...CHECK, deletable: false, locked: true, lockReason: "on a USB disk", changes: true, reason } });
+  assert.deepEqual([locked.button, locked.ready, locked.reason], [null, false, reason]);
+  assert.deepEqual(locked.warnings, [], "nothing to confirm when it can't run");
+
+  const failed = prompt({ check: { ...CHECK, deletable: false, failed: true, reason: "Couldn't check it." } });
+  assert.deepEqual([failed.button, failed.ready, failed.reason], [null, false, "Couldn't check it."]);
+  const main = prompt({ path: "/code/app", row: { path: "/code/app", branch: "main", main: true }, check: { ...CHECK, deletable: false, branch: "main", reason: "/code/app is the main checkout of app: it is never deleted." } });
+  assert.equal(main.button, null);
+});
+
+test("delete dialog: terminals that stay are the ones in the folder outside the spaces that close (D22)", () => {
+  const sp = [
+    space("s1", LOGIN, { tabs: [tab("s1-t1")] }),
+    space("s2", "/code/app", { tabs: [tab("s2-t1")] }),
+    space("s3", LOGIN, { machine: "box", tabs: [tab("s3-t1")] }),
+  ];
+  const pane = (id, tabId, cwd, extra = {}) => ({ pane: id, terminal: `${id}-term`, tab: tabId, cwd, ...extra });
+  const pn = [
+    pane("p1", "s1-t1", LOGIN), // in a space that closes
+    pane("p2", "s2-t1", `${LOGIN}/src`), // inside, another space: stays
+    pane("p3", "s2-t1", "~/orca/workspaces/app/feat-login"), // `~` too
+    pane("p4", "s2-t1", `${LOGIN}-2`), // a sibling folder: not in it
+    pane("p5", "s3-t1", LOGIN), // another machine's folder
+    pane("p6", "s2-t1", LOGIN, { terminal: null, mod: "files" }), // a mod pane: no terminal
+  ];
+  assert.equal(terminalsStaying(LOGIN, ["s1"], sp, pn, HOME), 2);
+  assert.equal(terminalsStaying(LOGIN, [], sp, pn, HOME), 3);
+});
+
+test("delete outcome: removed closes the dialog; a kept branch says why; while closed, a toast says what happened (S21, D22)", () => {
+  const removed = (branch) => ({ status: "removed", err: null, branch, branchErr: null, list: [], check: CHECK });
+  assert.deepEqual(deleteOutcome(removed("deleted"), { label: "login", open: true }), { close: true, toast: null, error: "", check: null });
+  assert.deepEqual(deleteOutcome(removed("kept"), { label: "login", open: true }).toast, { title: "Kept branch feat/login", body: "It isn't merged into main." });
+  assert.deepEqual(deleteOutcome(removed("in-use"), { label: "login", open: true }).toast, { title: "Kept branch feat/login", body: "Another workspace has it checked out." });
+  const gone = deleteOutcome(removed("deleted"), { label: "login", open: false });
+  assert.equal(gone.close, false, "nothing left to close");
+  assert.deepEqual(gone.toast, { title: "Deleted login", body: "Branch feat/login too.", level: "success" });
+  assert.deepEqual(deleteOutcome(removed("kept"), { label: "login", open: false }).toast,
+    { title: "Deleted login", body: "Kept branch feat/login: it isn't merged into main.", level: "success" });
+});
+
+test("delete outcome: changed shows the new check; failed and refused stay in the dialog, or toast once it closed (D22)", () => {
+  const fresh = { ...CHECK, changes: true };
+  const changed = { status: "changed", err: "feat-login now has changes that aren't committed.", branch: null, branchErr: null, list: [], check: fresh };
+  assert.deepEqual(deleteOutcome(changed, { label: "login", open: true }), { close: false, toast: null, error: changed.err, check: fresh });
+  const failed = { status: "failed", err: "fatal: cannot remove", branch: null, branchErr: null, list: [], check: CHECK };
+  assert.deepEqual(deleteOutcome(failed, { label: "login", open: true }), { close: false, toast: null, error: "fatal: cannot remove", check: null }, "the confirmed check stays: Delete can be tried again");
+  assert.deepEqual(deleteOutcome(failed, { label: "login", open: false }).toast, { title: "Didn't delete login", body: "fatal: cannot remove", level: "error" });
+  assert.deepEqual(deleteOutcome(changed, { label: "login", open: false }).toast, { title: "Didn't delete login", body: changed.err, level: "warning" });
+  const reason = `Locked by git. Unlock it with \`git worktree unlock ${LOGIN}\`.`;
+  const nowLocked = { ...CHECK, deletable: false, locked: true, lockReason: "", reason };
+  const locked = { status: "locked", err: reason, branch: null, branchErr: null, list: [], check: nowLocked };
+  assert.deepEqual(deleteOutcome(locked, { label: "login", open: true }), { close: false, toast: null, error: "", check: nowLocked }, "the check's reason says it once");
 });
