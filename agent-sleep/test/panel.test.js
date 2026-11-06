@@ -471,8 +471,10 @@ test("the first frame has no window size yet: pulses redraw the moon until its p
   assert.match(src("main.js"), /\(await this\.co\.pulse\(\{[^}]*\}\)\) \|\| this\.anchor === null\) cx\.notify\(\)/);
 });
 
-test("a key after a click opens over the moon's cell as it is now: the click's bounds are used once", () => {
-  assert.match(src("main.js"), /openPanel\(\) \{[\s\S]{0,420}this\.pressed = null;/);
+test("a key opens over the moon's cell as it is now: a press's bounds only ever reach its own click", () => {
+  const main = src("main.js");
+  assert.match(main, /this\.anchor = anchorFrom\(moonBounds\(window\.viewport_size\(\), zoomOf\(settings\(\)\)\)\);/);
+  assert.match(main, /toggle\(\) \{\s*const pressedAt = this\.pressedAt \?\? undefined;\s*const anchor = anchorFrom\(this\.pressed\) \?\? this\.anchor;\s*this\.pressed = null;\s*this\.pressedAt = null;/, "cleared before the guard can return");
 });
 
 test("the moon knows its cell with no press and no size event, and the popup marks its close", () => {
@@ -480,7 +482,7 @@ test("the moon knows its cell with no press and no size event, and the popup mar
   assert.match(main, /moonBounds\(window\.viewport_size\(\), zoomOf\(settings\(\)\)\)/);
   assert.doesNotMatch(main, /this\.size|measure\(/, "a fixed cell has no size change to wait for");
   assert.match(main, /async close\(\) \{\s*if \(this\.overlay\) setShared\(CLOSED_KEY, Date\.now\(\)\);/);
-  assert.match(main, /closedJustNow\(shared\(CLOSED_KEY\), Date\.now\(\), this\.pressedAt \?\? undefined\)/);
+  assert.match(main, /closedJustNow\(shared\(CLOSED_KEY\), Date\.now\(\), pressedAt\)/);
   const status = src("views/status.js");
   assert.doesNotMatch(status, /on_size_change/);
   assert.match(status, /\.on_mouse_down\("left", onPress\)/);

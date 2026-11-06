@@ -63,7 +63,7 @@ export default class AgentSleep extends View {
     this.overlay = pr?.overlay ?? null;
     this.owner = pr?.owner ?? null; // the popup's: the copy its clicks ask
     this.co = null;
-    this.pressed = null; // its bounds at the last press, until its click uses them
+    this.pressed = null; // its bounds at the last press, for that press's click
     this.pressedAt = null; // when that press was
     this.anchor = null; // where the popup opens from
     this.panel = null; // the popup this copy opened last
@@ -106,26 +106,27 @@ export default class AgentSleep extends View {
     if (!e.bounds) return;
     this.pressed = e.bounds;
     this.pressedAt = Date.now();
-    this.anchor = anchorFrom(e.bounds);
   }
 
   // The moon's click: the press that closed the popup doesn't open it again, so
   // a second click closes it.
   toggle() {
-    if (closedJustNow(shared(CLOSED_KEY), Date.now(), this.pressedAt ?? undefined)) return;
-    this.openPanel();
+    const pressedAt = this.pressedAt ?? undefined;
+    const anchor = anchorFrom(this.pressed) ?? this.anchor;
+    this.pressed = null;
+    this.pressedAt = null;
+    if (closedJustNow(shared(CLOSED_KEY), Date.now(), pressedAt)) return;
+    this.openPanel(anchor);
   }
 
   // Above the moon, as tall as its lines now. A `panel` key pressed with one open
   // replaces it, so they don't stack. Closing an id already gone does nothing, and
-  // ids aren't reused (o1, o2, …). The cell moves with the window, so a press's
-  // bounds are good for its click and not after it.
-  openPanel() {
+  // ids aren't reused (o1, o2, …). With no anchor given (a key) it goes by the
+  // cell as it is now: a press's bounds are only for that press's click.
+  openPanel(anchor = this.anchor) {
     const previous = this.panel;
-    this.panel = openOverlay(panelSpec({ view: this.co.view(), anchor: this.anchor, zoom: zoomOf(settings()), owner: this.co.d.copyId }));
+    this.panel = openOverlay(panelSpec({ view: this.co.view(), anchor, zoom: zoomOf(settings()), owner: this.co.d.copyId }));
     if (previous !== null) closeOverlay(previous);
-    this.pressed = null;
-    this.pressedAt = null;
   }
 
   // The popup sees a change at once. From a task that yields first, so not
@@ -147,7 +148,7 @@ export default class AgentSleep extends View {
     this.co.observeNow();
     const view = this.co.view();
     this.publish(view, cx);
-    this.anchor = anchorFrom(this.pressed ?? moonBounds(window.viewport_size(), zoomOf(settings())));
+    this.anchor = anchorFrom(moonBounds(window.viewport_size(), zoomOf(settings())));
     return renderStatus({
       t,
       model: view,
