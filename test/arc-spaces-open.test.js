@@ -77,9 +77,9 @@ const shared = (config = { enabled: true, names: NAMES }, more = {}) => ({
 
 // Runs the wrapper with `parent` as its parent process. The trailing `true`
 // keeps bash from exec-ing the wrapper, which would make the parent node.
-function run(args, { parent = herdrParent, env = {}, capMs } = {}) {
+function run(args, { parent = herdrParent, env = {}, capMs, prelude = "" } = {}) {
   const quoted = args.map((a) => `'${a}'`).join(" ");
-  return spawnSync(parent, ["-c", `'${WRAPPER}' ${quoted}; code=$?; exit $code`], {
+  return spawnSync(parent, ["-c", `${prelude}'${WRAPPER}' ${quoted}; code=$?; exit $code`], {
     encoding: "utf8",
     // The timing tests' cap: a limit that stops holding fails them instead of
     // hanging the suite.
@@ -346,23 +346,39 @@ test("a hung hc: stopped at the limit with what it started, then the folder the 
   assertRouted("Bulbasour");
   assert.deepEqual(logOf("hc"), ["t1"], "t1 is asked, and nothing after the limit");
   // Its own alarm ends the hc left running when the search was cut.
-  let gone = false;
-  for (let i = 0; i < 60 && !gone; i += 1) {
-    gone = !running(marker);
-    if (!gone) spawnSync("sleep", ["0.1"]);
-  }
-  assert.ok(gone, "the hung hc ends by itself, not left behind");
+  assert.ok(endsSoon(marker), "the hung hc ends by itself, not left behind");
 });
 
-test("a zero or bad limit is 1 s, not none", () => {
+// Waits up to 6 s for the process holding `marker` to end.
+function endsSoon(marker) {
+  for (let i = 0; i < 60; i += 1) {
+    if (!running(marker)) return true;
+    spawnSync("sleep", ["0.1"]);
+  }
+  return false;
+}
+
+test("a zero, bad or huge limit is 1 s, not none", () => {
   lsAnswer([space("/repos/ag", withTerminals("t1"))]);
-  slowHc("exec sleep 600");
-  for (const value of ["0", "0.5", "soon"]) {
+  for (const value of ["0", "0.5", "soon", "200000000"]) {
+    const marker = `sleep ${700_000 + Math.floor(Math.random() * 100_000)}`;
+    slowHc(`exec ${marker}`);
     rmSync(join(dir, "osascript.log"), { force: true });
     const result = run([URL_A], { env: { ARC_SPACES_HC_TIMEOUT: value }, capMs: 120_000 });
     assert.equal(result.signal, null, `ARC_SPACES_HC_TIMEOUT=${value} must still stop the search`);
     assertRouted("Bulbasour");
+    assert.ok(endsSoon(marker), `ARC_SPACES_HC_TIMEOUT=${value}: the hung hc ends by itself`);
   }
+});
+
+test("an ignored SIGALRM, inherited from Herdr, doesn't turn the limits off", () => {
+  lsAnswer([space("/repos/ag", withTerminals("t1"))]);
+  const marker = `sleep ${700_000 + Math.floor(Math.random() * 100_000)}`;
+  slowHc(`exec ${marker}`);
+  const result = run([URL_A], { env: { ARC_SPACES_HC_TIMEOUT: "2" }, capMs: 120_000, prelude: "trap '' ALRM; " });
+  assert.equal(result.signal, null, "the search must still stop");
+  assertRouted("Bulbasour");
+  assert.ok(endsSoon(marker), "the hung hc ends by itself");
 });
 
 test("many terminals hc can't read share one limit", () => {
@@ -485,6 +501,7 @@ const PARITY = [
   { name: "a registry of the wrong shape", folder: "/repos/ag", registry: "nope" },
   { name: "no registry", folder: "/repos/ag", registry: undefined },
   { name: "a cache of the wrong shape", folder: "/repos/ag", cache: 7 },
+  { name: "the same checkout under two projects: the first", folder: "/repos/x/y", cache: { "/repos/action": [checkout("/repos/x", true)], "/repos/ag": [checkout("/repos/x/", true)] } },
 ];
 
 test("every case lands in the group projects-sidebar's lib.js picks", () => {
