@@ -3,11 +3,15 @@
 // herdr's readTextFile (null when it's absent) and hand it to a reader here.
 // The mod never writes these files: it calls the CLI.
 //
-// Owner: T11, which makes it final and tested, then frozen. T1 writes the
-// constants and the path helpers final and stubs the readers.
+// Final and frozen (T11): a later task puts its own helpers in its own
+// *-model.js (D1).
 //
-// Readers (T11), written against D2's pinned shapes and test/fixtures/, each
-// tolerant of a missing (null) or partial file:
+// Readers, written against D2's pinned shapes and test/fixtures/, each
+// tolerant of a missing (null), corrupt or partial file. Each always returns
+// the same shape: a field that's missing or of the wrong type gets its empty
+// value (null, false, [] or the default), so the views never check types.
+// Fields a reader doesn't know are kept as written, so a field the CLI adds
+// later (D9: adding fields keeps version 1) still reaches the views.
 //   readAccounts(text)       accounts.v1.json (D9)
 //   readSettings(text)       settings.json     { switchMode }
 //   readRestart(text)        restart.json      { items: [...] }
@@ -44,32 +48,242 @@ export function cliPath(appHomeDir) {
   return `${appHomeDir}/mods/${MOD}/bin/claude-accounts`;
 }
 
-const notYet = (what) => new Error(`store.${what}: not implemented yet (T11)`);
+// ── Values ─────────────────────────────────────────────────────────────────
 
-export function readAccounts(_text) {
-  throw notYet("readAccounts");
+const isObject = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
+const isNumber = (v) => typeof v === "number" && Number.isFinite(v);
+const str = (v) => (typeof v === "string" && v !== "" ? v : null);
+const num = (v) => (isNumber(v) ? v : null);
+const oneOf = (values, v) => (values.includes(v) ? v : null);
+
+// A file's text as an object, or null: no file, not JSON, or not an object.
+// An object already parsed is taken as it is.
+function parseObject(text) {
+  if (isObject(text)) return text;
+  if (typeof text !== "string") return null;
+  try {
+    const value = JSON.parse(text);
+    return isObject(value) ? value : null;
+  } catch {
+    return null;
+  }
 }
 
-export function readSettings(_text) {
-  throw notYet("readSettings");
+// ── accounts.v1.json (D9) ──────────────────────────────────────────────────
+// { version: 1, updatedAt, active: "<id>"|"default", accounts: [account] }
+// account: { id, label, email, org, configDir, isDefault, needsSignIn, error,
+//   usage: { session, weekly, fable, monthly } each { percent, resetsAt } or
+//   null, credits: { balance, limit } or null, usageUpdatedAt,
+//   lastAuthenticatedAt }
+// A file of a later version (renamed or removed fields, D9) reads as no
+// file. An entry without an id is dropped. `error` is D4's enum: any other
+// value reads "unavailable", as D9 tells readers to. A percent is clamped to
+// 0–100 and rounded; a window without one is null. configDir is the exact
+// string, never normalized (D2's invariant).
+
+const ERRORS = ["expired", "rateLimited", "keychain", "network", "refreshFailed", "noSubscription", "unavailable"];
+const WINDOWS = ["session", "weekly", "fable", "monthly"];
+
+function readWindow(w) {
+  if (!isObject(w) || !isNumber(w.percent)) return null;
+  return { ...w, percent: Math.max(0, Math.min(100, Math.round(w.percent))), resetsAt: num(w.resetsAt) };
 }
 
-export function readRestart(_text) {
-  throw notYet("readRestart");
+function readCredits(c) {
+  if (!isObject(c)) return null;
+  const balance = num(c.balance);
+  const limit = num(c.limit);
+  return balance === null && limit === null ? null : { ...c, balance, limit };
 }
 
-export function readPendingSwitch(_text) {
-  throw notYet("readPendingSwitch");
+function readAccount(a) {
+  if (!isObject(a) || !str(a.id)) return null;
+  const isDefault = a.isDefault === true || a.id === "default";
+  const email = str(a.email);
+  const usage = isObject(a.usage) ? a.usage : {};
+  return {
+    ...a,
+    id: a.id,
+    label: str(a.label) ?? email ?? (isDefault ? "System default" : a.id),
+    email,
+    org: str(a.org),
+    configDir: str(a.configDir),
+    isDefault,
+    needsSignIn: a.needsSignIn === true,
+    error: a.error === null || a.error === undefined ? null : (oneOf(ERRORS, a.error) ?? "unavailable"),
+    usage: Object.fromEntries(WINDOWS.map((k) => [k, readWindow(usage[k])])),
+    credits: readCredits(a.credits),
+    usageUpdatedAt: num(a.usageUpdatedAt),
+    lastAuthenticatedAt: num(a.lastAuthenticatedAt),
+  };
 }
 
-export function readDetails(_text) {
-  throw notYet("readDetails");
+export function readAccounts(text) {
+  const raw = parseObject(text);
+  if (!raw || (raw.version !== undefined && raw.version !== 1)) {
+    return { version: 1, updatedAt: null, active: "default", accounts: [] };
+  }
+  const accounts = Array.isArray(raw.accounts) ? raw.accounts.map(readAccount).filter(Boolean) : [];
+  return { ...raw, version: 1, updatedAt: num(raw.updatedAt), active: str(raw.active) ?? "default", accounts };
 }
 
-export function readLoginLink(_text) {
-  throw notYet("readLoginLink");
+// ── settings.json ──────────────────────────────────────────────────────────
+// { switchMode: "ask"|"restart"|"keep" }: no file, or any other value, is
+// Orca's default, "ask" (D3).
+
+const SWITCH_MODES = ["ask", "restart", "keep"];
+
+export function readSettings(text) {
+  const raw = parseObject(text) ?? {};
+  return { ...raw, switchMode: oneOf(SWITCH_MODES, raw.switchMode) ?? "ask" };
 }
 
-export function classifyWatchPaths(_root, _paths) {
-  throw notYet("classifyWatchPaths");
+// ── restart.json (D2, D8, D9) ──────────────────────────────────────────────
+// { items: [{ id, kind: "switch"|"resume", terminal, from, to, sessionId,
+//   args, message, state, code, detail, claimedBy: { pid, at }|null,
+//   updatedAt }] }. An item without an id is dropped; an unknown kind or
+// state (D9's enum) reads null, so the views skip it. args keeps its
+// strings only.
+
+const KINDS = ["switch", "resume"];
+const STATES = [
+  "queued", "waitingIdle", "stopping", "starting", "sending",
+  "done", "timeout", "landedElsewhere", "failed", "cancelled",
+];
+
+function readClaim(c) {
+  return isObject(c) && isNumber(c.pid) && isNumber(c.at) ? { pid: c.pid, at: c.at } : null;
+}
+
+function readItem(i) {
+  if (!isObject(i) || !str(i.id)) return null;
+  return {
+    ...i,
+    id: i.id,
+    kind: oneOf(KINDS, i.kind),
+    terminal: str(i.terminal),
+    from: str(i.from),
+    to: str(i.to),
+    sessionId: str(i.sessionId),
+    args: Array.isArray(i.args) ? i.args.filter((a) => typeof a === "string") : [],
+    message: str(i.message),
+    state: oneOf(STATES, i.state),
+    code: Number.isInteger(i.code) ? i.code : null,
+    detail: str(i.detail),
+    claimedBy: readClaim(i.claimedBy),
+    updatedAt: num(i.updatedAt),
+  };
+}
+
+export function readRestart(text) {
+  const raw = parseObject(text) ?? {};
+  return { ...raw, items: Array.isArray(raw.items) ? raw.items.map(readItem).filter(Boolean) : [] };
+}
+
+// ── pending-switch.json (D2, D8) ───────────────────────────────────────────
+// { from, to, at, sessions: [{ terminal, title, account, group, reason }] },
+// or null when no Ask is waiting: no file, or no target account. A session
+// without a terminal is dropped; an unknown group reads "cantMove", so it is
+// never ticked nor restarted.
+
+const GROUPS = ["onAccount", "elsewhere", "cantMove"];
+
+function readSession(s) {
+  if (!isObject(s) || !str(s.terminal)) return null;
+  return {
+    ...s,
+    terminal: s.terminal,
+    title: str(s.title),
+    account: str(s.account),
+    group: oneOf(GROUPS, s.group) ?? "cantMove",
+    reason: str(s.reason),
+  };
+}
+
+export function readPendingSwitch(text) {
+  const raw = parseObject(text);
+  if (!raw || !str(raw.to)) return null;
+  return {
+    ...raw,
+    from: str(raw.from),
+    to: raw.to,
+    at: num(raw.at),
+    sessions: Array.isArray(raw.sessions) ? raw.sessions.map(readSession).filter(Boolean) : [],
+  };
+}
+
+// ── details.json (D2, D11) ─────────────────────────────────────────────────
+// { ranges: { "7"|"30"|"90"|"all": { result, running, startedAt, finishedAt,
+//   error } } }: always the four ranges, a missing one never run, any other
+// dropped. result is claude-usage --json's object as written (its shape is
+// claude-usage's, read by the details view), or null.
+
+const RANGES = ["7", "30", "90", "all"];
+
+function readRange(r) {
+  const raw = isObject(r) ? r : {};
+  return {
+    ...raw,
+    result: isObject(raw.result) ? raw.result : null,
+    running: raw.running === true,
+    startedAt: num(raw.startedAt),
+    finishedAt: num(raw.finishedAt),
+    error: str(raw.error),
+  };
+}
+
+export function readDetails(text) {
+  const raw = parseObject(text) ?? {};
+  const ranges = isObject(raw.ranges) ? raw.ranges : {};
+  return { ...raw, ranges: Object.fromEntries(RANGES.map((k) => [k, readRange(ranges[k])])) };
+}
+
+// ── login-link (D13) ───────────────────────────────────────────────────────
+// The captured sign-in URL, or null. Only a link that passes Orca's
+// isClaudeLocalSignInLink (main/claude-accounts/claude-sign-in-browser.ts:27-40)
+// is kept, the same check the CLI's helper makes: https on claude.com or
+// claude.ai, whose redirect_uri is http on localhost or 127.0.0.1.
+
+const AUTHORIZE_HOSTS = ["claude.com", "claude.ai"];
+const CALLBACK_HOSTS = ["localhost", "127.0.0.1"];
+
+function isClaudeLocalSignInLink(link) {
+  try {
+    const url = new URL(link);
+    const redirect = new URL(url.searchParams.get("redirect_uri") ?? "");
+    return (
+      url.protocol === "https:" &&
+      AUTHORIZE_HOSTS.includes(url.hostname) &&
+      redirect.protocol === "http:" &&
+      CALLBACK_HOSTS.includes(redirect.hostname)
+    );
+  } catch {
+    return false;
+  }
+}
+
+export function readLoginLink(text) {
+  const link = typeof text === "string" ? text.trim() : "";
+  return link && isClaudeLocalSignInLink(link) ? link : null;
+}
+
+// ── The watch (D1) ─────────────────────────────────────────────────────────
+// A watchFolder batch on the state folder (absolute paths) → "merge" when it
+// holds the root itself, or live/ or anything under it (a statusline drop,
+// D16): the footer runs `usage --json`. Anything else → "reread": the footer
+// only reads the files again. A batch that isn't a list is read as the root
+// (refresh everything).
+
+const trimSlash = (p) => (p.length > 1 ? p.replace(/\/+$/, "") : p);
+
+export function classifyWatchPaths(root, paths) {
+  if (!Array.isArray(paths)) return "merge";
+  const base = trimSlash(String(root));
+  const live = `${base}/${FILES.live}`;
+  for (const p of paths) {
+    if (typeof p !== "string") continue;
+    const path = trimSlash(p);
+    if (path === base || path === live || path.startsWith(`${live}/`)) return "merge";
+  }
+  return "reread";
 }
