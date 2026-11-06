@@ -16,7 +16,9 @@ function save(next) {
 
 export default class ArcSpaces extends View {
   init(_props, cx) {
-    this.inputs = new Map(); // group id → InputState, one for as long as the dialog is open
+    // Group id → its field. Herdr refuses InputState.new during render, so they
+    // are made here, and a group created while this is open shows the next time.
+    this.inputs = new Map(groupsOf(shared(GROUPS_KEY)).map(({ id }) => [id, this.newInput(id)]));
     this.focusedGroup = null;
     this.linked = true; // until asked, so the warning doesn't flash
     this.handle = cx.focus_handle();
@@ -29,10 +31,8 @@ export default class ArcSpaces extends View {
     });
   }
 
-  input(groupId) {
-    let state = this.inputs.get(groupId);
-    if (state) return state;
-    state = InputState.new({ value: config().names[groupId] ?? "", placeholder: "Arc space name" });
+  newInput(groupId) {
+    const state = InputState.new({ value: config().names[groupId] ?? "", placeholder: "Arc space name" });
     state.on("change", () => save(withName(config(), groupId, state.value())));
     state.on("focus", (_e, cx) => {
       this.focusedGroup = groupId;
@@ -42,7 +42,6 @@ export default class ArcSpaces extends View {
       if (this.focusedGroup === groupId) this.focusedGroup = null;
       cx.notify();
     });
-    this.inputs.set(groupId, state);
     return state;
   }
 
@@ -53,7 +52,7 @@ export default class ArcSpaces extends View {
   render() {
     const t = theme();
     const { enabled } = config();
-    const groups = groupsOf(shared(GROUPS_KEY));
+    const groups = groupsOf(shared(GROUPS_KEY)).filter(({ id }) => this.inputs.has(id));
     const note = (text, color = t.dim) => div().text_size(11.5).text_color(color).child(text);
 
     // A switch drawn by hand (gpui-base's Switch has no styling), as agent-sleep's.
@@ -65,7 +64,7 @@ export default class ArcSpaces extends View {
 
     const row = (group) => h_flex().items_center().gap(10)
       .child(div().flex_1().min_w(0).truncate().text_size(12.5).child(group.name))
-      .child(Input.new(this.input(group.id)).w(200).h(30).px(9).rounded(8).border_1()
+      .child(Input.new(this.inputs.get(group.id)).w(200).h(30).px(9).rounded(8).border_1()
         .border_color(this.focusedGroup === group.id ? t.accent : t.input)
         .bg(t.background).text_size(12.5).text_color(t.foreground));
 

@@ -3,7 +3,10 @@
 // installing it never reinstalls projects-sidebar.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, readFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { KEY, GROUPS_KEY, parseConfig, withEnabled, withName, groupsOf, isLinked } from "../arc-spaces/mods/arc-spaces/model.js";
 
 const plugin = (path) => new URL(`../arc-spaces/${path}`, import.meta.url);
@@ -72,6 +75,26 @@ test("the link counts only when it points at this home's installed wrapper", () 
   assert.equal(isLinked("/h/mods/arc-spaces/bin/open\n", "/h"), true);
   assert.equal(isLinked("/other/mods/arc-spaces/bin/open\n", "/h"), false);
   assert.equal(isLinked("", "/h"), false);
+});
+
+// A plain `herdr-app check` draws the dialog with the switch off, which has no
+// fields. Herdr refuses InputState.new during render, and only this one sees it.
+const herdr = spawnSync("herdr-app", ["--version"]).status === 0;
+test("the dialog draws with the switch on", { skip: herdr ? false : "herdr-app isn't installed" }, () => {
+  const home = mkdtempSync("/tmp/arc-check-");
+  try {
+    writeFileSync(join(home, "shared.json"), JSON.stringify({
+      [KEY]: { enabled: true, names: { g1: "Action" } },
+      [GROUPS_KEY]: { groups: [{ id: "g1", name: "Work", projects: [] }, { id: "g2", name: "Personal", projects: [] }], activeGroup: "g1" },
+    }));
+    const result = spawnSync("herdr-app", ["check", fileURLToPath(plugin("mods/arc-spaces"))], {
+      encoding: "utf8",
+      env: { ...process.env, HOME: home, HERDR_APP_HOME: home },
+    });
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
 });
 
 test("the plugin is a dialog that docks nowhere, with no requires and no keys", () => {
