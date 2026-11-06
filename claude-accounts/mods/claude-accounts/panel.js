@@ -92,6 +92,9 @@ export default class Panel extends UsageView {
     return v_flex()
       .id("ca-panel")
       .size_full()
+      // A popup takes its content's height, and the body below scrolls in
+      // what's left: without a height of its own that's nothing.
+      .when(this.height !== null, (el) => el.h(this.height - PANEL.frame))
       .min_h(0)
       .overflow_hidden()
       .bg(t.popover)

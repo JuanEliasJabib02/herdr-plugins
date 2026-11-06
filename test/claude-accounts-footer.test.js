@@ -1077,6 +1077,13 @@ async function panel(text = liveDoc()) {
   return { world, view: await overlay(Panel, spec, world) };
 }
 
+test("panel view: it has the height it opened at, or a popup, which takes its content's, leaves the scrolling body none", async () => {
+  const text = liveDoc();
+  const spec = panelSpec({ doc: readAccounts(text), text, anchor: ANCHOR, zoom: 1, now: Date.now() });
+  const { view } = await panel(text);
+  assert.equal(find(view.render(), "ca-panel").calls.h[0], spec.height - PANEL.frame);
+});
+
 test("panel view (S1): Claude Updated 3m ago, the card's windows, Claude Account with ✓ and the others' bars, Manage Accounts…", async () => {
   const { view } = await panel();
   const root = view.render();
