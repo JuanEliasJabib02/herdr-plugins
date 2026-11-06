@@ -11,8 +11,8 @@ import {
   KEYS, COMMON_DIR, WORKTREE_LIST,
   normPath, placeOf, changed,
   emptyRegistry, parseRegistry, needsBackup, registryWrites, activeGroup, findProject,
-  addProject, removeProject, moveProject, addGroup, renameGroup, deleteGroup, selectGroup,
-  parseUi, withCollapsed, parseCache, parseAgents,
+  addProject, removeProject, moveProject, addGroup, renameGroup, deleteGroup, selectGroup, setOrganize,
+  parseUi, withCollapsed, withTaskCollapsed, parseCache, parseAgents,
   resolveProject, parseWorktrees, listCheckouts,
   matchSpaces, attentionByGroup,
 } from "../projects-sidebar/mods/projects/lib.js";
@@ -286,6 +286,49 @@ test("creation order: groups and projects stay in the order they were made", () 
   assert.deepEqual(groupNames(parseRegistry(JSON.parse(JSON.stringify(r)))), groupNames(r), "survives a store round trip");
 });
 
+// ── Registry: how a group is organized (D29) ───────────────────────────────
+
+// Stored and read back, as store.js does.
+const roundTrip = (r) => JSON.parse(JSON.stringify(r));
+
+test("organize: a group in Task mode reads back as itself, so it never spends the backup; any other value is dropped", () => {
+  const r = twoGroups();
+  const task = roundTrip(setOrganize(r, r.groups[1].id, "task"));
+  assert.equal(task.groups[1].organize, "task");
+  assert.deepEqual(Object.keys(task.groups[1]), ["id", "name", "projects", "organize"], "the field goes last");
+  assert.deepEqual(parseRegistry(task), task);
+  assert.equal(needsBackup(task, parseRegistry(task)), false);
+  for (const odd of ["x", "project", "Task", null, 1]) {
+    const stored = { ...task, groups: [task.groups[0], { ...task.groups[1], organize: odd }] };
+    assert.deepEqual(parseRegistry(stored).groups[1], { id: "g2", name: "Clients", projects: [] }, `organize ${JSON.stringify(odd)} is dropped`);
+  }
+});
+
+test("organize: Task then Project gives back the original, with nothing to write; a no-op returns the same registry", () => {
+  const r = roundTrip(twoGroups());
+  const back = setOrganize(setOrganize(r, "g1", "task"), "g1", "project");
+  assert.deepEqual(back, r);
+  assert.ok(!("organize" in back.groups[0]), "Project mode stores no field, not even undefined");
+  assert.deepEqual(registryWrites(r, null, back), []);
+  assert.equal(setOrganize(r, "g1", "project"), r, "already in Project mode");
+  const task = setOrganize(r, "g1", "task");
+  assert.equal(setOrganize(task, "g1", "task"), task, "already in Task mode");
+  assert.equal(setOrganize(r, "nope", "task"), r, "an unknown group");
+  assert.equal(setOrganize(r, "g1", "status"), r, "an unknown mode");
+  assert.equal(addGroup(task, "New").groups.at(-1).organize, undefined, "a new group starts in Project mode");
+});
+
+test("organize: renaming the group or moving a project in or out keeps the mode", () => {
+  const r = setOrganize(twoGroups(), "g1", "task");
+  const renamed = renameGroup(r, "g1", "Work");
+  assert.equal(renamed.groups[0].organize, "task");
+  const out = moveProject(r, "/code/app", "g2");
+  assert.equal(out.groups[0].organize, "task");
+  const into = moveProject(setOrganize(twoGroups(), "g2", "task"), "/code/app", "g2");
+  assert.equal(into.groups[1].organize, "task");
+  for (const next of [renamed, out, into]) assert.equal(needsBackup(roundTrip(next), parseRegistry(roundTrip(next))), false);
+});
+
 // ── Other persisted keys ───────────────────────────────────────────────────
 
 test("ui state: collapsed projects, invalid values reset, toggled without duplicates", () => {
@@ -295,6 +338,31 @@ test("ui state: collapsed projects, invalid values reset, toggled without duplic
   assert.deepEqual(ui, { collapsed: ["/a", "/b"] });
   assert.deepEqual(withCollapsed(ui, "/b", true), ui);
   assert.deepEqual(withCollapsed(ui, "/a", false), { collapsed: ["/b"] });
+});
+
+test("ui state: folded Task-mode lanes kept deduped, anything not lane-shaped dropped, no `tasks` key when none (D31)", () => {
+  const long = `task:${"x".repeat(200)}`;
+  assert.equal(long.length, 205);
+  assert.deepEqual(parseUi({ collapsed: ["/a"], tasks: ["task:AX-1", "servers", "task:AX-1", 7, null, "task:", "task:none", long, `${long}y`, "login", "Servers"] }), {
+    collapsed: ["/a"],
+    tasks: ["task:AX-1", "servers", "task:none", long],
+  });
+  for (const none of [undefined, [], "task:AX-1", [3, "x"]]) assert.deepEqual(parseUi({ collapsed: ["/a"], tasks: none }), { collapsed: ["/a"] }, `tasks ${JSON.stringify(none)}`);
+  assert.deepEqual(parseUi({ tasks: ["servers"] }), { collapsed: [], tasks: ["servers"] });
+});
+
+test("ui state: folding a project keeps the folded lanes; folding a lane keeps the projects; a no-op returns the same ui", () => {
+  const ui = parseUi({ collapsed: ["/a"], tasks: ["task:login"] });
+  assert.deepEqual(withCollapsed(ui, "/b", true), { collapsed: ["/a", "/b"], tasks: ["task:login"] });
+  assert.deepEqual(withCollapsed(ui, "/a", false), { collapsed: [], tasks: ["task:login"] });
+  assert.equal(withTaskCollapsed(ui, "task:login", true), ui, "already folded");
+  assert.equal(withTaskCollapsed(ui, "servers", false), ui, "already open");
+  const folded = withTaskCollapsed(ui, "servers", true);
+  assert.deepEqual(folded, { collapsed: ["/a"], tasks: ["task:login", "servers"] });
+  assert.deepEqual(parseUi(JSON.parse(JSON.stringify(folded))), folded, "reads back as itself");
+  assert.deepEqual(withTaskCollapsed(ui, "task:login", false), { collapsed: ["/a"] }, "the last lane unfolded: no `tasks` key, as parseUi reads it");
+  assert.deepEqual(withTaskCollapsed({ collapsed: [] }, "task:AX-7", true), { collapsed: [], tasks: ["task:AX-7"] });
+  assert.equal(withTaskCollapsed(ui, `task:${"x".repeat(201)}`, true), ui, "a key parseUi would drop isn't stored");
 });
 
 test("worktree cache: keeps valid lists per project, drops anything malformed", () => {

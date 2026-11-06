@@ -3,16 +3,21 @@
 // persisted keys and their validation, repo resolution and worktree lists
 // (git is passed in), and the matching of Herdr's spaces to workspaces.
 // Every operation returns a new value and never mutates its input. Frozen
-// after T2: later tasks add their pure helpers to their own model files.
+// after T2: later tasks add their pure helpers to their own model files. The
+// one exception is T10, which added two optional fields to the persisted
+// shapes here: a group's `organize` (D29) and the folded Task-mode lanes,
+// `tasks` (D31).
 
 // ── Persisted keys ─────────────────────────────────────────────────────────
 
 // The shared() keys this mod persists, read and written only by store.js.
-// A format change gets a new key (projects.v2), never a reshaped v1.
+// A format change gets a new key (projects.v2), never a reshaped v1. An
+// optional field that an older build simply drops (organize, tasks) is not a
+// format change.
 export const KEYS = {
-  registry: "projects.v1", // { version: 1, groups: [{ id, name, projects: [{ path, name }] }], activeGroup }
+  registry: "projects.v1", // { version: 1, groups: [{ id, name, projects: [{ path, name }], organize?: "task" }], activeGroup }
   registryBackup: "projects.v1.backup", // the first stored projects.v1 that didn't read back as itself, as it was (needsBackup)
-  ui: "projects.ui.v1", // { collapsed: [projectPath] }
+  ui: "projects.ui.v1", // { collapsed: [projectPath], tasks?: [lane] }: tasks, the folded Task-mode lanes, only when there are any
   cache: "projects.cache.v1", // { [projectPath]: [{ path, branch, main }] }
   agents: "projects.agents.v1", // the last knownAgents() result
 };
@@ -69,7 +74,10 @@ const isProject = (p) => isObject(p) && isAbsolute(p.path) && typeof p.name === 
 // registry at all (another version, another mod's value) or keeps no valid
 // group is the empty registry. Unknown fields are dropped, paths normalized,
 // a group id or a path listed twice kept only the first time, and an active
-// group that doesn't exist falls back to the first group. Never throws.
+// group that doesn't exist falls back to the first group. A group's
+// `organize` is kept only when it is "task", as its last key (D29): that is
+// where setOrganize puts it, so a stored Task-mode group reads back as itself
+// and never needs a backup. Never throws.
 export function parseRegistry(value) {
   if (!isObject(value) || value.version !== 1 || !Array.isArray(value.groups)) return emptyRegistry();
   const ids = new Set();
@@ -86,7 +94,7 @@ export function parseRegistry(value) {
       paths.add(path);
       projects.push({ path, name: p.name });
     }
-    groups.push({ id: g.id, name: g.name, projects });
+    groups.push({ id: g.id, name: g.name, projects, ...(g.organize === "task" ? { organize: "task" } : {}) });
   }
   if (groups.length === 0) return emptyRegistry();
   const activeGroup = ids.has(value.activeGroup) ? value.activeGroup : groups[0].id;
@@ -193,19 +201,59 @@ export function selectGroup(registry, id) {
   return { ...registry, activeGroup: id };
 }
 
-// ── Other persisted keys ───────────────────────────────────────────────────
-
-// `projects.ui.v1`: the collapsed projects, by path.
-export function parseUi(value) {
-  const collapsed = isObject(value) && Array.isArray(value.collapsed) ? value.collapsed : [];
-  return { collapsed: [...new Set(collapsed.filter(isAbsolute).map((p) => normPath(p)))] };
+// How a group's tree is organized (D29): "task" (lanes by task) or "project"
+// (by project, the default). Task mode is `organize: "task"` on the group, as
+// its last key (parseRegistry's order); Project mode is no field at all,
+// never "project" or undefined, so either reads back as itself. The same
+// registry when the group is unknown, the mode is neither, or the group
+// already has it. Every other operation keeps the field (they spread the
+// group).
+export function setOrganize(registry, groupId, mode) {
+  const group = registry.groups.find((g) => g.id === groupId);
+  if (!group || (mode !== "task" && mode !== "project")) return registry;
+  if (mode === (group.organize === "task" ? "task" : "project")) return registry;
+  return mapGroup(registry, groupId, (g) => {
+    if (mode === "task") return { ...g, organize: "task" };
+    const { organize: _, ...rest } = g;
+    return rest;
+  });
 }
 
+// ── Other persisted keys ───────────────────────────────────────────────────
+
+// A Task-mode lane key (D31, task-model.js): "servers", "task:none", or
+// "task:" and 1–200 chars (a ticket, or a name of up to 200 chars).
+const isLane = (s) => typeof s === "string" && (s === "servers" || (s.startsWith("task:") && s.length > 5 && s.length <= 205));
+
+// `projects.ui.v1`: the collapsed projects, by path, and the folded
+// Task-mode lanes, by lane key. `tasks` is there only when a lane is folded,
+// so a value without it reads as { collapsed }, as before T10.
+export function parseUi(value) {
+  const collapsed = isObject(value) && Array.isArray(value.collapsed) ? value.collapsed : [];
+  const tasks = isObject(value) && Array.isArray(value.tasks) ? [...new Set(value.tasks.filter(isLane))] : [];
+  return { collapsed: [...new Set(collapsed.filter(isAbsolute).map((p) => normPath(p)))], ...(tasks.length ? { tasks } : {}) };
+}
+
+// A project folded or not; the folded lanes stay.
 export function withCollapsed(ui, path, collapsed) {
   const p = normPath(path);
   const rest = ui.collapsed.filter((x) => x !== p);
   const next = collapsed ? [...rest, p] : rest;
-  return next.length === ui.collapsed.length && next.every((x, i) => x === ui.collapsed[i]) ? ui : { collapsed: next };
+  return next.length === ui.collapsed.length && next.every((x, i) => x === ui.collapsed[i]) ? ui : { ...ui, collapsed: next };
+}
+
+// A Task-mode lane folded or not; the folded projects stay. The same `ui`
+// when nothing changes, or for a key parseUi wouldn't keep. Unfolding the
+// last lane drops `tasks`, which is how parseUi reads it.
+export function withTaskCollapsed(ui, lane, folded) {
+  if (!isLane(lane)) return ui;
+  const now = ui.tasks ?? [];
+  const rest = now.filter((x) => x !== lane);
+  const next = folded ? [...rest, lane] : rest;
+  if (next.length === now.length && next.every((x, i) => x === now[i])) return ui;
+  if (next.length) return { ...ui, tasks: next };
+  const { tasks: _, ...without } = ui;
+  return without;
 }
 
 const isCheckout = (c) => isObject(c) && isAbsolute(c.path) && (c.branch === null || typeof c.branch === "string") && typeof c.main === "boolean";
