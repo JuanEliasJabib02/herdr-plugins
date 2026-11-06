@@ -372,6 +372,13 @@ test("a zero or bad limit is 1 s, and a huge one a day, never none", () => {
   }
 });
 
+test("a huge limit is a day, not the 1 s of a bad value", () => {
+  lsAnswer([space("/repos/ag", withTerminals("t1"))]);
+  slowHc(`sleep 2\ncat <<'EOF'\n${JSON.stringify({ cwd: "/repos/action" })}\nEOF`);
+  run([URL_A], { env: { ARC_SPACES_HC_TIMEOUT: "200000000" }, capMs: 120_000 });
+  assertRouted("Action");
+});
+
 test("an ignored SIGALRM, inherited from Herdr, doesn't turn the limits off", () => {
   lsAnswer([space("/repos/ag", withTerminals("t1"))]);
   const marker = `sleep ${700_000 + Math.floor(Math.random() * 100_000)}`;

@@ -103,8 +103,7 @@ space=$(printf '%s\n' "$listing" | jq -r --arg live "$live" --arg userhome "$HOM
   | ([($s["projects.cache.v1"] // {}) | objects
       # parseCache: the valid entries by their normalized key; a later key that
       # normalizes the same replaces the list and keeps the place of the first.
-      | reduce (to_entries[] | select((.key | absolute) and (.value | type == "array" and all(.[]; checkout)))) as $e
-          ({}; .[$e.key | norm] = $e.value)
+      | with_entries(select((.key | absolute) and (.value | type == "array" and all(.[]; checkout))) | .key |= norm)
       | to_entries[]
       | .key as $project | .value[]
       | {project: $project, path: (.path | norm)}
