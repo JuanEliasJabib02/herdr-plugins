@@ -326,9 +326,10 @@ across repos.
   `spaces` → `{ "mod": "projects" }`, and a new block `groups` →
   `{ "mod": "projects", "props": { "view": "groups" } }` (px 44) between
   `sidebar-lists` and `sidebar-footer`. The status bar (`status`, px 28)
-  is a row: `workspace-status`, then `{ "mod": "claude-accounts", "props":
-  { "view": "footer" } }`, Claude's usage at its right as in Orca, both
-  weight 1 (the claude-accounts plugin draws it). Preview
+  is a row: `workspace-status` (weight 1), then `{ "mod": "spotlight",
+  "props": { "view": "footer" } }` (px 40, the spotlight plugin's test-queue
+  flask), then `{ "mod": "claude-accounts", "props": { "view": "footer" } }`
+  (weight 1), Claude's usage at its right as in Orca. Preview
   `layouts/projects.svg`.
 - **Mod `mods/projects/`** (`mod.json` `{ "place": "none" }`), one mod in
   views picked by `props.view`:

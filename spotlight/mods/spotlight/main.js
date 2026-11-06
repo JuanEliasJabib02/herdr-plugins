@@ -11,7 +11,7 @@
 // read its state.json and act by exec-ing it.
 
 import { View, div } from "gpui-kit";
-import { props, nextCommand } from "herdr";
+import { props, nextCommand, setShared } from "herdr";
 import Footer from "./footer.js";
 import Board from "./board.js";
 import SettingsView from "./settings-view.js";
@@ -58,8 +58,13 @@ export default class Spotlight extends View {
     });
   }
 
+  // The footer copy is the one that publishes badges.spotlight (badges.js).
+  // Once it goes (a layout switch, a reload) nothing keeps them current, so
+  // they go with it, the contract's clear (projects-sidebar RECIPE.md,
+  // "Lifetime"); a footer copy shown again publishes them anew.
   async close(cx) {
     await this.view?.close?.(cx);
+    if (this.name === "footer") setShared("badges.spotlight", null);
   }
 
   render(cx) {

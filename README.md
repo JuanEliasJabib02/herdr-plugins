@@ -9,6 +9,7 @@ like Herdr's home, with a `RECIPE.md` and a `preview.png`).
 | Folder | What it does |
 |---|---|
 | [`projects-sidebar/`](projects-sidebar/) | Replaces Herdr's Spaces list with projects and their workspaces (git worktrees), groups switched with F1–F3, Add project, and a New workspace dialog that can make the same branch in companion repos and give the agent access to them. [Recipe](projects-sidebar/RECIPE.md) |
+| [`spotlight/`](spotlight/) | Orca Pro Max's Spotlight and test queue: one dev server per repo at its root with the workspace's code projected there, the `spotlight` CLI agents use (`on`/`off`/`status`/`logs`), the test-turn queue with its flask, board and settings, and the sidebar badges. [Recipe](spotlight/RECIPE.md) |
 
 ![Projects sidebar](projects-sidebar/preview.png)
 
@@ -25,12 +26,18 @@ herdr-app do layout.switch '{"name":"projects"}'  # ctrl-shift-l switches back
   name it didn't install. It lists what it installed in
   `~/.config/herdr-app/.herdr-plugins/projects-sidebar.txt`. Set
   `HERDR_APP_HOME` for another Herdr home.
-- **Requires claude-accounts:** the projects layout's status bar draws the
-  claude-accounts plugin's Claude usage at its right. The installer installs
-  the plugins listed in `projects-sidebar/requires` first, when this repo has
-  their folder. Without it, that block shows "claude-accounts did not load".
+- **Requires claude-accounts and spotlight:** the projects layout's status
+  bar draws spotlight's test-queue flask and, at its right, the
+  claude-accounts plugin's Claude usage. The installer installs the plugins
+  listed in `projects-sidebar/requires` first, when this repo has their
+  folder. Without one, its block shows "<plugin> did not load".
   `scripts/install.sh --alone` installs projects-sidebar only, and
-  `--uninstall` never removes claude-accounts.
+  `--uninstall` never removes the required plugins.
+- **Commands on PATH:** a plugin's `bin` file lists executables of its mods
+  that the installer links as `~/.local/bin/<name>` to the installed copy
+  (spotlight's `spotlight` CLI). The link is recorded in the plugin's
+  manifest, a foreign file in the way stops the install, and `--uninstall`
+  removes it.
 - **Keys:** F1–F3 come from the plugin's `keys.json`, which the installer
   merges into yours. It adds only keys you don't use and backs the file up
   first (`keys.json.bak-<time>`). Once your keys.json is edited, Herdr stops

@@ -6,7 +6,26 @@ Orca Pro Max's Spotlight and test queue as a Herdr plugin. One dev server per re
 - The engine is the `spotlight` CLI, in `mods/spotlight/cli.mjs` and `bin/spotlight`.
 - State lives in `~/.config/herdr-app/spotlight/`; logs in `~/.local/state/herdr-spotlight/logs/`.
 
-Being built (ODD plan `odd/tasks/spotlight.md`, kept out of git). Install, verbs and probes get documented here as each task lands.
+Being built (ODD plan `odd/tasks/spotlight.md`, kept out of git). Verbs and probes get documented here as each task lands.
+
+## Install
+
+From the repo root:
+
+```sh
+scripts/install.sh            # projects-sidebar, which requires spotlight: both land, spotlight first
+scripts/install.sh spotlight  # spotlight alone
+scripts/install.sh --uninstall spotlight
+```
+
+- The installer copies `mods/spotlight/` into `~/.config/herdr-app/mods/`, with the CLI inside it, since Herdr doesn't load a symlinked mod. After an edit, run it again and Herdr hot-reloads the copy.
+- It links `~/.local/bin/spotlight` to the installed `mods/spotlight/bin/spotlight`, as the plugin's `bin` file asks, so agents, the harness hook and badge clicks run `spotlight` by name. Herdr's exec PATH starts with `~/.local/bin`.
+- The mod and the link are both listed in `~/.config/herdr-app/.herdr-plugins/spotlight.txt`. A `~/.local/bin/spotlight` that isn't that link stops the install before anything changes. `--uninstall` removes the mod and the link.
+- `bin/spotlight` follows its own links to the mod folder. It runs `cli.mjs` on the `node` found on PATH, else `/opt/homebrew/bin/node`, else `/usr/local/bin/node`.
+- The footer is a block in projects-sidebar's layout (D20, the way claude-accounts got its usage block). It shows the flask and is the copy that runs the reaper, badges and auto-sync.
+  - The block: `layouts/projects.json` has `status-spotlight` (px 40, `{"mod": "spotlight", "props": {"view": "footer"}}`) in the status row, between `workspace-status` and claude-accounts' usage.
+  - `projects-sidebar/requires` lists `spotlight`, so installing projects-sidebar installs this plugin first. Without it, the block shows "spotlight did not load".
+  - With another layout shown, no footer copy runs. Its `close` clears `badges.spotlight`, so no stale badge stays, and `spotlight on` still syncs and reaps for agents.
 
 ## Server terminal probe
 

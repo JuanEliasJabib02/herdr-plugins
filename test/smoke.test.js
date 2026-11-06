@@ -45,13 +45,14 @@ test("projects layout: tree replaces Spaces, groups block sits above the footer"
   assert.deepEqual(groups.size, { px: 44 });
 });
 
-test("projects layout: the status bar is a row, workspace-status then the claude-accounts footer (claude-accounts D10)", () => {
+test("projects layout: the status bar is a row, workspace-status, the spotlight flask, then the claude-accounts footer (claude-accounts D10, spotlight D20)", () => {
   const status = find(read("layouts/projects.json"), "status");
   assert.equal(status.type, "row");
   assert.equal(status.resizable, false);
   assert.deepEqual(status.size, { px: 28 });
   assert.deepEqual(status.children, [
     { id: "status-workspace", type: "block", size: { weight: 1 }, content: { mod: "workspace-status" } },
+    { id: "status-spotlight", type: "block", size: { px: 40 }, content: { mod: "spotlight", props: { view: "footer" } } },
     { id: "status-usage", type: "block", size: { weight: 1 }, content: { mod: "claude-accounts", props: { view: "footer" } } },
   ]);
 });

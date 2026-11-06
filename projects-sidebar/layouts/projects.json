@@ -199,6 +199,19 @@
               }
             },
             {
+              "id": "status-spotlight",
+              "type": "block",
+              "size": {
+                "px": 40
+              },
+              "content": {
+                "mod": "spotlight",
+                "props": {
+                  "view": "footer"
+                }
+              }
+            },
+            {
               "id": "status-usage",
               "type": "block",
               "size": {
