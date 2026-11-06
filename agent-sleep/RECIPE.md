@@ -7,7 +7,9 @@ shell is left, and its conversation comes back with `claude --resume`.
 
 **Off until you turn it on:** installing projects-sidebar installs this too,
 so it does nothing on its own until you switch on "Sleep idle agents" in the
-block's Settings.
+block's Settings. That covers coming back after a restart: while off, nothing
+keeps track of a running Claude, so one Core loses doesn't come back on its
+own.
 
 **How it behaves**
 
@@ -27,14 +29,17 @@ block's Settings.
   `claude <your flags> --resume <id>` into the shell, exactly once, and a
   toast says so. If you typed something at the shell it waits for you, and if
   another program is in front it forgets that Claude.
-- **After a restart.** If Core loses a kept terminal (crash, reboot, logout,
-  `hc server stop`), the Claude that was running there comes back the same
-  way when you show its tab. A Claude you ended yourself doesn't.
-  `hc server restart` keeps programs running, so nothing happens.
+- **After a restart** (needs automatic sleep on). If Core loses a kept
+  terminal (crash, reboot, logout, `hc server stop`), the Claude that was
+  running there comes back the same way when you show its tab. A Claude you
+  ended yourself doesn't. `hc server restart` keeps programs running, so
+  nothing happens.
 - **The block** (in projects-sidebar's sidebar): "Agent sleep · 2 asleep · ~620
-  MB freed", the next one due, the last event, why a Claude stays asleep if
-  one does, and Sleep now and Wake all. "fields:" says where it got each
-  terminal's details.
+  MB freed", why a Claude stays asleep if one does, the next one due, the last
+  event, and Sleep now and Wake all. "fields:" says where it got each
+  terminal's details. When the lines don't fit, the last ones are cut, never
+  the buttons. In the sidebar's rail (below 160 px) it is just the moon and how
+  many are asleep, with the headline as its tooltip.
 - **Sleep now** puts every hidden, finished Claude to sleep at once, without
   the wait. **Wake all** resumes every sleeping one. Both work while automatic
   sleep is off.
@@ -73,3 +78,9 @@ block is in the shown layout, and projects-sidebar's layout has it.
   first time its tab is shown once the mod is back.
 - **Off doesn't wake anyone.** A Claude already asleep when you turn it off
   still wakes when you show its tab.
+- **Two Herdr windows on one Core.** Each one showing the block runs its own
+  loop and can type into terminals, so run it in one. `sleeping.json` is
+  written with a compare-and-swap before each `/exit` and each resume, so the
+  copy whose write comes second drops that step. Nothing covers the rest: the
+  probe's `x` is typed before any write, so both can type one, and each copy
+  sees only its own window, so a Claude shown only in the other can be stopped.

@@ -54,7 +54,7 @@ test("paths live under appHome()/agent-sleep", () => {
   assert.equal(paths(`${HOME}/`).dir, `${HOME}/agent-sleep`);
 });
 
-test("settings: absent file → defaults (on, 30 min), not bad", () => {
+test("settings: absent file → defaults (off, 30 min), not bad", () => {
   assert.deepEqual(parseSettings(null), { settings: DEFAULT_SETTINGS, bad: false });
   assert.deepEqual(DEFAULT_SETTINGS, { enabled: false, idleMinutes: 30 });
 });

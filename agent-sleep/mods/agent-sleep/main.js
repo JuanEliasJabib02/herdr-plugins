@@ -13,16 +13,19 @@
 //                        "agent-sleep.wake-all").
 //   any other copy       render-only: no timer, no loop, no command.
 // The settings view is drawn in the block itself (its "Settings"), so it
-// belongs to the loop copy and saves through it.
+// belongs to the loop copy and saves through it. In the sidebar's rail
+// (rail.js) the block is its compact form, with no settings view; one left
+// open is back when the sidebar is.
 
 import { View, div } from "gpui-kit";
 import {
   props, hc, exec, home, appHome, readTextFile, writeTextFile,
-  terminals, spaces, panes, focused, notify, shared, setShared, theme, nextCommand,
+  terminals, spaces, panes, focused, notify, shared, setShared, theme, nextCommand, layout,
 } from "herdr";
 import { Coordinator, MOD, isLoopCopy, startLoop, stepMinutes, windowLabel } from "./coordinator.js";
 import { iconPath } from "./badges.js";
-import { renderBlock } from "./views/block.js";
+import { isRail } from "./rail.js";
+import { renderBlock, renderRail } from "./views/block.js";
 import { renderSettings } from "./views/settings.js";
 
 // Key commands ("agent-sleep.<name>" in keys.json, or `herdr-app do
@@ -93,6 +96,7 @@ export default class AgentSleep extends View {
     }
     // D6: what is on screen now, and what just left it, on every render.
     this.co.observeNow();
+    if (isRail(layout())) return renderRail({ t, model: this.co.model(), moon: iconPath(MOD) });
     if (this.mode === "settings") {
       const settings = this.co.shownSettings();
       const change = (c) => (_e, cx) => {
