@@ -62,3 +62,15 @@ test("the delete dialog is a view of the mod, and its delete outlives it (D22)",
   assert.match(src("workspace-menu.js"), /openDeleteWorkspace\(/, "the menu's Delete… opens it");
 });
 
+
+test("the rename dialog is a view of the mod, and its rename outlives it (D25)", () => {
+  const src = (f) => readFileSync(new URL(`../projects-sidebar/mods/projects/${f}`, import.meta.url), "utf8");
+  assert.match(src("main.js"), /"rename-workspace":\s*RenameWorkspace/);
+  const dialog = src("rename-workspace.js");
+  assert.match(dialog, /export default class RenameWorkspace/);
+  assert.match(dialog, /modal:\s*true/);
+  assert.match(dialog, /\{\s*owner:\s*null\s*\}/, "the sequence runs in a task no view owns");
+  assert.match(dialog, /removalCheck\(/, "it asks git on open whether the folder can move");
+  assert.match(src("workspace-menu.js"), /openRenameWorkspace\(/, "the menu's Rename… opens it");
+  assert.match(src("git.js"), /export const renameWorkspace\b/);
+});

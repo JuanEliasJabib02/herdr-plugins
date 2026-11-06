@@ -1,12 +1,14 @@
 // git on this machine, through Herdr's exec (the person's real environment:
 // PATH, HOME, auth). Projects are local, so nothing here takes a machine.
-// The parsing and the decisions live in lib.js, new-workspace-model.js and
-// remove-workspace-model.js, which tests run against a real git.
+// The parsing and the decisions live in lib.js, new-workspace-model.js,
+// remove-workspace-model.js and rename-workspace-model.js, which tests run
+// against a real git.
 
 import { exec } from "herdr";
 import { resolveProject, listCheckouts } from "./lib.js";
 import { fetchOrigin, defaultBaseOf, recentBasesOf, branchExistsIn, addWorktreeIn } from "./new-workspace-model.js";
 import { removalCheck as checkRemoval, removeWorkspace as removeWith } from "./remove-workspace-model.js";
+import { renameCheck as checkRename, renameWorkspace as renameWith } from "./rename-workspace-model.js";
 
 // { ok, out, err } (mods/worktree/main.js `git`). Rejects when git can't
 // start there: not installed, or the folder is gone.
@@ -64,3 +66,18 @@ export const removalCheck = ({ project, path }) => checkRemoval({ project, path 
 // rejects.
 export const removeWorkspace = ({ project, path, seen }, { closeSpaces }) =>
   removeWith({ project, path, seen }, { git, exists: pathExists, closeSpaces });
+
+// ── Rename (D25–D26) ───────────────────────────────────────────────────────
+
+// Whether renaming the workspace at `path` to the typed `name` may run, from
+// a fresh list; changes nothing. Resolves { status: "ok" | "refused" |
+// "failed", reason, err, branch, list, … }; never rejects.
+export const renameCheck = ({ project, path, name }) => checkRename({ project, path, name }, { git, exists: pathExists });
+
+// Renames a workspace in D26's order: check again, `git branch -m`, then,
+// with moveFolder (no space and no terminal in the folder: the dialog
+// decides), `git worktree move`. Resolves { status: "renamed" | "refused" |
+// "failed", reason, branch, folder: "moved" | "kept" | "stays" | null, err,
+// list }; never rejects.
+export const renameWorkspace = ({ project, path, name, moveFolder }) =>
+  renameWith({ project, path, name, moveFolder }, { git, exists: pathExists });

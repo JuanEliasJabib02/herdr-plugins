@@ -7,6 +7,7 @@
 //   project-menu      a project's right-click menu
 //   workspace-menu    a workspace's right-click menu
 //   delete-workspace  the Delete dialog (a worktree, its spaces, its branch)
+//   rename-workspace  the Rename dialog (a worktree's branch and folder)
 //   group-menu        a group's right-click menu
 //   group-form        New group / Rename group
 // Copies never reach into each other: they share state through store.js
@@ -18,6 +19,7 @@ import Tree, { commands as treeCommands } from "./tree.js";
 import ProjectMenu from "./project-menu.js";
 import WorkspaceMenu from "./workspace-menu.js";
 import DeleteWorkspace from "./delete-workspace.js";
+import RenameWorkspace from "./rename-workspace.js";
 import Groups, { commands as groupsCommands } from "./groups.js";
 import GroupForm from "./group-form.js";
 import GroupMenu from "./group-menu.js";
@@ -30,6 +32,7 @@ const VIEWS = {
   "project-menu": ProjectMenu,
   "workspace-menu": WorkspaceMenu,
   "delete-workspace": DeleteWorkspace,
+  "rename-workspace": RenameWorkspace,
   "group-menu": GroupMenu,
   "group-form": GroupForm,
 };

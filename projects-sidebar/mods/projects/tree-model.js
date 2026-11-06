@@ -2,12 +2,13 @@
 // `node --test` can load it: the rows of the active group (projects, their
 // workspaces and agents) from the registry, the worktree cache and Herdr's
 // live spaces; what a click opens (D8); Add project (D10) with the herdr side
-// passed in; the project and workspace menus' items; what the Delete dialog
-// says and what its outcome does (D22); the narrow rail; and the helpers of
-// the worktree engine (D6). tree.js, the menus and delete-workspace.js draw
-// and act on it.
+// passed in; the project and workspace menus' items; what the Delete and
+// Rename dialogs say and what their outcomes do (D22, D25); the narrow rail;
+// and the helpers of the worktree engine (D6). tree.js, the menus,
+// delete-workspace.js and rename-workspace.js draw and act on it.
 
 import { normPath, baseName, placeOf, activeGroup, findProject, addProject, matchSpaces } from "./lib.js";
+import { renameTarget, folderFor } from "./rename-workspace-model.js";
 
 // ── Statuses ───────────────────────────────────────────────────────────────
 
@@ -235,14 +236,18 @@ export async function addProjectAt(folder, io) {
 // The right-click menu of a workspace row: [{ id, label, text?, separator?,
 // danger? }]. Copy Path and Copy Worktree Name (its folder's name, not the
 // branch) on every checkout; on a worktree that isn't the main checkout,
-// after a separator, Delete… in the blocked color (S20, S21). The main
-// checkout is never deleted. Unknown row: [].
+// Rename… (S22), then, after a separator, Delete… in the blocked color (S20,
+// S21). The main checkout is never renamed or deleted. A detached worktree
+// gets Rename… too: its dialog says why it can't. Unknown row: [].
 export function workspaceMenuItems(row) {
   if (!row?.path) return [];
   return [
     { id: "copy-path", label: "Copy Path", text: row.path },
     { id: "copy-name", label: "Copy Worktree Name", text: baseName(row.path) },
-    ...(row.main ? [] : [{ id: "delete", label: "Delete…", separator: true, danger: true }]),
+    ...(row.main ? [] : [
+      { id: "rename", label: "Rename…" },
+      { id: "delete", label: "Delete…", separator: true, danger: true },
+    ]),
   ];
 }
 
@@ -330,6 +335,111 @@ export function deleteOutcome(r, { label, open }) {
   const fresh = ["changed", "locked", "refused"].includes(r?.status) && r.check ? r.check : null;
   // A lock or a refusal is the fresh check's own reason: said once.
   return { close: false, toast: null, error: fresh?.reason === err ? "" : err, check: fresh };
+}
+
+// ── Rename dialog (D25) ────────────────────────────────────────────────────
+
+// renameCheck refusals that no name changes: the workspace can't be renamed
+// at all, so the dialog has no input and no Rename.
+const STUCK = ["missing", "main", "detached"];
+
+// Refusals the live line already says ("Type a new name for the branch.").
+const UNNAMED = ["empty", "unchanged"];
+
+// Why the folder can't move, or "" when it can (D25, D26 step 3). git's own
+// reasons first, since closing a terminal wouldn't move a locked folder.
+// null while git hasn't answered.
+function folderStays(check, spaces, terminals) {
+  if (!check) return null;
+  if (check.locked) return "locked by git";
+  if (check.submodules) return "has submodules";
+  if (check.failed) return "git couldn't check it";
+  if (spaces > 0 || terminals > 0) return "a terminal is open there";
+  return "";
+}
+
+// What the Rename dialog says about the workspace at `path` (D25).
+//   row: its { path, branch, main } (removalCheck's fresh list, else the
+//     cache), null when unknown; text: the name input as typed;
+//   check: removalCheck's answer on open (null while asking): whether git
+//     lets the folder move (locked, submodules);
+//   live: the last renameCheck answer, { status, reason, err, text }, text
+//     being what it checked; null before the first;
+//   spaces: how many spaces show the workspace; terminals: terminal panes in
+//     its folder. Either keeps the folder where it is.
+// Resolves { label, title, path, branch, name, line, moveFolder, reason,
+// checking, ready, button, editable }: branch: the branch now (the input's
+// prefill); name: what the text becomes (renameTarget); line: the live line,
+// "branch <old> → <new> · folder <new>" or "· folder stays <old> (<why>)";
+// moveFolder: what renameWorkspace gets; reason: a refusal, of the workspace
+// (detached, the main checkout: no input, no Rename) or of the typed name
+// (pushed, taken), shown before Enter; ready: Enter may rename.
+export function renamePrompt({ path, row, text, check, live, spaces, terminals, home }) {
+  const at = normPath(path);
+  const label = row ? workspaceLabel({ ...row, path: normPath(row.path) || at }) : baseName(at);
+  const old = row?.branch ?? null;
+  const folder = baseName(at);
+  const target = renameTarget(text, old);
+  const stuck = live?.status === "refused" && STUCK.includes(live.reason);
+  const refusal = !stuck && live?.status === "refused" && live.text === text && !UNNAMED.includes(live.reason) ? live.err : "";
+  const why = folderStays(check, spaces, terminals);
+  const moveFolder = why === "";
+  let line = "";
+  if (!stuck && (!target.name || target.unchanged)) line = "Type a new name for the branch.";
+  else if (!stuck && old) {
+    line = `branch ${old} → ${target.name}`;
+    // The folder part waits for git. A folder that already has the name
+    // stays (macOS folders ignore case, as renameCheck's sameFolder).
+    if (why !== null) {
+      const to = folderFor(at, target.name);
+      if (to.toLowerCase() === at.toLowerCase()) line += ` · folder stays ${folder}`;
+      else line += moveFolder ? ` · folder ${baseName(to)}` : ` · folder stays ${folder} (${why})`;
+    }
+  }
+  return {
+    label,
+    title: `Rename ${label}`,
+    path: tilde(at, home),
+    branch: old,
+    name: target.name,
+    line,
+    moveFolder,
+    // With no branch known (the tree hasn't listed it) and git unable to
+    // list, the check's own reason says why Rename stays off.
+    reason: stuck ? live.err : refusal || (!old && check?.failed ? check.reason : ""),
+    checking: !check,
+    ready: Boolean(check) && !stuck && !refusal && Boolean(old) && Boolean(target.name) && !target.unchanged,
+    button: stuck ? null : "Rename",
+    editable: !stuck,
+  };
+}
+
+// What a renameWorkspace result (rename-workspace-model.js) does to the
+// dialog, and the toast it posts: { close, toast, error, live }.
+//   label: the workspace's label before; path: its folder before; open: the
+//   dialog is still there.
+// A rename closes the dialog (the row has its new name); it posts a toast
+// while open only when something went other than asked (git kept the folder,
+// the old upstream stayed). A refusal stays in the dialog as `live`, the
+// refusal the dialog shows (said once); a failure as `error`. Once the
+// dialog closed (Esc during the rename), every outcome is a toast.
+export function renameOutcome(r, { label, path, open }) {
+  if (r?.status === "renamed") {
+    const folder = baseName(normPath(path));
+    const where = r.folder === "moved"
+      ? `Its folder is now ${baseName(folderFor(path, r.branch))}.`
+      : r.folder === "kept" ? `Its folder stays ${folder}:` : `Its folder stays ${folder}.`;
+    const body = [where, r.err].filter(Boolean).join(" ");
+    const warn = r.folder === "kept" || Boolean(r.err);
+    const toast = { title: `Renamed ${label} to ${r.branch}`, body, level: warn ? "warning" : "success" };
+    return { close: open, toast: open && !warn ? null : toast, error: "", live: null };
+  }
+  const err = r?.err || "git couldn't rename it.";
+  if (!open) return { close: false, toast: { title: `Didn't rename ${label}`, body: err, level: r?.status === "failed" ? "error" : "warning" }, error: "", live: null };
+  // An empty or unchanged name the live line would hide (the branch changed
+  // outside meanwhile) is said as an error instead.
+  if (r?.status === "refused" && !UNNAMED.includes(r.reason)) return { close: false, toast: null, error: "", live: { status: "refused", reason: r.reason, err } };
+  return { close: false, toast: null, error: err, live: null };
 }
 
 // ── Project menu (D11) ─────────────────────────────────────────────────────

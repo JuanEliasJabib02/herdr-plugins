@@ -1,8 +1,8 @@
 // A workspace's right-click menu, a popup with props { project, path }
 // (D20): Copy Path and Copy Worktree Name; on a worktree that isn't the main
-// checkout, after a separator, Delete… (the Delete dialog, D22). ↑/↓ move,
-// Enter runs, Esc closes. Copying uses gpui's clipboard (D21), then a toast
-// says what was copied.
+// checkout, Rename… (the Rename dialog, D25) and, after a separator, Delete…
+// (the Delete dialog, D22). ↑/↓ move, Enter runs, Esc closes. Copying uses
+// gpui's clipboard (D21), then a toast says what was copied.
 
 import { div, svg } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
@@ -12,6 +12,7 @@ import { normPath } from "./lib.js";
 import * as store from "./store.js";
 import { workspaceMenuItems, workspaceLabel } from "./tree-model.js";
 import { openDeleteWorkspace } from "./delete-workspace.js";
+import { openRenameWorkspace } from "./rename-workspace.js";
 
 // The only place that opens the menu. A popup is as tall as its items;
 // height is only the most.
@@ -22,6 +23,7 @@ export function openWorkspaceMenu(project, path) {
 const ICONS = {
   "copy-path": icon("copy"),
   "copy-name": icon("copy"),
+  rename: "mods/workspace-chrome/square-pen.svg",
   delete: "mods/workspace-chrome/x.svg",
 };
 
@@ -53,6 +55,7 @@ export default class WorkspaceMenu {
       notify({ title: "Copied", body: item.text, level: "success", timeout: 2500 });
     }
     this.close();
+    if (item.id === "rename") openRenameWorkspace(this.project, this.path);
     if (item.id === "delete") openDeleteWorkspace(this.project, this.path);
   }
 

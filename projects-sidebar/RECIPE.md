@@ -67,8 +67,21 @@ across repos.
   - The project menu is a 220 × 300 popup: Open main, New workspace…, Move to
     group ▸, Remove from list.
   - The workspace menu is a 220-wide popup: Copy Path, Copy Worktree Name
-    and, on a worktree that isn't the main checkout, Delete… after a
-    separator, in `blocked`.
+    and, on a worktree that isn't the main checkout, Rename… and then
+    Delete… after a separator, in `blocked`.
+  - The Rename dialog is a 380 × 320 modal:
+    - "Rename <label>" and the path with `~`;
+    - a "Branch" input, prefilled with the branch and selected;
+    - under it, a live line: "branch <old> → <new> · folder <new>", or
+      "· folder stays <old> (a terminal is open there)", "(locked by git)"
+      or "(has submodules)";
+    - a refusal in `blocked` once git has checked the typed name: "Already
+      pushed as origin/<b>: renaming would split it from GitHub.", "Branch
+      <new> already exists." or "<path> already exists.";
+    - a detached worktree has no input and no Rename: "<label> is detached
+      or in the middle of a rebase.";
+    - footer: Cancel, and Rename (solid), off until git has answered
+      ("Checking with git…"), "Renaming…" while it runs.
   - The Delete dialog is a 380 × 320 modal:
     - always: "Delete <label>?", the path with `~`, and "Branch <b>" or
       "Detached HEAD";
@@ -126,6 +139,31 @@ across repos.
   - Every outcome is read from git's state (the list, the refs, the exit
     code), never from its words, which change with the locale and the
     version.
+- **Rename…** (never on the main checkout): the input starts as the branch,
+  and the untouched branch never renames. Each `/` segment of the name is
+  slugged like a new workspace's (`Fix Login!` → `fix-login`), so `user/feat`
+  keeps its namespace. On open the dialog asks git whether the folder can
+  move (a fresh `worktree list`: the lock, and submodule checkouts as Delete
+  counts them), and it checks the typed name a moment after typing stops.
+  Enter then runs, in this order:
+  1. It checks again, on a fresh list: a worktree of the project, on a
+     branch; the branch not pushed (no `<remote>/<b>` on any remote, no
+     upstream of its own name); the new branch and the new folder free.
+     Otherwise nothing runs, and the dialog says why.
+  2. `git branch -m <old> <new>` in the main checkout. An upstream with
+     another name (the `origin/main` a new workspace starts from) is unset,
+     so a push never lands there.
+  3. The folder moves only when no space and no terminal is in it:
+     `git worktree move` to a sibling named after the branch's last segment
+     (`…/app/feat-login` → `…/app/signup`). A new listing decides; if git
+     kept the folder, a toast says why. Otherwise the folder stays, and the
+     row shows the new branch anyway.
+  4. The fresh list is stored, so the row changes at once.
+  - While it runs, Esc, Cancel and clicks do nothing. It runs in a task no
+    view owns, so it finishes even if the dialog closes; the outcome is then
+    a toast.
+  - Like Delete, every outcome is read from git's state (the refs, the
+    list), never from its words.
 - **Groups:** F1/F2/F3 (in this layout only) select groups 1–3, and a
   missing group does nothing. "+" opens the form: Enter creates and selects
   the group, Esc cancels. Right-click a chip: Rename…, or Delete group, which
@@ -165,10 +203,11 @@ across repos.
   - `groups` = `groups.js`;
   - `new-workspace` = `new-workspace.js`;
   - `delete-workspace` = `delete-workspace.js`;
+  - `rename-workspace` = `rename-workspace.js`;
   - `project-menu`, `workspace-menu`, `group-menu`, `group-form`.
-  - Pure logic is in `lib.js`, `tree-model.js`, `new-workspace-model.js` and
-    `remove-workspace-model.js`, tested with `node --test` (Delete's against
-    a real git).
+  - Pure logic is in `lib.js`, `tree-model.js`, `new-workspace-model.js`,
+    `remove-workspace-model.js` and `rename-workspace-model.js`, tested with
+    `node --test` (Delete's and Rename's against a real git).
   - `store.js` is the only code that touches the shared keys: `projects.v1`
     (groups and projects), `projects.ui.v1` (collapsed), `projects.cache.v1`
     (worktree lists) and `projects.agents.v1` (`knownAgents()`). A stored
@@ -189,11 +228,12 @@ across repos.
     `worktree list --porcelain`, `for-each-ref`, `show-ref`, `fetch origin`
     (network) and `worktree add`. Delete adds `status --porcelain`,
     `rev-parse --git-path modules`, `ls-files --stage -z`, `worktree remove`
-    and `branch -d`.
+    and `branch -d`. Rename adds `config --get` (the branch's upstream),
+    `branch -m`, `branch --unset-upstream` and `worktree move`.
   - `test -e`, to check whether a folder exists.
 - **Art:** its own Lucide-style icons in `icons/` (folder, branch, home,
-  plus, code, copy), plus chevrons, check, x and spinner from Herdr's
-  `workspace-chrome` and agent icons from Herdr's `icons/`.
+  plus, code, copy), plus chevrons, check, x, square-pen and spinner from
+  Herdr's `workspace-chrome` and agent icons from Herdr's `icons/`.
 
 **Watch out**
 
@@ -222,6 +262,16 @@ across repos.
 - **`branch -d` keeps squash-merged branches.** A branch merged on GitHub by
   squash or rebase isn't merged for git, so it stays ("Kept branch <b>").
   Delete it yourself with `git branch -D` once you're sure.
+- **Rename never touches a pushed branch.** A branch with a copy on a remote,
+  or an upstream of its own name, is refused ("Already pushed as
+  origin/<b>: renaming would split it from GitHub."): the remote would keep
+  the old name.
+- **The folder stays** while a space or a terminal is in it, or while the
+  worktree is locked or has submodules. The branch is still renamed, and
+  the row shows it.
+- **Claude Code's history after a move:** Claude Code keeps sessions under
+  `~/.claude/projects/<old path with dashes>`, so `claude --continue` in the
+  moved folder starts fresh.
 - **`herdr-app check` draws only the tree view.** Check the other views
   from a copy whose `main.js` defaults to them.
 - **Limits:**
@@ -229,8 +279,8 @@ across repos.
   - Branch names have no user prefix and are slugged to 48 characters.
   - Linear, GitLab and fetching issue titles aren't supported; such a link
     is named by its slug.
-  - The main checkout is never deleted, and a branch only when git sees it
-    merged.
+  - The main checkout is never renamed or deleted, and a branch is deleted
+    only when git sees it merged.
   - Two chosen projects with the same folder name (`/a/web`, `/b/web`) would
     land on the same worktree path: the dialog says so and Create stays off.
 
@@ -257,3 +307,7 @@ across repos.
 - Right-click a throwaway worktree → Delete… → Delete: its space closes, and
   its folder, its row and its merged branch are gone. A dirty one asks
   "Delete anyway"; a locked one has no Delete.
+- Right-click a throwaway worktree → Rename… → a new name → Enter: with no
+  terminal in it, its branch and its folder take the name. With a space
+  open there, the folder stays and the row shows the new name. A pushed
+  branch is refused.

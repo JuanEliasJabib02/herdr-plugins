@@ -10,6 +10,7 @@ import {
   buildTree, openAction, openMainAction, railAction, workspaceLabel, workspaceMenuItems, initials, mostUrgent,
   agentTitle, ago, isNarrow, projectMenuItems, withoutProject, pruneCache, projectPaths,
   watchDirs, eachLimit, liveFolder, addProjectAt, deletePrompt, deleteOutcome, terminalsStaying,
+  renamePrompt, renameOutcome,
 } from "../projects-sidebar/mods/projects/tree-model.js";
 
 const HOME = "/Users/demo";
@@ -448,4 +449,113 @@ test("delete outcome: changed shows the new check; failed and refused stay in th
   const nowLocked = { ...CHECK, deletable: false, locked: true, lockReason: "", reason };
   const locked = { status: "locked", err: reason, branch: null, branchErr: null, list: [], check: nowLocked };
   assert.deepEqual(deleteOutcome(locked, { label: "login", open: true }), { close: false, toast: null, error: "", check: nowLocked }, "the check's reason says it once");
+});
+
+// ── Rename dialog (D25) ────────────────────────────────────────────────────
+
+test("workspace menu: Rename… on a worktree, before Delete…; never on the main checkout (S22)", () => {
+  const items = workspaceMenuItems({ path: "/w/app/feat-login", branch: "feat/login", main: false });
+  assert.deepEqual(items.map((i) => i.id), ["copy-path", "copy-name", "rename", "delete"]);
+  const rename = items[2];
+  assert.equal(rename.label, "Rename…");
+  assert.ok(!rename.separator && !rename.danger, "a plain item, above Delete…'s separator");
+  assert.equal(rename.text, undefined, "nothing to copy");
+  assert.ok(workspaceMenuItems({ path: "/w/app/detached", branch: null, main: false }).some((i) => i.id === "rename"), "a detached worktree too: the dialog says why it can't");
+  assert.ok(!workspaceMenuItems({ path: "/code/app", branch: "main", main: true }).some((i) => i.id === "rename"), "the main checkout is never renamed");
+});
+
+const rprompt = (over = {}) => renamePrompt({ path: LOGIN, row: ROW, text: "feat/login", check: CHECK, live: null, spaces: 0, terminals: 0, home: HOME, ...over });
+
+test("rename dialog: prefilled with the branch, which never renames; Rename waits for git (S22, D25)", () => {
+  const asking = rprompt({ check: null });
+  assert.equal(asking.title, "Rename login", "the row's label (D27)");
+  assert.equal(asking.path, "~/orca/workspaces/app/feat-login");
+  assert.equal(asking.branch, "feat/login", "the input's prefill");
+  assert.deepEqual([asking.checking, asking.ready, asking.button, asking.editable], [true, false, "Rename", true]);
+  assert.equal(asking.line, "Type a new name for the branch.");
+  const early = rprompt({ check: null, text: "feat/signup" });
+  assert.equal(early.line, "branch feat/login → feat/signup", "the folder waits for git");
+  assert.equal(early.ready, false, "no Rename before git says whether the folder can move");
+
+  const untouched = rprompt();
+  assert.deepEqual([untouched.checking, untouched.ready, untouched.line], [false, false, "Type a new name for the branch."], "an untouched prefill never renames");
+  assert.equal(rprompt({ text: "  " }).ready, false, "an empty name");
+  assert.equal(rprompt({ text: "FEAT/LOGIN" }).ready, false, "a name that slugs to the branch is unchanged");
+});
+
+test("rename dialog: the live line says the branch and the folder; a namespace survives and the name is slugged (S22, D25)", () => {
+  const p = rprompt({ text: "feat/signup" });
+  assert.equal(p.line, "branch feat/login → feat/signup · folder signup");
+  assert.deepEqual([p.name, p.ready, p.moveFolder, p.reason], ["feat/signup", true, true, ""]);
+  const slugged = rprompt({ text: "Fix Login!" });
+  assert.deepEqual([slugged.name, slugged.line], ["fix-login", "branch feat/login → fix-login · folder fix-login"]);
+  assert.equal(rprompt({ text: "team/feat-login" }).line, "branch feat/login → team/feat-login · folder stays feat-login", "the folder already has that name");
+});
+
+test("rename dialog: the folder stays while a space or a terminal is in it, or while git locks it or it has submodules (D25, D26)", () => {
+  const stays = (over) => {
+    const p = rprompt({ text: "feat/signup", ...over });
+    return [p.moveFolder, p.line, p.ready];
+  };
+  const line = (why) => `branch feat/login → feat/signup · folder stays feat-login (${why})`;
+  assert.deepEqual(stays({ spaces: 1 }), [false, line("a terminal is open there"), true], "the branch is still renamed");
+  assert.deepEqual(stays({ terminals: 2 }), [false, line("a terminal is open there"), true]);
+  assert.deepEqual(stays({ check: { ...CHECK, deletable: false, locked: true, lockReason: "usb" } }), [false, line("locked by git"), true]);
+  assert.deepEqual(stays({ check: { ...CHECK, submodules: true } }), [false, line("has submodules"), true]);
+  assert.deepEqual(stays({ spaces: 1, check: { ...CHECK, deletable: false, locked: true, lockReason: "" } }), [false, line("locked by git"), true],
+    "git's reason first: closing the terminal wouldn't move it");
+  assert.deepEqual(stays({ check: { ...CHECK, deletable: false, failed: true, reason: "Couldn't check it." } }), [false, line("git couldn't check it"), true]);
+});
+
+test("rename dialog: a refusal of the typed name shows before Enter; detached, the main checkout or a stray path have no Rename (S22, D25)", () => {
+  const pushed = { status: "refused", reason: "published", err: "Already pushed as origin/feat/login: renaming would split it from GitHub.", text: "feat/signup" };
+  const p = rprompt({ text: "feat/signup", live: pushed });
+  assert.deepEqual([p.reason, p.ready, p.button, p.editable], [pushed.err, false, "Rename", true]);
+  const other = rprompt({ text: "feat/other", live: pushed });
+  assert.deepEqual([other.reason, other.ready], ["", true], "a check of another text is stale: Rename checks again anyway");
+  assert.equal(rprompt({ live: { status: "refused", reason: "unchanged", err: "The branch is already feat/login.", text: "feat/login" } }).reason, "", "the hint already says it");
+  const exists = { status: "refused", reason: "folder-exists", err: "/w/app/signup already exists.", text: "feat/signup" };
+  assert.deepEqual([rprompt({ text: "feat/signup", live: exists }).reason, rprompt({ text: "feat/signup", live: exists }).ready], [exists.err, false]);
+
+  const detachedRow = { path: LOGIN, branch: null, main: false };
+  const detached = { status: "refused", reason: "detached", err: "feat-login is detached or in the middle of a rebase.", text: "" };
+  const d = rprompt({ row: detachedRow, text: "", live: detached });
+  assert.equal(d.title, "Rename feat-login", "detached: the folder's name");
+  assert.deepEqual([d.reason, d.button, d.ready, d.editable, d.line], [detached.err, null, false, false, ""]);
+  assert.equal(rprompt({ row: detachedRow, text: "x", live: detached }).button, null, "whatever is typed");
+  const main = { status: "refused", reason: "main", err: "The main checkout isn't renamed: rename one of its workspaces.", text: "main" };
+  assert.deepEqual([rprompt({ path: "/code/app", row: { path: "/code/app", branch: "main", main: true }, text: "main", live: main }).button], [null]);
+  const missing = { status: "refused", reason: "missing", err: `${LOGIN} isn't a workspace of app.`, text: "feat/login" };
+  assert.equal(rprompt({ live: missing }).reason, missing.err);
+  const unlisted = { ...CHECK, deletable: false, failed: true, branch: null, list: null, reason: "Couldn't list the workspaces of app: git didn't answer." };
+  assert.deepEqual([rprompt({ row: null, text: "x", check: unlisted }).reason, rprompt({ row: null, text: "x", check: unlisted }).ready], [unlisted.reason, false],
+    "no branch known and git couldn't list: says why instead of nothing");
+});
+
+test("rename outcome: renamed closes the dialog; a folder git kept says why; while closed, a toast says what happened (S22, D26)", () => {
+  const renamed = (folder, err = "") => ({ status: "renamed", reason: null, branch: "feat/signup", folder, err, list: [] });
+  const open = { label: "login", path: LOGIN, open: true };
+  const closed = { ...open, open: false };
+  assert.deepEqual(renameOutcome(renamed("moved"), open), { close: true, toast: null, error: "", live: null });
+  assert.deepEqual(renameOutcome(renamed("stays"), open), { close: true, toast: null, error: "", live: null }, "the live line said so before");
+  assert.deepEqual(renameOutcome(renamed("kept", "fatal: cannot move a locked working tree"), open),
+    { close: true, toast: { title: "Renamed login to feat/signup", body: "Its folder stays feat-login: fatal: cannot move a locked working tree", level: "warning" }, error: "", live: null });
+  assert.deepEqual(renameOutcome(renamed("moved", "Couldn't unset the upstream of feat/signup: x"), open).toast,
+    { title: "Renamed login to feat/signup", body: "Its folder is now signup. Couldn't unset the upstream of feat/signup: x", level: "warning" });
+  assert.deepEqual(renameOutcome(renamed("moved"), closed), { close: false, toast: { title: "Renamed login to feat/signup", body: "Its folder is now signup.", level: "success" }, error: "", live: null });
+  assert.deepEqual(renameOutcome(renamed("stays"), closed).toast, { title: "Renamed login to feat/signup", body: "Its folder stays feat-login.", level: "success" });
+});
+
+test("rename outcome: a refusal stays in the dialog as its reason, a failure as an error; once closed, a toast (S22, D25)", () => {
+  const open = { label: "login", path: LOGIN, open: true };
+  const closed = { ...open, open: false };
+  const refused = { status: "refused", reason: "branch-exists", branch: "feat/login", folder: null, err: "Branch feat/signup already exists.", list: [] };
+  assert.deepEqual(renameOutcome(refused, open), { close: false, toast: null, error: "", live: { status: "refused", reason: "branch-exists", err: refused.err } }, "said once, as the refusal");
+  const failed = { status: "failed", reason: null, branch: "feat/login", folder: null, err: "fatal: x", list: null };
+  assert.deepEqual(renameOutcome(failed, open), { close: false, toast: null, error: "fatal: x", live: null });
+  assert.deepEqual(renameOutcome(failed, closed).toast, { title: "Didn't rename login", body: "fatal: x", level: "error" });
+  assert.deepEqual(renameOutcome(refused, closed).toast, { title: "Didn't rename login", body: refused.err, level: "warning" });
+  assert.equal(renameOutcome({ status: "failed", err: "" }, open).error, "git couldn't rename it.");
+  const already = { status: "refused", reason: "unchanged", branch: "feat/signup", folder: null, err: "The branch is already feat/signup.", list: [] };
+  assert.deepEqual(renameOutcome(already, open), { close: false, toast: null, error: already.err, live: null }, "a refusal the live line hides is said as an error");
 });
