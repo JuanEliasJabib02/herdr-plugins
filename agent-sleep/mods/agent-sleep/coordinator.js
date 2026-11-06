@@ -72,6 +72,15 @@ const basename = (p) => (typeof p === "string" ? p.replace(/\/+$/, "").split("/"
 // the toast: its worktree's folder name ("checkout-flow").
 const labelOf = (r) => basename(r?.workspacePath || r?.cwd) || null;
 
+// D13, T7: a live record's terminal lost its program in a Core restart when
+// its shell is in front again with a root pid other than the record's (T0:
+// `reason` doesn't survive, the new root pid does). Without both pids there
+// is no evidence, so no resume.
+export const lostTerminal = (t, r) =>
+  isObject(r) && r.state === "live" &&
+  Number.isInteger(r.rootPid) && Number.isInteger(t?.pid) && t.pid !== r.rootPid &&
+  foregroundIsShell(t);
+
 // The block's line for a Claude kept asleep because its exit hint asked for
 // an env assignment the resume can't replay (Log L10).
 const envHold = (label, env) => `${label} stays asleep: Claude asked for ${env}`;
@@ -639,7 +648,18 @@ export class Coordinator {
       const r = own(next, t.address);
       if (r && r.state !== "live") continue;
       if (!isObject(t.foreground) || !isClaudeName(t.foreground.name)) {
-        if (r && Number.isInteger(t.pid) && t.pid === r.rootPid) next = withoutRecord(next, t.address);
+        if (r && Number.isInteger(t.pid) && t.pid === r.rootPid) {
+          next = withoutRecord(next, t.address);
+        } else if (r && lostTerminal(t, r)) {
+          // T7: the shell is back with a new root pid, so Core lost the
+          // program (crash, reboot, logout, `server stop`): asleep, resumed
+          // like any other when its tab is shown.
+          if (holder === undefined) holder = await this.holder();
+          const witness = r.holder && holder ? (r.holder === holder ? "same holder" : "new holder") : "holder unknown";
+          next = withRecord(next, t.address, { ...r, state: "asleep", by: "restart", at: now });
+          this.log(`${t.address}: lost in a restart (root pid ${r.rootPid} → ${t.pid}, ${witness}); resumes when shown`);
+          this.lastEvent = `${labelOf(r) ?? t.address} lost in a restart · resumes when shown`;
+        }
         continue;
       }
       const session = sessions[t.address];
@@ -707,8 +727,9 @@ export class Coordinator {
       this.log(`${address}: resume not sent (${(sent.stderr || sent.stdout || "").trim()}); type it yourself: ${cmd.command}`);
       return false;
     }
-    this.d.notify({ title: `Resuming ${label}`, body: `Session ${r.sessionId.slice(0, 8)} · same flags as before` });
-    this.lastEvent = `Woke ${label}`;
+    const afterRestart = r.by === "restart" ? " after a restart" : "";
+    this.d.notify({ title: `Resuming ${label}${afterRestart}`, body: `Session ${r.sessionId.slice(0, 8)} · same flags as before` });
+    this.lastEvent = `Woke ${label}${afterRestart}`;
     return true;
   }
 
