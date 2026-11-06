@@ -46,7 +46,8 @@ const chrome = (name) => `mods/workspace-chrome/${name}.svg`;
 // D33 (S28): the project row being dragged, { from, y, moving, over, after },
 // built from mouse events (gpui-kit has no element drag): a press on a
 // project row starts it, 4 px of travel makes it a drag, the rows under the
-// pointer mark where it lands, the list's mouse up moves the project.
+// pointer mark where it lands, the list's mouse up moves the project. A
+// press anywhere else, the row's "+", or leaving the list cancels it.
 let drag = null;
 // A drag just ended: the row's click that comes with the mouse up mustn't
 // also fold it.
@@ -289,6 +290,16 @@ function projectRow(p, t) {
       drag = { from: p.path, y: e.position.y, moving: false, over: null, after: false };
       dragged = false;
     })
+    // A new press cancels (D33). MouseMoveEvent doesn't say whether a button
+    // is held, so a drag whose mouse up never reached the list would turn
+    // into one on the next buttonless move: any press outside a project row
+    // ends it. This runs in the capture phase, before the pressed row's
+    // on_mouse_down starts a new one.
+    .on_mouse_down_out((_e, cx) => {
+      if (!drag) return;
+      drag = null;
+      cx.notify();
+    })
     .on_mouse_move((e, cx) => {
       if (!drag) return;
       if (!drag.moving && Math.abs(e.position.y - drag.y) < DRAG_START) return;
@@ -313,7 +324,11 @@ function projectRow(p, t) {
       .hover((s) => s.bg(t.hover).text_color(t.foreground))
       .tooltip("New workspace")
       .on_click((_e, cx) => {
+        // Its press also reached the row's on_mouse_down, and this stops the
+        // mouse up before the list's drop(): the drag it started ends here.
+        drag = null;
         cx.stop_propagation();
+        cx.notify();
         openNewWorkspace(p.path);
       })
       .child(svg(icon("plus")).size(12)));

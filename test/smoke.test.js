@@ -132,3 +132,26 @@ test("Delete task: the task menu's Delete task… opens its dialog, a view of th
   assert.match(del, /export async function closeSpaces\b/);
   assert.match(del, /export const closingSpaces\b/);
 });
+
+test("New workspace's add-project click hands addToGroup the spawn's async context, not the click's (R1-A)", () => {
+  const src = (f) => readFileSync(new URL(`../projects-sidebar/mods/projects/${f}`, import.meta.url), "utf8");
+  const dialog = src("new-workspace.js");
+  const start = dialog.indexOf('"nw-add-project"');
+  assert.ok(start >= 0, "the folder icon beside Project is drawn");
+  const click = dialog.slice(start).match(/\.on_click\(\(_e, cx\) => cx\.spawn\(async \((\w*)\) => this\.addToGroup\((\w+)\)\)\)/);
+  assert.ok(click, "its click runs addToGroup in a spawned task");
+  assert.ok(click[1], "the spawn callback takes the AsyncContext it is handed");
+  assert.equal(click[2], click[1], "addToGroup gets that AsyncContext, valid across the picker's await");
+  assert.doesNotMatch(dialog, /spawn\(async \(\) => this\.addToGroup\(cx\)\)/, "the click's cx is never kept across an await");
+});
+
+test("A press that isn't a drag start never leaves a project drag set (D33, R1b-C)", () => {
+  const src = (f) => readFileSync(new URL(`../projects-sidebar/mods/projects/${f}`, import.meta.url), "utf8");
+  const tree = src("tree.js");
+  const start = tree.indexOf("function projectRow(");
+  assert.ok(start >= 0, "tree.js draws project rows in projectRow");
+  const projectRow = tree.slice(start, tree.indexOf("\n}\n", start));
+  const plus = projectRow.slice(projectRow.indexOf("`p+:"));
+  assert.match(plus, /\.on_click\([\s\S]*?drag = null[\s\S]*?openNewWorkspace\(/, "the \"+\" clears the drag its press started");
+  assert.match(projectRow, /\.on_mouse_down_out\([\s\S]*?drag = null/, "a press outside the row cancels a drag");
+});

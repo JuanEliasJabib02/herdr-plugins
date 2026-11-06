@@ -548,7 +548,7 @@ test("rename (T9c 2): on GitHub → gh renames it there, the branch here, and th
   const c = await renameCheck({ project: p.path, path, name: "feat-b" }, t.io);
   assert.equal(c.status, "ok", c.err);
   assert.deepEqual(c.origin, { published: true, route: "github", gone: false, repo: { owner: "acme", repo: "shop" }, prs: [], sha });
-  assert.ok(t.git.includes("ls-remote origin refs/heads/feat-a refs/heads/feat-b"), "one ls-remote, exact refnames");
+  assert.ok(t.git.includes("ls-remote origin refs/heads/feat-a refs/heads/feat-b refs/heads/feat-b/*"), "one ls-remote, exact refnames, and what would be in the way of feat-b");
   const r = await rename(p, path, "feat-b", true, t.io, { route: "github", prs: [] });
   assert.equal(r.status, "renamed", r.err);
   assert.equal(r.remote, "renamed");
@@ -876,6 +876,96 @@ test("rename (T9c 22): a branch that only tracks origin/main stays offline: an l
   assert.equal(r.remote, "none");
   assert.equal(upstream(p, "still-local"), null, "the upstream with another name is unset");
   assert.deepEqual(t.gh, []);
+});
+
+// git can't have a branch that is another's folder: with feat, no feat/x;
+// with feat/x, no feat. Found only at `branch -m`, after origin got the new
+// name, it would split the two sides.
+const isBranchMove = (c) => c.startsWith("branch -m");
+
+test("rename: a local branch in the way of the new name (feat for feat/x, feat/x for feat) → refused before anything runs", async () => {
+  const p = makeProject("in-the-way");
+  const path = pushed(p, "other");
+  sh(p.path, ["branch", "feat"]);
+  const t = githubIo(p, { push: "missing" });
+  const under = await rename(p, path, "feat/x", true, t.io, { route: "copy", prs: [] });
+  assert.equal(under.status, "refused", under.err);
+  assert.equal(under.reason, "branch-exists");
+  assert.equal(under.err, "Branch feat already exists: git can't also have feat/x.");
+  assert.equal(under.branch, "other");
+  const deep = await renameCheck({ project: p.path, path, name: "feat/x/y" }, t.io);
+  assert.equal(deep.err, "Branch feat already exists: git can't also have feat/x/y.", "any parent, not only the first");
+  assert.deepEqual(heads(p), ["feat", "main", "other"]);
+
+  const q = makeProject("in-the-way-under");
+  const qpath = pushed(q, "other");
+  sh(q.path, ["branch", "feat/x"]);
+  const u = githubIo(q, { push: "missing" });
+  const over = await rename(q, qpath, "feat", true, u.io, { route: "copy", prs: [] });
+  assert.equal(over.status, "refused", over.err);
+  assert.equal(over.reason, "branch-exists");
+  assert.equal(over.err, "Branch feat/x already exists: git can't also have feat.");
+  assert.deepEqual(heads(q), ["feat/x", "main", "other"]);
+
+  for (const calls of [t.git, u.git]) {
+    assert.deepEqual(calls.filter((c) => isLsRemote(c.split(" ")) || c.startsWith("push ") || isBranchMove(c)), [], "no ls-remote, no push, no branch -m");
+  }
+  assert.deepEqual([...renamedOnGitHub(t.gh), ...renamedOnGitHub(u.gh)], []);
+  assert.deepEqual(Object.keys(onOrigin(p)).sort(), ["main", "other"], "origin gets nothing");
+  assert.deepEqual(Object.keys(onOrigin(q)).sort(), ["main", "other"]);
+});
+
+test("rename: a sibling (feat/y next to feat/x, feat-x next to feat) or the branch's own path (solo → solo/inner → solo) isn't in the way", async () => {
+  const p = makeProject("not-in-the-way");
+  sh(p.path, ["branch", "feat/x"]);
+  sh(p.path, ["branch", "feat-x"]);
+  const path = addWorkspace(p, "other");
+  const sibling = await renameCheck({ project: p.path, path, name: "feat/y" }, io);
+  assert.equal(sibling.status, "ok", sibling.err);
+  const near = await renameCheck({ project: p.path, path, name: "feat-x/z" }, io);
+  assert.equal(near.status, "refused", "feat-x is a parent of feat-x/z");
+  const solo = addWorkspace(p, "solo");
+  const inner = await rename(p, solo, "solo/inner");
+  assert.equal(inner.status, "renamed", inner.err);
+  assert.equal(inner.branch, "solo/inner", "git moves a branch into its own path");
+  const back = await rename(p, join(p.ws, "inner"), "solo");
+  assert.equal(back.status, "renamed", back.err);
+  assert.equal(back.branch, "solo", "and out of it");
+  assert.equal(has(p, "solo/inner"), false);
+});
+
+test("rename: origin's branch in the way of the new name → refused before anything runs, from origin itself or from the last fetch", async () => {
+  const p = makeProject("origin-in-the-way");
+  const path = pushed(p, "other");
+  sh(p.origin, ["branch", "feat", "main"]);
+  sh(p.origin, ["branch", "ui/x", "main"]);
+  const t = githubIo(p);
+  const under = await rename(p, path, "feat/x", true, t.io, { route: "github", prs: [] });
+  assert.equal(under.status, "refused", under.err);
+  assert.equal(under.reason, "remote-exists");
+  assert.equal(under.err, "origin already has feat: git can't also have feat/x.");
+  const over = await rename(p, path, "ui", true, t.io, { route: "github", prs: [] });
+  assert.equal(over.status, "refused", over.err);
+  assert.equal(over.reason, "remote-exists");
+  assert.equal(over.err, "origin already has ui/x: git can't also have ui.");
+  assert.ok(t.git.some((c) => isLsRemote(c.split(" "))), "not fetched: origin itself says it");
+  assert.deepEqual(t.git.filter((c) => c.startsWith("push ") || isBranchMove(c)), [], "no push, no branch -m");
+  assert.deepEqual(t.gh, [], "GitHub is never asked");
+
+  sh(p.path, ["fetch", "-q", "origin"]);
+  const local = addWorkspace(p, "local-only");
+  const c = githubIo(p);
+  const offline = await rename(p, local, "feat/x", true, c.io);
+  assert.equal(offline.status, "refused", offline.err);
+  assert.equal(offline.reason, "remote-exists");
+  assert.equal(offline.err, "origin already has feat: git can't also have feat/x.");
+  assert.deepEqual(c.git.filter((x) => isLsRemote(x.split(" ")) || x.startsWith("push ") || isBranchMove(x)), [], "the cheap first filter, offline: no ls-remote");
+  assert.deepEqual(heads(p), ["local-only", "main", "other"]);
+  assert.deepEqual(Object.keys(onOrigin(p)).sort(), ["feat", "main", "other", "ui/x"], "origin gets nothing");
+  assert.deepEqual(GIT.branchesNear("a/b/c"), ["for-each-ref", "--format=%(refname)", "refs/heads/a", "refs/heads/a/b", "refs/heads/a/b/c/"]);
+  assert.deepEqual(GIT.remotesNear("a/b"), ["for-each-ref", "--format=%(refname)", "refs/remotes/*/a", "refs/remotes/*/a/b/**"], "`*` is one segment, `**` crosses them");
+  assert.deepEqual(GIT.lsRemoteNear("o", "a/b"), ["ls-remote", "origin", "refs/heads/o", "refs/heads/a/b", "refs/heads/a", "refs/heads/a/b/*"]);
+  assert.deepEqual(GIT.lsRemoteNear("o", null), GIT.lsRemote("o", null), "no name yet: only <old>");
 });
 
 test("rename (T9c): remoteOutcome decides from origin's state after the call, never from the call alone (D28 step 2)", () => {

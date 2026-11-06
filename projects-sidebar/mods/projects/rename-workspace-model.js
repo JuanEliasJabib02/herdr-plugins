@@ -46,6 +46,19 @@ export function folderFor(path, name) {
 // its target "already there".
 const sameFolder = (a, b) => a.toLowerCase() === b.toLowerCase();
 
+// The branches a name sits under: a/b/c → a, a/b.
+const parentsOf = (name) => {
+  const segs = String(name).split("/");
+  return segs.slice(0, -1).map((_, i) => segs.slice(0, i + 1).join("/"));
+};
+
+// Whether branch `b` is in the way of a new branch `name`: git can't have a
+// branch that is another's folder (with feat, no feat/x; with feat/x, no
+// feat), and `branch -m` would only find it after origin got the new name.
+// The branch being renamed isn't: git moves it into or out of its own path
+// (feat → feat/x).
+const inTheWay = (b, name, old) => b !== old && (name.startsWith(`${b}/`) || b.startsWith(`${name}/`));
+
 // ── git and gh ─────────────────────────────────────────────────────────────
 
 // The git each step runs, in the project's main checkout; the worktree list
@@ -58,6 +71,13 @@ export const GIT = {
   // with two, the first by name needn't be origin's. `*` stops at a slash,
   // so origin/x/b doesn't count.
   remoteRefs: (b) => ["for-each-ref", "--format=%(refname)", `refs/remotes/*/${b}`],
+  // The local branches that could be in the way of <b>: its parents and
+  // what is under it. A plain pattern also lists what is under it (refs/
+  // heads/feat lists feat/y), so inTheWay picks.
+  branchesNear: (b) => ["for-each-ref", "--format=%(refname)", ...parentsOf(b).map((p) => `refs/heads/${p}`), `refs/heads/${b}/`],
+  // The same on every remote's copies, as the last fetch saw them: `*` is
+  // one segment (the remote), a trailing `/**` crosses them.
+  remotesNear: (b) => ["for-each-ref", "--format=%(refname)", ...parentsOf(b).map((p) => `refs/remotes/*/${p}`), `refs/remotes/*/${b}/**`],
   merge: (b) => ["config", "--get-all", `branch.${b}.merge`],
   remote: (b) => ["config", "--get", `branch.${b}.remote`],
   rename: (from, to) => ["branch", "-m", "--", from, to],
@@ -66,6 +86,10 @@ export const GIT = {
   // D28. What origin has now, in one call that names each ref in full: a
   // pattern (`--heads <name>`) would also match someone/<name>.
   lsRemote: (old, name) => ["ls-remote", "origin", `refs/heads/${old}`, ...(name ? [`refs/heads/${name}`] : [])],
+  // The check's look, the same one call: also origin's branches that could
+  // be in the way of <new> (ls-remote matches a pattern against a ref's
+  // end, `*` across slashes; inTheWay picks).
+  lsRemoteNear: (old, name) => [...GIT.lsRemote(old, name), ...(name ? [...parentsOf(name).map((p) => `refs/heads/${p}`), `refs/heads/${name}/*`] : [])],
   // The URL git really contacts, insteadOf applied.
   url: ["remote", "get-url", "origin"],
   // One ref, never the whole remote (D13: a big fetch can pass exec's 30 s).
@@ -303,10 +327,14 @@ async function githubOf(project, io, git) {
 //   it: gone); sha: origin's <old> commit.
 async function readOrigin(project, old, name, pub, io, git) {
   const refusal = (reason, err) => ({ refusal: { reason, err } });
-  const ls = await git(project, GIT.lsRemote(old, name));
+  const ls = await git(project, GIT.lsRemoteNear(old, name));
   if (!ls.ok) return refusal("unreachable", `Couldn't reach origin: ${redact(firstLine(ls.err)) || "git didn't answer"}.`);
   const { from, to } = remoteHeads(ls.out, old, name);
   if (to) return refusal("remote-exists", `origin already has ${name}.`);
+  const near = name && lines(ls.out).map((l) => l.split(/\s+/)[1] ?? "")
+    .filter((ref) => ref.startsWith("refs/heads/")).map((ref) => ref.slice("refs/heads/".length))
+    .find((b) => inTheWay(b, name, old));
+  if (near) return refusal("remote-exists", `origin already has ${near}: git can't also have ${name}.`);
   const elsewhere = [...pub.remotes, pub.upstream].find((r) => r && r !== "origin");
   if (elsewhere) return refusal("pushed-elsewhere", `Also pushed as ${elsewhere}/${old}: renaming would split it.`);
   const origin = { published: true, route: "local", gone: !from, repo: null, prs: [], sha: from };
@@ -376,6 +404,16 @@ export async function renameCheck({ project, path, name, moveFolder }, io) {
       const remote = ref.slice("refs/remotes/".length, -(target.name.length + 1));
       return refused("remote-exists", `${remote} already has ${target.name}.`, old, list);
     }
+    // A remote branch in the way of the new name, the same way.
+    const copy = lines((await git(project, GIT.remotesNear(target.name))).out)
+      .map((r) => r.split("/")).map(([, , remote, ...rest]) => ({ remote, b: rest.join("/") }))
+      .find(({ b }) => inTheWay(b, target.name, old));
+    if (copy) return refused("remote-exists", `${copy.remote} already has ${copy.b}: git can't also have ${target.name}.`, old, list);
+    // A local branch in the way: decided here, before origin is asked, so
+    // nothing remote runs for a name `branch -m` would refuse.
+    const blocker = lines((await git(project, GIT.branchesNear(target.name))).out)
+      .map((r) => r.slice("refs/heads/".length)).find((b) => inTheWay(b, target.name, old));
+    if (blocker) return refused("branch-exists", `Branch ${blocker} already exists: git can't also have ${target.name}.`, old, list);
   }
   const pub = await publishedAs(project, old, git);
   const read = pub ? await readOrigin(project, old, named ? target.name : null, pub, io, git) : { origin: UNPUBLISHED };

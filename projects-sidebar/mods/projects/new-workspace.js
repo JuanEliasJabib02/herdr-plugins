@@ -181,6 +181,7 @@ export default class NewWorkspace {
   // The folder icon beside "Project", as in Orca's dialog: adds a repo to the
   // primary's group without leaving the dialog, and picks its chip. A repo
   // already in another group stays there (its right-click menu moves it).
+  // cx: an AsyncContext (it is used after the awaits).
   async addToGroup(cx) {
     const group = this.chips().group;
     if (!group || this.busy) return;
@@ -416,7 +417,9 @@ export default class NewWorkspace {
         .when(Boolean(chips.group), (el) => el.child(div().id("nw-add-project").mb(4).size(22).flex().items_center().justify_center()
           .rounded(6).cursor_pointer().text_color(t.dim).hover((s) => s.bg(t.hover).text_color(t.foreground))
           .tooltip(`Add a project to ${chips.group.name}`)
-          .on_click((_e, cx) => cx.spawn(async () => this.addToGroup(cx)))
+          // The spawn's AsyncContext, not the click's cx: addToGroup awaits
+          // the folder picker and git before it uses one.
+          .on_click((_e, cx) => cx.spawn(async (acx) => this.addToGroup(acx)))
           .child(svg(icon("folder-plus")).size(14)))))
       .child(projectSelect)
       .child(label("Name"))

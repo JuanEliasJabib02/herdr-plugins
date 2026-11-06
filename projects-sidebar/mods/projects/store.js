@@ -81,7 +81,8 @@ export function saveWorktrees(project, list) {
 }
 
 // ── projects.notes.v1: a task's note (D34) ─────────────────────────────────
-// Read through lib.js noteKeyOf and noteOf; written only by the note dialog.
+// Read through lib.js noteKeyOf and noteOf; written by the note dialog, and
+// cleared by delete-task.js after a full Delete task.
 
 export const notes = () => parseNotes(shared(KEYS.notes));
 

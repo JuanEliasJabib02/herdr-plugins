@@ -159,8 +159,9 @@ across repos.
     - footer: Cancel, and Delete (or "Delete anyway") as a `blocked` outline
       button, off until git has answered for every row, "Deleting…" while it
       runs; only Close once a run left rows behind.
-  - The group menu is a 210 × 104 popup: Rename…, Delete group. The New /
-    Rename group form is a 380 × 214 dialog.
+  - The group menu is a 210 × 200 popup: Organize by Project, Organize by
+    Task, a separator, Rename…, Delete group. The New / Rename group form is
+    a 380 × 214 dialog.
 
 **How it behaves**
 
@@ -173,8 +174,9 @@ across repos.
   project row: collapse or expand, remembered.
 - **Drag a project row** (Project mode) up or down onto another project row:
   a line marks where it lands, and on release the project moves there within
-  its group, remembered. Leaving the list cancels the drag; a drag that ends
-  on its own row changes nothing and doesn't fold it.
+  its group, remembered. Leaving the list, or a new press anywhere else,
+  cancels the drag; a drag that ends on its own row changes nothing and
+  doesn't fold it.
 - **Add project** (header "+", or the empty state's button): a folder
   picker. The repo's main checkout is added to the active group, even if
   you picked a linked worktree or a subfolder. A folder that isn't a repo is
