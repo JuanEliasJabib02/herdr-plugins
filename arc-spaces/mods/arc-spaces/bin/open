@@ -31,12 +31,12 @@ home=${HERDR_APP_HOME:-"$HOME/.config/herdr-app"}
 jq -e '(.["arc-spaces.v1"] // {}) | .enabled == true and any((.names // {})[]?; type == "string" and test("\\S"))' \
   "$home/shared.json" >/dev/null 2>&1 || exec "$real" "$@"
 
-# Runs a command for at most $1 whole seconds (anything but 1 to 86400: 1). The
+# Runs a command for at most $1 whole seconds (at most a day; a bad value: 1). The
 # alarm goes with the command itself (perl execs it), so it holds even when
 # whoever started it is gone; SIGALRM is reset first, since an ignored one
 # would be inherited and stop nothing. 142 when time runs out (SIGALRM's code),
 # 127 when it can't start, else its own code.
-limit_pl='my $s = int(shift); $s = 1 unless $s >= 1 && $s <= 86400; $SIG{ALRM} = "DEFAULT"; alarm $s; exec { $ARGV[0] } @ARGV or exit 127'
+limit_pl='my $s = int(shift); $s = 86400 if $s > 86400; $s = 1 unless $s >= 1; $SIG{ALRM} = "DEFAULT"; alarm $s; exec { $ARGV[0] } @ARGV or exit 127'
 limit() { /usr/bin/perl -e "$limit_pl" "$@"; }
 
 listing=$(limit "${ARC_SPACES_LS_TIMEOUT:-3}" "${ARC_SPACES_HERDR:-$parent}" ls 2>/dev/null) || exec "$real" "$@"
@@ -100,9 +100,13 @@ space=$(printf '%s\n' "$listing" | jq -r --arg live "$live" --arg userhome "$HOM
   | ($s["projects.v1"] | registry) as $registry
   | ([.spaces[] | select(.active == true)][0]) as $shown
   | (if ($shown.machine // null) != null then "" elif $live != "" then $live else $shown.folder end | expand | norm) as $at
-  | ([($s["projects.cache.v1"] // {}) | objects | to_entries[]
-      | select((.key | absolute) and (.value | type == "array" and all(.[]; checkout)))
-      | (.key | norm) as $project | .value[]
+  | ([($s["projects.cache.v1"] // {}) | objects
+      # parseCache: the valid entries by their normalized key; a later key that
+      # normalizes the same replaces the list and keeps the place of the first.
+      | reduce (to_entries[] | select((.key | absolute) and (.value | type == "array" and all(.[]; checkout)))) as $e
+          ({}; .[$e.key | norm] = $e.value)
+      | to_entries[]
+      | .key as $project | .value[]
       | {project: $project, path: (.path | norm)}
       | select(.path as $path | $at | inside($path))]
      # The longest; between equal ones the first, as matchSpaces keeps it.

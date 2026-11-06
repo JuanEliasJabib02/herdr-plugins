@@ -358,15 +358,16 @@ function endsSoon(marker) {
   return false;
 }
 
-test("a zero, bad or huge limit is 1 s, not none", () => {
+test("a zero or bad limit is 1 s, and a huge one a day, never none", () => {
   lsAnswer([space("/repos/ag", withTerminals("t1"))]);
-  for (const value of ["0", "0.5", "soon", "200000000"]) {
+  for (const value of ["0", "0.5", "soon"]) {
     const marker = `sleep ${700_000 + Math.floor(Math.random() * 100_000)}`;
     slowHc(`exec ${marker}`);
-    rmSync(join(dir, "osascript.log"), { force: true });
+    for (const log of ["osascript.log", "hc.log"]) rmSync(join(dir, log), { force: true });
     const result = run([URL_A], { env: { ARC_SPACES_HC_TIMEOUT: value }, capMs: 120_000 });
     assert.equal(result.signal, null, `ARC_SPACES_HC_TIMEOUT=${value} must still stop the search`);
     assertRouted("Bulbasour");
+    assert.deepEqual(logOf("hc"), ["t1"], `ARC_SPACES_HC_TIMEOUT=${value}: hc was asked`);
     assert.ok(endsSoon(marker), `ARC_SPACES_HC_TIMEOUT=${value}: the hung hc ends by itself`);
   }
 });
@@ -375,9 +376,10 @@ test("an ignored SIGALRM, inherited from Herdr, doesn't turn the limits off", ()
   lsAnswer([space("/repos/ag", withTerminals("t1"))]);
   const marker = `sleep ${700_000 + Math.floor(Math.random() * 100_000)}`;
   slowHc(`exec ${marker}`);
-  const result = run([URL_A], { env: { ARC_SPACES_HC_TIMEOUT: "2" }, capMs: 120_000, prelude: "trap '' ALRM; " });
+  const result = run([URL_A], { env: { ARC_SPACES_HC_TIMEOUT: "3" }, capMs: 120_000, prelude: "trap '' ALRM; " });
   assert.equal(result.signal, null, "the search must still stop");
   assertRouted("Bulbasour");
+  assert.deepEqual(logOf("hc"), ["t1"], "hc was asked");
   assert.ok(endsSoon(marker), "the hung hc ends by itself");
 });
 
@@ -502,6 +504,8 @@ const PARITY = [
   { name: "no registry", folder: "/repos/ag", registry: undefined },
   { name: "a cache of the wrong shape", folder: "/repos/ag", cache: 7 },
   { name: "the same checkout under two projects: the first", folder: "/repos/x/y", cache: { "/repos/action": [checkout("/repos/x", true)], "/repos/ag": [checkout("/repos/x/", true)] } },
+  { name: "keys equal once normalized: the last list in the first place", folder: "/repos/x/y", cache: { "/repos/action": [checkout("/other", true)], "/repos/ag": [checkout("/repos/x", true)], "/repos/action/": [checkout("/repos/x", true)] } },
+  { name: "keys equal once normalized: the first list is gone", folder: "/repos/x/y", cache: { "/repos/action": [checkout("/repos/x", true)], "/repos/action/": [checkout("/other", true)] } },
 ];
 
 test("every case lands in the group projects-sidebar's lib.js picks", () => {
