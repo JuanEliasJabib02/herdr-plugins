@@ -207,12 +207,19 @@ fi
 exec ${REAL_GIT} "$@"
 `;
 
-// claude-accounts' contract (claude-accounts.md D9): `terminal <t> --json`.
+// claude-accounts' contract (claude-accounts.md D9): `terminal <t> --json`,
+// and `usage --refresh --json` (what `classify` runs first), which takes
+// $HERDR_APP_HOME/claude-accounts/usage-delay seconds when that file says so.
 const FAKE_ACCOUNTS = `#!/bin/sh
 if [ "$1" = terminal ]; then
   code=$(cat "$HERDR_APP_HOME/claude-accounts/terminal-exit" 2>/dev/null || echo 0)
   [ "$code" = 0 ] || exit "$code"
   printf '{"account":"acc-1","sessionId":"s1","status":"idle"}\\n'
+  exit 0
+fi
+if [ "$1" = usage ]; then
+  sleep "$(cat "$HERDR_APP_HOME/claude-accounts/usage-delay" 2>/dev/null || echo 0)"
+  cat "$HERDR_APP_HOME/claude-accounts/accounts.v1.json" 2>/dev/null
   exit 0
 fi
 exit 2
@@ -742,6 +749,8 @@ test("turn end with the accounts plugin: done with the account at 100% pauses li
   assert.equal(requestOf(w.state(), full).pauseReason, "limit");
 
   usage(30, 10 * 60_000);
+  // classify's fresh read takes a moment, so the second reap runs while it works.
+  writeFileSync(join(w.app, "claude-accounts", "usage-delay"), "2");
   const stale = await holding("AX-21");
   w.setAgent(stale, { turn: 1, status: { app: "claude", state: "done" } });
   assert.equal((await w.cli(["reap"])).code, 0);
@@ -751,6 +760,8 @@ test("turn end with the accounts plugin: done with the account at 100% pauses li
   assert.ok(Number.isInteger(r.classifyPid) && r.classifyPid > 0);
   assert.equal((await w.cli(["reap"])).code, 0);
   assert.equal(requestOf(w.state(), stale).classifyPid, r.classifyPid, "classify is spawned once per turn end");
+  // T11: classify decides with the fresh read (30%: the turn end releases).
+  await w.until((s) => !requestOf(s, stale), { what: "classify's release" });
 });
 
 test("a second `on` re-baselines requestTurn and clears resumingUntil", async () => {
@@ -830,7 +841,7 @@ test("tester case 13: `status` shows the limit, this terminal's place and who bl
 
 // ── Usage, small verbs, the launcher ───────────────────────────────────────
 
-test("usage errors exit 2; continue and classify are stubs (exit 64)", async () => {
+test("usage errors exit 2; continue and classify with nothing to act on", async () => {
   const w = makeWorld();
   const app = makeRepo(w, "app", { pkg: DEV, tasks: ["AX-30"] });
   w.register([{ id: "g1", repos: [app] }]);
@@ -842,11 +853,14 @@ test("usage errors exit 2; continue and classify are stubs (exit 64)", async () 
   assert.equal(noRepo.code, 2);
   assert.match(noRepo.stderr, /not in a git repository/);
   assert.equal((await w.cli(["frobnicate"])).code, 2);
-  for (const verb of ["continue", "classify"]) {
-    const r = await w.cli([verb, "--terminal", t]);
-    assert.equal(r.code, 64, verb);
-    assert.match(r.stderr, /not yet/);
-  }
+  for (const verb of ["continue", "classify"]) assert.equal((await w.cli([verb])).code, 2, verb);
+  // T11: no place in the queue, nothing to continue; no turn end to classify.
+  const cont = await w.cli(["continue", "--terminal", t]);
+  assert.equal(cont.code, 1);
+  assert.match(cont.stderr, /no place in the test queue/);
+  const classify = await w.cli(["classify", "--terminal", t]);
+  assert.equal(classify.code, 0, classify.stderr);
+  assert.match(classify.stdout, /Nothing to classify/);
 });
 
 test("logs --path, logs after the notes, peek, and env --variant checked before it is stored", async () => {

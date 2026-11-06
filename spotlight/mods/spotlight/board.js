@@ -5,18 +5,27 @@
 // actividad hace 12 min", "esperando 3 min", "se quedó sin límite"). A
 // flagged testing row (idle or resuming) offers Soltar turno, which gives the
 // turn back for every agent of the task (`spotlight off --terminal <t>`),
-// and leaves room for Continuar (T11 fills continueButton). A row with a
-// repo opens its server popup (D22). The model is board-model.js boardView.
-// It reads state.json and settings.json, and re-reads them on each state.json
-// write while open (watchState, shared with the footer copy).
+// and Continuar (T11, D15): Esc and "Continue where you left off." to the
+// turn's last agent. A paused row offers Continuar with the account it would
+// resume on ("Continuar con <cuenta>"), "Vuelve a las <hora>" while every
+// account is full, or Inicia sesión (the claude-accounts plugin's sign-in)
+// for a sign-in pause, and shows why its last Continuar didn't land. Both run
+// `spotlight continue --terminal <t>`, which returns at once; "Retomando…"
+// shows while its window is open. The labels are resume.js continueView. A
+// row with a repo opens its server popup (D22). The model is board-model.js
+// boardView. It reads state.json and settings.json, and re-reads them on
+// each state.json write while open (watchState, shared with the footer
+// copy); the accounts plugin's accounts.v1.json is read on open and every
+// 30 s.
 //   props: { view: "board" }
 
 import { div, svg } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
 import {
-  theme, props, shared, appHome, exec, readTextFile, watchFolder, openOverlay, closeOverlay,
+  theme, props, shared, appHome, exec, readTextFile, watchFolder, openOverlay, closeOverlay, run,
 } from "herdr";
 import { MOD, stateDirOf, cliPathOf, readState, readSettings, boardView, isStateBatch } from "./board-model.js";
+import { continueView, pickFromText } from "./resume.js";
 
 // A popup is as tall as its rows; this is only the most.
 const WIDTH = 300;
@@ -27,8 +36,14 @@ const ROWS_HEIGHT = 360;
 const MISSING_RETRY_MS = 5_000;
 // A burst of state.json writes (a lighting) is read once.
 const SETTLE_MS = 150;
-// The minutes on the rows move on their own.
+// The minutes on the rows move on their own; the accounts' pick is read again.
 const TICK_MS = 30_000;
+
+// The claude-accounts plugin (its CONTRACT.md): its usage file, its CLI
+// (installed or not), and the command that opens its sign-in dialog.
+const accountsFileOf = (home) => `${home}/claude-accounts/accounts.v1.json`;
+const accountsBinOf = (home) => `${home}/mods/claude-accounts/bin/claude-accounts`;
+const ACCOUNTS_SIGN_IN = "claude-accounts.open-accounts";
 
 // ── Openers: the only places these overlays open from ──────────────────────
 
@@ -105,11 +120,32 @@ export function watchState(cx, { alive, read }) {
 export default class Board {
   init(_props, cx) {
     this.files = { state: readState(null), settings: readSettings(null), found: false };
+    // The accounts plugin: installed or not, and the account Continuar would use.
+    this.accounts = { plugin: false, pick: null };
     this.alive = true;
-    // Rows whose Soltar turno is running: its button waits until it ends.
+    // Rows whose Soltar turno or Continuar is running: its button waits until it ends.
     this.pending = new Set();
     watchState(cx, { alive: () => this.alive, read: (files) => (this.files = files) });
-    cx.timer.every(TICK_MS, (cx) => cx.notify());
+    this.readAccounts(cx);
+    cx.timer.every(TICK_MS, (cx) => {
+      this.readAccounts(cx);
+      cx.notify();
+    });
+  }
+
+  // Whether the accounts plugin is installed, and its pick from
+  // accounts.v1.json as it is (a usage refresh is Continuar's own, in the CLI).
+  readAccounts(cx) {
+    cx.spawn(async (cx) => {
+      try {
+        const home = appHome();
+        const [doc, bin] = await Promise.all([readTextFile(accountsFileOf(home)), readTextFile(accountsBinOf(home))]);
+        this.accounts = { plugin: bin !== null, pick: bin !== null ? pickFromText(doc) : null };
+        cx.notify();
+      } catch (e) {
+        // Closed meanwhile: nothing to draw.
+      }
+    });
   }
 
   close() {
@@ -135,6 +171,30 @@ export default class Board {
     });
   }
 
+  // Continuar (D15): `spotlight continue` returns at once (the work runs
+  // detached); the state watch then shows "Retomando…" from its window.
+  continueTask(row, terminal, cx) {
+    const key = `continue:${row.key}`;
+    if (this.pending.has(key)) return;
+    this.pending.add(key);
+    cx.spawn(async (cx) => {
+      try {
+        const r = await exec(cliPathOf(appHome()), ["continue", "--terminal", terminal]);
+        if (r.code !== 0) console.log(`spotlight: continue --terminal ${terminal} exited ${r.code}: ${r.stderr.trim()}`);
+      } catch (e) {
+        console.log(`spotlight: continue --terminal ${terminal} failed: ${e}`);
+      }
+      this.pending.delete(key);
+      cx.notify();
+    });
+  }
+
+  // Inicia sesión: the accounts plugin's own dialog, in place of this popup.
+  signIn() {
+    closeOverlay(props()?.overlay);
+    run(ACCOUNTS_SIGN_IN);
+  }
+
   // The row's server popup, in place of this one.
   openServerOf(row) {
     closeOverlay(props()?.overlay);
@@ -158,7 +218,7 @@ export default class Board {
       .child(svg("mods/workspace-chrome/settings.svg").size(13));
   }
 
-  button(t, id, label, { primary = false, disabled = false, onClick }) {
+  button(t, id, label, { primary = false, disabled = false, tooltip = null, onClick }) {
     return div()
       .id(id)
       .px(8)
@@ -170,6 +230,7 @@ export default class Board {
       .when(primary, (el) => el.bg(t.raised))
       .when(disabled, (el) => el.text_color(t.dim))
       .when(!disabled, (el) => el.text_color(t.foreground).cursor_pointer().hover((s) => s.bg(t.hover)))
+      .when(Boolean(tooltip), (el) => el.tooltip(tooltip))
       .on_click((_e, cx) => {
         // The row behind it opens the server popup on a click.
         cx.stop_propagation();
@@ -178,27 +239,49 @@ export default class Board {
       .child(label);
   }
 
-  // T11 fills this: the Continuar button of a flagged testing row and of each
-  // paused row (account pick, "Retomando…", "Vuelve a las …"). Null until then.
-  continueButton(_row, _t) {
-    return null;
+  // The Continuar slot of a flagged testing row (the turn's last agent, as
+  // Orca) or of a paused row (its own agent): resume.js continueView's model
+  // plus the terminal it acts on; null for no button.
+  continueSlot(kind, row) {
+    if (kind === "testing" && !row.release) return null;
+    if (kind !== "testing" && kind !== "paused") return null;
+    const terminal = kind === "paused" ? row.terminal : row.terminals[row.terminals.length - 1];
+    if (!terminal) return null;
+    const request = kind === "paused" ? (this.files.state.queue.requests.find((r) => r.terminal === terminal) ?? null) : null;
+    const view = continueView({
+      kind,
+      request,
+      resuming: row.resuming,
+      pending: this.pending.has(`continue:${row.key}`),
+      plugin: this.accounts.plugin,
+      pick: this.accounts.pick,
+      now: Date.now(),
+    });
+    return view ? { ...view, terminal } : null;
   }
 
-  actionsOf(kind, row, t) {
+  continueButton(row, slot, t) {
+    if (!slot) return null;
+    const onClick = slot.action === "signin" ? () => this.signIn() : (cx) => this.continueTask(row, slot.terminal, cx);
+    return this.button(t, `continue-${row.key}`, slot.label, { primary: true, disabled: slot.disabled, tooltip: slot.tooltip, onClick });
+  }
+
+  actionsOf(kind, row, slot, t) {
     if (kind === "testing") {
       if (!row.release) return [];
       const releasing = this.pending.has(row.key);
       return [
-        this.continueButton(row, t),
+        this.continueButton(row, slot, t),
         this.button(t, `release-${row.key}`, "Soltar turno", { disabled: releasing, onClick: (cx) => this.release(row, cx) }),
       ].filter(Boolean);
     }
-    if (kind === "paused") return [this.continueButton(row, t)].filter(Boolean);
+    if (kind === "paused") return [this.continueButton(row, slot, t)].filter(Boolean);
     return [];
   }
 
   row(kind, row, t) {
-    const actions = this.actionsOf(kind, row, t);
+    const slot = this.continueSlot(kind, row);
+    const actions = this.actionsOf(kind, row, slot, t);
     return v_flex()
       .id(`spotlight-row-${row.key}`)
       .w_full()
@@ -208,6 +291,8 @@ export default class Board {
       .when(Boolean(row.server), (el) => el.cursor_pointer().hover((s) => s.bg(t.hover)).on_click(() => this.openServerOf(row)))
       .child(div().truncate().text_size(12).font_medium().text_color(t.foreground).child(row.name))
       .when(Boolean(row.meta), (el) => el.child(div().truncate().text_size(11).text_color(t.muted).child(row.meta)))
+      // Why the last Continuar didn't land, whole (a failed job's manual `claude --resume <sid>`).
+      .when(Boolean(slot?.note), (el) => el.child(div().pt(2).text_size(11).text_color(t.dim).child(slot.note)))
       .when(actions.length > 0, (el) => el.child(h_flex().pt(5).gap(6).flex_wrap().items_center().children(actions)));
   }
 

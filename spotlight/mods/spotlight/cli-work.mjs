@@ -461,6 +461,25 @@ export async function reconcileFree(cx) {
   return changes;
 }
 
+// One turn-end decision (cli-turns.mjs decideTurnEnd) applied to `cur`, a
+// request of `queue` (D13): release, pause (its turn end spent), or a first
+// baseline. Shared by reap and `classify`. → { queue, granted, released,
+// paused }.
+export function applyTurnEnd(queue, cur, d, qctx) {
+  if (d.action === "release") {
+    const o = release(queue, cur.terminal, qctx);
+    return { queue: o.queue, granted: o.granted, released: 1, paused: 0 };
+  }
+  if (d.action === "pause") {
+    const o = pause(queue, cur.terminal, { reason: d.reason, msg: d.msg }, qctx);
+    const paused = o.queue.requests.find((r) => r.terminal === cur.terminal);
+    if (paused) paused.handledTurn = d.turn;
+    return { queue: o.queue, granted: o.granted, released: 0, paused: 1 };
+  }
+  if (d.action === "baseline") cur.requestTurn = d.turn;
+  return { queue, granted: [], released: 0, paused: 0 };
+}
+
 // `spotlight reap` (the footer, every 30 s and on terminal changes; D12,
 // D13, D19, D10): refs win; each requesting terminal's turn end (release,
 // pause, or a detached `classify` when the usage is stale); holders'
@@ -521,25 +540,19 @@ export async function reap(cx, { full = true, skip = null } = {}) {
       // Asked again (or left) since the facts were read: its new request rules.
       if (!cur || cur.state !== req.state || cur.taskKey !== req.taskKey || cur.requestTurn !== req.requestTurn) continue;
       if (activity) Object.assign(cur, activity);
-      if (d.action === "release") {
-        const o = release(queue, req.terminal, qctxOf(cx));
-        queue = o.queue;
-        granted.push(...o.granted);
-        counts.released += 1;
-      } else if (d.action === "pause") {
-        const o = pause(queue, req.terminal, { reason: d.reason, msg: d.msg }, qctxOf(cx));
-        queue = o.queue;
-        granted.push(...o.granted);
-        const paused = queue.requests.find((r) => r.terminal === req.terminal);
-        if (paused) paused.handledTurn = d.turn;
-        counts.paused += 1;
-      } else if (d.action === "baseline") {
-        cur.requestTurn = d.turn;
-      } else if (d.action === "classify" && cur.classifyTurn !== d.turn) {
-        Object.assign(cur, { classifyTurn: d.turn, classifyAt: now, classifyPid: null });
-        classify.push(req.terminal);
-        counts.classify += 1;
+      if (d.action === "classify") {
+        if (cur.classifyTurn !== d.turn) {
+          Object.assign(cur, { classifyTurn: d.turn, classifyAt: now, classifyPid: null });
+          classify.push(req.terminal);
+          counts.classify += 1;
+        }
+        continue;
       }
+      const o = applyTurnEnd(queue, cur, d, qctxOf(cx));
+      queue = o.queue;
+      granted.push(...o.granted);
+      counts.released += o.released;
+      counts.paused += o.paused;
     }
     const o = regrant(queue, qctxOf(cx));
     queue = o.queue;

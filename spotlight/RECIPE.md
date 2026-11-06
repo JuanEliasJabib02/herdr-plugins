@@ -58,3 +58,21 @@ Probed 2026-11-06 in Herdr 0.1.13, with a throwaway mod (`zz-sl-cmd-probe`, `{"p
 - The server badge's id is the first 12 hex chars of sha1(workspace path), the same id the CLI puts in its error toasts' action (`cli-work.mjs` serverId). `badges-model.js` computes SHA-1 itself, so the id doesn't depend on the runtime's crypto.
 - `autosync.js` watches each holder's folder. It drops batches made only of Orca's ignored folders (`.git`, `node_modules`, `dist`, `build`, `.next`, `.cache`, `target`, `.venv`, `__pycache__`) and test output (`test-results`, `playwright-report`, `blob-report`, `coverage`), at any depth. After 300 ms of quiet it runs `spotlight sync --repo <root> --detach`. The filter is `watch-filter.js`.
 - The server popup (`server-view.js`, model `server-view-model.js`) runs the CLI for every control. Proyectar igual runs `light --task <k> --force`, which works inline, through `sh -c 'nohup "$0" "$@" … &'`, so exec's 30 s limit can't cut a lighting short. The argv go in as positional args.
+
+## Continuar and auto-resume
+
+When an agent's turn ends in an error, a sign-in prompt or a usage limit, its request is paused in place (D13). Continuar picks it up again, like Orca. The rules are `resume.js` (pure, shared by the board and the CLI); the CLI side is `cli-resume.mjs`.
+
+- `spotlight continue --terminal <t> [--account <id>]` opens the resume window (3 min) under the state lock, starts a detached `continue --inline` and returns at once. A second Continuar while the window is open, or while the plugin's job runs, reuses it.
+  - A paused agent, with the claude-accounts plugin: a fresh `claude-accounts usage --refresh`, then the account with the lowest peak under 100% over session, weekly, fable and monthly (the active one wins a tie; accounts that need a sign-in, carry an error or have no known usage never win), then `claude-accounts resume --terminal <t> --account <id> --message "Continue where you left off." --json`. Every account full: "Vuelve a las <hora>", the earliest of each account's latest full-window reset.
+  - A paused agent without the plugin: the message is typed into the same agent (`hc send`).
+  - An idle holder (the board's flagged testing row): Esc, then the message, in the same account. It keeps its turn; the Esc's turn end is spent.
+  - A `signin` pause is never switched to another account: the board offers Inicia sesión, which runs `claude-accounts.open-accounts`.
+- The reap (and `on`, `off`) polls `claude-accounts resume --status <job>` while the job lives, which keeps the window open. Its final state is cached on the request the first time it is seen, so a job the plugin forgets after 24 h (exit 7) changes nothing.
+  - `done`: the pause ends, and the request asks for its place back at the front of the line, granted when its repos are free. The turn count is re-baselined, so the resumed session's first turn end is decided like any other.
+  - `timeout`, `landedElsewhere`, `failed` (its `detail` carries the manual `claude --resume <sid>`) and `cancelled`: the agent stays paused with that text on its board row, and the window closes.
+  - A terminal that left inside the window is released when the job settles, if the job failed or the terminal is still gone.
+- Auto-resume (settings, off by default): the reap starts `continue --auto` for `limit` pauses only, at most 3 delivered in a row. With no account left it tries again 60 s after the first reset. Each delivered one leaves a toast, "Reanudado con <cuenta>: <tarea>".
+- `spotlight classify --terminal <t>` is spawned by the reap when a turn end needs the account's usage and the usage in `accounts.v1.json` is over 2 min old. It refreshes the usage, then releases the turn or pauses it (`limit`, `signin`, `error`).
+- An `accounts.v1.json` whose `version` isn't 1 is refused: Continuar says so, and turn ends are decided as without the plugin.
+- Spotlight never runs `claude-accounts use`, since that changes the global active account.

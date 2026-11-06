@@ -15,6 +15,7 @@ import { gitContext, runGit } from "./sync.js";
 import { hasServerCommand, nodeIo } from "./server-plan.js";
 import { normRoot } from "./settings.js";
 import { taskOf, laneOf } from "./task.js";
+import { parseAccounts } from "./resume.js";
 
 export const CLI_PATH = fileURLToPath(new URL("./cli.mjs", import.meta.url));
 
@@ -225,11 +226,15 @@ export function accountsBin(appHome) {
 
 const toMs = (v) => (typeof v === "number" ? v : typeof v === "string" ? Date.parse(v) : NaN);
 
+// The accounts plugin's usage file (its CONTRACT.md).
+export const accountsFileOf = (appHome) => path.join(appHome, "claude-accounts", "accounts.v1.json");
+
 // The terminal's Claude account and where its usage stands, from the
 // accounts plugin's contract (claude-accounts.md D9): `claude-accounts
 // terminal <t> --json` → { account }, then accounts.v1.json. null when the
-// plugin is absent or can't place the terminal (not Claude's): the caller
-// then decides without it. Otherwise { account, signin, atLimit, fresh }:
+// plugin is absent, can't place the terminal (not Claude's), or wrote a file
+// of another version (refused, D15): the caller then decides without it.
+// Otherwise { account, signin, atLimit, fresh }:
 // signin for exit 5 or an account that needs it; atLimit when some window
 // is at 100% or more (Orca's paneAccountAtLimit); fresh when its usage was
 // read under USAGE_FRESH_MS ago.
@@ -247,13 +252,16 @@ export async function accountUsage(terminal, { appHome, now }) {
   const raw = parseJson(r.stdout)?.account;
   const id = typeof raw === "string" ? raw : isObject(raw) && typeof raw.id === "string" ? raw.id : null;
   if (!id) return null;
-  let file = null;
+  let text = null;
   try {
-    file = JSON.parse(fs.readFileSync(path.join(appHome, "claude-accounts", "accounts.v1.json"), "utf8"));
+    text = fs.readFileSync(accountsFileOf(appHome), "utf8");
   } catch {
     // No usage file: the usage is unknown, so a classify must read it.
   }
-  const account = Array.isArray(file?.accounts) ? file.accounts.find((a) => a?.id === id) : null;
+  const parsed = parseAccounts(text);
+  // Another version of the file is refused (D15): decide as without the plugin.
+  if (!parsed.ok && parsed.reason === "version") return null;
+  const account = parsed.ok ? parsed.doc.accounts.find((a) => a.id === id) : null;
   if (!account) return { account: id, signin: false, atLimit: false, fresh: false };
   if (account.needsSignIn) return { account: id, signin: true, atLimit: false, fresh: true };
   const updated = toMs(account.usageUpdatedAt);

@@ -9,11 +9,13 @@
 //   sync --repo r [--force] [--detach]   restart --repo r
 //   logs [--repo r] [--lines N] [--path] peek --workspace p | --repo r
 //   env --workspace p [--env e] [--variant v]   reap
-//   internal: light --task k [--force], classify --terminal t, continue (T11)
+//   continue [--terminal t] [--account id]  Continuar on a paused or idle agent (T11)
+//   internal: light --task k [--force], classify --terminal t,
+//             continue --inline [--auto]
 //
 // The terminal is --terminal or $HC_TERMINAL_ID. Long work never runs in a
-// caller Herdr can kill (D18): toggle, reap, `sync --detach` and every grant
-// hand off to a detached copy of this CLI and return at once.
+// caller Herdr can kill (D18): toggle, reap, `sync --detach`, `continue` and
+// every grant hand off to a detached copy of this CLI and return at once.
 
 import fs from "node:fs";
 import path from "node:path";
@@ -37,6 +39,7 @@ import {
   markGranted, spawnLights, dropStaleMarkers, lightTask, syncRepo, deactivateRepo, ensureServer, waitForTurnServers,
   recordServers, reap,
 } from "./cli-work.mjs";
+import { settleResumes, autoResume, continueTask, classifyTerminal } from "./cli-resume.mjs";
 
 // Orca's: under an agent shell's 2-minute command cap; `on` is rerun to keep waiting.
 export const DEFAULT_ON_TIMEOUT_MS = 100_000;
@@ -60,6 +63,9 @@ People and the mod
   spotlight peek --workspace p | --repo r        look at the server's terminal
   spotlight env --workspace p [--env local|dev|prod] [--variant v]
   spotlight reap                                 turn ends, gone servers, idle times, grants
+  spotlight continue [--terminal t] [--account id]
+                                                 Continuar: resume a paused agent on the account with
+                                                 limit left, or nudge an idle holder (Esc + message)
 
 The terminal is --terminal or $HC_TERMINAL_ID. A repo is a path or its name.`;
 
@@ -78,6 +84,7 @@ const FLAGS = {
   task: "string",
   account: "string",
   inline: "bool",
+  auto: "bool",
   help: "bool",
 };
 
@@ -131,6 +138,12 @@ async function resolveRepo(cx, value) {
 // The repo root of --repo, else of the folder the CLI runs in.
 const repoOrCwd = async (cx, opts) => (opts.repo ? resolveRepo(cx, opts.repo) : repoRootOf(process.cwd()));
 
+// D15: Continuar's jobs settle before any turn end is decided (reap, on, off).
+async function reapQueue(cx, opts) {
+  await settleResumes(cx);
+  return reap(cx, opts);
+}
+
 // ── on ─────────────────────────────────────────────────────────────────────
 
 // Marks and spawns a `light` when the turn needs one (D12).
@@ -173,7 +186,7 @@ async function verbOn(cx, opts) {
   };
 
   // D13: turn ends are checked by `on` too, so a finished holder never blocks the line.
-  await reap(cx, { full: false, skip: terminal });
+  await reapQueue(cx, { full: false, skip: terminal });
   let asked = await askQueue();
   const skipped = [...task.skipped, ...asked.skipped];
   let turn = null;
@@ -199,7 +212,7 @@ async function verbOn(cx, opts) {
       return 1;
     }
     await cx.sleep(Math.min(cx.pollMs, deadline - cx.now()));
-    await reap(cx, { full: false, skip: terminal });
+    await reapQueue(cx, { full: false, skip: terminal });
   }
 
   if (turn.slotOnly || turn.members.length === 0) {
@@ -256,7 +269,7 @@ async function verbOff(cx, opts) {
   });
   await spawnLights(cx, r.result.keys);
   // D13: `off` checks the others' turn ends too.
-  await reap(cx, { full: false, skip: terminal });
+  await reapQueue(cx, { full: false, skip: terminal });
   out(formatOff(r.result));
   return 0;
 }
@@ -459,11 +472,17 @@ async function verbEnv(cx, opts) {
   return 0;
 }
 
-// ── reap, light, the T11 stubs ─────────────────────────────────────────────
+// ── reap, light, continue, classify ────────────────────────────────────────
 
+// Settles Continuar's jobs, reaps, then starts auto-resume (D13, D15).
 async function verbReap(cx) {
+  const { settled } = await settleResumes(cx);
   const r = await reap(cx);
-  out(`reaped: ${r.released} released, ${r.paused} paused, ${r.classify} to classify, ${r.lights} to light, ${r.reconciled} reconciled`);
+  const resumed = await autoResume(cx);
+  out(
+    `reaped: ${r.released} released, ${r.paused} paused, ${r.classify} to classify, ${r.lights} to light, ` +
+      `${r.reconciled} reconciled, ${settled} resumes settled, ${resumed} auto-resumed`,
+  );
   return 0;
 }
 
@@ -475,11 +494,27 @@ async function verbLight(cx, opts) {
   return 0;
 }
 
-// T11 builds Continuar and the stale-usage classification (D13, D15).
-const notYet = (verb) => async () => {
-  err(`spotlight ${verb}: not yet (T11 builds it).`);
-  return 64;
-};
+// Continuar (D15): returns at once and hands the work to a detached
+// `--inline` copy; the board, the reap's auto-resume and agents call it.
+async function verbContinue(cx, opts) {
+  const terminal = terminalOf(opts);
+  if (!terminal) return usage("spotlight continue: no terminal. Run it in a Herdr terminal ($HC_TERMINAL_ID) or pass --terminal <t>.");
+  const r = await continueTask(cx, { terminal, inline: Boolean(opts.inline), auto: Boolean(opts.auto), account: opts.account ?? null });
+  if (r.text) out(r.text);
+  if (r.error) err(r.error);
+  return r.code;
+}
+
+// A turn end whose usage was stale, decided with a fresh read (D13;
+// detached by the reap).
+async function verbClassify(cx, opts) {
+  const terminal = terminalOf(opts);
+  if (!terminal) return usage("spotlight classify: --terminal <t> is required.");
+  const d = await classifyTerminal(cx, terminal);
+  if (d.action === "none") out(`Nothing to classify for ${terminal}.`);
+  else out(`${terminal}: ${d.action}${d.reason ? ` (${d.reason})` : ""}.`);
+  return 0;
+}
 
 const VERBS = {
   on: verbOn,
@@ -493,8 +528,8 @@ const VERBS = {
   env: verbEnv,
   reap: verbReap,
   light: verbLight,
-  continue: notYet("continue"),
-  classify: notYet("classify"),
+  continue: verbContinue,
+  classify: verbClassify,
 };
 
 export async function main(argv) {
