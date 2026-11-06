@@ -19,13 +19,13 @@
 
 import { div } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input } from "gpui-base";
-import { theme, props, openOverlay, closeOverlay, spaces, panes, home, notify } from "herdr";
+import { theme, props, openOverlay, closeOverlay, spaces, panes, home, notify, run } from "herdr";
 import { MOD } from "./config.js";
 import { normPath, matchSpaces } from "./lib.js";
 import * as store from "./store.js";
 import { removalCheck, renameCheck, renameWorkspace } from "./git.js";
 import { spacesToClose } from "./remove-workspace-model.js";
-import { renamePrompt, renameOutcome, terminalsStaying } from "./tree-model.js";
+import { renamePrompt, renameOutcome, terminalsStaying, spaceRenames } from "./tree-model.js";
 
 // The typed name is checked with git this long after typing stops.
 const RECHECK = 250;
@@ -179,6 +179,18 @@ export default class RenameWorkspace {
         r = await renameWorkspace({ project, path, name: text, moveFolder, seen }, bg);
       } catch (e) {
         r = { status: "failed", reason: null, branch: null, name: null, folder: null, err: String(e?.message ?? e), list: null, remote: null, prs: [], check: null };
+      }
+      // S39: renamed here → the spaces the mod named after the old branch
+      // take the new name. Matched on the list from before the rename.
+      if (r.status === "renamed" && r.name && r.branch === r.name) {
+        const matches = matchSpaces(store.cache(), spaces(), panes(), home());
+        for (const s of spaceRenames({ path, before: r.check?.branch, after: r.branch, spaces: spaces(), matches })) {
+          try {
+            run("space.rename", s);
+          } catch {
+            // The branch is renamed; a space Herdr won't rename keeps its name.
+          }
+        }
       }
       // D26 step 4 (D23 step 5): the row changes at once.
       if (r.list) store.saveWorktrees(project, r.list);

@@ -84,6 +84,7 @@ test("the rename dialog is a view of the mod, and its rename outlives it (D25)",
   assert.match(dialog, /removalCheck\(/, "it asks git on open whether the folder can move");
   assert.match(src("workspace-menu.js"), /openRenameWorkspace\(/, "the menu's Rename… opens it");
   assert.match(src("git.js"), /export const renameWorkspace\b/);
+  assert.match(dialog, /spaceRenames\(\{ path, before: r\.check\?\.branch, after: r\.branch,[\s\S]{0,120}run\("space\.rename", s\)/, "S39: the spaces named after the old branch take the new name");
 });
 
 test("the group menu toggles Task mode, and the tree draws it (D31, D32)", () => {
@@ -112,6 +113,24 @@ test("working mark: Claude Code's glyphs change in place with frames(), never sp
   assert.match(tree, /const CLAUDE_ORANGE = "#D97757"/, "Claude's orange, the fill of Herdr's icons/claude.svg (S37)");
   assert.match(tree, /\.text_color\(CLAUDE_ORANGE\)\s*\.frames\(WORKING_FRAMES/, "the glyphs are drawn in it");
   assert.doesNotMatch(tree, /\.spin\(/, "no spin(): Herdr turns it at about 30 fps, which stutters");
+});
+
+test("the agents list is projects-agents, a copy of Herdr's agents mod with only the working mark changed (S38)", () => {
+  assert.deepEqual(find(read("layouts/projects.json"), "agents").content, { mod: "projects-agents" });
+  assert.deepEqual(read("mods/projects-agents/mod.json"), { place: "none", title: "Agents", cloned_from: { name: "agents", version: "0.1.13" } });
+  const src = (f) => readFileSync(new URL(`../projects-sidebar/mods/${f}`, import.meta.url), "utf8");
+  const copy = src("projects-agents/main.js");
+  const tree = src("projects/tree.js");
+  const constant = (s, name) => s.match(new RegExp(`const ${name} = .*;`))?.[0];
+  for (const name of ["WORKING_FRAMES", "CLAUDE_ORANGE"]) {
+    assert.ok(constant(copy, name), `${name} is defined`);
+    assert.equal(constant(copy, name), constant(tree, name), `${name} matches the projects tree`);
+  }
+  assert.match(copy, /a\.status === "working"[\s\S]{0,200}\.text_color\(CLAUDE_ORANGE\)\s*\.frames\(WORKING_FRAMES, 120\)\.child\(WORKING_FRAMES\[0\]\)/);
+  assert.doesNotMatch(copy, /\.spin\(/, "no spin(), and no Herdr spinner");
+  assert.match(copy, /openOverlay\(\{ mod: "projects-agents",/, "the sort menu opens the copy's own overlay, as mod.clone rewrites it");
+  assert.doesNotMatch(copy, /mod: "agents"/);
+  assert.match(src("projects-agents/LICENSE"), /Apache License\s+Version 2\.0/, "Herdr's license travels with the copy");
 });
 
 test("Task notes and the task menu: a lane's right-click and its tooltip, and their views (D34, D35)", () => {
