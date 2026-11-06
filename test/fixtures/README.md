@@ -29,6 +29,8 @@ sends it). "Now" is `1794000000000` (Nov 6 2026, 4:20 PM in Bogota).
 
 One `claude-usage --json --last 7` result (usage details & history): every
 section, a project whose transcript is gone (`path: null`, named by its
-slug), and cache figures that start after the range does (`cacheSince`).
+slug), cache figures that start after the range does (`cacheSince`), and
+cache figures that cover only part of the range's tokens (`cacheCoverage`
+0.7182).
 Its token counts add up across `daily`, `byAccount`, `byModel` and
 `byProject`.

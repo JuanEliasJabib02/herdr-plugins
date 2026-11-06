@@ -55,8 +55,9 @@ the same files and run the same commands: see [CONTRACT.md](CONTRACT.md).
   different account."
 - **Usage details & history** (a window): 7, 30 or 90 days or all time;
   usage by model, by project and by account; cache read, cache write and
-  reuse rate (labelled "since <date>" when the range starts before the cache
-  figures do); recent sessions; a daily chart; and how often and how fast
+  reuse rate, as Orca computes it (labelled "since <date>" when the range
+  starts before the cache figures do, with a note of the share of tokens they
+  cover when some sessions are gone from disk); recent sessions; a daily chart; and how often and how fast
   each account hits its 5-hour and weekly limits.
 
 **How it behaves**
@@ -139,7 +140,7 @@ scripts/install.sh claude-accounts
     `confirm` = `confirm.js`, `details` = `details.js` (a window).
   - Pure modules, tested with `node --test`: `store.js` (reading the CLI's
     files), `format.js` (percent, durations, dates, colors, error copy,
-    density) and `toasts.js`.
+    density, "since <date>" and the cache-coverage note) and `toasts.js`.
 - **CLI `mods/claude-accounts/bin/claude-accounts`** (Node, `cli/*.mjs`).
   Every command takes `--json`:
 
