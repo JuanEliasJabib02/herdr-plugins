@@ -9,6 +9,7 @@ like Herdr's home, with a `RECIPE.md` and a `preview.png`).
 | Folder | What it does |
 |---|---|
 | [`projects-sidebar/`](projects-sidebar/) | Replaces Herdr's Spaces list with projects and their workspaces (git worktrees), groups switched with F1–F3, Add project, and a New workspace dialog that can make the same branch in companion repos and give the agent access to them. [Recipe](projects-sidebar/RECIPE.md) |
+| [`arc-spaces/`](arc-spaces/) | Cmd-click a link in a terminal and it opens in the Arc space of that workspace's group, with Arc still your default browser. macOS; needs projects-sidebar's groups and one `sudo ln -s`. [Recipe](arc-spaces/RECIPE.md) |
 
 ![Projects sidebar](projects-sidebar/preview.png)
 

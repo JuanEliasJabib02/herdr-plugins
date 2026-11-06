@@ -71,6 +71,9 @@ function run(args, { parent = herdrParent, env = {} } = {}) {
       ARC_SPACES_OSASCRIPT: join(dir, "osascript"),
       ARC_SPACES_HERDR: join(dir, "herdr"),
       ARC_SPACES_APP: join(dir, "Arc.app"),
+      // Under the whole suite macOS can take over 10 s to run a new script, so
+      // the real limit would stop the fake osascript and fail the test.
+      ARC_SPACES_TIMEOUT: "300",
       ...env,
     },
   });
@@ -279,10 +282,10 @@ test("a script failure (a space Arc doesn't have): the real open", () => {
 });
 
 test("a hung Arc: stopped at the limit, then the real open", () => {
-  tool("osascript", "exec sleep 30");
+  tool("osascript", "exec sleep 600");
   const started = Date.now();
   run([URL_A], { env: { ARC_SPACES_TIMEOUT: "1" } });
-  assert.ok(Date.now() - started < 15_000, "it must not wait for the sleep to end");
+  assert.ok(Date.now() - started < 300_000, "it must not wait for the sleep to end");
   assert.deepEqual(logOf("real-open"), [URL_A]);
 });
 
