@@ -1,0 +1,74 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 200">
+  <!-- window: Herdr's dark theme -->
+  <rect width="320" height="200" fill="#131518"/>
+  <!-- sidebar -->
+  <rect width="86" height="200" fill="#101114"/>
+  <rect x="86" width="1" height="200" fill="#26272a"/>
+  <!-- brand -->
+  <rect x="30" y="5" width="6" height="6" rx="1.5" fill="#eeeeef"/>
+  <rect x="39" y="6.5" width="17" height="3" rx="1.5" fill="#eeeeef"/>
+  <!-- "Projects · group" header and its + -->
+  <rect x="6" y="19" width="30" height="2.5" rx="1.25" fill="#696a6d"/>
+  <rect x="76" y="18" width="1.2" height="5" fill="#98999b"/><rect x="74.1" y="19.9" width="5" height="1.2" fill="#98999b"/>
+  <!-- project 1: folder, bold name, + -->
+  <rect x="6" y="28" width="6" height="4.5" rx="1" fill="none" stroke="#98999b" stroke-width="0.8"/>
+  <rect x="15" y="29" width="30" height="3" rx="1.5" fill="#eeeeef"/>
+  <rect x="76" y="27.8" width="1.2" height="5" fill="#696a6d"/><rect x="74.1" y="29.7" width="5" height="1.2" fill="#696a6d"/>
+  <!-- its main checkout (home) -->
+  <path d="M15 41.5 L17.5 39 L20 41.5 V44 H15 Z" fill="none" stroke="#696a6d" stroke-width="0.8"/>
+  <rect x="23" y="40.5" width="16" height="2.5" rx="1.25" fill="#98999b"/>
+  <!-- a workspace with an agent, selected -->
+  <rect x="4" y="47" width="79" height="16" rx="3" fill="#262629"/>
+  <circle cx="17.5" cy="52" r="2" fill="#22a99a"/>
+  <rect x="23" y="50.8" width="28" height="2.5" rx="1.25" fill="#eeeeef"/>
+  <rect x="23" y="57.3" width="36" height="2" rx="1" fill="#696a6d"/>
+  <rect x="72" y="57.3" width="7" height="2" rx="1" fill="#696a6d"/>
+  <!-- another workspace, agent waiting on you -->
+  <circle cx="17.5" cy="68.5" r="2" fill="#e3814f"/>
+  <rect x="23" y="67.3" width="22" height="2.5" rx="1.25" fill="#98999b"/>
+  <!-- project 2 -->
+  <rect x="6" y="78" width="6" height="4.5" rx="1" fill="none" stroke="#98999b" stroke-width="0.8"/>
+  <rect x="15" y="79" width="24" height="3" rx="1.5" fill="#eeeeef"/>
+  <path d="M15 91.5 L17.5 89 L20 91.5 V94 H15 Z" fill="none" stroke="#696a6d" stroke-width="0.8"/>
+  <rect x="23" y="90.5" width="16" height="2.5" rx="1.25" fill="#98999b"/>
+  <path d="M16 98.5 V103.5 M16 101 C16 99 19 100 19 98.5" fill="none" stroke="#696a6d" stroke-width="0.8"/>
+  <rect x="23" y="99.8" width="26" height="2.5" rx="1.25" fill="#98999b"/>
+  <!-- project 3, collapsed -->
+  <rect x="6" y="110" width="6" height="4.5" rx="1" fill="none" stroke="#98999b" stroke-width="0.8"/>
+  <rect x="15" y="111" width="34" height="3" rx="1.5" fill="#eeeeef"/>
+  <!-- Herdr's agents list -->
+  <rect x="0" y="122" width="86" height="1" fill="#26272a"/>
+  <rect x="6" y="128" width="20" height="2.5" rx="1.25" fill="#696a6d"/>
+  <circle cx="8" cy="137" r="1.8" fill="#22a99a"/><rect x="13" y="136" width="40" height="2.2" rx="1.1" fill="#98999b"/>
+  <circle cx="8" cy="145" r="1.8" fill="#e3814f"/><rect x="13" y="144" width="32" height="2.2" rx="1.1" fill="#98999b"/>
+  <!-- groups bar: F1 active, F2 with the attention dot, F3 -->
+  <rect x="0" y="163" width="86" height="1" fill="#26272a"/>
+  <rect x="5" y="168" width="25" height="10" rx="3" fill="#2c2e31"/>
+  <rect x="9" y="171.8" width="15" height="2.4" rx="1.2" fill="#eeeeef"/>
+  <rect x="33" y="168" width="25" height="10" rx="3" fill="none" stroke="#26272a" stroke-width="0.8"/>
+  <rect x="37" y="171.8" width="13" height="2.4" rx="1.2" fill="#98999b"/>
+  <circle cx="54" cy="173" r="1.6" fill="#e3814f"/>
+  <rect x="61" y="168" width="20" height="10" rx="3" fill="none" stroke="#26272a" stroke-width="0.8"/>
+  <rect x="65" y="171.8" width="11" height="2.4" rx="1.2" fill="#98999b"/>
+  <!-- footer -->
+  <rect x="0" y="183" width="86" height="1" fill="#26272a"/>
+  <rect x="6" y="189" width="24" height="2.5" rx="1.25" fill="#98999b"/>
+  <!-- tabs -->
+  <rect x="91" y="3" width="22" height="9" rx="3" fill="#2c2e31" stroke="#404244" stroke-width="0.6"/>
+  <rect x="95" y="6.4" width="12" height="2.2" rx="1.1" fill="#eeeeef"/>
+  <!-- the agent's terminal -->
+  <rect x="91" y="16" width="225" height="172" rx="3" fill="#17191d" stroke="#96b2d7" stroke-width="0.8"/>
+  <rect x="91.4" y="24" width="224.2" height="0.6" fill="#2d2f32"/>
+  <rect x="96" y="19" width="26" height="2.2" rx="1.1" fill="#98999b"/>
+  <rect x="98" y="33" width="60" height="2.5" rx="1.25" fill="#22a99a"/>
+  <rect x="98" y="41" width="120" height="2.5" rx="1.25" fill="#98999b"/>
+  <rect x="98" y="48" width="96" height="2.5" rx="1.25" fill="#98999b"/>
+  <rect x="98" y="58" width="140" height="2.5" rx="1.25" fill="#696a6d"/>
+  <rect x="98" y="65" width="82" height="2.5" rx="1.25" fill="#696a6d"/>
+  <rect x="98" y="168" width="208" height="10" rx="2" fill="none" stroke="#2d2f32" stroke-width="0.8"/>
+  <rect x="102" y="172" width="3" height="2.5" fill="#eeeeef"/>
+  <!-- status bar -->
+  <rect x="87" y="191" width="233" height="1" fill="#26272a"/>
+  <rect x="93" y="194.5" width="26" height="2.2" rx="1.1" fill="#98999b"/>
+  <rect x="290" y="194.5" width="24" height="2.2" rx="1.1" fill="#696a6d"/>
+</svg>
