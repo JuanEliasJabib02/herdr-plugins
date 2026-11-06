@@ -9,7 +9,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import {
   PROBE_KEY, ERASE_KEY,
-  claudePrompt, shellPrompt, readPrompt, classifyProbe,
+  claudePrompt, shellPrompt, readPrompt, classifyProbe, promptRestored,
 } from "../mods/agent-sleep/prompt.js";
 
 const fixture = (name) => readFileSync(new URL(`./fixtures/${name}`, import.meta.url), "utf8");
@@ -99,6 +99,23 @@ test("the x didn't land: unknown and no backspace, even when the draft itself en
   // Something else replaced the line: no backspace into text we didn't type.
   assert.deepEqual(classifyProbe(before, withPrompt(before, "otra cosax")), { verdict: "unknown", typed: false });
   assert.deepEqual(classifyProbe(before, undefined), { verdict: "unknown", typed: false });
+});
+
+// J-001: after the probe's backspace, /exit goes only into a prompt line
+// that reads again exactly as before the `x` (T0: a backspace restores a
+// suggestion and a draft alike).
+test("the prompt line is back only when it reads as before the probe", () => {
+  const suggestion = fixture("claude-after-turn3.txt");
+  const draft = fixture("claude-draft.txt");
+  assert.equal(promptRestored(suggestion, suggestion), true);
+  assert.equal(promptRestored(draft, withPrompt(draft, "hola")), true);
+  assert.equal(promptRestored(suggestion, withPrompt(suggestion, "x")), false, "the x is still there");
+  assert.equal(promptRestored(suggestion, withPrompt(suggestion, "reply with the single word okx")), false);
+  assert.equal(promptRestored(draft, withPrompt(draft, "holax")), false);
+  assert.equal(promptRestored(suggestion, withPrompt(suggestion, "")), false, "an empty line isn't what was there");
+  assert.equal(promptRestored(suggestion, fixture("claude-trust-dialog.txt")), false);
+  assert.equal(promptRestored(suggestion, null), false, "a read that failed");
+  assert.equal(promptRestored(null, suggestion), false);
 });
 
 // ── The shell's line (D8: resume only into a bare prompt) ─────────────────

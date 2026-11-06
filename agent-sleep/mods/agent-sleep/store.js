@@ -8,8 +8,10 @@
 // Record states (D4, D13): "live" (a running Claude, kept for restart
 // recovery), "stopping" (written before /exit), "asleep" (the shell is back).
 // `flags` holds only the user's own flags (D8): launcher flags never get here.
-// `env` (optional) is the `NAME=1` assignment Claude's exit hint put before
-// `claude` (Log L10), replayed on resume; resume.js says which it accepts.
+// `env` (optional) is the `NAME=VALUE` assignment Claude's exit hint put
+// before `claude` (Log L10). It is stored whether or not the resume can
+// replay it, so a Claude kept asleep for one it can't stays held after the
+// hint leaves the screen or the mod reloads; resume.js says which it replays.
 
 import { DEFAULT_IDLE_MINUTES, MIN_IDLE_MINUTES, MAX_IDLE_MINUTES } from "./rules.js";
 
@@ -66,7 +68,10 @@ export async function loadSettings(io, p) {
 const isText = (v) => typeof v === "string" && v.length > 0;
 const isTextOrNull = (v) => v === null || v === undefined || typeof v === "string";
 const isCountOrNull = (v) => v === null || v === undefined || (Number.isFinite(v) && v >= 0);
-export const ENV_PATTERN = /^[A-Z_][A-Z0-9_]*=1$/;
+// A shell variable name, `=`, and a value with no whitespace or control
+// character (C0, DEL, C1). Stored only, never typed: resume.js replays just
+// its own list.
+export const ENV_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*=[^\s\p{Cc}]+$/u;
 const isEnvOrNull = (v) => v === null || v === undefined || (typeof v === "string" && ENV_PATTERN.test(v));
 
 function validRecord(r) {

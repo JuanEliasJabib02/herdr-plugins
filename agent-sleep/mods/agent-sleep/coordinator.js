@@ -40,7 +40,7 @@ import {
 } from "./store.js";
 import { BADGE_KEY, badgeValue, sameValue, workspaceOf, parseWorktreeList } from "./badges.js";
 import { loadSession, isClaudeName, parseExitScreen, exitSessionId, sessionFilePath } from "./claude-session.js";
-import { readPrompt, classifyProbe, PROBE_KEY, ERASE_KEY } from "./prompt.js";
+import { readPrompt, classifyProbe, promptRestored, PROBE_KEY, ERASE_KEY } from "./prompt.js";
 import { resumeFlags, resumeCommand, canResumeIn, hintDifference, REPLAYABLE_ENV } from "./resume.js";
 
 // This mod's folder under mods/: asset paths go through it, never a literal
@@ -80,6 +80,12 @@ export const lostTerminal = (t, r) =>
   isObject(r) && r.state === "live" &&
   Number.isInteger(r.rootPid) && Number.isInteger(t?.pid) && t.pid !== r.rootPid &&
   foregroundIsShell(t);
+
+// D5: a candidate's signature without its screen hash (address, status,
+// status_ms, turn, session): what only Claude itself changes. A probe that
+// didn't find a suggestion is refused under it, since the probe's own `x`
+// changes the screen and would make the terminal a candidate again.
+const claudeSignature = (c) => [c.address, c.state, c.statusMs, c.turn, c.sessionId].map(String).join("|");
 
 // The block's line for a Claude kept asleep because its exit hint asked for
 // an env assignment the resume can't replay (Log L10).
@@ -198,7 +204,9 @@ export class Coordinator {
     this.seen = { previousVisible: [], lastSeen: {}, firstSeen: {} };
     this.confirmState = null;
     this.failedUntil = {};
-    this.refused = {}; // address → the signature D5 turned down (a draft): not probed again until it changes
+    // address → what D5 turned down: the signature (a line read as a draft,
+    // a dialog), or claudeSignature after a probe: not tried again until it changes
+    this.refused = {};
     this.holds = {}; // address → why that asleep Claude stays asleep
     this.retryAt = {}; // address → when a waiting reveal looks again
     this.due = {};
@@ -452,7 +460,8 @@ export class Coordinator {
 
   // planSleep twice (D2): once to learn which screens to read, again with
   // them. A Claude that couldn't come back (resumability, T2) is never read
-  // nor offered; one D5 turned down stays out while its signature holds.
+  // nor offered; one D5 turned down stays out while its signature holds
+  // (after a probe, Claude's own: see claudeSignature).
   async plan({ now, terminals, sessions, manual }) {
     const base = {
       now, manual, settings: this.settings, terminals, ...this.layout(), ...this.seenInput(),
@@ -476,7 +485,8 @@ export class Coordinator {
     const reasons = { ...result.reasons };
     for (const address of unresumable) reasons[address] = "unresumable";
     const candidates = result.candidates.filter((c) => {
-      if (this.refused[c.address] !== c.signature) return true;
+      const refused = this.refused[c.address];
+      if (refused !== c.signature && refused !== claudeSignature(c)) return true;
       reasons[c.address] = "refused";
       return false;
     });
@@ -535,7 +545,9 @@ export class Coordinator {
       const verdict = await this.probe(address, screen);
       if (verdict === "visible") return false;
       if (verdict !== "suggestion") {
-        this.refused[address] = candidate.signature;
+        // The probe typed into Claude's screen: refused until Claude itself
+        // changes, never on the screen it left behind.
+        this.refused[address] = claudeSignature(candidate);
         return false;
       }
     } else if (prompt.state !== "empty") {
@@ -584,7 +596,10 @@ export class Coordinator {
   }
 
   // D5's one-character probe: `x`, read, backspace only when the `x` is on
-  // screen. → "suggestion" | "draft" | "unknown" | "visible".
+  // screen. → "suggestion" | "draft" | "unknown" | "visible". "suggestion"
+  // only when the backspace went through and Claude's prompt line reads as
+  // before the `x`; an erase it can't confirm is "unknown" (no /exit: Claude
+  // would get `x/exit`).
   async probe(address, before) {
     if (this.isVisible(address)) return "visible";
     await this.call(["keys", address, PROBE_KEY]);
@@ -594,9 +609,29 @@ export class Coordinator {
       after = await this.read(address);
     }
     const { verdict, typed } = classifyProbe(before, after);
-    if (typed) await this.call(["keys", address, ERASE_KEY]);
+    if (typed && !(await this.erase(address, before))) return "unknown";
     if (this.isVisible(address)) return "visible";
     return verdict;
+  }
+
+  // The probe's backspace, checked: the call succeeded and the screen, read
+  // again (a few times while Claude redraws), shows the prompt line as it
+  // was before the probe. False otherwise, with a log line: the `x` may
+  // still be on Claude's prompt line.
+  async erase(address, before) {
+    const sent = await this.call(["keys", address, ERASE_KEY]);
+    if (sent.code !== 0) {
+      this.log(`${address}: the probe's backspace failed (${(sent.stderr || sent.stdout || "").trim()}); its x may be on Claude's prompt line`);
+      return false;
+    }
+    let screen = await this.read(address);
+    for (let i = 1; i < PROBE_READS && !promptRestored(before, screen); i++) {
+      await this.sleep(PROBE_WAIT_MS);
+      screen = await this.read(address);
+    }
+    if (promptRestored(before, screen)) return true;
+    this.log(`${address}: Claude's prompt line isn't back after the probe's backspace; its x may still be there`);
+    return false;
   }
 
   // ── Reconcile and live records (D4, D13) ──
@@ -619,8 +654,10 @@ export class Coordinator {
   }
 
   // The shell is back after /exit (D3): the id Claude printed wins (it
-  // follows /clear), its env assignment is kept for the resume (Log L10),
-  // and any difference from the command this mod will type is logged.
+  // follows /clear), its env assignment is stored in the record (Log L10:
+  // replayed when resume.js can, otherwise the record holds that Claude
+  // asleep, past the hint leaving the screen and a reload), and any
+  // difference from the command this mod will type is logged.
   async afterExit(address, r) {
     const parsed = parseExitScreen(await this.read(address));
     const pick = exitSessionId(r.sessionId, parsed);
@@ -628,7 +665,7 @@ export class Coordinator {
     let out = { ...r, sessionId: pick.sessionId ?? r.sessionId };
     if (parsed.shape === "resume" && parsed.env) {
       if (ENV_PATTERN.test(parsed.env)) out = { ...out, env: parsed.env };
-      else this.holds[address] = envHold(labelOf(out) ?? address, parsed.env);
+      else this.holds[address] = envHold(labelOf(out) ?? address, parsed.env); // not even storable: held while the mod runs
     }
     const diff = hintDifference(parsed, out.flags, out.env ?? null);
     if (diff) this.log(`${address}: ${diff}`);
@@ -638,8 +675,11 @@ export class Coordinator {
 
   // D13: a `live` record for every running Claude that passes D3 and could
   // come back, rewritten only when what it says changes. A Claude you ended
-  // yourself (no Claude in front, same root pid) drops it; a new root pid is
-  // a lost terminal, left for restart recovery.
+  // yourself (a known program other than Claude in front, its shell or what
+  // you ran next, same root pid) drops it; a new root pid is a lost
+  // terminal, left for restart recovery. No foreground (Core's in-between
+  // state right after a server stop, maybe still with the old pid) decides
+  // nothing.
   async keepLive(terminals, sessions, now) {
     let next = this.records;
     let holder;
@@ -648,7 +688,7 @@ export class Coordinator {
       const r = own(next, t.address);
       if (r && r.state !== "live") continue;
       if (!isObject(t.foreground) || !isClaudeName(t.foreground.name)) {
-        if (r && Number.isInteger(t.pid) && t.pid === r.rootPid) {
+        if (r && isObject(t.foreground) && Number.isInteger(t.pid) && t.pid === r.rootPid) {
           next = withoutRecord(next, t.address);
         } else if (r && lostTerminal(t, r)) {
           // T7: the shell is back with a new root pid, so Core lost the

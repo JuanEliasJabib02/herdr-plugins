@@ -239,19 +239,34 @@ test("claim: stopping and live records are not claimable by a reveal", () => {
   assert.equal(claim(records, "t2", { states: ["live"] }).claimed.state, "live");
 });
 
-// T5: the optional `env` a Claude's exit hint asked for (Log L10), replayed
-// before `claude` on resume. Only a `NAME=1` assignment is storable.
-test("records: env is optional and, when set, must be NAME=1", () => {
-  const ok = [undefined, null, "CLAUDE_CODE_EXPERIMENTAL_CODE_MODE=1", "_X=1", "A1=1"];
+// T5, J-003: the optional `env` a Claude's exit hint asked for (Log L10).
+// Any `NAME=VALUE` is storable, so a Claude kept asleep for an env the
+// resume can't replay stays held across reloads; resume.js says which ones
+// it replays.
+test("records: env is optional and, when set, must be NAME=VALUE with no whitespace or control character", () => {
+  const ok = [undefined, null, "CLAUDE_CODE_EXPERIMENTAL_CODE_MODE=1", "_X=1", "A1=1", "FOO=bar", "lower=1", "X=1;rm", "X=a=b"];
   for (const env of ok) {
     const records = { t1: env === undefined ? rec() : rec({ env }) };
     const parsed = parseRecords(serializeRecords(records));
     assert.equal(parsed.bad, false, `env ${JSON.stringify(env)}`);
     assert.deepEqual(parsed.records, records);
   }
-  for (const env of ["", "FOO=bar", "lower=1", "1X=1", "X=1 Y=1", "X=1;rm", 1, ["X=1"]]) {
+  const bad = [
+    "", "X", "=1", "X=", "1X=1", "X-Y=1", "X=1 Y=1", "FOO=a b", "FOO=a\tb", "FOO=a\nb", "FOO=a b",
+    "FOO=a\u0001b", "FOO=a\u001bb", "FOO=a\u007fb", "FOO=a\u0085b", 1, ["X=1"],
+  ];
+  for (const env of bad) {
     const parsed = parseRecords(serializeRecords({ t1: rec({ env }) }));
     assert.equal(parsed.bad, true, `env ${JSON.stringify(env)}`);
     assert.deepEqual(parsed.records, {}, `env ${JSON.stringify(env)}`);
   }
+});
+
+test("records: an asleep record holding an env the resume can't replay survives a save and a load (J-003)", async () => {
+  const io = fakeIo();
+  const records = { t1: rec({ env: "FOO=bar" }) };
+  await saveRecords(io, P, records, null);
+  const loaded = await loadRecords(io, P);
+  assert.deepEqual(loaded.records, records);
+  assert.equal(io.files[P.sleepingBak], undefined, "not a bad file");
 });

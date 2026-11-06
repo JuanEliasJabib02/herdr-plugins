@@ -274,10 +274,94 @@ test("a glimpse at the tab while a tick reads its screen still restarts the idle
 test("a prompt suggestion: the probe types x, sees `❯ x`, erases it and sleeps", async () => {
   const { w, co } = setup();
   w.screens.t1 = SUGGESTION;
-  w.onKey.t1 = (key, screen) => (key === "x" ? SUGGESTION.replace("reply with the single word ok", "x") : key === "backspace" ? EMPTY : screen);
+  // T0: a backspace brings the suggestion back.
+  w.onKey.t1 = (key, screen) => (key === "x" ? SUGGESTION.replace("reply with the single word ok", "x") : key === "backspace" ? SUGGESTION : screen);
   await sleepT1(co, w);
   assert.deepEqual(w.keys.map((k) => k.key), ["x", "backspace"]);
   assert.equal(exits(w).length, 1);
+});
+
+// J-001: /exit goes only into a prompt line the probe left as it found it,
+// never after its own `x` (Claude would get `x/exit` as a prompt).
+const PROBED = SUGGESTION.replace("reply with the single word ok", "x");
+
+test("the probe's backspace fails: no /exit, and the x is never typed again while Claude stays the same", async () => {
+  const { w } = setup();
+  const d = deps(w);
+  const hc = d.hc;
+  let erases = 0;
+  d.hc = async (args) => {
+    if (args[0] === "keys" && args[2] === "backspace") {
+      erases += 1;
+      return fail("keys failed");
+    }
+    return hc(args);
+  };
+  const co = new Coordinator(d);
+  w.screens.t1 = SUGGESTION;
+  w.onKey.t1 = (key, screen) => (key === "x" ? PROBED : screen);
+  const t = await sleepT1(co, w);
+  assert.equal(erases, 1, "the backspace was tried");
+  assert.equal(exits(w).length, 0);
+  for (let m = 1; m <= 5; m++) await at(co, w, t + m * MIN);
+  assert.deepEqual(w.keys.map((k) => k.key), ["x"]);
+  assert.equal(exits(w).length, 0);
+});
+
+test("the probe's backspace 'succeeds' but the x is still on screen: no /exit", async () => {
+  const { w, co } = setup();
+  w.screens.t1 = SUGGESTION;
+  w.onKey.t1 = (key, screen) => (key === "x" ? PROBED : screen); // the backspace changes nothing
+  const t = await sleepT1(co, w);
+  assert.deepEqual(w.keys.map((k) => k.key), ["x", "backspace"]);
+  assert.equal(exits(w).length, 0);
+  for (let m = 1; m <= 5; m++) await at(co, w, t + m * MIN);
+  assert.deepEqual(w.keys.map((k) => k.key), ["x", "backspace"], "not probed again while Claude stays the same");
+  assert.equal(exits(w).length, 0);
+});
+
+test("the prompt line back a moment after the backspace (Claude redrawing): read again, then it sleeps", async () => {
+  const { w, co } = setup();
+  w.screens.t1 = SUGGESTION;
+  let reads = 0;
+  w.onKey.t1 = (key, screen) => {
+    if (key === "backspace") reads = 0;
+    return key === "x" ? PROBED : screen;
+  };
+  w.onRead = (address, w) => {
+    if (address === "t1" && w.keys.at(-1)?.key === "backspace" && ++reads === 3) w.screens.t1 = SUGGESTION;
+  };
+  await sleepT1(co, w);
+  assert.deepEqual(w.keys.map((k) => k.key), ["x", "backspace"]);
+  assert.equal(exits(w).length, 1);
+});
+
+// J-002: the probe's own `x` changes the screen, so a refusal after a probe
+// waits for Claude itself to change (status, status_ms, turn, session).
+test("a probe it couldn't read is not repeated though its x changed the screen; a new turn lifts the refusal", async () => {
+  const { w, co } = setup();
+  w.screens.t1 = SUGGESTION;
+  let reads = 0;
+  w.onKey.t1 = (key, screen) => {
+    if (key !== "x") return screen;
+    reads = 0;
+    return undefined; // the read right after the x fails
+  };
+  w.onRead = (address, w) => {
+    if (address === "t1" && w.screens.t1 === undefined && ++reads > 1) w.screens.t1 = PROBED;
+  };
+  const t = await sleepT1(co, w);
+  assert.deepEqual(w.keys.map((k) => k.key), ["x"], "no backspace: the x was never seen");
+  assert.equal(exits(w).length, 0);
+  for (let m = 1; m <= 5; m++) await at(co, w, t + m * MIN);
+  assert.equal(w.screens.t1, PROBED, "the screen differs from the one the probe started on");
+  assert.deepEqual(w.keys.map((k) => k.key), ["x"], "no second x");
+  assert.equal(exits(w).length, 0);
+  w.core.t1.turn = 4; // Claude ran another turn
+  w.screens.t1 = EMPTY;
+  await at(co, w, t + 6 * MIN);
+  await at(co, w, t + 7 * MIN);
+  assert.equal(exits(w).length, 1, "a new turn lifts the refusal");
 });
 
 test("a draft: the probe sees `❯ holax`, erases the x, never sleeps and never probes it again", async () => {
@@ -482,6 +566,26 @@ test("any other env in the hint: kept asleep, never resumed without it, and the 
     assert.equal(records(w).t1.state, "asleep", env);
     assert.ok(co.model().holds.some((h) => h.includes(env)), `${env}: ${JSON.stringify(co.model().holds)}`);
   }
+});
+
+// J-003: the hold lives in the record, so it outlasts the hint on screen
+// and a reload of the mod.
+test("an env the resume can't replay (FOO=bar) is stored; hint gone + a reload → still never resumed, the block says why", async () => {
+  const { w, co } = setup();
+  const t = await sleepT1(co, w);
+  exitClaude(w, "t1", EXIT.replace(`claude --resume ${SID1}`, `FOO=bar claude --resume ${SID1}`));
+  await at(co, w, t + 3_000);
+  assert.equal(records(w).t1.state, "asleep");
+  assert.equal(records(w).t1.env, "FOO=bar");
+  w.screens.t1 = SHELL_BARE; // the hint left the screen (`clear`, scrollback)
+  const fresh = new Coordinator(deps(w)); // a reload
+  show(w, "back");
+  await at(fresh, w, t + 4_000);
+  await at(fresh, w, t + 1 * MIN);
+  await at(fresh, w, t + 2 * MIN);
+  assert.equal(resumes(w).length, 0);
+  assert.equal(records(w).t1.state, "asleep");
+  assert.deepEqual(fresh.model().holds, ["app stays asleep: Claude asked for FOO=bar"]);
 });
 
 // ── Sleep now / Wake all (D9) ─────────────────────────────────────────────

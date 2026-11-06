@@ -15,7 +15,8 @@
 // turns left one), so D5 sleeps a Claude only when that line is empty or
 // exactly the fresh `Try "…"` placeholder, and otherwise probes: the
 // coordinator types `x` (PROBE_KEY), reads the screen, and classifyProbe
-// says what it was; the `x` is erased (ERASE_KEY) only when it is on screen.
+// says what it was; the `x` is erased (ERASE_KEY) only when it is on screen,
+// and promptRestored says whether the erase brought the line back.
 
 import { isClaudeName } from "./claude-session.js";
 
@@ -101,6 +102,16 @@ export function classifyProbe(before, after) {
     return { verdict: "draft", typed: true };
   }
   return { verdict: "unknown", typed: false };
+}
+
+// After the probe's backspace: true only when Claude's prompt line reads
+// again exactly as it did before the `x` (T0: a backspace restores a
+// suggestion and a draft alike). Anything else, a screen it can't read
+// included, may still hold the `x`, so the coordinator sends no /exit after
+// it (Claude would get `x/exit` as a prompt).
+export function promptRestored(before, after) {
+  const was = promptText(before);
+  return was !== null && promptText(after) === was;
 }
 
 // ── The shell (D8: resume only into a bare prompt) ─────────────────────────

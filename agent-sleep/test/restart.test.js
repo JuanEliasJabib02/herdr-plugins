@@ -69,6 +69,24 @@ test("lost in `hc server stop` (T0's fixture) + live record → asleep by restar
   assert.match(w.notes.at(-1)?.title ?? "", /after a restart/);
 });
 
+// J-004: only the shell in front with the same root pid says "you ended it".
+test("no foreground yet while Core still reports the old root pid → live record kept; shell back with a new pid → asleep by restart", async () => {
+  const { w, co } = await withLiveRecord();
+  const { reason, foreground, status, turn } = SERVER_STOP;
+  w.core.t1 = { ...w.core.t1, reason, foreground, status, status_ms: null, turn };
+  w.screens.t1 = "";
+  assert.equal(w.core.t1.pid, records(w).t1.rootPid, "the same root pid as the record");
+  await at(co, w, NOW + MIN);
+  assert.equal(records(w).t1?.state, "live", "a null foreground decides nothing");
+
+  shellBackWithNewPid(w, "t1", 300);
+  w.holder = "h2";
+  await at(co, w, NOW + 2 * MIN);
+  assert.equal(records(w).t1?.state, "asleep");
+  assert.equal(records(w).t1.by, "restart");
+  assert.equal(w.sends.length, 0);
+});
+
 test("lost with the holder (T0's holder-kill fixture) while its tab is shown → resumed at once", async () => {
   const { w, co } = await withLiveRecord();
   show(w, "back");
@@ -143,4 +161,17 @@ test("a Claude put to sleep normally is not mistaken for a restart", async () =>
   await at(co, w, NOW + 31 * MIN + 13_000);
   assert.equal(records(w).t1?.state, "asleep");
   assert.equal(records(w).t1.by, "auto");
+});
+
+test("you ended Claude and another program is in front (same root pid) → record dropped; a later restart resumes nothing", async () => {
+  const { w, co } = await withLiveRecord();
+  w.core.t1 = { ...w.core.t1, foreground: { argv: ["vim"], cwd: "/code/app", name: "vim", pid: 301 }, status: null, status_ms: null };
+  w.screens.t1 = EMPTY;
+  await at(co, w, NOW + MIN);
+  assert.equal(records(w).t1, undefined, "a known foreground that isn't Claude, same root pid: ended by you");
+  shellBackWithNewPid(w, "t1", 300);
+  show(w, "back");
+  await at(co, w, NOW + 2 * MIN);
+  await at(co, w, NOW + 3 * MIN);
+  assert.equal(w.sends.length, 0);
 });
