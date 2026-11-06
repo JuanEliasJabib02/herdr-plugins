@@ -23,7 +23,8 @@ the same files and run the same commands: see [CONTRACT.md](CONTRACT.md).
   - Colors: under 60% `muted`, 60–79% `working` (amber), 80% or more
     `blocked` (red).
   - As the column narrows: bars and labels, then one number per window, then
-    the icon only.
+    only the most-used window's number (`--` when there's none). Never the
+    icon alone, which would read as all clear.
   - Signed out: "Sign in to see usage" and a **Sign in** action.
   - Click it for the popover; click again to close it.
 - **Popover** (above the footer): `Usage`, a refresh button and a

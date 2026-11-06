@@ -170,5 +170,6 @@ function card(c, t) {
       .child(h_flex().h(16).flex_none().items_center().text_color(t.muted).child(c.credits.text))))
     .when(Boolean(c.notice), (el) => el.child(v_flex().flex_none()
       .when(Boolean(c.notice.label), (col) => col.child(h_flex().h(PANEL.noticeLabel).flex_none().items_center().text_size(11).font_medium().child(c.notice.label)))
-      .child(div().line_height(PANEL.line).text_color(t.muted).child(c.notice.message))));
+      // In px: a bare number is taken relative to the font size (D27).
+      .child(div().line_height(`${PANEL.line}px`).text_color(t.muted).child(c.notice.message))));
 }

@@ -18,7 +18,7 @@
 //                                    error values and for "needsSignIn"
 //                                    (D4's table)
 //   densityLevel(width, needs)       the footer's level for its width (D10):
-//                                    "full", "compact" or "icon"
+//                                    "full", "compact" or "tightest"
 //   formatSince(date, now)           "since Nov 3", for cache figures that
 //                                    start after the range does (D11)
 //   formatCoverage(coverage)         the note for cache figures that cover
@@ -188,7 +188,8 @@ export function errorCopy(kind, detail, opts = {}) {
 // (status-bar/status-bar-density.ts, pickStatusBarDensityLevel), and starts
 // at the roomiest until it is measured. The footer follows three of its
 // steps: "full" (bars and labels), "compact" (one number per window: no bars,
-// no secondary labels), "icon" (the icon only).
+// no secondary labels), "tightest" (one number in all). Orca never goes below
+// that: an icon alone would read as a healthy chip (D25).
 //   width  the footer's width in logical px (on_size_change); unmeasured
 //          (not a number) is "full", as Orca starts.
 //   needs  the width each level needs, { full, compact }; the defaults fit
@@ -204,7 +205,7 @@ export function densityLevel(width, needs = DENSITY_NEEDS) {
   const compact = isNumber(needs?.compact) ? needs.compact : DENSITY_NEEDS.compact;
   if (full <= width + WIDTH_TOLERANCE_PX) return "full";
   if (compact <= width + WIDTH_TOLERANCE_PX) return "compact";
-  return "icon";
+  return "tightest";
 }
 
 // ── Cache figures (D11) ────────────────────────────────────────────────────

@@ -164,7 +164,9 @@ function accountLabel(a) {
 //            numbers, the last read failed), "loading", "empty"
 //   level    format.densityLevel for `width` and the widths this content
 //            needs (`needs`, { full, compact }): "full" (bars and labels),
-//            "compact" (one number per window), "icon" (the icon alone)
+//            "compact" (one number per window), "tightest" (the icon and
+//            one text: the tightest window's percent, ··· while loading,
+//            -- with no number; D25)
 //   unit     "Used", or null; bar { fill, color }: the tightest window
 //            (Detailed, full only); sections [{ key, text, color }]
 //   label    { text, color }: "···", an error's label, "Sign in to see usage"
@@ -178,6 +180,8 @@ const CALM_STALE_MAX_AGE = 30 * 60_000;
 const SIGN_IN_REASON = "Sign in to see usage";
 const SIGN_IN = "Sign in";
 const ELLIPSIS = "···";
+// The tightest level's text when there's no number (Orca's compact "--").
+const NO_NUMBER = "--";
 
 // The footer's sizes in px, for the width each level needs (text_size 11.8).
 export const FOOTER = Object.freeze({ pad: 10, gap: 6, sectionGap: 5, char: 6.4, icon: 13, bar: 48, warning: 12, refresh: 19, button: 26 });
@@ -211,6 +215,7 @@ function footerContent(account, mode, now) {
   const calm = account.error === "expired" && !account.needsSignIn && isNumber(updated) && now - updated <= CALM_STALE_MAX_AGE;
   return {
     kind: "usage",
+    tight: tight.key,
     bar: mode === "compact" ? null : { fill: tight.percent, color: colorToken(tight.percent) },
     sections: shown.map((s) => ({ key: s.key, percent: formatPercent(s.percent), label: chipLabel(s, now), color: colorToken(s.percent) })),
     warning: Boolean(account.error || account.needsSignIn) && !calm,
@@ -218,30 +223,34 @@ function footerContent(account, mode, now) {
   };
 }
 
-// The content at one density level.
+// The content at one density level. The tightest keeps one text beside the
+// icon, never none (D25).
 function footerShape(c, level) {
   const full = level === "full";
-  const icon = level === "icon";
-  const s = { kind: c.kind, level, unit: null, bar: null, sections: [], label: null, warning: false, signIn: null, refresh: !icon && c.kind !== "signIn", tooltip: null };
+  const tightest = level === "tightest";
+  const s = { kind: c.kind, level, unit: null, bar: null, sections: [], label: null, warning: false, signIn: null, refresh: !tightest && c.kind !== "signIn", tooltip: null };
+  const noNumber = tightest ? { text: NO_NUMBER, color: "muted" } : null;
   if (c.kind === "usage") {
     const fullText = c.sections.map((x) => `${x.percent} ${x.label}`).join(" · ");
-    s.unit = icon ? null : "Used";
+    s.unit = tightest ? null : "Used";
     s.bar = full ? c.bar : null;
-    s.sections = icon ? [] : c.sections.map((x) => ({ key: x.key, text: full ? `${x.percent} ${x.label}` : x.percent, color: x.color }));
-    s.warning = !icon && c.warning;
+    const shown = tightest ? [c.sections.find((x) => x.key === c.tight) ?? c.sections[0]] : c.sections;
+    s.sections = shown.map((x) => ({ key: x.key, text: full ? `${x.percent} ${x.label}` : x.percent, color: x.color }));
+    s.warning = !tightest && c.warning;
     s.tooltip = [full ? null : fullText, c.note].filter(Boolean).join("\n") || null;
   } else if (c.kind === "signIn") {
-    s.label = full ? { text: SIGN_IN_REASON, color: "muted" } : null;
-    s.signIn = icon ? null : { id: c.id, text: SIGN_IN };
+    s.label = full ? { text: SIGN_IN_REASON, color: "muted" } : noNumber;
+    s.signIn = tightest ? null : { id: c.id, text: SIGN_IN };
     s.tooltip = full ? null : SIGN_IN_REASON;
   } else if (c.kind === "error") {
-    s.label = full ? { text: c.copy.label, color: "muted" } : null;
-    s.warning = !icon && !c.calm;
+    s.label = full ? { text: c.copy.label, color: "muted" } : noNumber;
+    s.warning = !tightest && !c.calm;
     s.tooltip = c.copy.message;
   } else if (c.kind === "loading") {
-    s.label = icon ? null : { text: ELLIPSIS, color: "muted" };
+    s.label = { text: ELLIPSIS, color: "muted" };
     s.tooltip = LOADING;
   } else {
+    s.label = noNumber;
     s.tooltip = NO_DATA;
   }
   return s;

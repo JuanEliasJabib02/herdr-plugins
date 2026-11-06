@@ -35,6 +35,8 @@ import {
 
 // D4: the timer polls every 15 minutes.
 const POLL = 15 * 60_000;
+// A footer made before the app's window looks for it this often (D26).
+const WINDOW_LOOK = 250;
 // "3h 2m" moves once a minute.
 const TICK = 60_000;
 // A watch wake waits this long, so one write's events come as one batch.
@@ -217,7 +219,25 @@ export default class Footer extends UsageView {
     this.pressed = null; // its bounds at the last press
     this.merging = false;
     this.mergeAgain = false;
-    if (!appWindow() || this.overlay) return;
+    this.started = false;
+    if (this.overlay) return;
+    if (appWindow()) {
+      this.start(cx);
+      return;
+    }
+    // Herdr opening on a layout makes its views before its window (D26). A
+    // copy that never gets one (herdr-app check) only looks.
+    const look = cx.timer.every(WINDOW_LOOK, (cx) => {
+      if (this.started || !appWindow()) return;
+      look?.cancel?.();
+      this.start(cx);
+    });
+  }
+
+  // The re-read, the merge, the watch and the timers: once, in a window.
+  start(cx) {
+    if (this.started) return;
+    this.started = true;
     cx.spawn(async (cx) => {
       await this.reread(cx);
       this.merge(cx);

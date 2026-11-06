@@ -129,7 +129,7 @@ test("footer, Compact: the tightest window only, no bar (Orca's headline)", () =
   assert.deepEqual(texts(footerModel({ doc: fable, mode: "compact", width: 900, now: NOW })), ["70% Fable"]);
 });
 
-test("footer density: full, then one number per window, then the icon only (D10)", () => {
+test("footer density: full, then one number per window, then the tightest number alone (D10, D25)", () => {
   const full = footerModel({ doc: DOC, mode: "verbose", width: undefined, now: NOW });
   assert.equal(full.level, "full", "unmeasured is full, as Orca starts");
   const { needs } = full;
@@ -146,17 +146,36 @@ test("footer density: full, then one number per window, then the icon only (D10)
   // What the level hides is in the tooltip.
   assert.match(compact.tooltip, /41% 3h 2m · 65% 4d 6h · 22% Fable/);
 
-  const icon = footerModel({ doc: DOC, mode: "verbose", width: needs.compact - 2, now: NOW });
-  assert.equal(icon.level, "icon");
-  assert.equal(icon.unit, null);
-  assert.deepEqual(icon.sections, []);
-  assert.equal(icon.bar, null);
-  assert.equal(icon.refresh, false);
-  assert.match(icon.tooltip, /41% 3h 2m/);
+  // Never the icon alone: it would read as a healthy chip (Orca).
+  const tightest = footerModel({ doc: DOC, mode: "verbose", width: needs.compact - 2, now: NOW });
+  assert.equal(tightest.level, "tightest");
+  assert.equal(tightest.unit, null);
+  assert.deepEqual(tightest.sections, [{ key: "weekly", text: "65%", color: "working" }]);
+  assert.equal(tightest.bar, null);
+  assert.equal(tightest.refresh, false);
+  assert.match(tightest.tooltip, /41% 3h 2m/);
+  assert.equal(footerModel({ doc: DOC, mode: "verbose", width: 0, now: NOW }).sections.length, 1);
 
   // Compact mode at the compact level: the tightest number alone.
   const c = footerModel({ doc: DOC, mode: "compact", width: 0, now: NOW }).needs;
   assert.deepEqual(texts(footerModel({ doc: DOC, mode: "compact", width: c.full - 2, now: NOW })), ["65%"]);
+});
+
+test("footer, tightest level without numbers: \"--\" signed out, after an error or with none; ··· while loading (D25)", () => {
+  const tight = (doc) => footerModel({ doc, mode: "verbose", width: 0, now: NOW });
+  const signedOut = tight(docWith("default"));
+  assert.equal(signedOut.level, "tightest");
+  assert.deepEqual(signedOut.label, { text: "--", color: "muted" });
+  assert.equal(signedOut.signIn, null);
+  assert.equal(signedOut.tooltip, "Sign in to see usage");
+  const error = tight(docWith(BEN, { [BEN]: { usage: NO_USAGE, error: "keychain" } }));
+  assert.deepEqual(error.label, { text: "--", color: "muted" });
+  assert.equal(error.warning, false);
+  assert.equal(error.tooltip, "Claude sign-in credentials could not be read.");
+  const empty = tight(docWith(BEN, { [BEN]: { usage: NO_USAGE, error: null, usageUpdatedAt: NOW - MIN } }));
+  assert.deepEqual(empty.label, { text: "--", color: "muted" });
+  const loading = tight(docWith(BEN, { [BEN]: { usage: NO_USAGE, error: null, usageUpdatedAt: null } }));
+  assert.deepEqual(loading.label, { text: "···", color: "muted" });
 });
 
 test("footer, stale data: ⚠ after a failed read, but not while the login waits for Claude (recent)", () => {
@@ -692,6 +711,7 @@ function newWorld({ files = {}, props = null, hasWindow = true } = {}) {
     watches: [],
     nextId: 0,
     execFn: () => ({ code: 0, stdout: "{}", stderr: "" }),
+    hasWindow,
   };
   w.opened = () => w.log.filter((x) => x.open).map((x) => x.open);
   w.closed = () => w.log.filter((x) => x.close).map((x) => x.close);
@@ -714,7 +734,11 @@ function newWorld({ files = {}, props = null, hasWindow = true } = {}) {
       w.sleeps.push(ms);
     },
     timer: {
-      every: (ms, f) => w.timers.push({ ms, fire: () => f(cx) }),
+      every: (ms, f) => {
+        const task = { ms, fire: () => f(cx), cancelled: false, cancel: () => (task.cancelled = true) };
+        w.timers.push(task);
+        return task;
+      },
       after: () => {},
     },
     write_to_clipboard: (t) => w.clipboard.push(t),
@@ -752,7 +776,7 @@ function newWorld({ files = {}, props = null, hasWindow = true } = {}) {
     settings: () => ({ zoom: 1 }),
     home: () => "/fake/home",
     appHome: () => "/fake/app",
-    window: () => (hasWindow ? { platform: "macos" } : null),
+    window: () => (w.hasWindow ? { platform: "macos" } : null),
     nextCommand: () => new Promise(() => {}),
   };
   return w;
@@ -787,18 +811,44 @@ async function footer(opts = {}) {
   return { world, view };
 }
 
-test("footer view: herdr-app check's copy (no window) only draws: no exec, no watch, no timer, no toast", async () => {
+test("footer view: herdr-app check's copy (no window) only draws: no exec, no watch, no timer but the window's, no toast", async () => {
   const world = newWorld({ files: { "accounts.v1.json": liveDoc(), "login-link": fixtureText("login-link") }, hasWindow: false });
   const view = new Footer();
   view.init({}, world.cx);
   await flush();
+  // It only looks for a window, which never comes.
+  assert.deepEqual(world.timers.map((x) => x.ms), [250]);
+  world.timers[0].fire();
+  await flush();
   assert.deepEqual(world.execs, []);
   assert.equal(world.watches.length, 0);
-  assert.equal(world.timers.length, 0);
+  assert.equal(world.timers.length, 1);
   assert.deepEqual(world.clipboard, []);
   assert.deepEqual(world.notified, []);
   assert.equal(world.shared.size, 0);
   assert.match(textOf(view.render()), /···/);
+});
+
+test("footer view (D26): made before the window, as when Herdr opens on a layout, it starts once the window is there", async () => {
+  const world = newWorld({ files: { "accounts.v1.json": liveDoc() }, hasWindow: false });
+  const view = new Footer();
+  view.init({}, world.cx);
+  await flush();
+  const [look] = world.timers;
+  assert.deepEqual(world.execs, []);
+  world.hasWindow = true;
+  look.fire();
+  await flush();
+  assert.equal(look.cancelled, true, "it stops looking");
+  assert.deepEqual(world.execs, [["usage", "--json"]]);
+  assert.equal(world.watches.length, 1);
+  assert.deepEqual(world.timers.slice(1).map((x) => x.ms).sort((a, b) => a - b), [60_000, 900_000]);
+  // A late tick of the look starts nothing twice.
+  look.fire();
+  await flush();
+  assert.equal(world.watches.length, 1);
+  assert.equal(world.timers.length, 3);
+  assert.match(textOf(view.render()), /41% 3h 2m/);
 });
 
 test("footer view (S1): draws Used [icon][bar] 41% 3h 2m · 65% 4d 6h · 22% Fable [refresh], in D5's colors", async () => {
@@ -826,7 +876,7 @@ test("footer view: its density follows its measured width, in layout px", async 
   root.handlers.size_change({ width: needs.full - 20, height: 28 }, world.cx);
   assert.equal(textOf(view.render()), "Used 41% · 65% · 22%");
   root.handlers.size_change({ width: needs.compact - 20, height: 28 }, world.cx);
-  assert.equal(textOf(view.render()), "");
+  assert.equal(textOf(view.render()), "65%");
   assert.equal(find(view.render(), "ca-footer-refresh"), null);
 });
 
@@ -1131,6 +1181,14 @@ test("panel view (S1): Claude Updated 3m ago, the card's windows, Other accounts
 test("panel view (S9): an active account that needs signing in keeps its row, with its ✓", async () => {
   const { view } = await panel(liveDoc(ANA, { [ANA]: elsewhere }));
   assert.deepEqual(checksIn(find(view.render(), `ca-panel-row-${ANA}`)), ["mods/workspace-chrome/check.svg"]);
+});
+
+test("panel view (D27): a notice in the card is plain text, 16px a line, and the list stays in view", async () => {
+  const { view } = await panel(liveDoc(ANA, { [ANA]: { usage: NO_USAGE, error: null, needsSignIn: true, usageUpdatedAt: null } }));
+  const root = view.render();
+  const message = withText(root, "The selected Claude account needs you to sign in again. Open Manage Accounts…, or choose another account.");
+  assert.ok(message, textOf(root));
+  assert.deepEqual(message.calls.line_height, ["16px"]);
 });
 
 test("panel view (S8): a folder signed in as someone else draws its saved email, the login, Sign in and no bars; a click opens the sign-in tab", async () => {

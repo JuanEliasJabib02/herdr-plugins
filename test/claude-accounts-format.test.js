@@ -201,11 +201,11 @@ test("densityLevel compact: one number per window when the bars don't fit", () =
   assert.equal(densityLevel(238, { full: 240, compact: 100 }), "compact");
 });
 
-test("densityLevel icon: the icon only when not even one number per window fits", () => {
-  assert.equal(densityLevel(138), "icon");
-  assert.equal(densityLevel(40), "icon");
-  assert.equal(densityLevel(0), "icon");
-  assert.equal(densityLevel(98, { full: 240, compact: 100 }), "icon");
+test("densityLevel tightest: Orca's last level, one number in all, when not even one per window fits (D25)", () => {
+  assert.equal(densityLevel(138), "tightest");
+  assert.equal(densityLevel(40), "tightest");
+  assert.equal(densityLevel(0), "tightest");
+  assert.equal(densityLevel(98, { full: 240, compact: 100 }), "tightest");
   // A bad needs value falls back to the default for that level.
   assert.equal(densityLevel(200, { full: "wide", compact: null }), "compact");
 });
