@@ -21,6 +21,7 @@ import { tmpdir } from "node:os";
 import { join, dirname, basename } from "node:path";
 import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
+import { acquire, unlock } from "../mods/spotlight/locks.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const MOD = join(HERE, "..", "mods", "spotlight");
@@ -515,6 +516,8 @@ test("toggle off on a root-diverged root refuses; `toggle --force` off restores 
   const refused = await w.cli(["toggle", "--workspace", ws]);
   assert.equal(refused.code, 1, refused.stderr + refused.stdout);
   assert.match(refused.stderr, /root-diverged/);
+  assert.match(refused.stderr, /Para apagarlo igual: `spotlight toggle --workspace .* --force` \(Apagar igual\)\./);
+  assert.doesNotMatch(refused.stderr, /turn it off anyway/);
   assert.match(refused.stderr, /--force/);
   assert.ok(refsOf(app.root).includes("refs/herdr-spotlight/snapshot"));
 
@@ -1158,9 +1161,19 @@ test("J-009: env drift the reap can't resolve isn't retried: a foreign process i
   await w.until((s) => s.repos[app.root]?.envFailed === "dev", { what: "the failed restart's mark" });
   assert.equal(interrupts(), 1);
   assert.equal(record().serverEnv, "local");
+  // It's still up on its old env: neither the record nor the toast says otherwise.
+  assert.notEqual(record().serverState, "stopped");
+  const note = w.state().notes.filter((n) => n.repo === app.root).at(-1).text;
+  assert.match(note, /el server sigue corriendo: no paró con Ctrl-C y no se reinició/);
+  assert.doesNotMatch(note, /still-running|no arrancó/);
   assert.equal((await w.cli(["reap"])).code, 0);
   await sleep(1500);
   assert.equal(interrupts(), 1, "the reap didn't interrupt it again");
+
+  // A sync tries it again and says so when it didn't take.
+  const retried = await w.cli(["sync", "--repo", app.root]);
+  assert.equal(retried.code, 0, retried.stderr + retried.stdout);
+  assert.match(retried.stdout, /^Nothing to sync: .* The server did not restart \(still-running\)\.$/m);
 
   // Ctrl-C works again: Reiniciar runs the env asked for, and the mark goes.
   w.hcUpdate((s) => {
@@ -1170,6 +1183,28 @@ test("J-009: env drift the reap can't resolve isn't retried: a foreign process i
   assert.equal(again.code, 0, again.stderr + again.stdout);
   assert.equal(record().serverEnv, "dev");
   assert.equal(record().envFailed ?? null, null);
+});
+
+test("a repeat `on` over a listening server whose repo lock is held says the root is being lit, not that the server isn't listening", async () => {
+  const w = makeWorld();
+  const app = makeRepo(w, "app", { pkg: DEV, tasks: ["AX-15"] });
+  w.register([{ id: "g1", repos: [app] }]);
+  w.listen(app.root, [3000]);
+  const ws = app.ws["AX-15"];
+  const t = w.agent(ws);
+  assert.equal((await w.cli(["on"], { terminal: t, cwd: ws })).code, 0);
+
+  const lock = join(dirname(w.statePath), "locks", `repo-${sha1(app.root)}`);
+  const owner = await acquire(lock);
+  try {
+    const r = await w.cli(["on", "--timeout-ms", "300"], { terminal: t, cwd: ws });
+    assert.equal(r.code, 0, r.stderr + r.stdout);
+    assert.match(r.stdout, /app {2}http:\/\/localhost:3000 {2}listening$/m);
+    assert.match(r.stdout, /the root is still being lit: run `spotlight on` again to sync it/);
+    assert.doesNotMatch(r.stdout, /Not every server/);
+  } finally {
+    unlock(lock, owner);
+  }
 });
 
 test("J-003: a Herdr terminal on a main checkout or outside git takes a slot-only turn keyed by its folder; two terminals in one folder share it", async () => {

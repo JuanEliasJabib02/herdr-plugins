@@ -183,6 +183,7 @@ async function lightMember(cx, member, { force, taskKey }) {
 
 function serverFailure(r) {
   if (r.reason === "busy") return "la terminal del server corre algo que Spotlight no arrancó: no se tocó";
+  if (r.reason === "still-running") return "el server sigue corriendo: no paró con Ctrl-C y no se reinició";
   return `el server no arrancó (${r.reason}${r.message ? `: ${r.message}` : ""})`;
 }
 
@@ -275,7 +276,8 @@ export async function ensureServer(cx, root, opts = {}) {
       if (r.pid) rec.serverPid = r.pid;
       rec.variantCandidates = [];
     } else {
-      rec.serverState = r.reason === "terminal-gone" ? "gone" : "stopped";
+      // A server that ignored Ctrl-C keeps the state it had: it's still up.
+      if (r.reason !== "still-running") rec.serverState = r.reason === "terminal-gone" ? "gone" : "stopped";
       if (rec.serverEnv !== plan.env) rec.envFailed = plan.env;
       addNote(s, { repo: root, text: `${cx.nameOf(root)}: ${serverFailure(r)}`, toast: true }, now);
     }
@@ -285,6 +287,9 @@ export async function ensureServer(cx, root, opts = {}) {
 }
 
 // ── sync ───────────────────────────────────────────────────────────────────
+
+// Why the restart a sync asked for didn't happen, for `spotlight sync`'s line.
+const restartFailure = (server) => (server?.state === "failed" ? server.result.reason : null);
 
 // Brings the root in step with its holder (`spotlight sync`, auto-sync, and
 // `on` for each lit member). Under the repo lock; the holder is read inside
@@ -328,7 +333,7 @@ export async function syncRepo(cx, root, { force = false, onlyIf, lockTimeoutMs 
         });
       }
       const server = (await envDrift(cx, root, record)) ? await refreshServer() : null;
-      return { ok: true, skipped: true, holder, restarted: server?.state === "started" };
+      return { ok: true, skipped: true, holder, restarted: server?.state === "started", restartFailed: restartFailure(server) };
     }
     const installs = await lockfileInstalls({ git: cx.planGit, root, fromSha: record.lastSnapshotSha, toSha: result.snapshotSha });
     const now = cx.now();
@@ -340,7 +345,7 @@ export async function syncRepo(cx, root, { force = false, onlyIf, lockTimeoutMs 
     });
     let server = null;
     if (installs.length > 0 || (await envDrift(cx, root, record))) server = await refreshServer();
-    return { ok: true, skipped: false, holder, installs, restarted: server?.state === "started" };
+    return { ok: true, skipped: false, holder, installs, restarted: server?.state === "started", restartFailed: restartFailure(server) };
   }, wait);
 }
 

@@ -257,7 +257,7 @@ async function verbOn(cx, opts) {
   const waited = await waitForTurnServers(cx, { members: turn.members, key, deadline, syncErrors });
   const servers = waited.servers.map((s) => (stillLit.has(s.root) ? { ...s, stillLit: true } : s));
   await recordServers(cx, servers);
-  out(formatOn({ label: task.label, servers, skipped, ready: waited.ready && stillLit.size === 0 }));
+  out(formatOn({ label: task.label, servers, skipped, ready: waited.ready }));
   return 0;
 }
 
@@ -320,7 +320,7 @@ async function verbToggle(cx, opts) {
     } catch (e) {
       const error = toSpotlightError(e);
       const hint = !force && (error.code === "root-diverged" || error.code === "untracked-collision")
-        ? ` Run \`spotlight toggle --workspace ${workspace} --force\` to turn it off anyway (Apagar igual).`
+        ? ` Para apagarlo igual: \`spotlight toggle --workspace ${workspace} --force\` (Apagar igual).`
         : "";
       err(`${error.code}: ${error.message}${hint}`);
       return 1;
@@ -383,7 +383,7 @@ async function verbSync(cx, opts) {
   }
   const holder = path.basename(r.holder);
   const why = r.installs?.length > 0 ? " A lockfile changed: the server restarted with the install first." : " The server restarted in its new env.";
-  const restarted = r.restarted ? why : "";
+  const restarted = r.restarted ? why : r.restartFailed ? ` The server did not restart (${r.restartFailed}).` : "";
   if (r.skipped) out(`Nothing to sync: ${cx.nameOf(root)}'s root already has ${holder}'s files.${restarted}`);
   else out(`Synced ${holder} onto ${cx.nameOf(root)}.${restarted}`);
   return 0;

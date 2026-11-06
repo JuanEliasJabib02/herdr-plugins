@@ -405,6 +405,7 @@ test("reconcileRepo: the port of Orca's reconcile, plus orphan refs, deciding fr
   assert.deepEqual(reconcileRepo(diverged.record, { ...REFS, rootHeadSha: "other" }, 10), { action: "keep" });
   const orphan = reconcileRepo(null, REFS, 9);
   assert.equal(orphan.action, "orphan");
+  assert.equal(orphan.record.lastError.message, "Hay refs de Spotlight en este repo sin registro de quién las tiene; apagar Spotlight restaura el root desde ellas.");
   assert.deepEqual(orphan.record, {
     ...emptyRepo(), lastSnapshotSha: "s1", lastError: { code: "orphan-refs", message: orphan.record.lastError.message, at: 9 },
   });

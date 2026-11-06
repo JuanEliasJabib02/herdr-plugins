@@ -152,7 +152,7 @@ export function rememberVariant(state, key, variant) {
 
 const ROOT_DIVERGED = "El root se movió del snapshot de Spotlight.";
 const ORPHAN_REFS =
-  "Spotlight refs are in this repository with no record of who holds them; turning Spotlight off restores the root from them.";
+  "Hay refs de Spotlight en este repo sin registro de quién las tiene; apagar Spotlight restaura el root desde ellas.";
 
 // Refs win (port of Orca's reconcile, spotlight-service.ts:239-280), for one
 // repo. `record`: its state record or null. `refs`: T1's readRefs(root)
