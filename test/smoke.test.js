@@ -45,6 +45,17 @@ test("projects layout: tree replaces Spaces, groups block sits above the footer"
   assert.deepEqual(groups.size, { px: 44 });
 });
 
+test("projects layout: the status bar is a row, workspace-status then the claude-accounts footer (claude-accounts D10)", () => {
+  const status = find(read("layouts/projects.json"), "status");
+  assert.equal(status.type, "row");
+  assert.equal(status.resizable, false);
+  assert.deepEqual(status.size, { px: 28 });
+  assert.deepEqual(status.children, [
+    { id: "status-workspace", type: "block", size: { weight: 1 }, content: { mod: "workspace-status" } },
+    { id: "status-usage", type: "block", size: { weight: 1 }, content: { mod: "claude-accounts", props: { view: "footer" } } },
+  ]);
+});
+
 test("the workspace menu is a view of the mod (D20)", () => {
   const src = (f) => readFileSync(new URL(`../projects-sidebar/mods/projects/${f}`, import.meta.url), "utf8");
   assert.match(src("main.js"), /"workspace-menu":\s*WorkspaceMenu/);

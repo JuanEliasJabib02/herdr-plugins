@@ -182,13 +182,36 @@
         },
         {
           "id": "status",
-          "type": "block",
+          "type": "row",
+          "resizable": false,
           "size": {
             "px": 28
           },
-          "content": {
-            "mod": "workspace-status"
-          }
+          "children": [
+            {
+              "id": "status-workspace",
+              "type": "block",
+              "size": {
+                "weight": 1
+              },
+              "content": {
+                "mod": "workspace-status"
+              }
+            },
+            {
+              "id": "status-usage",
+              "type": "block",
+              "size": {
+                "weight": 1
+              },
+              "content": {
+                "mod": "claude-accounts",
+                "props": {
+                  "view": "footer"
+                }
+              }
+            }
+          ]
         }
       ]
     }

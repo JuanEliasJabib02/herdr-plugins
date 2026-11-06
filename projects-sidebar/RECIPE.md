@@ -325,7 +325,11 @@ across repos.
 - **Layout `layouts/projects.json`:** Herdr's `main` tree with block
   `spaces` → `{ "mod": "projects" }`, and a new block `groups` →
   `{ "mod": "projects", "props": { "view": "groups" } }` (px 44) between
-  `sidebar-lists` and `sidebar-footer`. Preview `layouts/projects.svg`.
+  `sidebar-lists` and `sidebar-footer`. The status bar (`status`, px 28)
+  is a row: `workspace-status`, then `{ "mod": "claude-accounts", "props":
+  { "view": "footer" } }`, Claude's usage at its right as in Orca, both
+  weight 1 (the claude-accounts plugin draws it). Preview
+  `layouts/projects.svg`.
 - **Mod `mods/projects/`** (`mod.json` `{ "place": "none" }`), one mod in
   views picked by `props.view`:
   - none = `tree.js` (the tree; the only copy that reads key commands);
