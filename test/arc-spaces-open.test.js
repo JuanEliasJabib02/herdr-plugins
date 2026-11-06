@@ -321,23 +321,53 @@ test("a terminal hc can't read is skipped, as the sidebar skips a pane with no f
   assert.deepEqual(logOf("hc"), ["gone", "t2"]);
 });
 
-test("a hung hc: stopped at the deadline, then the folder the space was made in", () => {
+// A fake hc for the timing tests, run once before the test: macOS can take
+// seconds to start a script the first time, which would eat the limit before
+// any terminal is asked and let the test pass without testing anything.
+function slowHc(body) {
+  const path = tool("hc", `[ "$1" = warm ] && exit 0\nprintf '%s\\n' "$2" >> "${join(dir, "hc.log")}"\n${body}`);
+  spawnSync(path, ["warm"]);
+}
+
+// Whether a process whose command line holds `marker` is still running.
+const running = (marker) => spawnSync("pgrep", ["-f", marker]).status === 0;
+
+test("a hung hc: stopped at the limit with what it started, then the folder the space was made in", () => {
   lsAnswer([space("/repos/ag", withTerminals("t1", "t2"))]);
-  tool("hc", `printf '%s\\n' "$2" >> "${join(dir, "hc.log")}"\nexec sleep 600`);
+  // A number no other command line holds, so pgrep finds only this sleep.
+  const marker = `sleep ${700_000 + Math.floor(Math.random() * 100_000)}`;
+  slowHc(`exec ${marker}`);
   const started = Date.now();
-  run([URL_A], { env: { ARC_SPACES_HC_TIMEOUT: "1" } });
+  run([URL_A], { env: { ARC_SPACES_HC_TIMEOUT: "3" } });
   assert.ok(Date.now() - started < 300_000, "it must not wait for the sleep to end");
   assertRouted("Bulbasour");
-  assert.ok(!(logOf("hc") ?? []).includes("t2"), "nothing is asked after the deadline");
+  assert.deepEqual(logOf("hc"), ["t1"], "t1 is asked, and nothing after the limit");
+  spawnSync("sleep", ["0.3"]);
+  assert.equal(running(marker), false, "the hung hc is killed, not left behind");
 });
 
-test("many terminals hc can't read share one deadline", () => {
+test("many terminals hc can't read share one limit", () => {
   const terminals = Array.from({ length: 10 }, (_, i) => `t${i + 1}`);
   lsAnswer([space("/repos/ag", withTerminals(...terminals))]);
-  tool("hc", `printf '%s\\n' "$2" >> "${join(dir, "hc.log")}"\nsleep 0.6\nexit 1`);
-  run([URL_A], { env: { ARC_SPACES_HC_TIMEOUT: "1" } });
+  slowHc("sleep 0.6\nexit 1");
+  run([URL_A], { env: { ARC_SPACES_HC_TIMEOUT: "2" } });
   assertRouted("Bulbasour");
-  assert.ok((logOf("hc") ?? []).length < terminals.length, `asked ${logOf("hc")?.length} terminals`);
+  const asked = logOf("hc") ?? [];
+  assert.ok(asked.length >= 1 && asked.length < terminals.length, `asked ${asked.length} terminals`);
+});
+
+test("a repeated group id: only the first group counts, as parseRegistry keeps it", () => {
+  const dup = { id: "g1", name: "Dup", projects: [project("/repos/action")] };
+  writeShared(shared(undefined, { "projects.v1": { ...GROUPS, groups: [{ id: "g1", name: "Action Experience", projects: [project("/repos/other")] }, ...GROUPS.groups.slice(1), dup] } }));
+  run([URL_A]);
+  assertRouted("Personal");
+});
+
+test("a registry of another version reads as the sidebar's empty one: g1, active", () => {
+  lsAnswer([space("/repos/ag")]);
+  writeShared(shared(undefined, { "projects.v1": { ...GROUPS, version: 2 } }));
+  run([URL_A]);
+  assertRouted("Action");
 });
 
 test("a checkout the sidebar would drop takes its whole project with it", () => {
@@ -472,10 +502,10 @@ test("no shared.json: the real open", () => {
   assertPassedThrough([URL_A]);
 });
 
-test("a stored registry of the wrong shape: the real open", () => {
+test("a stored registry of the wrong shape reads as the sidebar's empty one: g1", () => {
   writeShared(shared(undefined, { "projects.v1": "nope", "projects.cache.v1": 7 }));
   run([URL_A]);
-  assertPassedThrough([URL_A]);
+  assertRouted("Action");
 });
 
 // ── The file itself ────────────────────────────────────────────────────────
