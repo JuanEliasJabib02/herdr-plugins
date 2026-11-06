@@ -15,6 +15,7 @@
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
+import { setTimeout as sleep } from "node:timers/promises";
 import {
   chmodSync,
   existsSync,
@@ -466,6 +467,31 @@ test("use writes the account's exact config dir (spaces, no trailing slash, no n
   writeFileSync(join(s.state, "accounts.json"), JSON.stringify([{ id: C, email: "ben@example.org", org: "Acme", orgUuid: ORG_B, configDir: odd, lastAuthenticatedAt: null, source: "herdr" }]));
   s.cli(["use", C]);
   assert.equal(s.read("active"), odd);
+});
+
+test("use to another account starts reading its usage at once, without waiting for it; to the same one it starts nothing (D22)", async () => {
+  const s = sandbox();
+  orcaProfile(s.home, A, ANA);
+  orcaProfile(s.home, B, BEN);
+  orcaDb(s.home, { claudeManagedAccounts: [orcaRow(A, ANA, 1), orcaRow(B, BEN, 2)], activeClaudeManagedAccountId: A });
+  listJson(s);
+  const state = () => (existsSync(join(s.state, "usage-state.json")) ? JSON.parse(s.read("usage-state.json")).accounts ?? {} : {});
+
+  // The same account: nothing to read.
+  assert.equal(s.cli(["use", A]).status, 0);
+  await sleep(1500);
+  assert.deepEqual(Object.keys(state()), []);
+
+  const started = Date.now();
+  const r = s.cli(["use", B, "--json"]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.ok(Date.now() - started < 8000, "use doesn't wait for the read");
+  // The read runs on its own: only B's, here with no login in the Keychain.
+  const read = () => state()[B]?.needsSignIn === true;
+  const deadline = Date.now() + 10_000;
+  while (!read() && Date.now() < deadline) await sleep(100);
+  assert.ok(read(), `B's usage was read: ${JSON.stringify(state()[B])}`);
+  assert.equal(state()[A], undefined, "only the new account's");
 });
 
 test("use refuses an unknown account with 7 and a missing id with 64, writing nothing", () => {

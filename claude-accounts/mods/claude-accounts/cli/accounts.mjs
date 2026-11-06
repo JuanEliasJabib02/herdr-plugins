@@ -37,7 +37,7 @@ import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { parseArgs, promisify } from "node:util";
-import { FILES, claudeStateFile, defaultConfigDir, orcaRoots, profilesHome, stateHome } from "./paths.mjs";
+import { FILES, claudeStateFile, cliPath, defaultConfigDir, orcaRoots, profilesHome, stateHome } from "./paths.mjs";
 import { failure, readJson, rebuildContract, render, withLock, writeAtomic } from "./files.mjs";
 import { afterUse } from "./restart.mjs";
 import { forgetUsage } from "./usage.mjs";
@@ -367,10 +367,20 @@ async function writeActive(target) {
   });
 }
 
+// The new account's numbers, read now and on their own (D22): Orca's
+// refreshForClaudeAccountChange with force. A failed read never undoes the
+// switch, and `use` doesn't wait for it.
+function readUsageOf(id) {
+  const child = spawn(process.execPath, [cliPath(), "usage", "--refresh", "--account", id, "--json"], { detached: true, stdio: "ignore", cwd: "/" });
+  child.on("error", () => {});
+  child.unref();
+}
+
 export async function use(args) {
   const { values, positionals } = parseArgs({ args, options: { json: { type: "boolean" } }, strict: true, allowPositionals: true });
   if (positionals.length !== 1) throw usageError("use <id|default>");
   const { from, to } = await writeActive(positionals[0]);
+  if (from !== to) readUsageOf(to);
   // The terminals still on `from` follow settings.switchMode (D8, T4).
   if (from !== to) await afterUse(from, to);
   const { switchMode } = await readSettings(stateHome());
