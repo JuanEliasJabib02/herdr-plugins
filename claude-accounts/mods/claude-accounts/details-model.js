@@ -18,7 +18,7 @@
 //
 //   RANGES, DEFAULT_RANGE, RANGE_LABELS   the picker: Orca's 7d, 30d, 90d, all
 //   pickRange(value)                      a known range, else the default
-//   formatTokens(n)                       Orca's "18.5M", "1.5k", "999"
+//   formatTokens(n)                       Orca's "18.5M", "1.5k", "999", plus "4.8B"
 //   formatCount(n)                        "2,310"
 //   formatActiveTime(seconds)             "45m", "3h 5m", "42h"
 //   chartBars(daily)                      the daily chart's bars
@@ -57,9 +57,11 @@ export function pickRange(value) {
 // Orca's formatTokens (stats/usage-formatters.ts): one decimal past a
 // thousand and past a million, else the count. Rounded half up on the
 // decimal value (Orca's toFixed reads 1,450,000 as "1.4M", a binary-float
-// artifact), and 999,950 reads "1.0M", not "1000.0k". Not a number: "n/a".
+// artifact), and 999,950 reads "1.0M", not "1000.0k". Past a billion it
+// reads "4.8B" where Orca would print "4808.5M". Not a number: "n/a".
 export function formatTokens(n) {
   if (!isNumber(n)) return "n/a";
+  if (Math.abs(n) >= 999_950_000) return `${(Math.round(n / 100_000_000) / 10).toFixed(1)}B`;
   if (Math.abs(n) >= 999_950) return `${(Math.round(n / 100_000) / 10).toFixed(1)}M`;
   if (Math.abs(n) >= 1_000) return `${(Math.round(n / 100) / 10).toFixed(1)}k`;
   return formatCount(n);

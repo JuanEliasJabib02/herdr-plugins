@@ -388,6 +388,9 @@ test("numbers: Orca's token format, counts with separators, active time in hours
   assert.equal(formatTokens(18450000), "18.5M");
   assert.equal(formatTokens(1450000), "1.5M");
   assert.equal(formatTokens(999950), "1.0M");
+  assert.equal(formatTokens(4808500000), "4.8B");
+  assert.equal(formatTokens(999950000), "1.0B");
+  assert.equal(formatTokens(999949999), "999.9M");
   assert.equal(formatTokens(1500), "1.5k");
   assert.equal(formatTokens(999), "999");
   assert.equal(formatTokens(0), "0");
