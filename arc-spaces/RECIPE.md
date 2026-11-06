@@ -40,8 +40,10 @@ found first and acts only when Herdr itself ran it with one http(s) link. It
 asks Herdr which space is shown and where it is now (its first terminal's
 folder, the way the projects sidebar places it), finds that place's group, and
 runs Orca's AppleScript on Arc. Anything else, and anything that fails (the
-space doesn't exist in Arc, Herdr takes over 3 seconds on one question, Arc
-over 10), goes to `/usr/bin/open`.
+space doesn't exist in Arc, Herdr doesn't say which space is shown within 3
+seconds, Arc doesn't answer within 10), goes to `/usr/bin/open`. If the
+terminals' folders can't be read within 3 seconds, the space's own folder is
+used instead.
 
 | | Where the link opens |
 |---|---|

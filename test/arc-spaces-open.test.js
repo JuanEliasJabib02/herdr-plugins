@@ -45,19 +45,24 @@ const hcAnswer = (records) => tool("hc", [
   "esac",
 ].join("\n"));
 
+// The shapes projects-sidebar writes: a project has a name, a checkout its
+// branch and whether it's the main one (lib.js isProject, isCheckout).
+const project = (path) => ({ path, name: path.split("/").pop() });
+const checkout = (path, main = false) => ({ path, branch: main ? "main" : "feature", main });
+
 const GROUPS = {
   version: 1,
   activeGroup: "g2",
   groups: [
-    { id: "g1", name: "Action Experience", projects: [{ path: "/repos/action" }] },
-    { id: "g2", name: "Arrecife", projects: [{ path: "/repos/mine" }] },
-    { id: "g3", name: "AG", projects: [{ path: "/repos/ag" }] },
+    { id: "g1", name: "Action Experience", projects: [project("/repos/action")] },
+    { id: "g2", name: "Arrecife", projects: [project("/repos/mine")] },
+    { id: "g3", name: "AG", projects: [project("/repos/ag")] },
   ],
 };
 const CACHE = {
-  "/repos/action": [{ path: "/repos/action", main: true }, { path: "/work/action/feature" }],
-  "/repos/mine": [{ path: "/repos/mine", main: true }],
-  "/repos/ag": [{ path: "/repos/ag", main: true }, { path: "/repos/mine/nested-ag" }],
+  "/repos/action": [checkout("/repos/action", true), checkout("/work/action/feature")],
+  "/repos/mine": [checkout("/repos/mine", true)],
+  "/repos/ag": [checkout("/repos/ag", true), checkout("/repos/mine/nested-ag")],
 };
 const NAMES = { g1: "Action", g2: "Personal", g3: "Bulbasour" };
 
@@ -87,7 +92,8 @@ function run(args, { parent = herdrParent, env = {} } = {}) {
       // Under the whole suite macOS can take over 10 s to run a new script, so
       // the real limits would stop the fakes and fail the test.
       ARC_SPACES_TIMEOUT: "300",
-      ARC_SPACES_LOOKUP_TIMEOUT: "300",
+      ARC_SPACES_LS_TIMEOUT: "300",
+      ARC_SPACES_HC_TIMEOUT: "300",
       ...env,
     },
   });
@@ -245,7 +251,7 @@ test("only the shown space counts", () => {
 });
 
 test("a trailing slash in a stored path still matches", () => {
-  writeShared(shared(undefined, { "projects.cache.v1": { "/repos/action/": [{ path: "/repos/action/" }] } }));
+  writeShared(shared(undefined, { "projects.cache.v1": { "/repos/action/": [checkout("/repos/action/", true)] } }));
   run([URL_A]);
   assertRouted("Action");
 });
@@ -315,13 +321,42 @@ test("a terminal hc can't read is skipped, as the sidebar skips a pane with no f
   assert.deepEqual(logOf("hc"), ["gone", "t2"]);
 });
 
-test("a hung hc: stopped at the limit, then the folder the space was made in", () => {
+test("a hung hc: stopped at the deadline, then the folder the space was made in", () => {
   lsAnswer([space("/repos/ag", withTerminals("t1", "t2"))]);
-  tool("hc", "exec sleep 600");
+  tool("hc", `printf '%s\\n' "$2" >> "${join(dir, "hc.log")}"\nexec sleep 600`);
   const started = Date.now();
-  run([URL_A], { env: { ARC_SPACES_LOOKUP_TIMEOUT: "1" } });
+  run([URL_A], { env: { ARC_SPACES_HC_TIMEOUT: "1" } });
   assert.ok(Date.now() - started < 300_000, "it must not wait for the sleep to end");
   assertRouted("Bulbasour");
+  assert.ok(!(logOf("hc") ?? []).includes("t2"), "nothing is asked after the deadline");
+});
+
+test("many terminals hc can't read share one deadline", () => {
+  const terminals = Array.from({ length: 10 }, (_, i) => `t${i + 1}`);
+  lsAnswer([space("/repos/ag", withTerminals(...terminals))]);
+  tool("hc", `printf '%s\\n' "$2" >> "${join(dir, "hc.log")}"\nsleep 0.6\nexit 1`);
+  run([URL_A], { env: { ARC_SPACES_HC_TIMEOUT: "1" } });
+  assertRouted("Bulbasour");
+  assert.ok((logOf("hc") ?? []).length < terminals.length, `asked ${logOf("hc")?.length} terminals`);
+});
+
+test("a checkout the sidebar would drop takes its whole project with it", () => {
+  writeShared(shared(undefined, { "projects.cache.v1": { ...CACHE, "/repos/action": [checkout("/repos/action", true), { path: "/work/action/feature" }] } }));
+  run([URL_A]);
+  assertRouted("Personal");
+});
+
+test("a project with no name counts for nothing, as the sidebar drops it", () => {
+  writeShared(shared(undefined, { "projects.v1": { ...GROUPS, groups: [{ id: "g1", name: "Action Experience", projects: [{ path: "/repos/action" }] }, ...GROUPS.groups.slice(1)] } }));
+  run([URL_A]);
+  assertRouted("Personal");
+});
+
+test("a group the sidebar would drop isn't the fallback", () => {
+  lsAnswer([space("/Users/someone")]);
+  writeShared(shared(undefined, { "projects.v1": { ...GROUPS, activeGroup: "gone", groups: [{ id: "", name: "No id", projects: [] }, ...GROUPS.groups.slice(1)] } }));
+  run([URL_A]);
+  assertRouted("Personal");
 });
 
 test("a space on another machine: its terminals aren't asked", () => {
@@ -335,8 +370,8 @@ test("a space on another machine: its terminals aren't asked", () => {
 test("~ in the space's place is the home folder, as projects-sidebar reads it", () => {
   const action = join(dir, "repos/action");
   writeShared(shared(undefined, {
-    "projects.v1": { ...GROUPS, groups: [{ id: "g1", name: "Action Experience", projects: [{ path: action }] }, ...GROUPS.groups.slice(1)] },
-    "projects.cache.v1": { [action]: [{ path: action }] },
+    "projects.v1": { ...GROUPS, groups: [{ id: "g1", name: "Action Experience", projects: [project(action)] }, ...GROUPS.groups.slice(1)] },
+    "projects.cache.v1": { [action]: [checkout(action, true)] },
   }));
   lsAnswer([space("~/repos/action/src")]);
   run([URL_A]);
@@ -345,8 +380,8 @@ test("~ in the space's place is the home folder, as projects-sidebar reads it", 
 
 test("a stored path that isn't absolute counts for nothing, as projects-sidebar drops it", () => {
   writeShared(shared(undefined, {
-    "projects.v1": { ...GROUPS, groups: [{ id: "g1", name: "Action Experience", projects: [{ path: "~/repos/action" }] }, ...GROUPS.groups.slice(1)] },
-    "projects.cache.v1": { "~/repos/action": [{ path: "~/repos/action" }], "/repos/ag": [{ path: "/repos/ag" }, { path: "relative/ag" }] },
+    "projects.v1": { ...GROUPS, groups: [{ id: "g1", name: "Action Experience", projects: [project("~/repos/action")] }, ...GROUPS.groups.slice(1)] },
+    "projects.cache.v1": { "~/repos/action": [checkout("~/repos/action", true)], "/repos/ag": [checkout("/repos/ag", true), checkout("relative/ag")] },
   }));
   for (const folder of [join(dir, "repos/action"), "/repos/ag"]) {
     lsAnswer([space(folder)]);
@@ -408,7 +443,7 @@ test("an osascript that can't start: the real open", () => {
 test("a hung Herdr ls: stopped at the limit, then the real open", () => {
   tool("herdr", "exec sleep 600");
   const started = Date.now();
-  run([URL_A], { env: { ARC_SPACES_LOOKUP_TIMEOUT: "1" } });
+  run([URL_A], { env: { ARC_SPACES_LS_TIMEOUT: "1" } });
   assert.ok(Date.now() - started < 300_000, "it must not wait for the sleep to end");
   assertPassedThrough([URL_A]);
 });
