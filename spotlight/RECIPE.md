@@ -24,3 +24,18 @@ Probed 2026-11-06 against Herdr's hc, on a throwaway terminal `sl-probe` (create
   - `hc send` to a finished terminal exits 11 with `finished`.
   - After `hc kill`, the terminal reads `state: "finished"`, `reason: "killed"`, with no `foreground`. `hc get <name>` still finds it until `hc rm`, so `server.js` removes a finished server terminal before creating a new one.
   - `hc run --json` prints the new terminal's `address`.
+
+## Badge command probe
+
+Probed 2026-11-06 in Herdr 0.1.13, with a throwaway mod (`zz-sl-cmd-probe`, `{"place":"none"}`, shown as a `kind: "window"` overlay through `mod.open`, then closed and its folder removed). `badges.js` relies on what it showed.
+
+- Dynamic command names reach `nextCommand()`. `herdr-app do zz-sl-cmd-probe.server.0a1b2c3d4e5f` from a shell, and `run("zz-sl-cmd-probe.server.fedcba987654")` from inside a mod (what projects-sidebar's badge click does), both arrived. `nextCommand()` yielded `server.0a1b2c3d4e5f` and `server.fedcba987654`: the name without the mod's prefix, dots kept. So the server badge uses `{ "command": "spotlight.server.<id>" }`, and D17's exec fallback (`ui.request` in state.json) isn't needed.
+- With no shown copy, Herdr refuses the command (`unknown command "…": a mod's are <mod>.<command> and need the mod loaded`) and doesn't queue it: a copy opened afterwards got nothing. So the server badge and the error toasts open the popup only while the footer copy is in the layout (D20).
+- What remains: Herdr's `seen.json` keeps the probe's name, as it keeps every mod folder it has seen.
+
+## Badges, auto-sync and the server popup
+
+- `badges.js` (footer copy only) publishes `badges.spotlight` per projects-sidebar's contract: a flashlight (amber on the holder's and the root's rows, dim on the other worktrees of an enabled repo, red on an error), the server (`:3000`, `:3000+1`, `…`, red when stopped or gone) and the queue state (flask, clock + `#N`, pause), at most three per row, written only when the value changes. The model is `badges-model.js`.
+- The server badge's id is the first 12 hex chars of sha1(workspace path), the same id the CLI puts in its error toasts' action (`cli-work.mjs` serverId). `badges-model.js` computes SHA-1 itself, so the id doesn't depend on the runtime's crypto.
+- `autosync.js` watches each holder's folder. It drops batches made only of Orca's ignored folders (`.git`, `node_modules`, `dist`, `build`, `.next`, `.cache`, `target`, `.venv`, `__pycache__`) and test output (`test-results`, `playwright-report`, `blob-report`, `coverage`), at any depth. After 300 ms of quiet it runs `spotlight sync --repo <root> --detach`. The filter is `watch-filter.js`.
+- The server popup (`server-view.js`, model `server-view-model.js`) runs the CLI for every control. Proyectar igual runs `light --task <k> --force`, which works inline, through `sh -c 'nohup "$0" "$@" … &'`, so exec's 30 s limit can't cut a lighting short. The argv go in as positional args.
