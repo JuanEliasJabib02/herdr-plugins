@@ -65,7 +65,7 @@ test("off: Sleep now still stops a Claude, and showing its tab wakes it", async 
   assert.equal(records(w).t1?.state, "asleep");
   show(w, "back");
   await at(co, w, NOW + 3_000);
-  assert.deepEqual(resumes(w).map((s) => s.text), [`claude --dangerously-skip-permissions --resume ${SID1}`]);
+  assert.deepEqual(resumes(w).map((s) => s.text), [`CLAUDE_ACCOUNTS_DIR='' claude --dangerously-skip-permissions --resume ${SID1}`]);
 });
 
 test("off: a Claude already asleep keeps its record and still wakes when shown", async () => {
@@ -89,7 +89,7 @@ test("off: Wake all resumes a Claude asleep in a hidden tab, exactly once", asyn
   await at(co, w, NOW + 1_000);
   await at(co, w, NOW + 2_000);
   await at(co, w, NOW + MIN);
-  assert.deepEqual(resumes(w).map((s) => s.text), [`claude --dangerously-skip-permissions --resume ${SID1}`]);
+  assert.deepEqual(resumes(w).map((s) => s.text), [`CLAUDE_ACCOUNTS_DIR='' claude --dangerously-skip-permissions --resume ${SID1}`]);
   assert.equal(records(w).t1, undefined);
 });
 

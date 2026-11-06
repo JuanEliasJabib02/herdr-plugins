@@ -3,9 +3,11 @@
 // shaped like herdr's `exec(cmd, args)` → { code, stdout, stderr } and a
 // text reader, so the coordinator passes the real ones and tests pass fakes.
 //
-// Claude Code 2.1.318 writes `~/.claude/sessions/<pid>.json` for every
-// running Claude: { pid, sessionId, cwd, procStart, kind, status, ... }. It
-// is trusted only when:
+// Claude Code 2.1.318 writes `<config dir>/sessions/<pid>.json` for every
+// running Claude: { pid, sessionId, cwd, procStart, kind, status, ... }. The
+// config dir is `~/.claude` (System default) or the CLAUDE_CONFIG_DIR it runs
+// with: a claude-accounts account or an Orca profile (D15). It is trusted only
+// when:
 //   - Core's foreground.name says Claude (claude, or claude.exe as the OS
 //     names the native binary);
 //   - its procStart equals `TZ=UTC ps -o lstart= -p <pid>` (runs of spaces
@@ -13,10 +15,12 @@
 //   - kind is "interactive";
 //   - sessionId passes Orca's check (agent-session-resume.ts:115-131);
 //   - its transcript exists, found by id with
-//     `find ~/.claude/projects -maxdepth 2 -name <id>.jsonl` (Claude hashes
-//     folder names past 200 chars, so the folder is never rebuilt from cwd).
-// A Claude run with another CLAUDE_CONFIG_DIR writes its file elsewhere, so
-// it fails here as `no-session-file` and never sleeps (RECIPE "Watch out").
+//     `find -H <config dir>/projects -maxdepth 2 -name <id>.jsonl` (Claude
+//     hashes folder names past 200 chars, so the folder is never rebuilt from
+//     cwd; a profile's projects/ is a symlink to ~/.claude/projects, which
+//     -H follows).
+// Which config dir: the first candidate (loadConfigDirs) whose file passes
+// those checks. A Claude whose file is in none of them never sleeps.
 //
 // After /exit, Claude prints "Resume this session with:" and the command;
 // the id there wins over the file's (it follows /clear), taken only from a
@@ -65,15 +69,35 @@ export function normalizeSessionId(value) {
 // edge; a cut UUID is no longer one.
 const CLAUDE_HINT_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+// ── A Claude's config dir (D15) ────────────────────────────────────────────
+
+// The one check on a config dir, wherever one comes from: the candidate list,
+// a stored record (store.js) and the resume command (resume.js). An absolute
+// path with no control character (C0, DEL, C1). System default is null, never
+// a string. The string is never normalized: the claude launcher and the
+// Keychain key on it exactly, trailing slash included.
+export function isConfigDir(value) {
+  return typeof value === "string" && value.startsWith("/") && !/\p{Cc}/u.test(value);
+}
+
 // ── Paths and commands (argv arrays; the coordinator runs them) ───────────
 
 const isPid = (pid) => Number.isSafeInteger(pid) && pid > 0;
 const isHome = (home) => typeof home === "string" && home.startsWith("/") && home.length > 1;
 const trimSlash = (path) => path.replace(/\/+$/, "");
 
-export function sessionFilePath(home, pid) {
-  if (!isHome(home) || !isPid(pid)) return null;
-  return `${trimSlash(home)}/.claude/sessions/${pid}.json`;
+// The folder Claude keeps its files in: the config dir (only for building
+// paths: `/x/home/` and `/x/home` are the same folder), or ~/.claude for
+// System default (null). Null when either fails its check.
+function configFolder(home, configDir) {
+  if (configDir === null || configDir === undefined) return isHome(home) ? `${trimSlash(home)}/.claude` : null;
+  return isConfigDir(configDir) ? trimSlash(configDir) : null;
+}
+
+export function sessionFilePath(home, pid, configDir = null) {
+  const folder = configFolder(home, configDir);
+  if (folder === null || !isPid(pid)) return null;
+  return `${folder}/sessions/${pid}.json`;
 }
 
 // `TZ=UTC ps -o lstart= -p <pid>`: `env` sets TZ so no shell is involved.
@@ -135,19 +159,23 @@ export function checkSession({ pid, foregroundName, file, procStart } = {}) {
 
 // ── The transcript, found by id ────────────────────────────────────────────
 
-export function transcriptLookupCommand(home, sessionId) {
+// `-H` follows the start point when it is a symlink (a profile's projects/
+// links to ~/.claude/projects) and nothing under it.
+export function transcriptLookupCommand(home, sessionId, configDir = null) {
   const id = normalizeSessionId(sessionId);
-  if (!isHome(home) || id === null) return null;
-  return ["find", `${trimSlash(home)}/.claude/projects`, "-maxdepth", "2", "-name", `${id}.jsonl`];
+  const folder = configFolder(home, configDir);
+  if (folder === null || id === null) return null;
+  return ["find", "-H", `${folder}/projects`, "-maxdepth", "2", "-name", `${id}.jsonl`];
 }
 
 // The first line of find's output that is exactly
-// `<home>/.claude/projects/<one folder>/<id>.jsonl`. `-name` is a glob, so
+// `<config dir>/projects/<one folder>/<id>.jsonl`. `-name` is a glob, so
 // an id with `*` could list other transcripts: only the exact name counts.
-export function parseTranscriptLookup(stdout, { home, sessionId } = {}) {
+export function parseTranscriptLookup(stdout, { home, sessionId, configDir = null } = {}) {
   const id = normalizeSessionId(sessionId);
-  if (typeof stdout !== "string" || !isHome(home) || id === null) return null;
-  const root = `${trimSlash(home)}/.claude/projects/`;
+  const folder = configFolder(home, configDir);
+  if (typeof stdout !== "string" || folder === null || id === null) return null;
+  const root = `${folder}/projects/`;
   const name = `/${id}.jsonl`;
   for (const line of stdout.split("\n")) {
     if (!line.startsWith(root) || !line.endsWith(name)) continue;
@@ -168,30 +196,133 @@ async function run(exec, argv) {
   }
 }
 
-// { home, pid, foregroundName } and { readText(path), exec(cmd, args) } →
-// checkSession's result plus `transcript` (its path, or null when none was
-// found: rules.js's `no-transcript`). Never throws: a read or exec that
-// fails is a refusal. ps's output counts only when it exited 0; find's
-// stdout counts whatever its exit code (unreadable folders make it exit 1
-// while still listing what it found).
-export async function loadSession({ home, pid, foregroundName } = {}, { readText, exec } = {}) {
-  if (!isClaudeName(foregroundName)) return { ok: false, reason: "not-claude" };
-  const path = sessionFilePath(home, pid);
-  if (path === null) return { ok: false, reason: "bad-pid" };
-  let file = null;
+async function read(readText, path) {
   try {
-    file = await readText(path);
+    const text = await readText(path);
+    return text === undefined ? null : text;
   } catch {
-    file = null;
+    return null;
   }
-  if (file === null || file === undefined) return { ok: false, reason: "no-session-file" };
-  const ps = await run(exec, procStartCommand(pid));
-  const procStart = ps && ps.code === 0 ? ps.stdout : null;
-  const checked = checkSession({ pid, foregroundName, file, procStart });
-  if (!checked.ok) return checked;
-  const found = await run(exec, transcriptLookupCommand(home, checked.sessionId));
-  const transcript = found ? parseTranscriptLookup(found.stdout, { home, sessionId: checked.sessionId }) : null;
-  return { ...checked, transcript };
+}
+
+// { home, pid, foregroundName, configDirs } and { readText(path),
+// exec(cmd, args) } → checkSession's result plus `configDir` (the candidate
+// whose file passed, exactly as given; null for ~/.claude) and `transcript`
+// (its path, or null when none was found: rules.js's `no-transcript`).
+// `configDirs` is loadConfigDirs' list, ~/.claude alone by default; a
+// candidate failing isConfigDir is skipped unread. ps runs once, at the first
+// file found. With no file passing: the first failure, or `no-session-file`
+// when no candidate had one. Never throws: a read or exec that fails is a
+// refusal. ps's output counts only when it exited 0; find's stdout counts
+// whatever its exit code (unreadable folders make it exit 1 while still
+// listing what it found).
+export async function loadSession({ home, pid, foregroundName, configDirs = [null] } = {}, { readText, exec } = {}) {
+  if (!isClaudeName(foregroundName)) return { ok: false, reason: "not-claude" };
+  if (sessionFilePath(home, pid) === null) return { ok: false, reason: "bad-pid" };
+  let procStart;
+  let failure = null;
+  for (const configDir of Array.isArray(configDirs) ? configDirs : [null]) {
+    const path = sessionFilePath(home, pid, configDir);
+    if (path === null) continue;
+    const file = await read(readText, path);
+    if (file === null) continue;
+    if (procStart === undefined) {
+      const ps = await run(exec, procStartCommand(pid));
+      procStart = ps && ps.code === 0 ? ps.stdout : null;
+    }
+    const checked = checkSession({ pid, foregroundName, file, procStart });
+    if (!checked.ok) {
+      failure ??= checked;
+      continue;
+    }
+    const dir = configDir ?? null;
+    const found = await run(exec, transcriptLookupCommand(home, checked.sessionId, dir));
+    const transcript = found ? parseTranscriptLookup(found.stdout, { home, sessionId: checked.sessionId, configDir: dir }) : null;
+    return { ...checked, configDir: dir, transcript };
+  }
+  return failure ?? { ok: false, reason: "no-session-file" };
+}
+
+// ── Where a Claude's config dir can be (D15) ───────────────────────────────
+// As claude-accounts searches for a Claude's account (its cli/terminals.mjs
+// configDirs, cli/paths.mjs): System default, every saved account's exact
+// configDir, then every profile folder no account has. Read-only: this mod
+// never writes claude-accounts' files, nor needs it installed.
+
+// claude-accounts' list of saved accounts, under Herdr's home.
+export function accountsPath(appHome) {
+  return isHome(appHome) ? `${trimSlash(appHome)}/claude-accounts/accounts.json` : null;
+}
+
+// accounts.json → the saved accounts' config dirs, in file order. It is a
+// top-level JSON array (claude-accounts' readRegistry); anything else, or a
+// file that doesn't parse, gives none. Each element counts only for a
+// configDir that passes isConfigDir, kept exactly.
+export function parseAccounts(text) {
+  if (typeof text !== "string") return [];
+  let list;
+  try {
+    list = JSON.parse(text);
+  } catch {
+    return [];
+  }
+  if (!Array.isArray(list)) return [];
+  return list.filter((a) => isObject(a) && isConfigDir(a.configDir)).map((a) => a.configDir);
+}
+
+// The folders holding profile folders (`<root>/<name>/home`): Orca Dev's and
+// Orca's claude-profiles, then claude-accounts' own beside Herdr's home.
+export function profileRoots(home, appHome) {
+  const roots = [];
+  if (isHome(home)) {
+    const support = `${trimSlash(home)}/Library/Application Support`;
+    roots.push(`${support}/Orca Dev/claude-profiles`, `${support}/Orca/claude-profiles`);
+  }
+  if (isHome(appHome)) roots.push(`${trimSlash(appHome)}/claude-accounts-profiles`);
+  return roots;
+}
+
+// The folders right under a root (no listing API in Herdr, so `find`). -H
+// follows the root itself when it is a symlink; entries that are symlinks
+// aren't folders here, as for claude-accounts' readdir.
+export function profileListCommand(root) {
+  return ["find", "-H", root, "-mindepth", "1", "-maxdepth", "1", "-type", "d"];
+}
+
+// find's lines → `<root>/<name>/home` for each folder exactly one level down,
+// sorted (find lists in directory order).
+export function parseProfileList(stdout, root) {
+  if (typeof stdout !== "string" || typeof root !== "string") return [];
+  const prefix = `${root}/`;
+  const names = [];
+  for (const line of stdout.split("\n")) {
+    if (!line.startsWith(prefix)) continue;
+    const name = line.slice(prefix.length);
+    if (name !== "" && !name.includes("/")) names.push(name);
+  }
+  return names.sort().map((name) => `${prefix}${name}/home`);
+}
+
+// The candidates loadSession tries, in order: null (~/.claude), the saved
+// accounts' dirs, the profile folders; each string once, ~/.claude's own
+// path never as a string (it is System default). One read and up to three
+// listings. Never throws: what can't be read gives no candidate.
+export async function loadConfigDirs({ home, appHome } = {}, { readText, exec } = {}) {
+  const dirs = [null];
+  const seen = new Set(isHome(home) ? [`${trimSlash(home)}/.claude`] : []);
+  const add = (dir) => {
+    if (isConfigDir(dir) && !seen.has(dir)) {
+      seen.add(dir);
+      dirs.push(dir);
+    }
+  };
+  const accounts = accountsPath(appHome);
+  if (accounts !== null) for (const dir of parseAccounts(await read(readText, accounts))) add(dir);
+  for (const root of profileRoots(home, appHome)) {
+    const found = await run(exec, profileListCommand(root));
+    if (found) for (const dir of parseProfileList(found.stdout, root)) add(dir);
+  }
+  return dirs;
 }
 
 // ── The exit screen ────────────────────────────────────────────────────────

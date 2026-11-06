@@ -11,6 +11,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import {
   MIN, NOW, SID1, SHELL_BARE, EMPTY, setup, show, shellOf, exitClaude, records, resumes, exits, at,
+  ORCA_DEV_PROFILES, PROFILE, addClaude, addProfile,
 } from "./harness.js";
 
 const core = (name) => JSON.parse(readFileSync(new URL(`./fixtures/${name}`, import.meta.url), "utf8"));
@@ -64,9 +65,37 @@ test("lost in `hc server stop` (T0's fixture) + live record → asleep by restar
   await at(co, w, NOW + 2 * MIN + 1000);
   await at(co, w, NOW + 2 * MIN + 2000);
   await at(co, w, NOW + 3 * MIN);
-  assert.deepEqual(resumes(w).map((s) => s.text), [`claude --dangerously-skip-permissions --resume ${SID1}`]);
+  assert.deepEqual(resumes(w).map((s) => s.text), [`CLAUDE_ACCOUNTS_DIR='' claude --dangerously-skip-permissions --resume ${SID1}`]);
   assert.equal(records(w).t1, undefined, "claimed: never resumed twice");
   assert.match(w.notes.at(-1)?.title ?? "", /after a restart/);
+});
+
+// T10, D15: restart recovery brings a Claude back in the account it ran in,
+// so its live record has to carry the account (keepLive's `want`).
+test("a profile Claude lost in a restart comes back with its configDir", async () => {
+  const { w, co } = setup({ t1: false });
+  const dir = addProfile(w, ORCA_DEV_PROFILES, "p1");
+  addClaude(w, "t1", { pid: 100, fgPid: 200, sid: SID1, configDir: dir });
+  await at(co, w, NOW);
+  assert.equal(records(w).t1?.state, "live");
+  assert.equal(records(w).t1.configDir, PROFILE, "the live record carries the account");
+
+  serverStopped(w, "t1");
+  await at(co, w, NOW + MIN);
+  shellBackWithNewPid(w, "t1", 300);
+  w.holder = "h2";
+  await at(co, w, NOW + 2 * MIN);
+  assert.equal(records(w).t1?.state, "asleep");
+  assert.equal(records(w).t1.by, "restart");
+  assert.equal(records(w).t1.configDir, PROFILE);
+
+  show(w, "back");
+  await at(co, w, NOW + 2 * MIN + 1000);
+  await at(co, w, NOW + 3 * MIN);
+  assert.deepEqual(resumes(w).map((s) => s.text), [
+    `CLAUDE_ACCOUNTS_DIR='${PROFILE}' CLAUDE_CONFIG_DIR='${PROFILE}' claude --dangerously-skip-permissions --resume ${SID1}`,
+  ]);
+  assert.equal(records(w).t1, undefined, "claimed: never resumed twice");
 });
 
 // J-004: only the shell in front with the same root pid says "you ended it".

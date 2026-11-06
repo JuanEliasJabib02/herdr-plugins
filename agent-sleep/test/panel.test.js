@@ -222,7 +222,7 @@ test("sleep-now and wake-all: a request does what the key does", async () => {
   w.now = NOW + 3_000;
   ask(w, "r2", "wake-all");
   await at(co, w, NOW + 3_000);
-  assert.deepEqual(resumes(w).map((s) => s.text), [`claude --dangerously-skip-permissions --resume ${SID1}`]);
+  assert.deepEqual(resumes(w).map((s) => s.text), [`CLAUDE_ACCOUNTS_DIR='' claude --dangerously-skip-permissions --resume ${SID1}`]);
 });
 
 test("a key goes through the same table; an unknown one says so and does nothing", async () => {

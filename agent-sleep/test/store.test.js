@@ -270,3 +270,28 @@ test("records: an asleep record holding an env the resume can't replay survives 
   assert.deepEqual(loaded.records, records);
   assert.equal(io.files[P.sleepingBak], undefined, "not a bad file");
 });
+
+// T10, D15: the account a Claude slept in. `configDir` is an absolute path
+// with no control character (claude-session.js's isConfigDir, the one
+// predicate), or null for System default; a record without it, written
+// before T10, reads as System default.
+test("records: configDir is optional, null, or an absolute path with no control character, kept exactly", () => {
+  const ok = [undefined, null, "/Users/demo/Library/Application Support/Orca Dev/claude-profiles/p1/home", "/x/home/", "/it's/home"];
+  for (const configDir of ok) {
+    const records = { t1: configDir === undefined ? rec() : rec({ configDir }) };
+    const parsed = parseRecords(serializeRecords(records));
+    assert.equal(parsed.bad, false, `configDir ${JSON.stringify(configDir)}`);
+    assert.deepEqual(parsed.records, records);
+  }
+  for (const configDir of ["", "rel/home", "~/x", "/x\n/home", "/x\u0000", "/x\u0085", 7, ["/x"], {}]) {
+    const parsed = parseRecords(serializeRecords({ t1: rec({ configDir }), t2: rec() }));
+    assert.equal(parsed.bad, true, `configDir ${JSON.stringify(configDir)}`);
+    assert.deepEqual(Object.keys(parsed.records), ["t2"], `configDir ${JSON.stringify(configDir)}`);
+  }
+});
+
+test("records: the version stays 1; a record from before T10 (no configDir) still loads", () => {
+  const before = JSON.stringify({ version: 1, records: { t1: rec() } });
+  assert.deepEqual(parseRecords(before), { records: { t1: rec() }, bad: false });
+  assert.equal(JSON.parse(serializeRecords({ t1: rec({ configDir: "/x/home" }) })).version, 1);
+});

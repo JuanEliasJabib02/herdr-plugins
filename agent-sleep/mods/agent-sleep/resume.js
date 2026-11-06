@@ -1,8 +1,17 @@
 // The command typed into a terminal's shell to bring its Claude back (D8).
 // Pure: no herdr import, no I/O.
 //
-//   [cd <cwd> &&] claude <the user's flags> --resume <id>
+//   [cd <cwd> &&] CLAUDE_ACCOUNTS_DIR=<dir> [CLAUDE_CONFIG_DIR=<dir>] claude <the user's flags> --resume <id>
 //
+// - The account it slept in (D15), always first: CLAUDE_ACCOUNTS_DIR is the
+//   claude launcher's rule 1 (~/my-mac-scripts/bin/claude, herdr_account):
+//   set, even empty, it wins over claude-accounts' `active` file and is unset
+//   before Claude starts. '' is System default (~/.claude). A named account
+//   also gets CLAUDE_CONFIG_DIR, the same dir, so a shell without the
+//   launcher lands there too (claude-accounts' runLogin does both). The dir
+//   is the exact string, quoted, never normalized. What it decides is the
+//   login (org, usage limit, telemetry): every profile's projects/ links to
+//   ~/.claude/projects, so the conversation is found in any account.
 // - Bare `claude`, whatever path Core shows (argv[0] must be claude by
 //   Orca's isClaudeExecutableToken, agent-resume-launch-command.ts:20-23):
 //   the shell finds it again, so a launcher function re-adds its own env and
@@ -25,7 +34,7 @@
 //   binary); any other assignment refuses, so that Claude is never resumed
 //   without it (Log L10).
 
-import { normalizeSessionId } from "./claude-session.js";
+import { normalizeSessionId, isConfigDir } from "./claude-session.js";
 import { shellName } from "./prompt.js";
 
 // ── Claude Code 2.1.318 rjo() ──────────────────────────────────────────────
@@ -263,25 +272,33 @@ export const REPLAYABLE_ENV = Object.freeze(["CLAUDE_CODE_EXPERIMENTAL_CODE_MODE
 const hasControl = (s) => /[\u0000-\u001f\u007f]/.test(s);
 const sameTokens = (a, b) => a.length === b.length && a.every((t, i) => t === b[i]);
 
+// The assignments that put a resumed Claude in its account (D15).
+function accountWords(configDir) {
+  const dir = quoteArg(configDir ?? "");
+  return configDir == null ? [`CLAUDE_ACCOUNTS_DIR=${dir}`] : [`CLAUDE_ACCOUNTS_DIR=${dir}`, `CLAUDE_CONFIG_DIR=${dir}`];
+}
+
 // { flags (resumeFlags' list, as stored), sessionId, cwd (the session's),
 //   shellCwd (the shell's now; unknown → cd anyway), shell, env (optional,
-//   one of REPLAYABLE_ENV) }
+//   one of REPLAYABLE_ENV), configDir (the account's exact dir; null or
+//   absent for System default) }
 // → { ok: true, command } or { ok: false, reason }: "unsupported-shell",
 // "unsupported-env", "invalid-session-id", "bad-cwd" (not absolute, or a
-// control character), "bad-flags" (not what rjo would keep: the record was
-// edited or broken).
-export function resumeCommand({ flags, sessionId, cwd, shellCwd, shell, env } = {}) {
+// control character), "bad-config-dir" (fails isConfigDir), "bad-flags" (not
+// what rjo would keep: the record was edited or broken).
+export function resumeCommand({ flags, sessionId, cwd, shellCwd, shell, env, configDir } = {}) {
   if (!canResumeIn(shell)) return { ok: false, reason: "unsupported-shell" };
   if (env !== null && env !== undefined && !REPLAYABLE_ENV.includes(env)) return { ok: false, reason: "unsupported-env" };
   const id = normalizeSessionId(sessionId);
   if (id === null) return { ok: false, reason: "invalid-session-id" };
   if (typeof cwd !== "string" || !cwd.startsWith("/") || hasControl(cwd)) return { ok: false, reason: "bad-cwd" };
+  if (configDir != null && !isConfigDir(configDir)) return { ok: false, reason: "bad-config-dir" };
   if (!Array.isArray(flags) || !flags.every((f) => typeof f === "string")) return { ok: false, reason: "bad-flags" };
   const again = filterFlags(flags);
   if (!again.ok || !sameTokens(again.flags, flags)) return { ok: false, reason: "bad-flags" };
   const words = ["claude", ...flags, "--resume", id].map(quoteArg);
   // REPLAYABLE_ENV entries are plain words: written as they are, never quoted.
-  const claude = (env ? [env, ...words] : words).join(" ");
+  const claude = [...accountWords(configDir), ...(env ? [env] : []), ...words].join(" ");
   return { ok: true, command: cwd === shellCwd ? claude : `cd ${quoteArg(cwd)} && ${claude}` };
 }
 

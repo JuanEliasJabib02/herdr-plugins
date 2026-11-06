@@ -23,7 +23,8 @@
 // and asks by naming a command. A pulse is cheap unless there is work:
 //   - a request the popup left is taken, and a settings change saved, first;
 //   - every TICK_MS a tick (D2): settings and records read again, Core's
-//     terminals gathered, records reconciled (D4), live records kept while
+//     terminals gathered, records reconciled (D4), the folders a Claude's
+//     account can be in listed again (D15), live records kept while
 //     automatic sleep is on and dropped while it's off (D13), the plan made,
 //     confirmed against the last tick, and at most one stop;
 //   - while a stop is young (SETTLE_MS), its terminal is checked each pulse,
@@ -42,7 +43,7 @@ import {
   foregroundIsShell, ENV_PATTERN,
 } from "./store.js";
 import { BADGE_KEY, badgeValue, sameValue, workspaceOf, parseWorktreeList } from "./badges.js";
-import { loadSession, isClaudeName, parseExitScreen, exitSessionId, sessionFilePath } from "./claude-session.js";
+import { loadSession, loadConfigDirs, isClaudeName, parseExitScreen, exitSessionId, sessionFilePath } from "./claude-session.js";
 import { readPrompt, classifyProbe, promptRestored, PROBE_KEY, ERASE_KEY } from "./prompt.js";
 import { resumeFlags, resumeCommand, canResumeIn, hintDifference, REPLAYABLE_ENV } from "./resume.js";
 
@@ -96,6 +97,10 @@ const claudeSignature = (c) => [c.address, c.state, c.statusMs, c.turn, c.sessio
 // The popup's line for a Claude kept asleep because its exit hint asked for
 // an env assignment the resume can't replay (Log L10).
 const envHold = (label, env) => `${label} stays asleep: Claude asked for ${env}`;
+
+// D15: its account's folder was removed while it slept. Resuming would
+// recreate it as a fresh, signed-out config dir.
+const goneHold = (label) => `${label} stays asleep: its account folder is gone`;
 
 // ── Which copy runs the loop (D11) ─────────────────────────────────────────
 
@@ -250,6 +255,7 @@ export class Coordinator {
     this.badge = undefined;
     this.worktrees = new Map(); // cwd → workspace path (or null)
     this.transcripts = new Map(); // find argv → its result, found transcripts only
+    this.configDirs = null; // D15: where a Claude's session file can be, listed once per tick
   }
 
   // ── Entry points ──
@@ -452,6 +458,7 @@ export class Coordinator {
       return;
     }
     await this.reconcileWith(terminals, now);
+    await this.listConfigDirs();
     const sessions = await this.sessionsOf(terminals);
     // Off (D11): nothing kept for restart recovery, and a live record left
     // from before goes, so a later restart resumes nothing on its own.
@@ -580,8 +587,9 @@ export class Coordinator {
     return { candidates, reasons, due, labels };
   }
 
-  // T2: a Claude is stopped only if it can come back. → { ok, flags, cwd }
-  // or { ok: false, reason }.
+  // T2: a Claude is stopped only if it can come back, in its own account
+  // (D15: a config dir the resume would refuse is refused here, before
+  // /exit). → { ok, flags, cwd, configDir } or { ok: false, reason }.
   resumable(t, session) {
     if (!isObject(t) || !isObject(session)) return { ok: false, reason: "no session" };
     const flags = resumeFlags(t.foreground?.argv);
@@ -589,9 +597,10 @@ export class Coordinator {
     const shell = Array.isArray(t.argv) ? t.argv[0] : null;
     if (!canResumeIn(shell)) return { ok: false, reason: "unsupported shell" };
     if (typeof session.cwd !== "string" || session.cwd === "") return { ok: false, reason: "no cwd" };
-    const dry = resumeCommand({ flags: flags.flags, sessionId: session.sessionId, cwd: session.cwd, shellCwd: null, shell });
+    const configDir = session.configDir ?? null;
+    const dry = resumeCommand({ flags: flags.flags, sessionId: session.sessionId, cwd: session.cwd, shellCwd: null, shell, configDir });
     if (!dry.ok) return { ok: false, reason: dry.reason };
-    return { ok: true, flags: flags.flags, cwd: session.cwd };
+    return { ok: true, flags: flags.flags, cwd: session.cwd, configDir };
   }
 
   // ── The stop (D2, D4, D5) ──
@@ -642,6 +651,7 @@ export class Coordinator {
       sessionId: session.sessionId,
       cwd: res.cwd,
       flags: res.flags,
+      configDir: res.configDir,
       workspacePath: await this.workspaceOf(res.cwd, { fresh: true }),
       rssKb: await this.rssKb(t.foreground.pid),
       rootPid: Number.isInteger(t.pid) ? t.pid : null,
@@ -657,7 +667,7 @@ export class Coordinator {
     // D4: Core and the session file still say idle/done, nobody looks.
     const fresh = await this.getTerminal(address);
     const core = statusWord(fresh?.status);
-    const file = await this.fileStatus(t.foreground.pid, session.sessionId);
+    const file = await this.fileStatus(t.foreground.pid, record.sessionId, record.configDir);
     const same = isObject(fresh?.foreground) && fresh.foreground.pid === t.foreground.pid;
     if (!same || (core !== "done" && core !== "idle") || (file !== "idle" && file !== "done") || this.isVisible(address)) {
       await undo();
@@ -786,10 +796,14 @@ export class Coordinator {
       if (!session || session.transcript !== true) continue;
       const res = this.resumable(t, session);
       if (!res.ok) continue;
+      // configDir too (D15): restart recovery resumes from this record, so
+      // without it a profile Claude would come back on System default. A
+      // record from before T10 reads as null here, so it isn't rewritten.
       const want = {
         sessionId: session.sessionId,
         cwd: res.cwd,
         flags: res.flags,
+        configDir: res.configDir,
         workspacePath: await this.workspaceOf(res.cwd),
         rootPid: Number.isInteger(t.pid) ? t.pid : null,
       };
@@ -838,11 +852,18 @@ export class Coordinator {
       this.hold(address, envHold(label, hint.env ?? "no env"), now);
       return false;
     }
+    // D15: back in the account it slept in (a record without one is System
+    // default), and only into a folder that still exists.
+    const configDir = r.configDir ?? null;
     const cmd = resumeCommand({
-      flags: r.flags, sessionId: r.sessionId, cwd: r.cwd, shellCwd: t.foreground.cwd ?? null, shell: t.foreground.name, env,
+      flags: r.flags, sessionId: r.sessionId, cwd: r.cwd, shellCwd: t.foreground.cwd ?? null, shell: t.foreground.name, env, configDir,
     });
     if (!cmd.ok) {
       this.hold(address, cmd.reason === "unsupported-env" ? envHold(label, env) : `${label} stays asleep: ${cmd.reason}`, now);
+      return false;
+    }
+    if (configDir !== null && (await this.run("test", ["-d", configDir])).code !== 0) {
+      this.hold(address, goneHold(label), now);
       return false;
     }
     // Claimed and saved before anything is typed: resumed exactly once.
@@ -911,22 +932,40 @@ export class Coordinator {
     return out;
   }
 
-  // D3 for every local Claude in front of its terminal.
+  // D15: the folders a Claude's session file can be in (~/.claude, the saved
+  // accounts', the profile folders), listed once per tick. Between ticks
+  // (Sleep now, a stop) the tick's list is used: an account added since waits
+  // for the next tick, so it fails closed.
+  async listConfigDirs() {
+    this.configDirs = await loadConfigDirs(
+      { home: this.d.home, appHome: this.d.appHome },
+      { readText: (path) => this.d.files.read(path), exec: (cmd, args) => this.d.exec(cmd, args) },
+    );
+    return this.configDirs;
+  }
+
+  // D3 for every local Claude in front of its terminal, in whichever account
+  // folder holds its session file (D15).
   async sessionsOf(terminals) {
     const sessions = {};
+    let configDirs = this.configDirs;
     for (const t of terminals) {
       if (!isLocal(t) || t.state !== "live" || !isObject(t.foreground) || !isClaudeName(t.foreground.name)) continue;
+      if (configDirs === null) configDirs = await this.listConfigDirs();
       const s = await loadSession(
-        { home: this.d.home, pid: t.foreground.pid, foregroundName: t.foreground.name },
+        { home: this.d.home, pid: t.foreground.pid, foregroundName: t.foreground.name, configDirs },
         { readText: (path) => this.d.files.read(path), exec: (cmd, args) => this.execFind(cmd, args) },
       );
-      if (s.ok) sessions[t.address] = { sessionId: s.sessionId, transcript: s.transcript !== null, cwd: s.cwd, status: s.status };
+      if (s.ok) {
+        sessions[t.address] = { sessionId: s.sessionId, transcript: s.transcript !== null, cwd: s.cwd, status: s.status, configDir: s.configDir };
+      }
     }
     return sessions;
   }
 
-  // A transcript found once stays found: `find` over ~/.claude/projects
-  // runs once per session id, not once per Claude per tick.
+  // A transcript found once stays found: `find` over a config dir's
+  // projects/ runs once per session id and folder, not once per Claude per
+  // tick.
   async execFind(cmd, args) {
     const key = cmd === "find" ? args.join("\0") : null;
     if (key !== null && this.transcripts.has(key)) return this.transcripts.get(key);
@@ -938,9 +977,10 @@ export class Coordinator {
     return result;
   }
 
-  // D4's re-read of the session file: its status, if it still names this session.
-  async fileStatus(pid, sessionId) {
-    const path = sessionFilePath(this.d.home, pid);
+  // D4's re-read of the session file, in the record's account folder (D15):
+  // its status, if it still names this session.
+  async fileStatus(pid, sessionId, configDir = null) {
+    const path = sessionFilePath(this.d.home, pid, configDir);
     if (path === null) return null;
     try {
       const data = JSON.parse(await this.d.files.read(path));

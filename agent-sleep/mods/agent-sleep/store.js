@@ -12,8 +12,14 @@
 // before `claude` (Log L10). It is stored whether or not the resume can
 // replay it, so a Claude kept asleep for one it can't stays held after the
 // hint leaves the screen or the mod reloads; resume.js says which it replays.
+// `configDir` (D15) is the account the Claude ran in, the exact
+// CLAUDE_CONFIG_DIR string (isConfigDir), or null for System default
+// (~/.claude). A record written before T10 has none and reads as null: only a
+// ~/.claude Claude could sleep then. The version stays 1, since older code
+// ignores the field.
 
 import { DEFAULT_IDLE_MINUTES, MIN_IDLE_MINUTES, MAX_IDLE_MINUTES } from "./rules.js";
+import { isConfigDir } from "./claude-session.js";
 
 export const VERSION = 1;
 export const STATES = Object.freeze(["live", "stopping", "asleep"]);
@@ -75,6 +81,7 @@ const isCountOrNull = (v) => v === null || v === undefined || (Number.isFinite(v
 // its own list.
 export const ENV_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*=[^\s\p{Cc}]+$/u;
 const isEnvOrNull = (v) => v === null || v === undefined || (typeof v === "string" && ENV_PATTERN.test(v));
+const isConfigDirOrNull = (v) => v === null || v === undefined || isConfigDir(v);
 
 function validRecord(r) {
   return (
@@ -89,7 +96,8 @@ function validRecord(r) {
     isTextOrNull(r.holder) &&
     isCountOrNull(r.rssKb) &&
     isCountOrNull(r.rootPid) &&
-    isEnvOrNull(r.env)
+    isEnvOrNull(r.env) &&
+    isConfigDirOrNull(r.configDir)
   );
 }
 

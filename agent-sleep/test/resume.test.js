@@ -21,6 +21,8 @@ const NVM_CLAUDE = "/Users/demo/.nvm/versions/node/v24.14.0/bin/claude";
 const flagsOf = (...args) => resumeFlags([NVM_CLAUDE, ...args]);
 const command = (over = {}) =>
   resumeCommand({ flags: [], sessionId: SID, cwd: "/code/app", shellCwd: "/code/app", shell: "zsh", ...over });
+// What every System default resume starts with (D15).
+const SYS = "CLAUDE_ACCOUNTS_DIR=''";
 
 // ── The rjo() tables, verbatim ─────────────────────────────────────────────
 
@@ -58,12 +60,12 @@ test("each option keeps its commander arity: -w [name] optional, -n <name> requi
 
 // ── resumeFlags: argv[0] and rjo() ─────────────────────────────────────────
 
-test("/abs/nvm/bin/claude --dangerously-skip-permissions → claude --dangerously-skip-permissions --resume <id>", () => {
+test("/abs/nvm/bin/claude --dangerously-skip-permissions → CLAUDE_ACCOUNTS_DIR='' claude --dangerously-skip-permissions --resume <id>", () => {
   const flags = flagsOf("--dangerously-skip-permissions");
   assert.deepEqual(flags, { ok: true, flags: ["--dangerously-skip-permissions"] });
   assert.deepEqual(command({ flags: flags.flags }), {
     ok: true,
-    command: `claude --dangerously-skip-permissions --resume ${SID}`,
+    command: `${SYS} claude --dangerously-skip-permissions --resume ${SID}`,
   });
 });
 
@@ -76,7 +78,7 @@ test("the launcher's --mcp-config=… and --add-dir=… are dropped, never store
     "c2950f2d-2b78-43cd-b888-5e5f4d5d0ac3",
   ];
   assert.deepEqual(resumeFlags(argv), { ok: true, flags: [] });
-  assert.equal(command({ flags: resumeFlags(argv).flags }).command, `claude --resume ${SID}`);
+  assert.equal(command({ flags: resumeFlags(argv).flags }).command, `${SYS} claude --resume ${SID}`);
   // The user's own space-separated --add-dir is theirs: kept, with its values.
   assert.deepEqual(flagsOf("--add-dir", "/a", "/b", "--verbose"), { ok: true, flags: ["--add-dir", "/a", "/b", "--verbose"] });
 });
@@ -107,7 +109,7 @@ test("claude \"task\" and -- x resume without the prompt (positionals and the --
   assert.deepEqual(resumeFlags([NVM_CLAUDE, "task"]), { ok: true, flags: [] });
   assert.deepEqual(flagsOf("--model", "opus", "--", "x", "--verbose"), { ok: true, flags: ["--model", "opus"] });
   assert.deepEqual(flagsOf("task", "--verbose"), { ok: true, flags: ["--verbose"] });
-  assert.equal(command({ flags: resumeFlags([NVM_CLAUDE, "task"]).flags }).command, `claude --resume ${SID}`);
+  assert.equal(command({ flags: resumeFlags([NVM_CLAUDE, "task"]).flags }).command, `${SYS} claude --resume ${SID}`);
 });
 
 test("anything rjo can't account for is refused: unknown option, a value on a boolean, a cluster, a missing value", () => {
@@ -155,12 +157,12 @@ test("a cwd with ' and $ is quoted in cd, and only when the shell sits elsewhere
   const cwd = "/tmp/it's $HOME";
   assert.deepEqual(command({ cwd, shellCwd: "/Users/demo" }), {
     ok: true,
-    command: `cd '/tmp/it'"'"'s $HOME' && claude --resume ${SID}`,
+    command: `cd '/tmp/it'"'"'s $HOME' && ${SYS} claude --resume ${SID}`,
   });
-  assert.equal(command({ shellCwd: "/elsewhere" }).command, `cd /code/app && claude --resume ${SID}`);
+  assert.equal(command({ shellCwd: "/elsewhere" }).command, `cd /code/app && ${SYS} claude --resume ${SID}`);
   // The shell's cwd unknown: cd anyway.
-  assert.equal(command({ shellCwd: undefined }).command, `cd /code/app && claude --resume ${SID}`);
-  assert.equal(command().command, `claude --resume ${SID}`);
+  assert.equal(command({ shellCwd: undefined }).command, `cd /code/app && ${SYS} claude --resume ${SID}`);
+  assert.equal(command().command, `${SYS} claude --resume ${SID}`);
 });
 
 test("the cwd must be an absolute path without control characters", () => {
@@ -217,6 +219,58 @@ test("hintDifference: the flags Claude printed vs the command's, null when they 
   assert.equal(hintDifference(cloud, ["--model", "opus"]), null);
 });
 
+// ── D15: the account a Claude resumes in ──────────────────────────────────
+
+const PROFILE = "/Users/demo/Library/Application Support/Orca Dev/claude-profiles/p1/home";
+
+test("System default (configDir null or absent) types CLAUDE_ACCOUNTS_DIR='' first, and no CLAUDE_CONFIG_DIR", () => {
+  for (const configDir of [null, undefined]) {
+    assert.deepEqual(command({ configDir }), { ok: true, command: `CLAUDE_ACCOUNTS_DIR='' claude --resume ${SID}` }, String(configDir));
+  }
+});
+
+test("a named account sets CLAUDE_ACCOUNTS_DIR and CLAUDE_CONFIG_DIR to the same exact, quoted dir", () => {
+  const quoted = `'${PROFILE}'`;
+  assert.deepEqual(command({ configDir: PROFILE }), {
+    ok: true, command: `CLAUDE_ACCOUNTS_DIR=${quoted} CLAUDE_CONFIG_DIR=${quoted} claude --resume ${SID}`,
+  });
+  // Kept exactly: a trailing slash stays (the launcher and the Keychain key on the string).
+  assert.equal(command({ configDir: "/x/home/" }).command, `CLAUDE_ACCOUNTS_DIR=/x/home/ CLAUDE_CONFIG_DIR=/x/home/ claude --resume ${SID}`);
+  // A ' in it round-trips the same way a cwd does.
+  assert.equal(command({ configDir: "/it's/home" }).command, `CLAUDE_ACCOUNTS_DIR='/it'"'"'s/home' CLAUDE_CONFIG_DIR='/it'"'"'s/home' claude --resume ${SID}`);
+});
+
+test("the order: cd, the account, the replayed env, then claude", () => {
+  assert.equal(
+    command({ configDir: "/x/home", env: "CLAUDE_CODE_EXPERIMENTAL_CODE_MODE=1", shellCwd: "/elsewhere", flags: ["--model", "opus"] }).command,
+    `cd /code/app && CLAUDE_ACCOUNTS_DIR=/x/home CLAUDE_CONFIG_DIR=/x/home CLAUDE_CODE_EXPERIMENTAL_CODE_MODE=1 claude --model opus --resume ${SID}`,
+  );
+});
+
+test("a configDir failing the shared predicate is refused (sleeping.json can be edited by hand)", () => {
+  for (const configDir of ["", "rel/home", "/x\n/home", "/x\u0085", 7, ["/x"]]) {
+    assert.deepEqual(command({ configDir }), { ok: false, reason: "bad-config-dir" }, JSON.stringify(configDir));
+  }
+});
+
+// The prefix as each shell reads it: the variable reaches the command, the
+// empty value included, and with the exact string. `claude` is swapped for a
+// shell that prints them, and the line is checked first, so nothing but that
+// printf ever runs (and PATH holds no claude).
+const PRINT_ACCOUNT = `-c 'printf "%s|%s" "\${CLAUDE_ACCOUNTS_DIR-unset}" "\${CLAUDE_CONFIG_DIR-unset}"'`;
+for (const shell of ["/bin/sh", "/bin/zsh", "/bin/bash"]) {
+  test(`the account prefix reaches the command through ${shell}`, { skip: !existsSync(shell) && `${shell} not installed` }, () => {
+    for (const configDir of [null, PROFILE, "/it's $HOME/home/"]) {
+      const full = command({ configDir }).command;
+      const tail = `claude --resume ${SID}`;
+      assert.ok(full.startsWith("CLAUDE_ACCOUNTS_DIR=") && full.endsWith(` ${tail}`), full);
+      const line = `${full.slice(0, -tail.length)}${shell} ${PRINT_ACCOUNT}`;
+      const out = execFileSync(shell, ["-c", line], { encoding: "utf8", env: { PATH: "/usr/bin:/bin" } });
+      assert.equal(out, configDir === null ? "|unset" : `${configDir}|${configDir}`, `${shell}: ${line}`);
+    }
+  });
+}
+
 test("resume.js is pure: no herdr import, no I/O", () => {
   const src = readFileSync(new URL("../mods/agent-sleep/resume.js", import.meta.url), "utf8");
   assert.doesNotMatch(src, /from\s+["']herdr["']/);
@@ -228,12 +282,12 @@ test("resume.js is pure: no herdr import, no I/O", () => {
 test("resumeCommand replays CLAUDE_CODE_EXPERIMENTAL_CODE_MODE=1 before claude, and only that", () => {
   assert.deepEqual(REPLAYABLE_ENV, ["CLAUDE_CODE_EXPERIMENTAL_CODE_MODE=1"]);
   assert.deepEqual(command({ env: "CLAUDE_CODE_EXPERIMENTAL_CODE_MODE=1" }), {
-    ok: true, command: `CLAUDE_CODE_EXPERIMENTAL_CODE_MODE=1 claude --resume ${SID}`,
+    ok: true, command: `${SYS} CLAUDE_CODE_EXPERIMENTAL_CODE_MODE=1 claude --resume ${SID}`,
   });
   assert.deepEqual(command({ env: "CLAUDE_CODE_EXPERIMENTAL_CODE_MODE=1", shellCwd: "/elsewhere", flags: ["--model", "opus"] }), {
-    ok: true, command: `cd /code/app && CLAUDE_CODE_EXPERIMENTAL_CODE_MODE=1 claude --model opus --resume ${SID}`,
+    ok: true, command: `cd /code/app && ${SYS} CLAUDE_CODE_EXPERIMENTAL_CODE_MODE=1 claude --model opus --resume ${SID}`,
   });
-  for (const env of [null, undefined]) assert.equal(command({ env }).command, `claude --resume ${SID}`);
+  for (const env of [null, undefined]) assert.equal(command({ env }).command, `${SYS} claude --resume ${SID}`);
   for (const env of ["FOO=1", "CLAUDE_CODE_EXPERIMENTAL_CODE_MODE=0", "X=$(id)", "", 1]) {
     assert.deepEqual(command({ env }), { ok: false, reason: "unsupported-env" }, `env ${JSON.stringify(env)}`);
   }

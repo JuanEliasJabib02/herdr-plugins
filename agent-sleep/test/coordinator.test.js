@@ -16,6 +16,7 @@ import { BADGE_KEY } from "../mods/agent-sleep/badges.js";
 
 import {
   fixture, MIN, NOW, HOME, APP, SLEEPING, SETTINGS, SID1, SID2, NVM_CLAUDE, PROC_START, EMPTY, SUGGESTION, DRAFT, EXIT, SHELL_BARE, SHELL_TYPED, claude, shellOf, ok, fail, makeWorld, addClaude, putSession, exitClaude, show, liveTerminals, deps, records, exits, resumes, at, sleepT1, setup, storeRecord,
+  ORCA_DEV_PROFILES, HERDR_PROFILES, PROFILE, SAVED, addProfile, putAccounts,
 } from "./harness.js";
 
 // ── Which copy runs the loop (D11) ────────────────────────────────────────
@@ -431,7 +432,7 @@ test("a running Claude gets a live record once; it is rewritten only when it cha
   await at(co, w, NOW);
   const r = records(w).t1;
   assert.deepEqual({ ...r, at: undefined }, {
-    state: "live", sessionId: SID1, cwd: "/code/app", flags: ["--dangerously-skip-permissions"],
+    state: "live", sessionId: SID1, cwd: "/code/app", flags: ["--dangerously-skip-permissions"], configDir: null,
     workspacePath: "/code/app", rssKb: null, rootPid: 100, holder: "h1", at: undefined, by: "auto",
   });
   const writes = w.writes.length;
@@ -465,7 +466,7 @@ test("an asleep Claude resumes exactly once when its tab is shown, with the toas
   await at(co, w, NOW + 1_000);
   await at(co, w, NOW + 2_000);
   await at(co, w, NOW + 1 * MIN);
-  assert.deepEqual(resumes(w), [{ address: "t1", text: `claude --dangerously-skip-permissions --resume ${SID1}`, opts: [] }]);
+  assert.deepEqual(resumes(w), [{ address: "t1", text: `CLAUDE_ACCOUNTS_DIR='' claude --dangerously-skip-permissions --resume ${SID1}`, opts: [] }]);
   assert.equal(records(w).t1, undefined);
   assert.deepEqual(w.notes, [{ title: "Resuming app", body: "Session 00000000 · same flags as before" }]);
   assert.equal(co.model().last, "Woke app");
@@ -477,7 +478,7 @@ test("the resume cds into the session's folder when the shell sits elsewhere", a
   exitClaude(w, "t1");
   show(w, "back");
   await at(co, w, NOW);
-  assert.equal(resumes(w)[0].text, `cd '/code/it'"'"'s here' && claude --dangerously-skip-permissions --resume ${SID1}`);
+  assert.equal(resumes(w)[0].text, `cd '/code/it'"'"'s here' && CLAUDE_ACCOUNTS_DIR='' claude --dangerously-skip-permissions --resume ${SID1}`);
 });
 
 test("revealed while stopping: kept, then resumed once when the shell is back, without leaving the tab", async () => {
@@ -493,7 +494,7 @@ test("revealed while stopping: kept, then resumed once when the shell is back, w
   await at(co, w, t + 7_000);
   await at(co, w, t + 1 * MIN);
   assert.equal(resumes(w).length, 1);
-  assert.equal(resumes(w)[0].text, `claude --dangerously-skip-permissions --resume ${SID1}`);
+  assert.equal(resumes(w)[0].text, `CLAUDE_ACCOUNTS_DIR='' claude --dangerously-skip-permissions --resume ${SID1}`);
 });
 
 test("revealing a running Claude: its live record untouched, nothing sent or written", async () => {
@@ -551,7 +552,7 @@ test("an exit hint with CLAUDE_CODE_EXPERIMENTAL_CODE_MODE=1 is stored as env an
   assert.equal(records(w).t1.env, "CLAUDE_CODE_EXPERIMENTAL_CODE_MODE=1");
   show(w, "back");
   await at(co, w, t + 4_000);
-  assert.equal(resumes(w)[0].text, `CLAUDE_CODE_EXPERIMENTAL_CODE_MODE=1 claude --dangerously-skip-permissions --resume ${SID1}`);
+  assert.equal(resumes(w)[0].text, `CLAUDE_ACCOUNTS_DIR='' CLAUDE_CODE_EXPERIMENTAL_CODE_MODE=1 claude --dangerously-skip-permissions --resume ${SID1}`);
 });
 
 test("any other env in the hint: kept asleep, never resumed without it, and the popup says why", async () => {
@@ -587,6 +588,168 @@ test("an env the resume can't replay (FOO=bar) is stored; hint gone + a reload �
   assert.equal(resumes(w).length, 0);
   assert.equal(records(w).t1.state, "asleep");
   assert.deepEqual(fresh.model().holds, ["app stays asleep: Claude asked for FOO=bar"]);
+});
+
+// ── A Claude's account (T10, D15) ─────────────────────────────────────────
+
+// What a resume types for a Claude in this account (D15): the account first,
+// for a named one CLAUDE_CONFIG_DIR too, then claude.
+const SYSTEM = "CLAUDE_ACCOUNTS_DIR=''";
+const named = (dir) => `CLAUDE_ACCOUNTS_DIR='${dir}' CLAUDE_CONFIG_DIR='${dir}'`;
+const resumeLine = (prefix, sid = SID1) => `${prefix} claude --dangerously-skip-permissions --resume ${sid}`;
+
+// t1 put to sleep by the usual three ticks, its shell back, its tab shown:
+// what was typed to bring it back.
+async function sleepAndWake(w, co) {
+  const t = await sleepT1(co, w);
+  assert.equal(exits(w).length, 1, "stopped");
+  exitClaude(w, "t1");
+  await at(co, w, t + 3_000);
+  assert.equal(records(w).t1?.state, "asleep");
+  const slept = records(w).t1;
+  show(w, "back");
+  await at(co, w, t + 4_000);
+  return { slept, typed: resumes(w).map((s) => s.text) };
+}
+
+test("a Claude whose session file is in a saved account's dir is stopped and resumed in that exact account", async () => {
+  const { w, co } = setup({ t1: false });
+  putAccounts(w, [{ id: "a1", email: "work@example.com", configDir: SAVED, source: "herdr" }]);
+  addClaude(w, "t1", { pid: 100, fgPid: 200, sid: SID1, configDir: SAVED });
+  const { slept, typed } = await sleepAndWake(w, co);
+  assert.equal(slept.configDir, SAVED, "the exact string, its trailing slash included");
+  assert.deepEqual(typed, [resumeLine(named(SAVED))]);
+});
+
+test("a Claude in an Orca profile folder no account names is stopped and resumed in it", async () => {
+  const { w, co } = setup({ t1: false });
+  const dir = addProfile(w, ORCA_DEV_PROFILES, "p1");
+  addClaude(w, "t1", { pid: 100, fgPid: 200, sid: SID1, configDir: dir });
+  const { slept, typed } = await sleepAndWake(w, co);
+  assert.equal(slept.configDir, PROFILE);
+  assert.deepEqual(typed, [resumeLine(named(PROFILE))]);
+});
+
+test("a Claude in Herdr's own profile folder sleeps too", async () => {
+  const { w, co } = setup({ t1: false });
+  const dir = addProfile(w, HERDR_PROFILES, "u1");
+  addClaude(w, "t1", { pid: 100, fgPid: 200, sid: SID1, configDir: dir });
+  const { slept, typed } = await sleepAndWake(w, co);
+  assert.equal(slept.configDir, dir);
+  assert.deepEqual(typed, [resumeLine(`CLAUDE_ACCOUNTS_DIR=${dir} CLAUDE_CONFIG_DIR=${dir}`)]);
+});
+
+test("a ~/.claude Claude sleeps with configDir null and resumes with CLAUDE_ACCOUNTS_DIR=''", async () => {
+  const { w, co } = setup();
+  addProfile(w, ORCA_DEV_PROFILES, "p1"); // another account exists; this Claude isn't in it
+  const { slept, typed } = await sleepAndWake(w, co);
+  assert.equal(slept.configDir, null);
+  assert.deepEqual(typed, [resumeLine(SYSTEM)]);
+});
+
+test("an old record with no configDir resumes as System default", async () => {
+  const { w, co } = setup();
+  storeRecord(w, "t1");
+  assert.equal(Object.hasOwn(records(w).t1, "configDir"), false);
+  exitClaude(w, "t1");
+  show(w, "back");
+  await at(co, w, NOW);
+  assert.deepEqual(resumes(w).map((s) => s.text), [resumeLine(SYSTEM)]);
+});
+
+test("a record whose account folder is gone is held, not resumed, and the popup says why; back once it exists", async () => {
+  const { w, co } = setup();
+  storeRecord(w, "t1", { configDir: PROFILE }); // its folder isn't there (no addProfile)
+  exitClaude(w, "t1");
+  show(w, "back");
+  await at(co, w, NOW);
+  await at(co, w, NOW + 5_000);
+  assert.equal(resumes(w).length, 0, "never typed into a removed account");
+  assert.equal(records(w).t1.state, "asleep");
+  assert.deepEqual(co.model().holds, ["app stays asleep: its account folder is gone"]);
+  w.dirs.add(PROFILE);
+  await at(co, w, NOW + 2 * MIN);
+  assert.deepEqual(resumes(w).map((s) => s.text), [resumeLine(named(PROFILE))]);
+  assert.deepEqual(co.model().holds, []);
+});
+
+test("a Claude found in no candidate never sleeps: not in ~/.claude, any account or any profile folder", async () => {
+  const cases = [
+    { configDir: "/elsewhere/home" },
+    { configDir: "rel/home", accounts: [{ id: "a1", configDir: "rel/home" }] },
+    { configDir: "/x\n/home", accounts: [{ id: "a1", configDir: "/x\n/home" }] },
+  ];
+  for (const { configDir, accounts } of cases) {
+    const { w, co } = setup({ t1: false });
+    if (accounts) putAccounts(w, accounts);
+    addClaude(w, "t1", { pid: 100, fgPid: 200, sid: SID1, configDir });
+    await sleepT1(co, w);
+    co.requestSleepNow();
+    await at(co, w, NOW + 32 * MIN);
+    assert.equal(exits(w).length, 0, JSON.stringify(configDir));
+    assert.equal(w.keys.length, 0, "nothing typed");
+    assert.equal(records(w).t1, undefined, "no live record either");
+  }
+});
+
+test("a malformed accounts.json still finds the ~/.claude and profile Claudes; its own dirs are never used", async () => {
+  const { w, co } = setup({ t2: false });
+  putAccounts(w, JSON.stringify({ accounts: [{ id: "a1", configDir: SAVED }] }));
+  const dir = addProfile(w, ORCA_DEV_PROFILES, "p1");
+  addClaude(w, "t2", { pid: 101, fgPid: 201, sid: SID2, cwd: "/code/checkout-flow", configDir: dir });
+  addClaude(w, "t3", { pid: 102, fgPid: 202, sid: "00000000-0000-4000-8000-000000000003", configDir: SAVED });
+  await at(co, w, NOW);
+  assert.equal(records(w).t1?.configDir, null);
+  assert.equal(records(w).t2?.configDir, PROFILE);
+  assert.equal(records(w).t3, undefined, "SAVED is named only by the malformed file");
+});
+
+test("a session whose configDir fails the shared predicate can't come back, so it is refused before /exit", () => {
+  const { w, co } = setup();
+  const session = { sessionId: SID1, transcript: true, cwd: "/code/app", status: "idle" };
+  assert.equal(co.resumable(w.core.t1, { ...session, configDir: null }).ok, true);
+  assert.deepEqual(co.resumable(w.core.t1, { ...session, configDir: PROFILE }), {
+    ok: true, flags: ["--dangerously-skip-permissions"], cwd: "/code/app", configDir: PROFILE,
+  });
+  for (const configDir of ["rel/home", "/x\n/home", ""]) {
+    assert.deepEqual(co.resumable(w.core.t1, { ...session, configDir }), { ok: false, reason: "bad-config-dir" }, JSON.stringify(configDir));
+  }
+});
+
+test("live records carry the account: a profile Claude's says its dir; one that moved account is rewritten", async () => {
+  const { w, co } = setup();
+  await at(co, w, NOW);
+  assert.equal(records(w).t1.configDir, null);
+  const writes = w.writes.length;
+  await at(co, w, NOW + MIN);
+  assert.equal(w.writes.length, writes, "unchanged: no write");
+  // The same Claude now found in a profile folder (its session file there).
+  const dir = addProfile(w, ORCA_DEV_PROFILES, "p1");
+  delete w.files[`${HOME}/.claude/sessions/200.json`];
+  putSession(w, 200, { sessionId: SID1, configDir: dir });
+  await at(co, w, NOW + 2 * MIN);
+  assert.equal(records(w).t1.configDir, PROFILE);
+});
+
+test("an old live record (no configDir) for a ~/.claude Claude is not rewritten", async () => {
+  const { w, co } = setup();
+  storeRecord(w, "t1", { state: "live", rssKb: null });
+  const before = w.files[SLEEPING];
+  await at(co, w, NOW);
+  assert.equal(w.files[SLEEPING], before);
+});
+
+test("the account list is built once per tick: three listings, and none for Sleep now between ticks", async () => {
+  const { w, co } = setup();
+  const listings = () => w.execs.filter((c) => c[0] === "find" && c.includes("-mindepth")).length;
+  await at(co, w, NOW);
+  assert.equal(listings(), 3);
+  co.requestSleepNow();
+  await at(co, w, NOW + 1_000);
+  assert.equal(exits(w).length, 1, "Sleep now used the tick's list");
+  assert.equal(listings(), 3);
+  await at(co, w, NOW + MIN);
+  assert.equal(listings(), 6);
 });
 
 // ── Sleep now / Wake all (D9) ─────────────────────────────────────────────

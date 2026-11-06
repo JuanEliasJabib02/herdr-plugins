@@ -12,6 +12,7 @@ import {
   isClaudeName, normalizeSessionId, normalizeProcStart, sessionFilePath, procStartCommand,
   checkSession, transcriptLookupCommand, parseTranscriptLookup, loadSession,
   parseExitScreen, exitSessionId,
+  isConfigDir, accountsPath, profileRoots, profileListCommand, parseProfileList, parseAccounts, loadConfigDirs,
 } from "../mods/agent-sleep/claude-session.js";
 
 const fixture = (name) => readFileSync(new URL(`./fixtures/${name}`, import.meta.url), "utf8");
@@ -146,9 +147,9 @@ test("a cwd that isn't an absolute path comes back as null (resume.js then refus
 
 // ── The transcript, found by id (Claude hashes long folder names) ─────────
 
-test("transcriptLookupCommand is `find ~/.claude/projects -maxdepth 2 -name <id>.jsonl` as an argv", () => {
+test("transcriptLookupCommand is `find -H ~/.claude/projects -maxdepth 2 -name <id>.jsonl` as an argv", () => {
   assert.deepEqual(transcriptLookupCommand(HOME, SID), [
-    "find", "/Users/demo/.claude/projects", "-maxdepth", "2", "-name", `${SID}.jsonl`,
+    "find", "-H", "/Users/demo/.claude/projects", "-maxdepth", "2", "-name", `${SID}.jsonl`,
   ]);
   assert.equal(transcriptLookupCommand(HOME, "-bad"), null);
   assert.equal(transcriptLookupCommand("", SID), null);
@@ -197,12 +198,13 @@ test("loadSession reads the file, checks procStart with ps and finds the transcr
     sessionId: SID,
     cwd: "/code/app",
     status: "idle",
+    configDir: null,
     transcript: `/Users/demo/.claude/projects/-code-app/${SID}.jsonl`,
   });
   assert.deepEqual(io.calls, [
     ["read", "/Users/demo/.claude/sessions/70285.json"],
     ["env", "TZ=UTC", "ps", "-o", "lstart=", "-p", "70285"],
-    ["find", "/Users/demo/.claude/projects", "-maxdepth", "2", "-name", `${SID}.jsonl`],
+    ["find", "-H", "/Users/demo/.claude/projects", "-maxdepth", "2", "-name", `${SID}.jsonl`],
   ]);
 });
 
@@ -325,6 +327,176 @@ test("the file's id has to be valid too: with neither id valid there's no sessio
   const parsed = parseExitScreen(exitScreen("claude --resume"));
   assert.deepEqual(exitSessionId("-bad", parsed).sessionId, null);
   assert.deepEqual(exitSessionId(SID, parseExitScreen(42)).sessionId, SID);
+});
+
+// ── D15: a Claude's account (its CLAUDE_CONFIG_DIR) ───────────────────────
+
+const APP = "/Users/demo/.config/herdr-app";
+const ORCA_DEV = "/Users/demo/Library/Application Support/Orca Dev/claude-profiles";
+const ORCA = "/Users/demo/Library/Application Support/Orca/claude-profiles";
+const HERDR = `${APP}/claude-accounts-profiles`;
+const PROFILE = `${ORCA_DEV}/p1/home`;
+const SAVED = "/Volumes/Work Claude/home/";
+
+test("isConfigDir: an absolute path with no control character; anything else is refused", () => {
+  for (const dir of [PROFILE, SAVED, "/x", "/it's $HOME/home", "/a/../b"]) assert.equal(isConfigDir(dir), true, dir);
+  for (const dir of [null, undefined, "", "rel/home", "~/x", "./x", "/a\nb", "/a\tb", "/a\u0000b", "/a\u007fb", "/a\u0085b", 7, ["/x"]]) {
+    assert.equal(isConfigDir(dir), false, JSON.stringify(dir));
+  }
+});
+
+test("the session file and the transcript lookup follow the config dir; null is ~/.claude", () => {
+  assert.equal(sessionFilePath(HOME, PID, null), "/Users/demo/.claude/sessions/70285.json");
+  assert.equal(sessionFilePath(HOME, PID, PROFILE), `${PROFILE}/sessions/70285.json`);
+  assert.equal(sessionFilePath(HOME, PID, SAVED), "/Volumes/Work Claude/home/sessions/70285.json");
+  assert.equal(sessionFilePath(HOME, PID, "rel/home"), null, "a dir failing the predicate gives no path");
+  // -H: a profile's projects/ is a symlink to ~/.claude/projects; -H follows the start point only.
+  assert.deepEqual(transcriptLookupCommand(HOME, SID, PROFILE), [
+    "find", "-H", `${PROFILE}/projects`, "-maxdepth", "2", "-name", `${SID}.jsonl`,
+  ]);
+  assert.equal(transcriptLookupCommand(HOME, SID, "rel/home"), null);
+  const line = `${PROFILE}/projects/-code-app/${SID}.jsonl`;
+  assert.equal(parseTranscriptLookup(`${line}\n`, { home: HOME, sessionId: SID, configDir: PROFILE }), line);
+  // Parsed against <dir>/projects/: a ~/.claude path doesn't count for a profile, nor the reverse.
+  assert.equal(parseTranscriptLookup(`/Users/demo/.claude/projects/-a/${SID}.jsonl\n`, { home: HOME, sessionId: SID, configDir: PROFILE }), null);
+  assert.equal(parseTranscriptLookup(`${line}\n`, { home: HOME, sessionId: SID }), null);
+});
+
+test("accounts.json is a top-level array: each element's configDir when it is a valid path, kept exactly", () => {
+  assert.equal(accountsPath(APP), `${APP}/claude-accounts/accounts.json`);
+  const text = JSON.stringify([
+    { id: "a1", email: "a@x", configDir: SAVED, source: "herdr" },
+    { id: "a2", configDir: PROFILE, source: "orca" },
+    { id: "a3", configDir: null },
+    { id: "a4" },
+    { id: "a5", configDir: "" },
+    { id: "a6", configDir: "relative/home" },
+    { id: "a7", configDir: "/x\n/home" },
+    { id: "a8", configDir: 42 },
+    "not an account",
+    null,
+  ]);
+  assert.deepEqual(parseAccounts(text), [SAVED, PROFILE]);
+});
+
+test("accounts.json missing or malformed gives none: `{accounts: [...]}` is not claude-accounts' shape", () => {
+  for (const text of [null, undefined, "", "{oops", "null", "42", JSON.stringify({ accounts: [{ id: "a1", configDir: SAVED }] })]) {
+    assert.deepEqual(parseAccounts(text), [], JSON.stringify(text));
+  }
+});
+
+test("the profile roots: Orca Dev, Orca, then Herdr's own; each listed with `find -H <root>` one level down", () => {
+  assert.deepEqual(profileRoots(HOME, APP), [ORCA_DEV, ORCA, HERDR]);
+  assert.deepEqual(profileRoots(`${HOME}/`, `${APP}/`), [ORCA_DEV, ORCA, HERDR]);
+  assert.deepEqual(profileRoots(HOME, "relative"), [ORCA_DEV, ORCA], "no Herdr root without a valid appHome");
+  assert.deepEqual(profileListCommand(ORCA_DEV), ["find", "-H", ORCA_DEV, "-mindepth", "1", "-maxdepth", "1", "-type", "d"]);
+  // <root>/<name>/home for each folder exactly one level down, sorted.
+  const out = [`${ORCA_DEV}/zz`, `${ORCA_DEV}/p1`, `/elsewhere/p2`, `${ORCA_DEV}/a/b`, `${ORCA_DEV}/`, ""].join("\n");
+  assert.deepEqual(parseProfileList(out, ORCA_DEV), [PROFILE, `${ORCA_DEV}/zz/home`]);
+  assert.deepEqual(parseProfileList(undefined, ORCA_DEV), []);
+});
+
+// The fake I/O for loadConfigDirs and a multi-folder loadSession: files by
+// path, profile roots by their folder names, the process start for PID.
+function worldIo({ files = {}, roots = {}, ps = `${PROC_START}\n`, transcripts = [SID] } = {}) {
+  const calls = [];
+  return {
+    calls,
+    readText: async (path) => {
+      calls.push(["read", path]);
+      return Object.hasOwn(files, path) ? files[path] : null;
+    },
+    exec: async (cmd, args) => {
+      calls.push([cmd, ...args]);
+      if (cmd === "env") return { code: ps ? 0 : 1, stdout: ps ?? "", stderr: "" };
+      if (cmd === "find" && args.includes("-mindepth")) {
+        const names = roots[args[1]];
+        return names ? { code: 0, stdout: names.map((n) => `${args[1]}/${n}\n`).join(""), stderr: "" } : { code: 1, stdout: "", stderr: "no such folder" };
+      }
+      if (cmd === "find") {
+        const id = args.at(-1).replace(/\.jsonl$/, "");
+        return { code: 0, stdout: transcripts.includes(id) ? `${args[1]}/-code-app/${id}.jsonl\n` : "", stderr: "" };
+      }
+      throw new Error(`unexpected ${cmd}`);
+    },
+  };
+}
+
+test("loadConfigDirs: ~/.claude (null) first, the saved accounts in file order, then every profile folder; no duplicates", async () => {
+  const io = worldIo({
+    files: { [`${APP}/claude-accounts/accounts.json`]: JSON.stringify([{ id: "a1", configDir: SAVED }, { id: "a2", configDir: PROFILE }, { id: "a3", configDir: "/Users/demo/.claude" }]) },
+    roots: { [ORCA_DEV]: ["p1", "p0"], [HERDR]: ["u1"] },
+  });
+  assert.deepEqual(await loadConfigDirs({ home: HOME, appHome: APP }, io), [
+    null, SAVED, PROFILE, `${ORCA_DEV}/p0/home`, `${HERDR}/u1/home`,
+  ]);
+  // One read and three listings, nothing more.
+  assert.deepEqual(io.calls.map((c) => c[0]), ["read", "find", "find", "find"]);
+});
+
+test("loadConfigDirs: a malformed accounts.json still gives ~/.claude and the profile folders", async () => {
+  for (const text of ["{oops", JSON.stringify({ accounts: [{ id: "a1", configDir: SAVED }] })]) {
+    const io = worldIo({ files: { [`${APP}/claude-accounts/accounts.json`]: text }, roots: { [ORCA]: ["p9"] } });
+    assert.deepEqual(await loadConfigDirs({ home: HOME, appHome: APP }, io), [null, `${ORCA}/p9/home`], text);
+  }
+});
+
+test("loadConfigDirs: an accounts.json entry whose configDir is relative or has a newline is never used", async () => {
+  const io = worldIo({ files: { [`${APP}/claude-accounts/accounts.json`]: JSON.stringify([{ id: "a1", configDir: "rel/home" }, { id: "a2", configDir: "/x\n/home" }]) } });
+  assert.deepEqual(await loadConfigDirs({ home: HOME, appHome: APP }, io), [null]);
+});
+
+test("loadConfigDirs never throws: failing reads and listings leave ~/.claude alone", async () => {
+  const io = {
+    readText: async () => {
+      throw new Error("EACCES");
+    },
+    exec: async () => {
+      throw new Error("exec timed out");
+    },
+  };
+  assert.deepEqual(await loadConfigDirs({ home: HOME, appHome: APP }, io), [null]);
+});
+
+test("loadSession over several config dirs: the first whose file passes D3 wins, ps once, the transcript under that dir", async () => {
+  // A stale file in ~/.claude for a pid the OS reused, the real one in a profile.
+  const io = worldIo({
+    files: {
+      [`${HOME}/.claude/sessions/${PID}.json`]: sessionFile({ procStart: "Mon Nov  2 10:00:00 2026", sessionId: "00000000-0000-4000-8000-0000000000ff" }),
+      [`${PROFILE}/sessions/${PID}.json`]: sessionFile(),
+    },
+  });
+  const result = await loadSession({ home: HOME, pid: PID, foregroundName: "claude.exe", configDirs: [null, SAVED, PROFILE] }, io);
+  assert.deepEqual(result, {
+    ok: true, sessionId: SID, cwd: "/code/app", status: "idle", configDir: PROFILE,
+    transcript: `${PROFILE}/projects/-code-app/${SID}.jsonl`,
+  });
+  assert.equal(io.calls.filter((c) => c[0] === "env").length, 1, "ps runs once per Claude");
+  assert.deepEqual(io.calls.at(-1), ["find", "-H", `${PROFILE}/projects`, "-maxdepth", "2", "-name", `${SID}.jsonl`]);
+});
+
+test("loadSession: the exact configDir string comes back, a trailing slash included", async () => {
+  const io = worldIo({ files: { [`/Volumes/Work Claude/home/sessions/${PID}.json`]: sessionFile() } });
+  const result = await loadSession({ home: HOME, pid: PID, foregroundName: "claude.exe", configDirs: [null, SAVED] }, io);
+  assert.equal(result.configDir, SAVED);
+  assert.equal(result.transcript, `/Volumes/Work Claude/home/projects/-code-app/${SID}.jsonl`);
+});
+
+test("loadSession: ~/.claude's file → configDir null; found in no candidate → no-session-file; none passing → the first failure", async () => {
+  const home = await loadSession({ home: HOME, pid: PID, foregroundName: "claude.exe", configDirs: [null, PROFILE] }, worldIo({ files: { [`${HOME}/.claude/sessions/${PID}.json`]: sessionFile() } }));
+  assert.equal(home.ok, true);
+  assert.equal(home.configDir, null);
+  const nowhere = await loadSession({ home: HOME, pid: PID, foregroundName: "claude.exe", configDirs: [null, PROFILE] }, worldIo({ files: { [`/elsewhere/sessions/${PID}.json`]: sessionFile() } }));
+  assert.deepEqual(nowhere, { ok: false, reason: "no-session-file" });
+  const stale = await loadSession({ home: HOME, pid: PID, foregroundName: "claude.exe", configDirs: [null, PROFILE] }, worldIo({ files: { [`${PROFILE}/sessions/${PID}.json`]: sessionFile({ kind: "background" }) } }));
+  assert.deepEqual(stale, { ok: false, reason: "not-interactive" });
+});
+
+test("loadSession skips a candidate failing the predicate: its file is never read", async () => {
+  const io = worldIo({ files: { [`rel/home/sessions/${PID}.json`]: sessionFile() } });
+  const result = await loadSession({ home: HOME, pid: PID, foregroundName: "claude.exe", configDirs: ["rel/home", "/x\n/home"] }, io);
+  assert.deepEqual(result, { ok: false, reason: "no-session-file" });
+  assert.deepEqual(io.calls, []);
 });
 
 test("claude-session.js is pure: no herdr import, no clock", () => {

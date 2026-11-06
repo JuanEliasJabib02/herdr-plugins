@@ -13,6 +13,17 @@ export const HOME = "/Users/demo";
 export const APP = `${HOME}/.config/herdr-app`;
 export const SLEEPING = `${APP}/agent-sleep/sleeping.json`;
 export const SETTINGS = `${APP}/agent-sleep/settings.json`;
+// D15: where a Claude's account can be. claude-accounts' list of saved
+// accounts (a top-level JSON array), and the three roots of profile folders
+// (`<root>/<name>/home`).
+export const ACCOUNTS = `${APP}/claude-accounts/accounts.json`;
+export const ORCA_DEV_PROFILES = `${HOME}/Library/Application Support/Orca Dev/claude-profiles`;
+export const ORCA_PROFILES = `${HOME}/Library/Application Support/Orca/claude-profiles`;
+export const HERDR_PROFILES = `${APP}/claude-accounts-profiles`;
+// An Orca profile no saved account names, and a saved account outside every
+// root (its trailing slash is part of the exact string the launcher keys on).
+export const PROFILE = `${ORCA_DEV_PROFILES}/p1/home`;
+export const SAVED = "/Volumes/Work Claude/home/";
 // claude-exit.txt prints this id under "Resume this session with:".
 export const SID1 = "00000000-0000-4000-8000-000000000001";
 export const SID2 = "00000000-0000-4000-8000-000000000002";
@@ -71,6 +82,8 @@ export function makeWorld() {
     files: {},
     procStart: {},
     transcripts: new Set(),
+    profiles: {}, // a profile root → the folder names in it (no key: the root doesn't exist)
+    dirs: new Set(), // the config dirs that exist (`test -d`)
     rss: {},
     holder: "h1",
     spaces: [
@@ -84,6 +97,7 @@ export function makeWorld() {
     ],
     focused: { space: "s1", tab: "front", pane: "p9", terminal: "t9", shown: null, agent: null, cwd: "/code/app" },
     calls: [],
+    execs: [], // every exec, as [cmd, ...args]
     sends: [],
     keys: [],
     notes: [],
@@ -98,19 +112,41 @@ export function makeWorld() {
 }
 
 // A running Claude whose session file passes D3, with its transcript.
-export function addClaude(w, address, { pid, fgPid, sid, screen = EMPTY, cwd = "/code/app", ...over }) {
+// `configDir`: the account it runs in (D15), null for System default
+// (~/.claude); its folder exists.
+export function addClaude(w, address, { pid, fgPid, sid, screen = EMPTY, cwd = "/code/app", configDir = null, ...over }) {
   w.core[address] = claude(address, { pid, fgPid, cwd, ...over });
   w.screens[address] = screen;
   w.procStart[fgPid] = PROC_START;
   w.transcripts.add(sid);
   w.rss[fgPid] = 307_200;
-  putSession(w, fgPid, { sessionId: sid, cwd });
+  if (configDir !== null) w.dirs.add(configDir);
+  putSession(w, fgPid, { sessionId: sid, cwd, configDir });
 }
 
-export function putSession(w, pid, { sessionId, cwd = "/code/app", status = "idle" }) {
-  w.files[`${HOME}/.claude/sessions/${pid}.json`] = JSON.stringify({
+// Where Claude writes a session file: <configDir>/sessions/<pid>.json, or
+// ~/.claude's for System default.
+export const sessionPath = (pid, configDir = null) =>
+  `${configDir === null ? `${HOME}/.claude` : configDir.replace(/\/+$/, "")}/sessions/${pid}.json`;
+
+export function putSession(w, pid, { sessionId, cwd = "/code/app", status = "idle", configDir = null }) {
+  w.files[sessionPath(pid, configDir)] = JSON.stringify({
     pid, sessionId, cwd, procStart: PROC_START, kind: "interactive", status,
   });
+}
+
+// An Orca or Herdr profile folder, `<root>/<name>/home`, as a listing of its
+// root shows it. Returns the folder.
+export function addProfile(w, root, name) {
+  w.profiles[root] = [...(w.profiles[root] ?? []), name];
+  const dir = `${root}/${name}/home`;
+  w.dirs.add(dir);
+  return dir;
+}
+
+// claude-accounts' accounts.json: a top-level array of accounts.
+export function putAccounts(w, accounts) {
+  w.files[ACCOUNTS] = typeof accounts === "string" ? accounts : JSON.stringify(accounts);
 }
 
 // Claude ran /exit: the shell is back with the exit screen.
@@ -200,15 +236,26 @@ export function deps(w) {
       return fail(`unknown command ${cmd}`);
     },
     exec: async (cmd, args) => {
+      w.execs.push([cmd, ...args]);
       if (cmd === "env" && args[1] === "ps") {
         const s = w.procStart[Number(args.at(-1))];
         return s ? ok(`${s}\n`) : fail();
       }
       if (cmd === "find") {
+        // The folder find starts from (after `-H`, which follows it when it is
+        // a symlink: a profile's projects/ links to ~/.claude/projects).
+        const from = args[0] === "-H" ? args[1] : args[0];
+        if (args.includes("-mindepth")) {
+          // A profile root's folders.
+          const names = w.profiles[from];
+          if (!names) return { code: 1, stdout: "", stderr: `find: ${from}: No such file or directory` };
+          return ok(names.map((n) => `${from}/${n}\n`).join(""));
+        }
         const name = args.at(-1);
         const sid = name.replace(/\.jsonl$/, "");
-        return ok(w.transcripts.has(sid) ? `${HOME}/.claude/projects/-code-app/${name}\n` : "");
+        return ok(w.transcripts.has(sid) ? `${from}/-code-app/${name}\n` : "");
       }
+      if (cmd === "test") return args[0] === "-d" && w.dirs.has(args[1]) ? ok("") : fail("");
       if (cmd === "ps") {
         const kb = w.rss[Number(args.at(-1))];
         return kb ? ok(`  ${kb}\n`) : fail();
