@@ -4,24 +4,28 @@
 # symlink, so these are copies: after editing the repo, run this again and
 # Herdr hot-reloads what changed.
 #
-#   scripts/install.sh [--no-keys] [plugin]   install or update (default plugin: projects-sidebar)
-#   scripts/install.sh --uninstall [plugin]   remove only what this installed
+#   scripts/install.sh [--no-keys] [--alone] [plugin]   install or update (default plugin: projects-sidebar)
+#   scripts/install.sh --uninstall [plugin]             remove only what this installed
 #
 # Herdr's home is $HERDR_APP_HOME, else ~/.config/herdr-app. What it installed
 # is listed in <home>/.herdr-plugins/<plugin>.txt; it never overwrites or
 # removes anything else: a name already taken stops the install. The plugin's
 # keys.json is merged into <home>/keys.json (new keys only, after a backup)
-# unless --no-keys; uninstalling leaves keys.json as it is.
+# unless --no-keys; uninstalling leaves keys.json as it is. A plugin's
+# `requires` file names other plugin folders of this repo that it needs
+# beside it; they are installed first, unless --alone.
 set -eu
 
 repo=$(cd "$(dirname "$0")/.." && pwd)
 home=${HERDR_APP_HOME:-"$HOME/.config/herdr-app"}
 mode=install
 keys=yes
+alone=no
 while [ $# -gt 0 ]; do
   case "$1" in
     --uninstall) mode=uninstall ;;
     --no-keys) keys=no ;;
+    --alone) alone=yes ;;
     -*) echo "install: unknown option $1" >&2; exit 2 ;;
     *) break ;;
   esac
@@ -60,6 +64,36 @@ for item in $(items); do
     exit 1
   fi
 done
+
+# What the plugin needs beside it, installed after its own names pass the
+# check above (a refused install changes nothing) and before its own copy: its
+# `requires` file, one plugin folder of this repo per line (# comments).
+# projects-sidebar's layout draws claude-accounts' footer, and a block whose
+# mod isn't installed shows "<mod> did not load". Each runs once per install
+# (HERDR_PLUGINS_SEEN breaks a loop); one this repo doesn't have is named
+# and skipped. --uninstall never removes them: another plugin may use them.
+if [ "$alone" = no ] && [ -f "$src/requires" ]; then
+  seen=" ${HERDR_PLUGINS_SEEN:-} $plugin "
+  while IFS= read -r dep || [ -n "$dep" ]; do
+    dep=$(printf '%s' "${dep%%#*}" | tr -d '[:space:]')
+    [ -n "$dep" ] || continue
+    case "$dep" in
+      .*|*[!A-Za-z0-9._-]*) echo "requires: $dep isn't a plugin name; skipped" >&2; continue ;;
+    esac
+    case "$seen" in *" $dep "*) continue ;; esac
+    seen="$seen$dep "
+    if [ -d "$repo/$dep" ]; then
+      echo "requires: installing $dep"
+      if [ "$keys" = no ]; then
+        HERDR_PLUGINS_SEEN="$seen" sh "$repo/scripts/install.sh" --no-keys "$dep"
+      else
+        HERDR_PLUGINS_SEEN="$seen" sh "$repo/scripts/install.sh" "$dep"
+      fi
+    else
+      echo "requires: $dep isn't in this checkout; install it on its own"
+    fi
+  done < "$src/requires"
+fi
 
 mkdir -p "$home/.herdr-plugins" "$home/mods" "$home/layouts"
 # A run that stops partway leaves nothing half-written: the item being copied

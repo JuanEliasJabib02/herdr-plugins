@@ -108,7 +108,7 @@ for (const [item, file] of [
   test(`a ${item} that isn't in the manifest stops the install: exit 1, named, nothing changed`, () => {
     const home = fakeHome({ [file]: "// theirs\n", "mods/other/main.js": "// theirs too\n" });
     const before = snapshot(home);
-    const r = run(INSTALL, home, "--no-keys");
+    const r = run(INSTALL, home, "--no-keys", "--alone");
     assert.equal(r.status, 1, r.stdout);
     assert.match(r.stderr, new RegExp(`${home}/${item} exists and wasn't installed from projects-sidebar; nothing changed`));
     assert.deepEqual(snapshot(home), before, "nothing in the home changed");
@@ -139,7 +139,7 @@ test("re-install after the plugin stops shipping an item: it is removed and drop
 
 test("--uninstall removes only what the manifest lists; a foreign mod stays", () => {
   const home = fakeHome({ "mods/other/main.js": "// theirs\n", "layouts/other.json": "{}\n" });
-  const installed = run(INSTALL, home, "--no-keys");
+  const installed = run(INSTALL, home, "--no-keys", "--alone");
   assert.equal(installed.status, 0, installed.stderr);
   assert.ok(existsSync(join(home, "mods/projects/main.js")));
 
@@ -158,6 +158,64 @@ test("--uninstall removes only what the manifest lists; a foreign mod stays", ()
     "mods/other/": "dir",
     "mods/other/main.js": "// theirs\n",
   });
+});
+
+// ── What a plugin requires ─────────────────────────────────────────────────
+
+test("a plugin's requires file: each listed plugin folder of the repo is installed first, with its own manifest", () => {
+  const { script, plugin } = fakeRepo({ "mods/a/main.js": "a\n", requires: "# what demo's layout draws\ndep\n" });
+  writeTree(join(dirname(plugin), "dep"), { "mods/dep/main.js": "dep\n" });
+  const home = fakeHome();
+  const r = run(script, home, "--no-keys", "demo");
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(manifest(home, "demo"), ["mods/a"]);
+  assert.deepEqual(manifest(home, "dep"), ["mods/dep"]);
+  assert.equal(readFileSync(join(home, "mods/dep/main.js"), "utf8"), "dep\n");
+  assert.ok(r.stdout.indexOf("mods/dep") < r.stdout.indexOf("mods/a"), "the required plugin lands first");
+});
+
+test("a required plugin this repo doesn't have, or a name that isn't one, is named and the install still succeeds", () => {
+  const { script } = fakeRepo({ "mods/a/main.js": "a\n", requires: "missing\n../up\n" });
+  const home = fakeHome();
+  const r = run(script, home, "--no-keys", "demo");
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /requires: missing isn't in this checkout/);
+  assert.match(r.stderr, /requires: \.\.\/up isn't a plugin name/);
+  assert.deepEqual(manifest(home, "demo"), ["mods/a"]);
+  assert.equal(existsSync(join(home, ".herdr-plugins/missing.txt")), false);
+});
+
+test("an install its own check refuses installs nothing it requires either", () => {
+  const { script, plugin } = fakeRepo({ "mods/a/main.js": "a\n", requires: "dep\n" });
+  writeTree(join(dirname(plugin), "dep"), { "mods/dep/main.js": "dep\n" });
+  const home = fakeHome({ "mods/a/main.js": "// theirs\n" });
+  const before = snapshot(home);
+  const r = run(script, home, "--no-keys", "demo");
+  assert.equal(r.status, 1, r.stdout);
+  assert.deepEqual(snapshot(home), before, "nothing in the home changed");
+});
+
+test("--alone installs only the plugin; --uninstall never removes what it requires", () => {
+  const { script, plugin } = fakeRepo({ "mods/a/main.js": "a\n", requires: "dep\n" });
+  writeTree(join(dirname(plugin), "dep"), { "mods/dep/main.js": "dep\n" });
+  const home = fakeHome();
+  assert.equal(run(script, home, "--no-keys", "--alone", "demo").status, 0);
+  assert.equal(existsSync(join(home, "mods/dep")), false);
+  assert.equal(run(script, home, "--no-keys", "demo").status, 0);
+  assert.ok(existsSync(join(home, "mods/dep/main.js")));
+  assert.equal(run(script, home, "--uninstall", "demo").status, 0);
+  assert.equal(existsSync(join(home, "mods/a")), false);
+  assert.ok(existsSync(join(home, "mods/dep/main.js")), "another plugin may use it");
+});
+
+test("requires that loop back (demo needs dep, dep needs demo) install each once", () => {
+  const { script, plugin } = fakeRepo({ "mods/a/main.js": "a\n", requires: "dep\n" });
+  writeTree(join(dirname(plugin), "dep"), { "mods/dep/main.js": "dep\n", requires: "demo\n" });
+  const home = fakeHome();
+  const r = run(script, home, "--no-keys", "demo");
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal((r.stdout.match(/^installed .*\/mods\/a$/gm) ?? []).length, 1);
+  assert.equal((r.stdout.match(/^installed .*\/mods\/dep$/gm) ?? []).length, 1);
 });
 
 // ── A copy that fails partway ──────────────────────────────────────────────

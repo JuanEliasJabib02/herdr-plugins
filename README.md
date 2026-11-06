@@ -25,6 +25,12 @@ herdr-app do layout.switch '{"name":"projects"}'  # ctrl-shift-l switches back
   name it didn't install. It lists what it installed in
   `~/.config/herdr-app/.herdr-plugins/projects-sidebar.txt`. Set
   `HERDR_APP_HOME` for another Herdr home.
+- **Requires claude-accounts:** the projects layout's status bar draws the
+  claude-accounts plugin's Claude usage at its right. The installer installs
+  the plugins listed in `projects-sidebar/requires` first, when this repo has
+  their folder. Without it, that block shows "claude-accounts did not load".
+  `scripts/install.sh --alone` installs projects-sidebar only, and
+  `--uninstall` never removes claude-accounts.
 - **Keys:** F1–F3 come from the plugin's `keys.json`, which the installer
   merges into yours. It adds only keys you don't use and backs the file up
   first (`keys.json.bak-<time>`). Once your keys.json is edited, Herdr stops
