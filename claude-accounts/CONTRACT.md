@@ -47,7 +47,7 @@ change without notice.
 |---|---|---|
 | `id` | string | The account's uuid, or `"default"`. |
 | `label` | string | What to show: `"System default"`, or the account's email. |
-| `email` | string or null | The email it's signed in as; null when System default has no login. |
+| `email` | string or null | The email its folder is signed in as now (a `/login` inside its Claude changes it), or the one saved when the folder has no login; null when System default has no login. |
 | `org` | string or null | The organization's name. |
 | `configDir` | string or null | Its Claude config folder, the exact `CLAUDE_CONFIG_DIR` its Claude runs with (never normalized). Null for System default. |
 | `isDefault` | boolean | True for System default only. |

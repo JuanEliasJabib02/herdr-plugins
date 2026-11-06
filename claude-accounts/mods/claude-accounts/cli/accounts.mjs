@@ -101,6 +101,9 @@ function print(json, value, human) {
 // A trimmed non-empty string, else null (Orca's `text` schema).
 const text = (value) => (typeof value === "string" && value.trim() ? value.trim() : null);
 const sameEmail = (a, b) => Boolean(a && b && a.trim().toLowerCase() === b.trim().toLowerCase());
+// Orca's isSameClaudeLogin: missing organization ids permit an email-only match.
+export const sameLogin = (a, b) =>
+  sameEmail(a?.email, b?.email) && (!a.orgUuid || !b.orgUuid || a.orgUuid === b.orgUuid);
 
 const isDir = (path) => {
   try {
@@ -273,17 +276,23 @@ export async function knownAccounts(home = stateHome(), env = process.env) {
   const activeConfigDir = await readActive(home);
   const saved = registry.map((a) => {
     const configDir = typeof a.configDir === "string" && a.configDir ? a.configDir : null;
+    const login = configDir ? folderLogin(configDir, env) : null;
+    // A /login in a Claude running on the folder changes who it's signed in as
+    // without telling anyone: then the folder says who it is. Otherwise the
+    // saved names stay, fresher than the ones the folder kept.
+    const stored = { email: text(a.email), org: text(a.org), orgUuid: text(a.orgUuid) };
+    const who = login && !sameLogin(login, stored) ? login : stored;
     return {
       id: a.id,
-      email: text(a.email),
-      org: text(a.org),
-      orgUuid: text(a.orgUuid),
+      email: who.email,
+      org: who.org,
+      orgUuid: who.orgUuid,
       configDir,
       lastAuthenticatedAt: Number.isFinite(a.lastAuthenticatedAt) ? a.lastAuthenticatedAt : null,
       // Anything but "herdr" keeps its folder on remove.
       source: a.source === "herdr" ? "herdr" : "orca",
       isDefault: false,
-      signedIn: Boolean(configDir && folderLogin(configDir, env)),
+      signedIn: Boolean(login),
       duplicateOf: null,
     };
   });

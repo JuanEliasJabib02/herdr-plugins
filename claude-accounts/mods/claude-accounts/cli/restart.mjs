@@ -104,7 +104,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { parseArgs } from "node:util";
 import { FILES, cliPath, stateHome } from "./paths.mjs";
 import { failure, isAlive, readJson, render, withLock, writeAtomic } from "./files.mjs";
-import { knownAccounts, readSettings } from "./accounts.mjs";
+import { knownAccounts, readSettings, sameLogin } from "./accounts.mjs";
 import { contractUsage } from "./usage.mjs";
 import { HC_SEND_TIMEOUT_MS, getTerminal, hasTranscript, hc, inspectTerminal, isIdle, listClaudeTerminals } from "./terminals.mjs";
 
@@ -374,7 +374,12 @@ async function scanTerminals(known) {
 
 // D8's three groups, in pending-switch.json's shape plus what a switch item
 // needs: [{ terminal, title, account, group, reason, sessionId, args }].
-function classify(scan, from, to) {
+function classify(scan, from, to, known) {
+  // A session on another folder with the outgoing account's login spends the
+  // same limits, so it moves with it (System default and a saved account can
+  // hold one login).
+  const accountById = new Map(known.accounts.map((a) => [a.id, a]));
+  const leaving = (account) => account === from || sameLogin(accountById.get(account), accountById.get(from));
   const holders = new Map();
   for (const { found } of scan) {
     if (found.kind === "claude") holders.set(found.sessionId, (holders.get(found.sessionId) ?? 0) + 1);
@@ -394,7 +399,7 @@ function classify(scan, from, to) {
     else {
       out.push({
         ...row,
-        group: found.account === from ? "onAccount" : "elsewhere",
+        group: leaving(found.account) ? "onAccount" : "elsewhere",
         reason: null,
         sessionId: found.sessionId,
         args: keptArgs(found.argv),
@@ -421,7 +426,7 @@ export async function afterUse(from, to) {
       say(`claude-accounts: couldn't list Herdr's terminals (${e.message}); Claude terminals stay where they are.`);
     }
   }
-  const sessions = switchMode === "keep" ? [] : classify(scan, from, to);
+  const sessions = switchMode === "keep" ? [] : classify(scan, from, to, known);
   const onAccount = sessions.filter((s) => s.group === "onAccount");
   const accountOf = new Map(scan.filter((s) => s.found.kind === "claude").map((s) => [s.terminal, s.found.account]));
 
@@ -440,7 +445,7 @@ export async function afterUse(from, to) {
     if (switchMode === "restart") {
       for (const s of onAccount) {
         if (doc.items.some((item) => item.terminal === s.terminal && isLive(item))) continue;
-        const item = newItem("switch", { terminal: s.terminal, from, to, sessionId: s.sessionId, args: s.args }, doc.items, now);
+        const item = newItem("switch", { terminal: s.terminal, from: s.account, to, sessionId: s.sessionId, args: s.args }, doc.items, now);
         doc.items.push(item);
         ids.push(item.id);
       }

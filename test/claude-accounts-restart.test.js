@@ -393,6 +393,7 @@ function sandbox({ active = A, switchMode = "ask", timing = {} } = {}) {
   };
   // A terminal whose shell has nothing in the foreground.
   s.shell = (t) => s.world(t, { address: t, pid: ++shellPids, claude: null, own: false, argv: [], where: `ws / ${t}` });
+  s.home = home;
   s.world = (t, value) => writeFileSync(join(world, "terminals", `${t}.json`), JSON.stringify(value));
   s.worldOf = (t) => JSON.parse(readFileSync(join(world, "terminals", `${t}.json`), "utf8"));
 
@@ -639,6 +640,21 @@ test("use, Ask: --answer restart queues only the listed sessions that were ticke
   assert.deepEqual(s.json(["restart", "--answer", "keep"]), { queued: [] });
   assert.equal(s.pending(), null);
   assert.deepEqual(s.queue().filter((i) => i.state !== "done"), []);
+});
+
+test("use, Always restart: a session on another folder with the outgoing account's login moves with it", async () => {
+  const s = sandbox({ active: A, switchMode: "restart" });
+  writeFileSync(join(s.home, ".claude.json"), JSON.stringify({ oauthAccount: { emailAddress: "ANA@example.com" } }));
+  const onDefault = s.term("t1", { on: "default" });
+  const other = s.term("t2", { on: C });
+  s.json(["use", B]);
+  const sessions = Object.fromEntries(s.pending().sessions.map((x) => [x.terminal, x.group]));
+  assert.deepEqual(sessions, { t1: "onAccount", t2: "elsewhere" });
+  const item = s.queue().find((i) => i.terminal === "t1");
+  assert.deepEqual([item.from, item.to], ["default", B]);
+  await until(() => s.item((i) => i.id === item.id && i.state === "done"), WAIT, "t1's restart");
+  assert.ok(!alive(onDefault.pid));
+  assert.ok(alive(other.pid), "another login stays");
 });
 
 test("use, Ask: --answer restart takes a terminal's name as well as its address", async () => {

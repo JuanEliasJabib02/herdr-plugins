@@ -302,6 +302,19 @@ test("import-orca again: new Orca accounts and fresh metadata come in; active, s
 
 // ── System default ─────────────────────────────────────────────────────────
 
+test("a saved account shows what its folder is signed in as now; a folder with no login keeps what was saved", () => {
+  const s = sandbox();
+  orcaProfile(s.home, A, BEN); // A /login inside its Claude: saved as Ana, signed in as Ben.
+  orcaProfile(s.home, B);
+  orcaDb(s.home, { claudeManagedAccounts: [orcaRow(A, ANA, 1), orcaRow(B, BEN, 2)] });
+  const doc = listJson(s);
+  assert.equal(byId(doc, A).email, BEN.emailAddress);
+  assert.equal(byId(doc, A).label, BEN.emailAddress);
+  assert.equal(byId(doc, A).org, BEN.organizationName);
+  assert.equal(byId(doc, B).email, BEN.emailAddress, "no login in the folder: the saved email");
+  assert.equal(byId(doc, B).needsSignIn, true);
+});
+
 test("System default comes from ~/.claude.json, and flags a saved account with the same email (Orca's notice)", () => {
   const s = sandbox();
   writeFileSync(join(s.home, ".claude.json"), JSON.stringify({ oauthAccount: { ...ANA, emailAddress: " ANA@Example.com" } }));
