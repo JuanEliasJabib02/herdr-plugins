@@ -1,0 +1,4 @@
+# Plugin folders of this repo that scripts/install.sh installs first.
+# The layout's status bar draws claude-accounts' footer; without it the
+# block shows "claude-accounts did not load".
+claude-accounts
