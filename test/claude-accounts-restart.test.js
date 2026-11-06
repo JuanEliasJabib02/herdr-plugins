@@ -891,6 +891,152 @@ test("queue rules: right before acting the terminal is re-read, and a restart al
   assert.deepEqual(s.sends(), []);
 });
 
+// ── A switch while a restart is under way (D19) ────────────────────────────
+//
+// A→B restarts t1; B→C comes while that restart has already stopped Claude.
+// The scan can't say where t1 runs then (the old Claude still on A, a shell,
+// or the new Claude on B), so the started item says it: t1 counts as on B.
+
+// How long each hc send sleeps in the tests that hold a restart in
+// `starting`: t1 is at a shell (out of `hc ls`'s Claude terminals) for that
+// long, and a CLI run or two fit in it on a loaded machine.
+const HOLD_SEND_S = 8;
+
+// An item in these states hasn't stopped Claude yet.
+const NOT_STARTED_STATES = ["queued", "waitingIdle"];
+
+// C signed in (the sandbox leaves it signed out), so `use C` is allowed.
+const signInC = (s) => s.setLogin(C, login("cal@example.net", "Cal"));
+
+// The account t1 runs on now, or null when it isn't running Claude.
+function accountNow(s, t) {
+  const r = s.cli(["terminal", t, "--json"]);
+  return r.status === 0 ? JSON.parse(r.stdout).account : null;
+}
+
+test("D19, restart mode: B→C while t1's restart to B types its line (t1 at a shell, out of the scan): t1 ends on C", async () => {
+  const s = sandbox({ active: A, switchMode: "restart" });
+  signInC(s);
+  const t1 = s.term("t1", { on: A, sendSleep: HOLD_SEND_S });
+  s.json(["use", B]);
+  const first = await until(() => s.item((i) => i.terminal === "t1" && i.state === "starting"), WAIT, "t1's restart to B typing its line", s.queue);
+  s.json(["use", C]);
+  assert.equal(s.item((i) => i.id === first.id).state, "starting", "use C ran while the line was being typed");
+  t1.set({ sendSleep: 0 });
+  const second = s.item((i) => i.terminal === "t1" && i.id !== first.id);
+  assert.ok(second, `a second switch item for t1: ${JSON.stringify(s.queue())}`);
+  assert.deepEqual([second.kind, second.from, second.to, second.sessionId], ["switch", B, C, t1.sessionId]);
+  const row = s.pending().sessions.find((x) => x.terminal === "t1");
+  assert.deepEqual([s.pending().mode, row.group, row.account, row.status, row.title], ["restart", "onAccount", B, "busy", null]);
+
+  await until(() => s.item((i) => i.id === second.id && i.state === "done"), WAIT, "t1's restart to C", s.queue);
+  assert.equal(s.item((i) => i.id === first.id).state, "done");
+  assert.equal(accountNow(s, "t1"), C);
+  assert.deepEqual(s.typed("t1").map((x) => x.dir), [s.dirs[B], s.dirs[C]]);
+});
+
+test("D19, restart mode: B→C while t1's restart to B is stopping (the old Claude still up on A, read as elsewhere): t1 ends on C", async () => {
+  const s = sandbox({ active: A, switchMode: "restart" });
+  signInC(s);
+  const t1 = s.term("t1", { on: A, ignoreTerm: true });
+  s.json(["use", B]);
+  const first = await until(() => s.item((i) => i.terminal === "t1" && i.state === "stopping"), WAIT, "t1's restart to B stopping", s.queue);
+  s.json(["use", C]);
+  assert.ok(alive(t1.pid), "the old Claude was still up during use C");
+  const second = s.item((i) => i.terminal === "t1" && i.id !== first.id);
+  assert.ok(second, `a second switch item for t1: ${JSON.stringify(s.queue())}`);
+  assert.deepEqual([second.from, second.to], [B, C]);
+  assert.deepEqual(s.pending().sessions.map((x) => [x.terminal, x.group, x.account]), [["t1", "onAccount", B]], "the scan's elsewhere row was replaced");
+  // The old Claude goes at last: the first restart ends on B, then the second.
+  process.kill(t1.pid, "SIGKILL");
+  await until(() => s.item((i) => i.id === second.id && i.state === "done"), WAIT, "t1's restart to C", s.queue);
+  assert.equal(s.item((i) => i.id === first.id).state, "done");
+  assert.equal(accountNow(s, "t1"), C);
+  assert.deepEqual(s.typed("t1").map((x) => x.dir), [s.dirs[B], s.dirs[C]]);
+});
+
+test("D19, restart mode: B→C right after t1's restart to B began (a Claude that stops at once): t1 ends on C", async () => {
+  const s = sandbox({ active: A, switchMode: "restart" });
+  signInC(s);
+  s.term("t1", { on: A });
+  s.json(["use", B]);
+  await until(() => s.item((i) => i.terminal === "t1" && !NOT_STARTED_STATES.includes(i.state)), WAIT, "t1's restart to B to begin", s.queue);
+  s.json(["use", C]);
+  await until(() => s.item((i) => i.terminal === "t1" && i.to === C && i.state === "done"), WAIT, "t1's restart to C", s.queue);
+  assert.equal(accountNow(s, "t1"), C);
+  assert.deepEqual(s.queue().filter((i) => i.state !== "done"), [], "nothing left over");
+});
+
+test("D19, ask mode: B→C while t1's restart to B types its line lists t1 as onAccount (prompt, busy), and Restart moves it to C", async () => {
+  const s = sandbox({ active: A, switchMode: "ask" });
+  signInC(s);
+  const t1 = s.term("t1", { on: A, sendSleep: HOLD_SEND_S });
+  writeTranscript(t1, [userLine("move the docs page"), assistantLine("on it")]);
+  s.json(["use", B]);
+  const { queued: [firstId] } = s.json(["restart", "--answer", "restart"]);
+  await until(() => s.item((i) => i.id === firstId && i.state === "starting"), WAIT, "t1's restart to B typing its line", s.queue);
+
+  s.json(["use", C]);
+  const pending = s.pending();
+  assert.ok(pending, "a question");
+  assert.deepEqual([pending.mode, pending.from, pending.to], ["ask", B, C]);
+  assert.deepEqual(pending.sessions, [
+    { terminal: "t1", title: null, prompt: "move the docs page", account: B, group: "onAccount", reason: null, status: "busy" },
+  ]);
+  assert.deepEqual(s.queue().map((i) => i.id), [firstId], "Ask queues nothing");
+
+  const { queued } = s.json(["restart", "--answer", "restart"]);
+  assert.equal(s.item((i) => i.id === firstId).state, "starting", "answered while t1 was at a shell");
+  assert.equal(queued.length, 1, "Restart queued t1");
+  t1.set({ sendSleep: 0 });
+  const second = s.item((i) => i.id === queued[0]);
+  assert.deepEqual([second.kind, second.terminal, second.from, second.to, second.sessionId], ["switch", "t1", B, C, t1.sessionId]);
+  await until(() => s.item((i) => i.id === second.id && i.state === "done"), WAIT, "t1's restart to C", s.queue);
+  assert.equal(s.item((i) => i.id === firstId).state, "done");
+  assert.equal(accountNow(s, "t1"), C);
+});
+
+test("D19, keep mode: B→C while t1's restart to B types its line does nothing: t1 ends on B", async () => {
+  const s = sandbox({ active: A, switchMode: "restart" });
+  signInC(s);
+  const t1 = s.term("t1", { on: A, sendSleep: HOLD_SEND_S });
+  s.json(["use", B]);
+  const first = await until(() => s.item((i) => i.terminal === "t1" && i.state === "starting"), WAIT, "t1's restart to B typing its line", s.queue);
+  s.json(["settings", "set", "switchMode", "keep"]);
+  s.json(["use", C]);
+  assert.equal(s.item((i) => i.id === first.id).state, "starting", "use C ran while the line was being typed");
+  t1.set({ sendSleep: 0 });
+  assert.deepEqual(s.queue().map((i) => i.id), [first.id], "nothing queued");
+  assert.equal(s.pending(), null, "nothing asked");
+  await until(() => s.item((i) => i.id === first.id && i.state === "done"), WAIT, "t1's restart to B", s.queue);
+  assert.equal(accountNow(s, "t1"), B);
+  assert.equal(s.typed("t1").length, 1);
+});
+
+test("D19, the skips: a started switch item already heading to the new account keeps the terminal out; so does a live resume job to another one", async () => {
+  // A switch item to B that already stopped Claude (its runner is this test
+  // process, alive), while the old Claude still reads on A.
+  const s = sandbox({ active: A, switchMode: "restart" });
+  const t1 = s.term("t1", { on: A });
+  const started = resumeItem({ id: "sw-started", kind: "switch", sessionId: t1.sessionId, state: "stopping", claimedBy: { pid: process.pid, at: Date.now() + 60_000 } });
+  s.writeQueue([started]);
+  s.json(["use", B]);
+  assert.deepEqual(s.pending().sessions.map((x) => [x.terminal, x.group]), [["t1", "onAccount"]]);
+  assert.deepEqual(s.queue().map((i) => [i.id, i.state, i.to]), [["sw-started", "stopping", B]], "no second item");
+  assert.ok(alive(t1.pid));
+
+  // A resume job to B on a busy t2 while the switch goes A → C.
+  const r = sandbox({ active: A, switchMode: "restart" });
+  signInC(r);
+  const t2 = r.term("t2", { on: A, status: "busy", state: "working" });
+  const { job } = r.json(["resume", "--terminal", "t2", "--account", B]);
+  r.json(["use", C]);
+  assert.deepEqual(r.pending().sessions.map((x) => [x.terminal, x.group]), [["t2", "onAccount"]]);
+  assert.deepEqual(r.queue().map((i) => [i.id, i.kind, i.to]), [[job, "resume", B]], "no switch item, and the job keeps its own target");
+  assert.ok(alive(t2.pid));
+  r.json(["resume", "--cancel", job]);
+});
+
 // ── The runner, per terminal (D8) ──────────────────────────────────────────
 
 test("a busy terminal is waited on with no cap, and restart --cancel <t> cancels it before Claude stops", async () => {
@@ -1113,6 +1259,44 @@ test("resume: a repeat returns the live job; --cancel ends it as cancelled; a te
   }
 });
 
+test("resume (D20): the account is checked before the live job (7, 5); a live job to another account exits 11 and names it; the same account gets its id", () => {
+  const s = sandbox({ active: A });
+  s.term("t1", { on: A, status: "busy", state: "working" });
+  const { job } = s.json(["resume", "--terminal", "t1", "--account", B]);
+
+  for (const extra of [[], ["--wait", "0.2"], ["--message", "go on"]]) {
+    const other = s.cli(["resume", "--terminal", "t1", "--account", "default", ...extra, "--json"]);
+    assert.equal(other.status, 11, `${extra.join(" ")}: ${other.stderr}`);
+    assert.equal(other.stdout, "");
+    assert.equal(
+      other.stderr,
+      `claude-accounts resume: terminal t1 already has a live job ${job} to ben@example.org: cancel it (resume --cancel ${job}) or wait for it\n`,
+    );
+  }
+  const signedOut = s.cli(["resume", "--terminal", "t1", "--account", C, "--json"]);
+  assert.equal(signedOut.status, 5, signedOut.stderr);
+  assert.match(signedOut.stderr, /cal@example\.net needs you to sign in again/);
+  const unknown = s.cli(["resume", "--terminal", "t1", "--account", "nobody", "--json"]);
+  assert.equal(unknown.status, 7, unknown.stderr);
+
+  assert.equal(s.json(["resume", "--terminal", "t1", "--account", B]).job, job, "the same account gets the job's id");
+  assert.deepEqual(s.queue().map((i) => [i.id, i.to]), [[job, B]], "never a second job");
+  s.json(["resume", "--cancel", job]);
+});
+
+test("resume (D20): two resumes at once to A and B on one terminal queue one job, and the other exits 11 naming it", async () => {
+  const s = sandbox({ active: A });
+  // Each hc get takes 0.4 s, so both calls look for a live job before either
+  // has queued one, and meet again inside the lock that queues.
+  s.term("t1", { on: "default", status: "busy", state: "working", getSleep: 0.4 });
+  const runs = await Promise.all([A, B].map((id) => s.exec(["resume", "--terminal", "t1", "--account", id, "--json"])));
+  assert.deepEqual(runs.map((r) => r.status).sort((x, y) => x - y), [0, 11], runs.map((r) => r.stderr).join(" | "));
+  const { job } = JSON.parse(runs.find((r) => r.status === 0).stdout);
+  assert.match(runs.find((r) => r.status === 11).stderr, new RegExp(`already has a live job ${job} to `));
+  assert.deepEqual(s.queue().map((i) => i.id), [job], "one job");
+  s.json(["resume", "--cancel", job]);
+});
+
 test("job lifetime: a job whose runner is dead or stale reads failed 'runner gone' with the line; a final job answers 24 h, then 7", () => {
   const s = sandbox();
   const sid = randomUUID();
@@ -1156,6 +1340,43 @@ test("a runner killed mid-wait: its job reads failed 'runner gone', Claude was n
   const next = s.json(["resume", "--terminal", "t1", "--account", B]);
   assert.notEqual(next.job, job);
   assert.equal((await s.final(next.job)).state, "done");
+});
+
+test("D19: a runner killed while its restart to B is starting doesn't hold up the switch to C behind it: t1 still ends on C", async () => {
+  const s = sandbox({ active: A, switchMode: "restart" });
+  signInC(s);
+  // The new Claude on B comes up busy, so the first item stays in `starting`
+  // (waiting for it to be idle) with that Claude up.
+  const t1 = s.term("t1", { on: A, startStatus: "busy" });
+  s.json(["use", B]);
+  const first = await until(
+    () => s.item((i) => i.terminal === "t1" && i.state === "starting" && s.worldOf("t1").claude !== t1.pid && alive(s.worldOf("t1").claude)),
+    WAIT,
+    "t1's restart to B with its new Claude up",
+    s.queue,
+  );
+  s.json(["use", C]);
+  const second = s.item((i) => i.terminal === "t1" && i.id !== first.id);
+  assert.deepEqual([second?.from, second?.to], [B, C], JSON.stringify(s.queue()));
+
+  // The first runner dies while its item is `starting`, once the second
+  // runner has claimed its item: a runner settles the queue only when it
+  // claims, and nothing here reads restart.json under the lock either, which
+  // would fail the first item. So only the follow-up's own loop can see that
+  // runner is gone.
+  await until(() => s.item((i) => i.id === second.id && i.claimedBy), WAIT, "the second runner's claim", s.queue);
+  process.kill(first.claimedBy.pid, "SIGKILL");
+  await until(() => !alive(first.claimedBy.pid), WAIT, "the first runner to die");
+  t1.set({ startStatus: "idle" });
+  const onB = s.worldOf("t1").claude;
+  writeFileSync(join(s.dirs[B], "sessions", `${onB}.json`), JSON.stringify({ pid: onB, sessionId: t1.sessionId, status: "idle" }));
+
+  await until(() => s.item((i) => i.id === second.id && i.state === "done"), WAIT, "t1's restart to C", s.queue);
+  assert.equal(accountNow(s, "t1"), C);
+  assert.ok(!alive(onB), "the Claude on B was stopped");
+  const gone = s.status(first.id);
+  assert.deepEqual([gone.state, gone.code], ["failed", 9]);
+  assert.match(gone.detail, /^runner gone: /);
 });
 
 test("terminals restart independently: a resume on t2 is done while a switch on busy t1 still waits", async () => {

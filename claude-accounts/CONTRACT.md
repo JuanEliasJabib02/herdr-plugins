@@ -155,7 +155,11 @@ Always restart or Never restart) to the Claude terminals still on the
 previous one. A terminal on a saved account's folder counts only as that
 account. One on System default counts as System default, and also as a saved
 account signed in to the same login: both have an org id, the same org and
-the same email.
+the same email. A terminal whose restart onto the previous account has
+already stopped its Claude counts as on the previous account, whatever it
+shows right then: Always restart moves it on to the new one once that
+restart ends, and Ask lists it. A terminal with a live `resume` job is left
+alone.
 
 ```text
 {"from": "<id>" | "default", "to": "<id>" | "default", "switchMode": "ask" | "restart" | "keep"}
@@ -163,7 +167,10 @@ the same email.
 
 An unknown account exits 7. A saved account whose folder has no login, or
 someone else's (`signedInAs`), exits 5 ("Sign in to this Claude account again
-before selecting it.").
+before selecting it."). An account whose Keychain login lapsed (its folder
+still holds its own login, and `needsSignIn` is true from the last usage
+read) is selected, as in Orca, and its card asks you to sign in again, while
+`resume` to it exits 5.
 
 ### `resume --terminal <t> --account <id|default> [--message <text>] [--wait <s>] --json`
 
@@ -174,8 +181,10 @@ typed it. It never changes the active account.
 - `<t>` is a terminal's address or a name `hc` knows it by. The job is kept
   under its address, so one terminal named two ways gets one job, and
   `--status` reports the address.
-- It checks what needs no waiting and fails at once with 2, 3, 5, 7, 8 or
-  64, and 1 when hc can't read the terminal. It exits 2 when the
+- It checks what needs no waiting and fails at once with 2, 3, 5, 7, 8, 11
+  or 64, and 1 when hc can't read the terminal. The account comes first:
+  an unknown one exits 7 and one that needs sign-in exits 5, even when the
+  terminal already has a live job. It exits 2 when the
   terminal's conversation has no transcript yet ("there's no conversation
   to resume yet in terminal <t>: …"), unless the terminal already runs on
   `--account`, where only `--message` is sent.
@@ -185,8 +194,12 @@ typed it. It never changes the active account.
   it, types `CLAUDE_ACCOUNTS_DIR=<folder> claude <its safe flags> --resume
   <session>` in the same shell, waits for the new Claude to be idle (up to
   2 minutes), checks it landed on the account, and sends the message.
-- A terminal that already has a live job gets that job's id back (exit 0);
-  no second job is queued.
+- A terminal that already has a live job to the same account gets that
+  job's id back (exit 0). A live job to another account exits 11, with
+  "terminal <t> already has a live job <job> to <account>: cancel it
+  (resume --cancel <job>) or wait for it" on stderr (`<account>` is "System
+  default" or the account's email). No second job is queued either way, and
+  two `resume` calls at once on one terminal give the same answers.
 - A terminal already on the account only gets the message.
 - `--wait <s>` (at most 25) waits for the job: it exits with the job's
   final code, or 75 while it's still running. With `--json` it prints the
@@ -255,8 +268,13 @@ ended), and 7 for an unknown job. With `--json` it prints the job's status.
 | 8 | The terminal can't move (Claude is its own program, no shell to come back to) |
 | 9 | Job failed |
 | 10 | Job cancelled |
+| 11 | `resume`: the terminal already has a live job to another account; cancel it or wait for it |
 | 64 | Bad usage: an unknown command or flag, a missing argument (sysexits `EX_USAGE`) |
 | 75 | Still running, under `--wait` (sysexits `EX_TEMPFAIL`) |
+
+Codes are only ever added under version 1 (11 came after the first
+release, where that case answered 0 with the other account's job). Read a
+code you don't know as a failure, as you read 1.
 
 ## Not part of the contract
 

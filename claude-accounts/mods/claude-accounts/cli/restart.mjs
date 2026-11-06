@@ -11,16 +11,24 @@
 //                                        (onAccount and elsewhere) that were
 //                                        ticked, every listed one when no
 //                                        --terminal is given (Orca's
-//                                        answerClaudeAccountSwitchPrompt).
+//                                        answerClaudeAccountSwitchPrompt),
+//                                        with afterUse's skip (5 below). A
+//                                        ticked terminal still restarting
+//                                        onto the question's `from` (D19)
+//                                        is queued even when it doesn't
+//                                        read as Claude now.
 //                                        "Don't ask again" is
 //                                        `settings set switchMode restart`.
 //   resume --terminal <t> --account <id|default> [--message <text>] [--wait <s>]
 //   resume --status <job> [--wait <s>]
 //   resume --cancel <job>
-//     asynchronous (D9, CONTRACT.md): validates (exit 2, 3, 5, 7, 8, 64;
-//     2 also when the conversation has no transcript yet, so there's nothing
-//     to resume, unless the terminal is already on the account and only
-//     gets the message),
+//     asynchronous (D9, CONTRACT.md): checks the account first (exit 7, 5;
+//     D20), then hands back the terminal's live job when it goes to that
+//     account (exit 0), or exits 11 when it goes to another one; then
+//     validates the terminal (exit 2, 3, 8, 64; 2 also when the
+//     conversation has no transcript yet, so there's nothing to resume,
+//     unless the terminal is already on the account and only gets the
+//     message),
 //     queues a job in restart.json, spawns its own runner and exits 0 with
 //     {"job": "<id>"} at once. --status prints {job, terminal, account,
 //     state, code, detail, updatedAt} and exits with the job's code once
@@ -44,9 +52,14 @@
 //      terminal holds the same session id), "unknown-account" (its session
 //      lives in a folder no account has) or "unreadable" (hc couldn't read
 //      it: Orca's "Couldn't check N terminals"). Terminals already on `to`,
-//      as D18 reads it too, aren't listed.
+//      as D18 reads it too, aren't listed. D19: a terminal whose switch item
+//      to `from` has already stopped Claude (headingTo) is onAccount
+//      whatever the scan read, since mid-restart it reads the old Claude, a
+//      shell or a new Claude with no session file yet.
 //   5. restart: each onAccount terminal is queued as a switch item, and a
-//      runner is spawned.
+//      runner is spawned. A live resume job keeps the terminal out, and so
+//      does a live switch item already heading to `to` (D19); the new item
+//      waits behind any other one that already stopped Claude.
 //   6. pending-switch.json gets {from, to, at, mode, sessions} when there's
 //      something to say: an onAccount session, or an unreadable or shared
 //      one. Each session is {terminal, title, prompt, account, group,
@@ -55,7 +68,9 @@
 //      "workspace / tab"), or null; prompt is the conversation's last
 //      prompt (terminals.mjs lastPrompt), or null; status is the session
 //      file's "idle" or "busy" when the switch looked (the dialog then
-//      reads it live), null when there's no session. `mode` is "ask" or "restart", so the mod (T7's toasts.react)
+//      reads it live), null when there's no session. A D19 row (still
+//      restarting) is "busy", with its item's session's prompt, and title
+//      null when the scan didn't list it. `mode` is "ask" or "restart", so the mod (T7's toasts.react)
 //      tells them apart: mode "ask" with an onAccount session opens the
 //      confirm view; mode "restart" is the restart toast, and its Review
 //      opens the confirm view on the sessions that aren't onAccount (they're
@@ -65,7 +80,9 @@
 // exec's 30 s cap never cuts it): under the D2 lock it claims every item
 // that's neither final nor claimed, then runs one async loop per claimed
 // item, so a busy terminal never holds up another. It refreshes its claims'
-// `at` every heartbeat and exits when its loops end. Per item (D8):
+// `at` every heartbeat and exits when its loops end. An item waits while
+// another item on its terminal has stopped Claude, unless that one's runner
+// is gone. Per item (D8):
 //   1. Waits, with no cap, until the terminal's Claude is idle (state
 //      waitingIdle, written once), while the terminal lives and its account
 //      still differs from the item's `to`. Right before acting it re-reads
@@ -109,7 +126,7 @@ import { rm } from "node:fs/promises";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { parseArgs } from "node:util";
-import { FILES, cliPath, stateHome } from "./paths.mjs";
+import { FILES, cliPath, defaultConfigDir, stateHome } from "./paths.mjs";
 import { failure, isAlive, readJson, render, withLock, writeAtomic } from "./files.mjs";
 import { knownAccounts, readSettings, sameEmail } from "./accounts.mjs";
 import { contractUsage } from "./usage.mjs";
@@ -140,6 +157,8 @@ const NOT_STARTED = new Set(["queued", "waitingIdle"]);
 const isLive = (item) => !isFinal(item);
 
 const EX_TEMPFAIL = 75;
+// resume: the terminal already has a live job to another account (D20).
+const EXIT_OTHER_JOB = 11;
 const RESUME_USAGE =
   "resume --terminal <t> --account <id|default> [--message <text>] [--wait <s>] | --status <job> [--wait <s>] | --cancel <job>";
 const RESTART_USAGE = "restart --detach | --cancel <t> | --answer keep|restart [--terminal <t>]...";
@@ -260,6 +279,22 @@ function targetDir(known, id) {
   const account = known.accounts.find((a) => a.id === id);
   if (!account) return null;
   return account.isDefault ? "" : (account.configDir ?? null);
+}
+
+// The folder an account's Claude writes to (~/.claude for System default),
+// or null when the account is gone.
+function configDirOf(known, id) {
+  const account = known.accounts.find((a) => a.id === id);
+  if (!account) return null;
+  return account.isDefault ? defaultConfigDir() : (account.configDir ?? null);
+}
+
+// What to call an account in a message: "System default", its email, else
+// its id (one no longer saved).
+function labelOf(known, id) {
+  const account = known.accounts.find((a) => a.id === id);
+  if (!account) return id;
+  return account.isDefault ? "System default" : (account.email ?? account.id);
 }
 
 // What to run by hand to finish an item: the line the runner types.
@@ -448,12 +483,69 @@ async function withPrompts(sessions, scan) {
 
 const publicSession = ({ terminal, title, prompt, account, group, reason, status }) => ({ terminal, title, prompt, account, group, reason, status });
 
+// D19: the switch item that has the terminal on its way to `account`: one
+// that already stopped Claude (stopping or starting) and is still live, or
+// one that ended done at or after `since`. The newest when there are
+// several, else null. Mid-restart the scan reads the old Claude, a shell or
+// a new Claude with no session file yet, so this item says where the
+// terminal runs. afterUse passes the time it read the queue, before its
+// scan, so an item that ends while the scan runs still counts; answer()
+// passes the question's `at`, since afterUse moved every waiting switch item
+// to the question's `to` in the lock that wrote it. Any other final state
+// never reached `account`: the scan's or the inspect's reading stands.
+function headingTo(doc, terminal, account, since) {
+  for (let i = doc.items.length - 1; i >= 0; i -= 1) {
+    const item = doc.items[i];
+    if (item.kind !== "switch" || item.terminal !== terminal || item.to !== account) continue;
+    if (isLive(item) ? !NOT_STARTED.has(item.state) : item.state === "done" && (item.updatedAt ?? 0) >= since) return item;
+  }
+  return null;
+}
+
+// D19's skip, for afterUse and answer(): a live resume job keeps a terminal
+// out of a switch whatever its target (an explicit resume wins, as `resume`
+// makes a waiting switch item give way); a live switch item only when it
+// already heads to `to`. Otherwise a new switch item is queued, and it waits
+// behind the live one (blockedBy).
+const keptOut = (doc, terminal, to) =>
+  doc.items.some((item) => item.terminal === terminal && isLive(item) && (item.kind !== "switch" || item.to === to));
+
+// D19: each terminal with a switch item heading to `from` (headingTo) gets
+// an onAccount row in place of whatever row the scan has for it: the item's
+// session and args, its last prompt read from `from`'s folder, status
+// "busy" (it's restarting), and the scan's title, null when the scan didn't
+// list the terminal. Called inside afterUse's lock, with the queue as it is.
+async function withRestarting(sessions, scan, doc, from, since, known) {
+  const rows = new Map();
+  for (const terminal of new Set(doc.items.map((item) => item.terminal))) {
+    const item = headingTo(doc, terminal, from, since);
+    if (!item) continue;
+    const seen = scan.find((s) => s.terminal === terminal);
+    rows.set(terminal, {
+      terminal,
+      title: seen ? (seen.found.title ?? seen.where ?? null) : null,
+      prompt: await lastPrompt(configDirOf(known, from), item.sessionId),
+      account: from,
+      group: "onAccount",
+      reason: null,
+      status: "busy",
+      sessionId: item.sessionId,
+      args: item.args ?? [],
+    });
+  }
+  if (rows.size === 0) return sessions;
+  const out = sessions.map((s) => rows.get(s.terminal) ?? s);
+  for (const [terminal, row] of rows) if (!sessions.some((s) => s.terminal === terminal)) out.push(row);
+  return out;
+}
+
 export async function afterUse(from, to) {
   if (from === to) return;
   const home = stateHome();
   const t = timing();
   const known = await knownAccounts(home);
   const { switchMode } = await readSettings(home);
+  const since = Date.now();
   const waiting = (await readQueue(home)).items.some((item) => item.kind === "switch" && NOT_STARTED.has(item.state));
   let scan = [];
   if (switchMode !== "keep" || waiting) {
@@ -463,8 +555,7 @@ export async function afterUse(from, to) {
       say(`claude-accounts: couldn't list Herdr's terminals (${e.message}); Claude terminals stay where they are.`);
     }
   }
-  const sessions = switchMode === "keep" ? [] : await withPrompts(classify(scan, from, to, known), scan);
-  const onAccount = sessions.filter((s) => s.group === "onAccount");
+  const scanned = switchMode === "keep" ? [] : await withPrompts(classify(scan, from, to, known), scan);
   const accountOf = new Map(scan.filter((s) => s.found.kind === "claude").map((s) => [s.terminal, s.found.account]));
 
   const queued = await underLock(home, known, t, async (doc, now) => {
@@ -478,10 +569,12 @@ export async function afterUse(from, to) {
       return true;
     });
     if (switchMode === "keep") return { result: [], write };
+    const sessions = await withRestarting(scanned, scan, doc, from, since, known);
+    const onAccount = sessions.filter((s) => s.group === "onAccount");
     const ids = [];
     if (switchMode === "restart") {
       for (const s of onAccount) {
-        if (doc.items.some((item) => item.terminal === s.terminal && isLive(item))) continue;
+        if (keptOut(doc, s.terminal, to)) continue;
         const item = newItem("switch", { terminal: s.terminal, from: s.account, to, sessionId: s.sessionId, args: s.args }, doc.items, now);
         doc.items.push(item);
         ids.push(item.id);
@@ -568,14 +661,17 @@ async function answer(choice, ticked, json) {
       await rm(pendingPath(home), { force: true });
       const added = [];
       for (const f of found) {
-        if (f.kind !== "claude" || f.ownProgram || f.account === pending.to) continue;
-        if (doc.items.some((item) => item.terminal === f.terminal && isLive(item))) continue;
-        const item = newItem(
-          "switch",
-          { terminal: f.terminal, from: f.account, to: pending.to, sessionId: f.sessionId, args: keptArgs(f.argv) },
-          doc.items,
-          now,
-        );
+        // D19: a terminal restarting onto the question's `from` moves on to
+        // its `to` even when it doesn't read as Claude now (a shell, or a
+        // new Claude with no session file yet); runItem re-reads it once the
+        // first restart ends.
+        const restarting = headingTo(doc, f.terminal, pending.from, pending.at);
+        if (!restarting && (f.kind !== "claude" || f.ownProgram || f.account === pending.to)) continue;
+        if (keptOut(doc, f.terminal, pending.to)) continue;
+        const fields = restarting
+          ? { from: pending.from, sessionId: restarting.sessionId, args: restarting.args ?? [] }
+          : { from: f.account, sessionId: f.sessionId, args: keptArgs(f.argv) };
+        const item = newItem("switch", { terminal: f.terminal, to: pending.to, ...fields }, doc.items, now);
         doc.items.push(item);
         added.push(item.id);
       }
@@ -679,10 +775,17 @@ async function crashed(home, id, error) {
   await finish(home, id, "failed", withLine(`the runner failed (${error?.message ?? error})`, item && manualLine(item, known))).catch(() => {});
 }
 
-// Another item is acting on this terminal (a resume job queued behind a
-// switch item that already stopped Claude): wait for it.
-const blockedBy = (doc, item) =>
-  doc.items.some((other) => other.id !== item.id && other.terminal === item.terminal && isLive(other) && !NOT_STARTED.has(other.state));
+// Another item is acting on this terminal (it already stopped Claude): wait
+// for it. That's a resume job queued behind a switch item, or a switch made
+// while a restart was under way (D19). An item whose runner is gone doesn't
+// count: it would never end, since nothing here settles the queue, and the
+// loop re-reads the terminal before acting anyway.
+const blockedBy = (doc, item, t) => {
+  const now = Date.now();
+  return doc.items.some(
+    (other) => other.id !== item.id && other.terminal === item.terminal && isLive(other) && !NOT_STARTED.has(other.state) && !runnerGone(other, now, t),
+  );
+};
 
 async function runItem(home, id, t) {
   // 1. Wait for idle, with no cap.
@@ -694,7 +797,7 @@ async function runItem(home, id, t) {
     const own = await ownItem(home, id);
     if (!own) return;
     item = own.item;
-    if (blockedBy(own.doc, item)) {
+    if (blockedBy(own.doc, item, t)) {
       await sleep(t.poll);
       continue;
     }
@@ -931,16 +1034,14 @@ export async function resume(args) {
   if (!values.terminal || !values.account) throw usageError(RESUME_USAGE);
   const known = await knownAccounts(home);
   const terminalId = await addressOf(values.terminal);
-  const live = await underLock(home, known, t, async (doc) => ({
-    result: doc.items.find((item) => item.terminal === terminalId && item.kind === "resume" && isLive(item)) ?? null,
-  }));
-  if (live) return accepted(home, known, t, live.id, { wait, json: values.json });
-
+  // D20: the account first, even when the terminal has a live job.
   const account = known.accounts.find((a) => a.id === values.account);
   if (!account) throw failure(`unknown account "${values.account}"`, 7);
-  if (await needsSignIn(home, account)) {
-    throw failure(`${account.isDefault ? "System default" : (account.email ?? account.id)} needs you to sign in again before Claude can run on it.`, 5);
-  }
+  if (await needsSignIn(home, account)) throw failure(`${labelOf(known, account.id)} needs you to sign in again before Claude can run on it.`, 5);
+  // Before the terminal's own checks: mid-restart it reads as a shell.
+  const live = await underLock(home, known, t, async (doc) => ({ result: liveResume(doc, terminalId) }));
+  if (live) return accepted(home, known, t, onlyTo(live, account, terminalId, known).id, { wait, json: values.json });
+
   const found = await inspectTerminal(terminalId, known);
   if (found.kind === "unreadable") throw failure(`couldn't read terminal ${terminalId} (${found.error})`);
   if (found.kind === "missing") throw failure(`terminal ${terminalId} is missing`, 3);
@@ -954,7 +1055,9 @@ export async function resume(args) {
   }
 
   const job = await underLock(home, known, t, async (doc, now) => {
-    const again = doc.items.find((item) => item.terminal === terminalId && item.kind === "resume" && isLive(item));
+    // Another resume queued since the lookup above (two at once): the same
+    // answer as there.
+    const again = liveResume(doc, terminalId);
     if (again) return { result: { item: again, fresh: false } };
     // A switch item still waiting on this terminal gives way to the job.
     doc.items = doc.items.filter((item) => !(item.terminal === terminalId && item.kind === "switch" && NOT_STARTED.has(item.state)));
@@ -975,7 +1078,22 @@ export async function resume(args) {
     return { result: { item, fresh: true }, write: true };
   });
   if (job.fresh) spawnRunner();
+  else onlyTo(job.item, account, terminalId, known);
   return accepted(home, known, t, job.item.id, { wait, json: values.json });
+}
+
+// D20: the terminal's live resume job, or null. Both lookups use it: the one
+// before the terminal is inspected, and the one inside the lock that queues.
+const liveResume = (doc, terminalId) => doc.items.find((item) => item.terminal === terminalId && item.kind === "resume" && isLive(item)) ?? null;
+
+// D20: a live job is handed back only when it goes to the asked account;
+// one to another account exits 11, and no second job is queued.
+function onlyTo(job, account, terminalId, known) {
+  if (job.to === account.id) return job;
+  throw failure(
+    `terminal ${terminalId} already has a live job ${job.id} to ${labelOf(known, job.to)}: cancel it (resume --cancel ${job.id}) or wait for it`,
+    EXIT_OTHER_JOB,
+  );
 }
 
 // A job accepted (new or the terminal's live one): {"job": id}, or with
