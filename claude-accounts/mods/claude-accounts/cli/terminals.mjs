@@ -1,11 +1,14 @@
 // Which account and conversation a Herdr terminal runs (D7, which answers S4:
 // no hook needed). Owner: T4.
 //
-//   terminal <t> [--json] → { account, sessionId, status }
+//   terminal <t> [--json] → { account, sessionId, status, resumable }
 //     account: the id of the account whose config dir holds the terminal's
 //     live session file ("default" for ~/.claude), or null when that folder
 //     belongs to no account (an Orca or Herdr profile folder the registry
 //     doesn't have, such as a removed account's). status: "idle" or "busy".
+//     resumable: the conversation has a transcript, so `claude --resume`
+//     can continue it (a Claude that hasn't been sent a message yet has a
+//     session file but no transcript: it can't move, Orca's no-session).
 //     Exits 3 when the terminal is missing or isn't running Claude, 2 when
 //     its Claude has no session file yet (CONTRACT.md), 1 when hc fails.
 //
@@ -26,6 +29,11 @@
 //   session: the session file's status word, "idle" or "busy";
 //   state: Herdr's .status.state ("idle", "working", "done", "blocked", …).
 //
+// hasTranscript(configDir, sessionId): whether
+// <configDir>/projects/*/<sessionId>.jsonl exists, symlinks followed (every
+// profile's projects/ links to ~/.claude/projects), searched over every
+// project folder rather than guessing the slug from the cwd.
+//
 // listClaudeTerminals(): `hc ls --json`, the live local terminals whose agent
 // is "claude-code" (D7 step 1). Terminals on other machines (`vps/t7`) are
 // left out: their logins are their own (Orca's rule).
@@ -34,7 +42,7 @@
 // passes the terminal after `--`, so a name can't read as a flag.
 
 import { execFile } from "node:child_process";
-import { readFile, readdir } from "node:fs/promises";
+import { readFile, readdir, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { parseArgs } from "node:util";
@@ -165,6 +173,18 @@ async function findSession(dirs, pid) {
   return i < 0 ? null : { ...dirs[i], session: found[i] };
 }
 
+// A session id that names a file, never a path.
+const SESSION_ID = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+
+export async function hasTranscript(configDir, sessionId) {
+  if (!configDir || typeof sessionId !== "string" || !SESSION_ID.test(sessionId)) return false;
+  const projects = join(configDir, "projects");
+  const names = await readdir(projects).catch(() => []);
+  const file = `${sessionId}.jsonl`;
+  const found = await Promise.all(names.map((name) => stat(join(projects, name, file)).then((st) => st.isFile(), () => false)));
+  return found.some(Boolean);
+}
+
 // The foreground looks like Claude Code: the native binary (`claude`,
 // `claude.exe`) or node running its bin.
 const CLAUDE_BIN = /(^|\/)claude(\.exe)?$/i;
@@ -237,9 +257,16 @@ export async function terminal(args) {
   if (found.kind === "missing") throw failure(`terminal ${t} is missing`, 3);
   if (found.kind === "notClaude") throw failure(`terminal ${t} isn't running Claude`, 3);
   if (found.kind === "noSession") throw failure(`Claude in terminal ${t} has no session file yet`, 2);
-  const out = { account: found.account, sessionId: found.sessionId, status: found.session === "idle" ? "idle" : "busy" };
+  const out = {
+    account: found.account,
+    sessionId: found.sessionId,
+    status: found.session === "idle" ? "idle" : "busy",
+    resumable: await hasTranscript(found.configDir, found.sessionId),
+  };
   process.stdout.write(
-    values.json ? render(out) : `${t}: ${out.account ?? "a folder no account has"} · ${out.sessionId} · ${out.status}\n`,
+    values.json
+      ? render(out)
+      : `${t}: ${out.account ?? "a folder no account has"} · ${out.sessionId} · ${out.status}${out.resumable ? "" : " · nothing to resume yet"}\n`,
   );
   return 0;
 }

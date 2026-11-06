@@ -17,7 +17,10 @@
 //   resume --terminal <t> --account <id|default> [--message <text>] [--wait <s>]
 //   resume --status <job> [--wait <s>]
 //   resume --cancel <job>
-//     asynchronous (D9, CONTRACT.md): validates (exit 2, 3, 5, 7, 8, 64),
+//     asynchronous (D9, CONTRACT.md): validates (exit 2, 3, 5, 7, 8, 64;
+//     2 also when the conversation has no transcript yet, so there's nothing
+//     to resume, unless the terminal is already on the account and only
+//     gets the message),
 //     queues a job in restart.json, spawns its own runner and exits 0 with
 //     {"job": "<id>"} at once. --status prints {job, terminal, account,
 //     state, code, detail, updatedAt} and exits with the job's code once
@@ -35,7 +38,8 @@
 //   3. switchMode keep: nothing else.
 //   4. The Claude terminals (D7) split into onAccount (on `from`), elsewhere
 //      (on another account) and cantMove: reason "own-program" (Claude is
-//      the terminal's program), "no-session", "shared-session" (another
+//      the terminal's program), "no-session" (no session file, or a session
+//      with no transcript yet: nothing to resume, Orca's rule), "shared-session" (another
 //      terminal holds the same session id), "unknown-account" (its session
 //      lives in a folder no account has) or "unreadable" (hc couldn't read
 //      it: Orca's "Couldn't check N terminals"). Terminals already on `to`
@@ -61,7 +65,9 @@
 //      the terminal (D7): a switch item already on its target is dropped
 //      (Orca's consumePendingPaneAccountRestart); a resume job already on it
 //      only sends its message. A switch item whose terminal closed, or whose
-//      Claude quit, is dropped too; a resume job in that case fails.
+//      Claude quit, is dropped too; a resume job in that case fails. A
+//      session with no transcript (a `/clear` nobody has written to yet)
+//      fails, and Claude is never stopped.
 //   2. stopping: SIGTERM to the foreground pid (probe b4). From here on the
 //      item can't be cancelled.
 //   3. Waits up to 30 s for the shell to be the foreground again, else
@@ -71,6 +77,10 @@
 //      send is failed with the line to run by hand.
 //   5. Waits up to 120 s for the new Claude to report idle, else timeout.
 //      Its session file must lie in the target's dir, else landedElsewhere.
+//      When the shell is back in the foreground for 5 s with no new Claude
+//      (Claude refused the resume, "No conversation found…", and exited),
+//      it fails at once: detail is the error Claude left on the screen
+//      (`hc read`), then the line to run by hand.
 //   6. A resume job with a message: sending, `hc send` as the user (no
 //      HC_TERMINAL_ID). Then done.
 // A failed, timed-out or orphaned item's detail is `<why>: <the line to run
@@ -81,6 +91,7 @@
 //
 // keptArgs(argv): D8's allowlist over Claude's foreground argv.
 // shellQuote(s), resumeLine(dir, args, sessionId): the typed line.
+// screenReason(screen, line): what the typed line left on the screen.
 //
 // Test seam: CLAUDE_ACCOUNTS_RESTART_TIMING, a JSON object of milliseconds
 // overriding TIMING below ({"poll":25,"shell":800,…}).
@@ -95,13 +106,23 @@ import { FILES, cliPath, stateHome } from "./paths.mjs";
 import { failure, isAlive, readJson, render, withLock, writeAtomic } from "./files.mjs";
 import { knownAccounts, readSettings } from "./accounts.mjs";
 import { contractUsage } from "./usage.mjs";
-import { HC_SEND_TIMEOUT_MS, getTerminal, hc, inspectTerminal, isIdle, listClaudeTerminals } from "./terminals.mjs";
+import { HC_SEND_TIMEOUT_MS, getTerminal, hasTranscript, hc, inspectTerminal, isIdle, listClaudeTerminals } from "./terminals.mjs";
 
 // Milliseconds. poll: how often a loop re-reads its terminal; shell and
-// claude: D8's step 3 and step 5 caps; heartbeat: how often a runner
-// refreshes its claims; stale: a claim (or an unclaimed queued item) older
-// than this is void; waitPoll: how often --wait reads the job.
-const TIMING = Object.freeze({ poll: 1000, shell: 30_000, claude: 120_000, heartbeat: 15_000, stale: 60_000, waitPoll: 250 });
+// claude: D8's step 3 and step 5 caps; shellBack: how long the shell may be
+// back in the foreground after the typed line, with no new Claude, before
+// the item fails; heartbeat: how often a runner refreshes its claims; stale:
+// a claim (or an unclaimed queued item) older than this is void; waitPoll:
+// how often --wait reads the job.
+const TIMING = Object.freeze({
+  poll: 1000,
+  shell: 30_000,
+  claude: 120_000,
+  shellBack: 5_000,
+  heartbeat: 15_000,
+  stale: 60_000,
+  waitPoll: 250,
+});
 const MAX_WAIT_S = 25;
 const KEEP_FINAL_MS = 24 * 60 * 60 * 1000;
 
@@ -243,6 +264,49 @@ function manualLine(item, known) {
 
 const withLine = (why, line) => (line ? `${why}: ${line}` : why);
 
+const noConversation = (terminalId, sessionId) =>
+  `there's no conversation to resume yet in terminal ${terminalId}: Claude hasn't saved session ${sessionId} (it has no messages)`;
+
+// What the typed line left on the screen: the last non-empty line the
+// command printed, under the echoed line and above the new prompt. A prompt
+// can span lines (starship draws an info line, then `❯`), so the new prompt
+// is dropped from the end: its last line (it ends with the symbol the typed
+// line was echoed after), then the lines above it that start like the lines
+// the previous prompt drew above the echoed line. Without an echoed line,
+// the screen's last non-empty line. null when there's nothing left.
+export function screenReason(screen, line) {
+  const lines = String(screen ?? "").split(/\r?\n/).map((l) => l.replace(/\s+$/, ""));
+  const lastText = (list) => [...list].reverse().find((l) => l.trim() !== "") ?? null;
+  const marker = "CLAUDE_ACCOUNTS_DIR=";
+  let start = -1;
+  for (let i = lines.length - 1; i >= 0; i -= 1) {
+    if (lines[i].includes(marker)) {
+      start = i;
+      break;
+    }
+  }
+  if (start < 0) return lastText(lines)?.trim() ?? null;
+  // The echoed line may wrap over several screen lines.
+  let end = start;
+  while (end + 1 < lines.length && !lines.slice(start, end + 1).join("").includes(line)) end += 1;
+  if (!lines.slice(start, end + 1).join("").includes(line)) end = start;
+  const after = lines.slice(end + 1);
+  const trimEnd = () => {
+    while (after.length && after[after.length - 1].trim() === "") after.pop();
+  };
+  trimEnd();
+  const symbol = lines[start].slice(0, lines[start].indexOf(marker)).trim().split(/\s+/).pop() ?? "";
+  if (symbol && after.length && after[after.length - 1].trim().endsWith(symbol)) after.pop();
+  trimEnd();
+  const firstWord = (l) => l.trim().split(/\s+/)[0];
+  for (let above = start - 1; above >= 0 && lines[above].trim() !== "" && after.length; above -= 1) {
+    if (firstWord(after[after.length - 1]) !== firstWord(lines[above])) break;
+    after.pop();
+  }
+  trimEnd();
+  return lastText(after)?.trim() ?? null;
+}
+
 function finalize(item, state, detail, now) {
   Object.assign(item, { state, code: FINAL_CODES[state], detail: detail ?? null, claimedBy: null, updatedAt: now });
 }
@@ -299,7 +363,13 @@ function spawnRunner() {
 // The Claude terminals and what each runs: [{ terminal, where, found }].
 async function scanTerminals(known) {
   const listed = await listClaudeTerminals();
-  return Promise.all(listed.map(async (l) => ({ ...l, found: await inspectTerminal(l.terminal, known) })));
+  return Promise.all(
+    listed.map(async (l) => {
+      const found = await inspectTerminal(l.terminal, known);
+      const resumable = found.kind === "claude" && (await hasTranscript(found.configDir, found.sessionId));
+      return { ...l, found: { ...found, resumable } };
+    }),
+  );
 }
 
 // D8's three groups, in pending-switch.json's shape plus what a switch item
@@ -319,6 +389,7 @@ function classify(scan, from, to) {
     else if (found.account === to) continue;
     else if (found.ownProgram) cantMove("own-program");
     else if (found.account === null) cantMove("unknown-account");
+    else if (!found.resumable) cantMove("no-session");
     else if (holders.get(found.sessionId) > 1) cantMove("shared-session");
     else {
       out.push({
@@ -597,6 +668,11 @@ async function runItem(home, id, t) {
       return;
     }
     if (found.kind === "claude" && isIdle(found)) {
+      // Nothing to resume (a /clear nobody has written to yet): Claude stays.
+      if (!(await hasTranscript(found.configDir, found.sessionId))) {
+        await finish(home, id, "failed", noConversation(item.terminal, found.sessionId));
+        return;
+      }
       // Idle: the item moves to stopping, but only on the target its line
       // is built for. From here on it can't be cancelled.
       const args = keptArgs(found.argv);
@@ -662,12 +738,23 @@ async function runItem(home, id, t) {
     return;
   }
 
-  // 5. Wait for the new Claude, idle and on the target.
+  // 5. Wait for the new Claude, idle and on the target. The shell back in
+  // the foreground for shellBack with no new Claude means Claude refused
+  // the line and exited: fail now, with what it printed.
   const claudeBy = Date.now() + t.claude;
+  let shellSince = null;
   for (;;) {
     const fresh = await inspectTerminal(item.terminal, known);
     if (fresh.kind === "missing") {
       await finish(home, id, "failed", withLine(`terminal ${item.terminal} is gone`, line));
+      return;
+    }
+    const shellUp = Number.isInteger(fresh.foregroundPid) && fresh.foregroundPid === fresh.pid && !fresh.ownProgram;
+    if (!shellUp) shellSince = null;
+    else if (shellSince === null) shellSince = Date.now();
+    else if (Date.now() - shellSince >= t.shellBack) {
+      const said = await hc(["read", "--", item.terminal]).then((screen) => screenReason(screen, line), () => null);
+      await finish(home, id, "failed", withLine(said ?? "no new Claude came up after the resume line", line));
       return;
     }
     if (fresh.kind === "claude" && fresh.foregroundPid !== pid) {
@@ -804,6 +891,11 @@ export async function resume(args) {
   if (found.kind === "notClaude") throw failure(`terminal ${terminalId} isn't running Claude`, 3);
   if (found.ownProgram) throw failure(`Claude is terminal ${terminalId}'s own program: there's no shell to restart it in`, 8);
   if (found.kind === "noSession") throw failure(`Claude in terminal ${terminalId} has no session file yet`, 2);
+  // Nothing is resumed on a terminal already on the account: it only gets
+  // the message, so it needs no transcript.
+  if (found.account !== account.id && !(await hasTranscript(found.configDir, found.sessionId))) {
+    throw failure(noConversation(terminalId, found.sessionId), 2);
+  }
 
   const job = await underLock(home, known, t, async (doc, now) => {
     const again = doc.items.find((item) => item.terminal === terminalId && item.kind === "resume" && isLive(item));
