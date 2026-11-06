@@ -9,6 +9,7 @@ like Herdr's home, with a `RECIPE.md` and a `preview.png`).
 | Folder | What it does |
 |---|---|
 | [`projects-sidebar/`](projects-sidebar/) | Replaces Herdr's Spaces list with projects and their workspaces (git worktrees), groups switched with F1–F3, Add project, and a New workspace dialog that can make the same branch in companion repos and give the agent access to them. [Recipe](projects-sidebar/RECIPE.md) |
+| [`agent-sleep/`](agent-sleep/) | Puts idle Claude Code terminals you aren't looking at to sleep to free memory, and resumes each one when you show its tab, the way Orca's agent hibernation works. Off until you turn it on. |
 | [`arc-spaces/`](arc-spaces/) | Cmd-click a link in a terminal and it opens in the Arc space of that workspace's group, with Arc still your default browser. macOS; needs projects-sidebar's groups and one `sudo ln -s`. [Recipe](arc-spaces/RECIPE.md) |
 
 ![Projects sidebar](projects-sidebar/preview.png)
@@ -32,6 +33,9 @@ herdr-app do layout.switch '{"name":"projects"}'  # ctrl-shift-l switches back
   their folder. Without it, that block shows "claude-accounts did not load".
   `scripts/install.sh --alone` installs projects-sidebar only, and
   `--uninstall` never removes claude-accounts.
+- **Requires agent-sleep too:** the layout's status bar draws its moon, so it
+  is installed the same way. Automatic sleep stays off until you turn it on in
+  the popup the moon opens.
 - **Keys:** F1–F3 come from the plugin's `keys.json`, which the installer
   merges into yours. It adds only keys you don't use and backs the file up
   first (`keys.json.bak-<time>`). Once your keys.json is edited, Herdr stops
