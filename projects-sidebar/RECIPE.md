@@ -29,6 +29,8 @@ across repos.
     - Label: the branch on the main checkout. On the others, the branch's
       last segment (`user/feat-x` → `feat-x`), or the folder name when
       detached. It is bright when the workspace has a space.
+    - After the label, other plugins' badges, if any (see Badges from
+      other plugins).
     - A dot on the right when a space is open there: `accent` while shown,
       `muted` otherwise.
     - The shown workspace has a `selected` background.
@@ -310,9 +312,9 @@ across repos.
     `delete-task` = `delete-task.js`;
   - `project-menu`, `workspace-menu`, `group-menu`, `group-form`.
   - Pure logic is in `lib.js`, `tree-model.js`, `task-model.js`,
-    `new-workspace-model.js`, `remove-workspace-model.js` and
-    `rename-workspace-model.js`, tested with `node --test` (Delete's and
-    Rename's against a real git).
+    `new-workspace-model.js`, `remove-workspace-model.js`,
+    `rename-workspace-model.js` and `badges-model.js`, tested with `node
+    --test` (Delete's and Rename's against a real git).
   - `store.js` is the only code that touches the shared keys: `projects.v1`
     (groups and projects), `projects.ui.v1` (collapsed), `projects.cache.v1`
     (worktree lists), `projects.agents.v1` (`knownAgents()`) and
@@ -320,7 +322,11 @@ across repos.
     group or project keeps the valid rest, and the original is copied to
     `projects.v1.backup` before the first write over it; a malformed
     `projects.notes.v1` goes to `projects.notes.v1.backup` the same way.
-  - `config.js` holds `MOD` and `WORKTREE_ROOT` (`~/orca/workspaces`).
+    It also reads the badge keys `badges.spotlight`, `badges.pr` and
+    `badges.hibernate`, read-only: other plugins write them, and this
+    plugin never writes or clears one.
+  - `config.js` holds `MOD`, `WORKTREE_ROOT` (`~/orca/workspaces`) and
+    `BADGE_KEYS`.
 - **Commands:** `projects.add`, `projects.add-here`, `projects.new-workspace`,
   `projects.group1`..`projects.group3`, `projects.ping`. `keys.json` binds
   F1–F3 in section `layout:projects`.
@@ -345,9 +351,96 @@ across repos.
     `branches/<old>/rename`, run in the repo with your gh account.
   - `ssh -G <host>`, to read which host an ssh alias of origin's URL is.
   - `test -e`, to check whether a folder exists.
+  - Whatever program another plugin's badge names in its `exec`, when you
+    click that badge; its hover says which ("· runs <program>").
 - **Art:** its own Lucide-style icons in `icons/` (folder, branch, home,
   plus, code, copy), plus chevrons, check, x, square-pen and spinner from
   Herdr's `workspace-chrome` and agent icons from Herdr's `icons/`.
+
+**Badges from other plugins**
+
+Other plugins can put small indicators ("badges") on workspace rows, the
+Spotlight plugin first. This plugin knows none of them: it reads, draws and
+runs what they publish. This section is the contract a publisher codes
+against.
+
+- **Keys:** `badges.spotlight`, `badges.pr` and `badges.hibernate`, read in
+  that order (`config.js` `BADGE_KEYS`). A plugin writes only its own key,
+  with `setShared(key, value)`; each write replaces the whole value, every
+  path at once. Adding a plugin is one line in that list.
+  There is no index key listing the plugins: shared state keeps the last
+  write, so two plugins adding themselves to one list at start would race.
+- **Value:** `{ [workspacePath]: [badge] }`.
+  - A path is the workspace's folder, absolute, spelled as `git worktree
+    list` prints it (a trailing slash is ignored). Any other key is ignored.
+  - A value that isn't an object (`null`, a string, a list) is no badges.
+  - A path whose value isn't a list draws nothing there.
+- **A badge:** `{ icon?, text?, tone?, tooltip?, action? }`.
+  - `icon`: an SVG under Herdr's home (`~/.config/herdr-app`),
+    `mods/<mod>/…/<name>.svg` at any depth, with no `..`, empty segment or
+    backslash. Drawn 12 px, tinted. Build it from your mod's folder name:
+    an install may have renamed it.
+  - `text`: at most 16 code points (a longer one is cut), on one line:
+    runs of whitespace become one space.
+  - `tone`: `accent`, `dim`, `working`, `blocked` or `done`, the theme's
+    colors of those names; anything else is `dim`.
+  - `tooltip`: at most 200 code points.
+  - A badge needs an icon or a text; one with neither is dropped.
+  - A field that breaks a rule is dropped alone: a bad icon or action goes
+    and the rest of the badge stays. Unknown fields are ignored.
+- **`action`:** `{ "command": "<mod>.<command>" }` or
+  `{ "exec": [program, ...args] }`, never both (both drop the action):
+  - `command` must match `^[a-z0-9][a-z0-9-]*\.[a-z0-9][a-z0-9._-]*$`. It
+    goes through `run(command)`: it reaches that mod's shown copies only,
+    with no args (`nextCommand()` yields only the name), and it can't
+    report a failure (`run` returns null). An action that needs args, or
+    must say it failed, uses `exec`.
+  - `exec`: 1 to 20 strings, each at most 500 chars, with no NUL.
+    `argv[0]` is a bare name (no `/`) or an absolute path. A relative path
+    (`./x`, `bin/x`) drops the action: it would run a file from whatever
+    branch the workspace has checked out. Prefer an absolute path.
+  - An `exec` click runs `exec(argv[0], argv.slice(1), { cwd: <the
+    workspace's folder> })`: argv only, never a shell. It gets Herdr's
+    environment, whose PATH is `~/.local/bin` and then the login shell's
+    (`$SHELL -l`, which reads `/etc/paths` and `.zprofile` but not
+    `.zshrc`). So a bare name finds `/usr/local/bin`, but not a folder only
+    `.zshrc` adds to PATH. exec stops it after 30 s.
+  - A non-zero exit, or a program that can't start, shows a warning toast
+    titled with the program's name: stderr's first line, else "exited with
+    code N". While a badge's program runs, more clicks on it are ignored.
+- **Limits:** at most 3 badges per plugin on a row, and 4 per row in all,
+  in key order; the rest aren't drawn.
+- **Drawing:** after the workspace row's label, in Project and Task modes,
+  main checkouts included, never on the narrow rail. The icon, then the
+  text (11.5 px), in the tone's color. The row's badges share 128 px (one
+  badge up to 72 px, four up to 29 px each, 4 px apart), and a long text
+  ends in "…", so the label keeps its room. The hover shows the tooltip,
+  then what a click runs: "· runs <argv[0]>" or "· <command>".
+- **Clicks:** a click runs the action and doesn't open the workspace. A
+  right-click opens the workspace menu, as on the row, and never runs the
+  action. A badge without an action clicks like its row.
+- **Lifetime:** the format only grows; a breaking change gets a new key
+  (e.g. `badges.spotlight.v2`). A publisher clears its own paths, and its
+  key (`setShared(key, null)`), when they no longer apply: a stale badge
+  stays until it does.
+- **Example:** this `badges.spotlight` value draws a "live" badge in the
+  `working` color on one workspace. Its hover reads "Spotlight is on · runs
+  /usr/local/bin/spotlight", and a click runs that program with the three
+  args, in that workspace's folder:
+
+  ```json
+  {
+    "/Users/you/orca/workspaces/app/login": [
+      {
+        "icon": "mods/spotlight/icons/spotlight.svg",
+        "text": "live",
+        "tone": "working",
+        "tooltip": "Spotlight is on",
+        "action": { "exec": ["/usr/local/bin/spotlight", "toggle", "--workspace", "/Users/you/orca/workspaces/app/login"] }
+      }
+    ]
+  }
+  ```
 
 **Watch out**
 

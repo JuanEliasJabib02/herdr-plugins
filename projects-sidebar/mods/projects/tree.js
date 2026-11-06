@@ -6,8 +6,9 @@
 // project for its menu. A group organized by Task (D29–D32) shows task lanes
 // instead of projects, each row naming its project, and the header gets a
 // New workspace "+"; a lane shows its task's note on hover and has a
-// right-click menu (D34, D35). Below 160 px of sidebar it is a rail of
-// initials.
+// right-click menu (D34, D35). A workspace row also shows what other
+// plugins publish for it ("badges", D38). Below 160 px of sidebar it is a
+// rail of initials.
 //
 // This copy is also the worktree engine (D6): it lists every group's
 // projects into projects.cache.v1 at start, re-lists one when its
@@ -17,16 +18,17 @@
 import { div, svg, image } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
 import {
-  theme, props, notify, run, spaces, panes, agents, focused, layout, home, window, pickFolder, watchFolder,
+  theme, props, notify, run, exec, spaces, panes, agents, focused, layout, home, window, pickFolder, watchFolder,
 } from "herdr";
 import { icon } from "./config.js";
-import { findProject, activeGroup, matchSpaces, noteKeyOf, noteOf } from "./lib.js";
+import { findProject, activeGroup, matchSpaces, noteKeyOf, noteOf, baseName } from "./lib.js";
 import * as store from "./store.js";
 import { repoOf, listWorktrees } from "./git.js";
 import {
   buildTree, openAction, railAction, isNarrow, projectPaths, pruneCache, watchDirs, eachLimit, liveFolder, addProjectAt, reorderProject,
 } from "./tree-model.js";
 import { buildTaskTree } from "./task-model.js";
+import { badgeTooltip, badgeMaxWidth, execFailure, startFailure, BADGE_GAP } from "./badges-model.js";
 import { openNewWorkspace } from "./new-workspace.js";
 import { openProjectMenu } from "./project-menu.js";
 import { openWorkspaceMenu } from "./workspace-menu.js";
@@ -53,6 +55,10 @@ let drag = null;
 // also fold it.
 let dragged = false;
 const DRAG_START = 4;
+
+// D38: the badges whose exec is still running, `${path}\n${key}\n${index}`:
+// a click on one of them is ignored until its program ends.
+const running = new Set();
 
 export default class Tree {
   init(_props, cx) {
@@ -173,9 +179,11 @@ export default class Tree {
     };
     const model = byTask ? buildTaskTree({ ...args, tasks: ui.tasks ?? [] }) : buildTree(args);
     const notes = byTask ? store.notes() : {};
+    // Other plugins' badges (D38), read once; the rail draws none.
+    const badges = narrow ? {} : store.badges();
     const body = model.empty
       ? narrow ? [] : [emptyState(t)]
-      : narrow ? model.projects.map((p) => railRow(p, t)) : model.rows.map((r) => row(r, t, notes));
+      : narrow ? model.projects.map((p) => railRow(p, t)) : model.rows.map((r) => row(r, t, notes, badges));
     return v_flex().size_full().min_h(0).bg(t.chrome).text_size(13)
       .child(header(model.group, narrow, byTask, t))
       .child(v_flex().id("projects-list").flex_1().min_h(0).px(narrow ? 0 : 8).pb(14).overflow_y_scrollbar().mode("always")
@@ -229,10 +237,11 @@ function focusedProject() {
 }
 
 // `notes`: projects.notes.v1, read once per render (Task mode only).
-function row(r, t, notes) {
+// `badges`: other plugins' badges by workspace path (store.js badges).
+function row(r, t, notes, badges) {
   if (r.kind === "task") return taskRow(r, t, notes);
   if (r.kind === "project") return projectRow(r, t);
-  if (r.kind === "workspace") return workspaceRow(r, t);
+  if (r.kind === "workspace") return workspaceRow(r, t, badges[r.path] ?? []);
   if (r.kind === "agent") return agentRow(r, t);
   const what = r.kind === "missing" ? "Can't read this folder." : "Loading…";
   const text = r.projectName ? `${r.projectName} · ${what}` : what;
@@ -335,8 +344,10 @@ function projectRow(p, t) {
 }
 
 // A workspace: home (main checkout) or branch icon, or its agent's status in
-// that place; the open dot when it has a space; highlighted when shown.
-function workspaceRow(w, t) {
+// that place; other plugins' badges after the label (D38); the open dot when
+// it has a space; highlighted when shown.
+function workspaceRow(w, t, badges) {
+  const width = badgeMaxWidth(badges.length);
   const busy = Boolean(w.status) && w.status !== "idle";
   const lead = busy ? statusMark(w.status, t) : svg(icon(w.main ? "home" : "branch")).size(13).flex_none().text_color(t.dim);
   return h_flex().id(`w:${w.path}`).h(28).flex_none().pl(26).pr(8).gap(8).items_center().rounded(8)
@@ -352,9 +363,65 @@ function workspaceRow(w, t) {
     })
     .child(h_flex().w(14).flex_none().items_center().justify_center().child(lead))
     .child(div().flex_1().min_w(0).truncate().text_color(w.open ? t.foreground : t.muted).child(w.label))
+    .when(badges.length > 0, (el) => el.child(h_flex().flex_none().gap(BADGE_GAP).items_center()
+      .children(badges.map((b) => badge(w, b, width, t)))))
     // Task mode: no project row above names it (Orca's project label).
     .when(Boolean(w.projectName), (el) => el.child(div().flex_none().max_w(110).truncate().text_size(11.5).text_color(t.dim).child(w.projectName)))
     .when(w.open, (el) => el.child(div().size(6).flex_none().rounded(3).bg(w.selected ? t.accent : t.muted)));
+}
+
+// Another plugin's badge on a workspace row (D38): its icon and/or text in
+// its tone's color, never wider than its share of the row's badge room. Its
+// hover names what a click runs. A right-click opens the workspace menu, as
+// on the row, and never runs the action. With an action, a click runs it and
+// doesn't also open the workspace; without one, a click is the row's.
+function badge(w, b, width, t) {
+  const color = t[b.tone] ?? t.dim;
+  const tip = badgeTooltip(b);
+  return h_flex().id(`b:${b.key}:${b.index}:${w.path}`).flex_none().max_w(width).gap(3).items_center().text_size(11.5).text_color(color)
+    .when(Boolean(tip), (el) => el.tooltip(tip))
+    .on_mouse_down("right", (_e, cx) => {
+      cx.stop_propagation(); // or on_click runs the action (ClickEvent carries no button)
+      openWorkspaceMenu(w.project, w.path);
+    })
+    .when(Boolean(b.action), (el) => el.cursor_pointer().on_click((_e, cx) => {
+      cx.stop_propagation(); // like the project's "+": the row doesn't open the workspace too
+      runBadge(w.path, b, cx);
+    }))
+    .when(Boolean(b.icon), (el) => el.child(svg(b.icon).size(12).flex_none().text_color(color)))
+    .when(Boolean(b.text), (el) => el.child(div().min_w(0).truncate().child(b.text)));
+}
+
+// A badge's action (D38): a mod command (no args, no answer: run returns
+// null), or a program run as argv, never through a shell, in the
+// workspace's folder with Herdr's environment (the login shell's PATH, a
+// 30 s limit). A non-zero exit or a program that can't start is a warning
+// toast. While its program runs, more clicks on that badge are ignored.
+function runBadge(path, b, cx) {
+  const { command } = b.action;
+  if (command) {
+    try {
+      run(command);
+    } catch (e) {
+      notify({ title: command, body: startFailure(e), level: "warning" });
+    }
+    return;
+  }
+  const argv = b.action.exec;
+  const id = `${path}\n${b.key}\n${b.index}`;
+  if (running.has(id)) return;
+  running.add(id);
+  cx.spawn(async () => {
+    let failure;
+    try {
+      failure = execFailure(await exec(argv[0], argv.slice(1), { cwd: path }));
+    } catch (e) {
+      failure = startFailure(e);
+    } finally {
+      running.delete(id);
+    }
+    if (failure) notify({ title: baseName(argv[0]), body: failure, level: "warning" });
+  });
 }
 
 // An agent in a workspace's space: its program, title, time since its tab

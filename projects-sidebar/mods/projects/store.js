@@ -4,8 +4,12 @@
 // when the value changes, because setShared re-renders every mod. A stored
 // registry, or notes value, that didn't read back as itself is copied to its
 // backup key before the first write over it. Never write from render().
+// It also reads, and never writes, other plugins' badge keys (config.js
+// BADGE_KEYS, D38).
 
 import { shared, setShared } from "herdr";
+import { BADGE_KEYS } from "./config.js";
+import { parseBadges } from "./badges-model.js";
 import {
   KEYS, changed, normPath,
   parseRegistry, registryWrites, parseUi, withCollapsed, withTaskCollapsed, parseCache, parseAgents,
@@ -107,3 +111,10 @@ export const agents = () => parseAgents(shared(KEYS.agents));
 export function saveAgents(list) {
   return write(KEYS.agents, parseAgents(list));
 }
+
+// ── badges.*: other plugins' indicators (D38) ──────────────────────────────
+// Read only: each key belongs to the plugin that publishes it, which also
+// clears its own paths. { [workspacePath]: [badge] }, validated and capped
+// by badges-model.js; tree.js reads it once per render.
+
+export const badges = () => parseBadges(BADGE_KEYS.map((k) => shared(k)));
