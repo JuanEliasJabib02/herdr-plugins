@@ -1,7 +1,7 @@
 // The moon and its popup, in numbers (S12, D14): where the popup opens, how
 // tall, the moon's color, and what the popup leaves in shared. Pure: main.js
 // passes it settings(), the window's size and the cell's bounds. The pattern is
-// claude-accounts' footer (footer-model.js overlayAt, zoomOf, footerBounds).
+// claude-accounts' footer (footer-model.js overlayAt, zoomOf, moonBounds).
 //
 // Units: on_size_change, a press's e.bounds and `at` are window px; an overlay's
 // width and height are layout px, which Herdr multiplies by the zoom.
@@ -44,12 +44,17 @@ export function zoomOf(settings) {
   return z > 0 ? z : 1;
 }
 
-// The cell's place before any press gave it, from the window's size and its own
-// (on_size_change): the status row's last cell sits at the window's bottom
-// right (projects-sidebar's layout). Null until both are known.
-export function footerBounds(viewport, size) {
-  if (![viewport?.width, viewport?.height, size?.width, size?.height].every(isNumber)) return null;
-  return { x: viewport.width - size.width, y: viewport.height - size.height, width: size.width, height: size.height };
+// The moon's cell before any press gave it: the status row's last cell, so at
+// the window's bottom right. The layout fixes its size (projects.json, pinned
+// by test/smoke.test.js), and a fixed cell gets no size event to learn it from.
+// In window px: the cell's layout px times the zoom. Null without a window size.
+export const MOON_CELL = Object.freeze({ width: 40, height: 28 });
+
+export function moonBounds(viewport, zoom = 1) {
+  if (![viewport?.width, viewport?.height].every(isNumber)) return null;
+  const width = MOON_CELL.width * zoom;
+  const height = MOON_CELL.height * zoom;
+  return { x: viewport.width - width, y: viewport.height - height, width, height };
 }
 
 // ── How tall ───────────────────────────────────────────────────────────────
@@ -81,19 +86,22 @@ export function panelLines(view) {
   return v.holds.length + (v.next ? 1 : 0) + (v.last ? 1 : 0);
 }
 
-// From the lines at open, up to maxLines. An open popup can't change its size:
-// a line that appears later clips in the text area, never over the buttons.
+// From the lines at open, up to maxLines, with `last`'s line always counted:
+// it is what Sleep now and Wake all report. An open popup can't change its
+// size: any other line that appears later clips in the text area, never over
+// the buttons.
 export function panelHeight(view) {
-  const lines = Math.min(panelLines(view), PANEL.maxLines);
+  const lines = Math.min(panelLines(view) + (panelView(view).last ? 0 : 1), PANEL.maxLines);
   const area = lines * PANEL.line + Math.max(0, lines - 1) * PANEL.lineGap;
   return PANEL.frame + 2 * PANEL.padY + PANEL.headline + 2 * PANEL.row + area + PANEL.buttons + 4 * PANEL.gap;
 }
 
-// openOverlay's argument. No anchor: it opens at the pointer.
-export function panelSpec({ view, anchor, zoom = 1 } = {}) {
+// openOverlay's argument. `owner`: the loop copy its clicks ask (makeRequest).
+// No anchor: it opens at the pointer.
+export function panelSpec({ view, anchor, zoom = 1, owner = null } = {}) {
   const size = { width: PANEL.width, height: panelHeight(view) };
   const at = overlayAt(anchor, size, zoom);
-  return { mod: MOD, kind: "popup", width: size.width, height: size.height, ...(at ? { at } : {}), props: { view: "panel" } };
+  return { mod: MOD, kind: "popup", width: size.width, height: size.height, ...(at ? { at } : {}), props: { view: "panel", owner } };
 }
 
 // ── The moon ───────────────────────────────────────────────────────────────
@@ -105,23 +113,25 @@ export function moonTone({ enabled, asleep }) {
 }
 
 // A press beside the popup closes it and may reach the moon too: the popup
-// marks when it closed, and the moon's click right after that press doesn't
-// open it again. A time ahead of the clock isn't "just now": the moon must open.
+// marks when it closed, and the click that press ends doesn't open it again,
+// however long the button is held. So it goes by the press (`pressedAt`, or
+// `now` with none): closed after it, or just before it reached the moon. A time
+// ahead of the clock isn't "just now": the moon must open.
 export const CLOSE_GUARD_MS = 400;
 
-export function closedJustNow(closedAt, now) {
-  if (!isNumber(closedAt)) return false;
-  const age = now - closedAt;
-  return age >= 0 && age < CLOSE_GUARD_MS;
+export function closedJustNow(closedAt, now, pressedAt = now) {
+  if (!isNumber(closedAt) || closedAt > now) return false;
+  return closedAt > pressedAt - CLOSE_GUARD_MS;
 }
 
 // ── What the popup asks ────────────────────────────────────────────────────
 
-// What a click leaves under REQUEST_KEY for the loop copy (Coordinator
-// takeRequest). The counter keeps two clicks in one millisecond apart.
+// What a click leaves under REQUEST_KEY for the loop copy that opened this
+// popup (Coordinator takeRequest). The counter keeps two clicks in one
+// millisecond apart.
 let requests = 0;
 
-export function makeRequest(command, now) {
+export function makeRequest(command, now, owner) {
   requests += 1;
-  return { id: `${now}-${requests}`, at: now, command };
+  return { id: `${now}-${requests}`, owner, command };
 }

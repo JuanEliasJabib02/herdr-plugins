@@ -8,6 +8,7 @@ export const fixture = (name) => readFileSync(new URL(`./fixtures/${name}`, impo
 
 export const MIN = 60_000;
 export const NOW = Date.UTC(2026, 10, 6, 12, 0, 0);
+export const COPY = "copy-1"; // which loop copy this is (a popup's clicks name it)
 export const HOME = "/Users/demo";
 export const APP = `${HOME}/.config/herdr-app`;
 export const SLEEPING = `${APP}/agent-sleep/sleeping.json`;
@@ -138,6 +139,7 @@ export function liveTerminals(w) {
 
 export function deps(w) {
   return {
+    copyId: COPY,
     home: HOME,
     appHome: APP,
     now: () => w.now,

@@ -24,7 +24,7 @@ import {
 import { Coordinator, MOD, VIEW_KEY, REQUEST_KEY, isLoopCopy, startLoop, windowLabel } from "./coordinator.js";
 import { iconPath } from "./badges.js";
 import {
-  CLOSED_KEY, anchorFrom, closedJustNow, footerBounds, makeRequest, moonTone, panelSpec, panelView, zoomOf,
+  CLOSED_KEY, anchorFrom, closedJustNow, makeRequest, moonBounds, moonTone, panelSpec, panelView, zoomOf,
 } from "./panel-model.js";
 import { renderStatus } from "./views/status.js";
 import { renderPanel } from "./views/panel.js";
@@ -32,6 +32,8 @@ import { renderPanel } from "./views/panel.js";
 // What the Coordinator touches, from Herdr.
 function herdrDeps() {
   return {
+    // Which copy this is: a popup's clicks name it (D14).
+    copyId: `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
     hc: (args) => hc(args),
     exec: (cmd, args, options) => exec(cmd, args, options),
     files: {
@@ -59,9 +61,10 @@ export default class AgentSleep extends View {
     const pr = props() ?? p ?? {};
     this.name = typeof pr?.view === "string" ? pr.view : null;
     this.overlay = pr?.overlay ?? null;
+    this.owner = pr?.owner ?? null; // the popup's: the copy its clicks ask
     this.co = null;
-    this.size = null; // the moon's cell, in window px
-    this.pressed = null; // its bounds at the last press
+    this.pressed = null; // its bounds at the last press, until its click uses them
+    this.pressedAt = null; // when that press was
     this.anchor = null; // where the popup opens from
     this.panel = null; // the popup this copy opened last
     if (!isLoopCopy(pr)) return;
@@ -71,7 +74,9 @@ export default class AgentSleep extends View {
     if (!appWindow()) return;
     startLoop(pr, cx.timer, (cx) => {
       cx.spawn(async (cx) => {
-        if (await this.co.pulse({ sleep: (ms) => cx.sleep(ms) })) cx.notify();
+        // Also while its place isn't known: the first frame has no window size,
+        // and nothing else may redraw this copy before a `panel` key.
+        if ((await this.co.pulse({ sleep: (ms) => cx.sleep(ms) })) || this.anchor === null) cx.notify();
       });
     });
     this.listen(cx);
@@ -97,39 +102,42 @@ export default class AgentSleep extends View {
 
   // ── The moon's copy ──
 
-  measure(size, cx) {
-    this.size = size;
-    this.pressed = null;
-    cx.notify();
-  }
-
   press(e) {
     if (!e.bounds) return;
     this.pressed = e.bounds;
+    this.pressedAt = Date.now();
     this.anchor = anchorFrom(e.bounds);
   }
 
   // The moon's click: the press that closed the popup doesn't open it again, so
   // a second click closes it.
   toggle() {
-    if (closedJustNow(shared(CLOSED_KEY), Date.now())) return;
+    if (closedJustNow(shared(CLOSED_KEY), Date.now(), this.pressedAt ?? undefined)) return;
     this.openPanel();
   }
 
   // Above the moon, as tall as its lines now. A `panel` key pressed with one open
   // replaces it, so they don't stack. Closing an id already gone does nothing, and
-  // ids aren't reused (o1, o2, …).
+  // ids aren't reused (o1, o2, …). The cell moves with the window, so a press's
+  // bounds are good for its click and not after it.
   openPanel() {
     const previous = this.panel;
-    this.panel = openOverlay(panelSpec({ view: this.co.view(), anchor: this.anchor, zoom: zoomOf(settings()) }));
+    this.panel = openOverlay(panelSpec({ view: this.co.view(), anchor: this.anchor, zoom: zoomOf(settings()), owner: this.co.d.copyId }));
     if (previous !== null) closeOverlay(previous);
+    this.pressed = null;
+    this.pressedAt = null;
   }
 
-  // The popup sees a change at once. From a task: setShared re-renders every
-  // mod, this one too, and viewToPublish stops it there.
-  publish(cx) {
-    const view = this.co.viewToPublish();
-    if (view !== null) cx.spawn(async () => setShared(VIEW_KEY, view));
+  // The popup sees a change at once. From a task that yields first, so not
+  // inside this render: setShared re-renders every mod, this one too, and
+  // viewToPublish stops it there.
+  publish(view, cx) {
+    const published = this.co.viewToPublish(view);
+    if (published === null) return;
+    cx.spawn(async (cx) => {
+      await cx.sleep(0);
+      setShared(VIEW_KEY, published);
+    });
   }
 
   renderMoon(t, cx) {
@@ -137,15 +145,14 @@ export default class AgentSleep extends View {
     this.co.takeRequest();
     // D6: what is on screen now, and what just left it, on every render.
     this.co.observeNow();
-    this.publish(cx);
-    this.anchor = anchorFrom(this.pressed ?? footerBounds(window.viewport_size(), this.size));
-    const model = this.co.model();
+    const view = this.co.view();
+    this.publish(view, cx);
+    this.anchor = anchorFrom(this.pressed ?? moonBounds(window.viewport_size(), zoomOf(settings())));
     return renderStatus({
       t,
-      model,
-      tone: moonTone({ enabled: this.co.shownSettings().enabled, asleep: model.asleep }),
+      model: view,
+      tone: moonTone({ enabled: view.settings.enabled, asleep: view.asleep }),
       moon: iconPath(MOD),
-      onSize: (size, cx) => this.measure(size, cx),
       onPress: (e) => this.press(e),
       onClick: () => this.toggle(),
     });
@@ -159,7 +166,7 @@ export default class AgentSleep extends View {
       t,
       view,
       windowText: windowLabel(view.settings.idleMinutes),
-      ask: (command) => () => setShared(REQUEST_KEY, makeRequest(command, Date.now())),
+      ask: (command) => () => setShared(REQUEST_KEY, makeRequest(command, Date.now(), this.owner)),
     });
   }
 

@@ -53,9 +53,6 @@ export const PULSE_MS = 1000;
 // Shared values (D14): what the loop copy says to the popup, and the popup to it.
 export const VIEW_KEY = "agent-sleep.view";
 export const REQUEST_KEY = "agent-sleep.request";
-// A request older than this is ignored: shared values may outlive a restart
-// (shared.json), and a fresh loop copy has no last id to compare.
-export const REQUEST_MAX_AGE_MS = 5000;
 // After /exit, the stopping terminal is checked on every pulse for this
 // long; later, ticks reconcile it (D4: asleep whenever the shell is back).
 export const SETTLE_MS = 30_000;
@@ -247,6 +244,7 @@ export class Coordinator {
     this.pendingSettings = null; // settings changes asked for, saved by the next pulse
     this.savingSettings = null; // the change that pulse is writing now
     this.lastRequestId = null; // the popup's last request seen (D14: it runs once)
+    this.deferred = []; // commands that came before the settings were read
     this.lastView = null; // what the last pulse left to show (pulse's return)
     this.publishedView = null; // the view as last handed out to share with the popup
     this.badge = undefined;
@@ -326,7 +324,7 @@ export class Coordinator {
     return blockModel({
       now: this.d.now(),
       records: this.records,
-      settings: this.settings,
+      settings: this.shownSettings(),
       due: this.due,
       labels: this.dueLabels,
       lastEvent: this.lastEvent,
@@ -341,27 +339,30 @@ export class Coordinator {
   }
 
   // A command by name, from a key or a request. False, with a log line, for a
-  // name the table doesn't have.
+  // name the table doesn't have. Until the settings are read it waits: toggle
+  // would flip the defaults instead of what the file says.
   command(name) {
     if (typeof name !== "string" || !Object.hasOwn(COMMANDS, name)) {
       this.log(`no command ${JSON.stringify(name)}`);
       return false;
     }
-    COMMANDS[name](this);
+    if (this.loaded) COMMANDS[name](this);
+    else this.deferred.push(name);
     return true;
   }
 
   // What the popup left under REQUEST_KEY. A render calls this, so no I/O: the
   // command only sets what the next pulse acts on. It runs once (D14): the same
-  // id is ignored, and so is a time more than REQUEST_MAX_AGE_MS from the clock.
-  // Until the settings are read it isn't even looked at: toggle would flip the
-  // defaults, and the first pulse takes it. True when a command ran.
+  // id is ignored, and so is any request that doesn't name this copy, since
+  // shared values outlive a reload or a restart and may span windows. Until the
+  // settings are read it isn't looked at; the first pulse takes it. True when a
+  // command ran.
   takeRequest() {
     if (!this.loaded) return false;
     const request = this.safe(() => this.d.shared(REQUEST_KEY), null);
     if (!isObject(request) || typeof request.id !== "string" || request.id === this.lastRequestId) return false;
     this.lastRequestId = request.id;
-    if (!Number.isFinite(request.at) || Math.abs(this.d.now() - request.at) > REQUEST_MAX_AGE_MS) return false;
+    if (request.owner !== this.d.copyId) return false;
     return this.command(request.command);
   }
 
@@ -369,9 +370,8 @@ export class Coordinator {
   // changed since the last one, else null. setShared re-renders every mod, so
   // publishing on every render would never end. Null before the first pulse:
   // the defaults say less than what shared.json still has.
-  viewToPublish() {
+  viewToPublish(view = this.view()) {
     if (!this.loaded) return null;
-    const view = this.view();
     const json = JSON.stringify(view);
     if (json === this.publishedView) return null;
     this.publishedView = json;
@@ -434,6 +434,7 @@ export class Coordinator {
     await this.loadRecords();
     this.badge = this.safe(() => this.d.shared(BADGE_KEY), undefined);
     this.loaded = true;
+    for (const name of this.deferred.splice(0)) this.command(name);
   }
 
   // D2: one tick. The first one, right after start, also reconciles a stop

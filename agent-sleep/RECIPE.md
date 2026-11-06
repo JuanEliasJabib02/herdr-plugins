@@ -90,3 +90,5 @@ is in the shown layout, and projects-sidebar's status bar has it.
   copy whose write comes second drops that step. Nothing covers the rest: the
   probe's `x` is typed before any write, so both can type one, and each copy
   sees only its own window, so a Claude shown only in the other can be stopped.
+  A popup's clicks only reach the window that opened it, but its lines can be
+  the other window's.

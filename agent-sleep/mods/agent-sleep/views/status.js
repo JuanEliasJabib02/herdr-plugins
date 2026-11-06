@@ -9,13 +9,12 @@ import { div, svg } from "gpui-kit";
 import { h_flex } from "gpui-base";
 
 // { t: theme(), model: blockModel(), tone: moonTone()'s key of t, moon: the icon
-//   path or null, onSize, onPress: the cell's measure and press (where the popup
-//   opens), onClick: the moon's }
-export function renderStatus({ t, model, tone, moon, onSize, onPress, onClick }) {
+//   path or null, onPress: the cell's press (where the popup opens), onClick:
+//   the moon's }
+export function renderStatus({ t, model, tone, moon, onPress, onClick }) {
   return h_flex().id("agent-sleep-status").size_full().min_w(0).overflow_hidden().items_center().justify_center()
     .bg(t.chrome).border_t(1).border_color(t.border)
     .text_size(11.8).whitespace_nowrap()
-    .on_size_change(onSize)
     .on_mouse_down("left", onPress)
     .child(h_flex().id("agent-sleep-moon").flex_none().px(4).py(2).gap(3).items_center().rounded(4).cursor_pointer()
       .text_color(t[tone])

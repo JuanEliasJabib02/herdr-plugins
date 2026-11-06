@@ -8,20 +8,20 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
 import {
-  Coordinator, COMMANDS, REQUEST_KEY, VIEW_KEY, REQUEST_MAX_AGE_MS, MOD, stepMinutes,
+  Coordinator, COMMANDS, REQUEST_KEY, VIEW_KEY, MOD, stepMinutes,
 } from "../mods/agent-sleep/coordinator.js";
 import {
-  PANEL, overlayAt, zoomOf, footerBounds, anchorFrom, panelLines, panelHeight, panelSpec, panelView, moonTone, closedJustNow, CLOSE_GUARD_MS, makeRequest,
+  PANEL, overlayAt, zoomOf, moonBounds, anchorFrom, panelLines, panelHeight, panelSpec, panelView, moonTone, closedJustNow, CLOSE_GUARD_MS, makeRequest,
 } from "../mods/agent-sleep/panel-model.js";
-import { NOW, SETTINGS, SHELL_BARE, SID1, deps, setup, exitClaude, storeRecord, records, exits, resumes, at } from "./harness.js";
+import { NOW, COPY, SETTINGS, SHELL_BARE, SID1, deps, setup, exitClaude, storeRecord, records, exits, resumes, at } from "./harness.js";
 
 const mod = (f) => new URL(`../mods/agent-sleep/${f}`, import.meta.url);
 const src = (f) => readFileSync(mod(f), "utf8");
 const saved = (w) => JSON.parse(w.files[SETTINGS]);
 
-// What the popup's click leaves in shared, as of the world's clock.
+// What a click in the popup of the copy under test leaves in shared.
 const ask = (w, id, command, over = {}) => {
-  w.shared[REQUEST_KEY] = { id, at: w.now, command, ...over };
+  w.shared[REQUEST_KEY] = { id, owner: COPY, command, ...over };
 };
 
 // ── Where the popup opens (S12) ────────────────────────────────────────────
@@ -62,11 +62,11 @@ test("zoomOf: the app's zoom, 1 when it says nothing", () => {
   for (const bad of [null, undefined, {}, { zoom: 0 }, { zoom: -1 }, { zoom: "big" }]) assert.equal(zoomOf(bad), 1, JSON.stringify(bad));
 });
 
-test("footerBounds: the cell's place from the window's size and its own, before any press; null until both are known", () => {
-  assert.deepEqual(footerBounds({ width: 1000, height: 700 }, { width: 40, height: 28 }), CELL);
-  assert.equal(footerBounds({ width: 1000, height: 700 }, null), null);
-  assert.equal(footerBounds(null, { width: 40, height: 28 }), null);
-  assert.equal(footerBounds({ width: 1000 }, { width: 40, height: 28 }), null);
+test("moonBounds: the last cell of the status row, from the window's size and the zoom, needing no press", () => {
+  assert.deepEqual(moonBounds({ width: 1000, height: 700 }), CELL);
+  assert.deepEqual(moonBounds({ width: 1000, height: 700 }, 1.5), { x: 940, y: 658, width: 60, height: 42 });
+  assert.equal(moonBounds(null), null);
+  assert.equal(moonBounds({ width: 1000 }), null);
 });
 
 // ── How tall it opens (S12) ────────────────────────────────────────────────
@@ -81,29 +81,30 @@ test("panelLines counts what sits between the rows and the buttons: holds, next,
 });
 
 test("panelHeight grows by each line and stops at 6 lines", () => {
-  const height = (holds) => panelHeight({ ...VIEW, holds: Array.from({ length: holds }, (_, i) => `hold ${i}`) });
-  assert.equal(height(1) - height(0), PANEL.line);
-  assert.equal(height(2) - height(1), PANEL.line + PANEL.lineGap);
-  assert.equal(height(6) - height(5), PANEL.line + PANEL.lineGap);
-  assert.equal(height(7), height(6), "capped: past 6 lines the text area clips");
-  assert.equal(height(40), height(6));
+  const height = (holds) => panelHeight({ ...VIEW, last: "l", holds: Array.from({ length: holds }, (_, i) => `hold ${i}`) });
+  assert.equal(height(1) - height(0), PANEL.line + PANEL.lineGap);
+  assert.equal(height(5) - height(4), PANEL.line + PANEL.lineGap);
+  assert.equal(height(6), height(5), "capped: past 6 lines the text area clips");
+  assert.equal(height(40), height(5));
   assert.equal(PANEL.maxLines, 6);
 });
 
-test("panelHeight holds the headline, both rows and the buttons with no lines at all", () => {
+test("panelHeight keeps one line free for what the buttons report, on top of the headline, rows and buttons", () => {
   const fixed = PANEL.frame + 2 * PANEL.padY + PANEL.headline + 2 * PANEL.row + PANEL.buttons + 4 * PANEL.gap;
-  assert.equal(panelHeight(VIEW), fixed);
+  assert.equal(panelHeight(VIEW), fixed + PANEL.line, "no last yet: its line is there for Sleep now's result");
+  assert.equal(panelHeight({ ...VIEW, last: "Woke app" }), fixed + PANEL.line, "a last already has it");
+  assert.equal(panelHeight({ ...VIEW, next: "Automatic sleep is off" }), fixed + 2 * PANEL.line + PANEL.lineGap);
 });
 
-test("panelSpec: a popup of this mod, 280 wide, above the moon, the panel view its only prop", () => {
+test("panelSpec: a popup of this mod, 280 wide, above the moon, saying which copy it asks", () => {
   const view = { ...VIEW, next: "Next: app in 3 min" };
-  assert.deepEqual(panelSpec({ view, anchor: anchorFrom(CELL), zoom: 1 }), {
+  assert.deepEqual(panelSpec({ view, anchor: anchorFrom(CELL), zoom: 1, owner: COPY }), {
     mod: MOD,
     kind: "popup",
     width: 280,
     height: panelHeight(view),
     at: overlayAt(anchorFrom(CELL), { width: 280, height: panelHeight(view) }, 1),
-    props: { view: "panel" },
+    props: { view: "panel", owner: COPY },
   });
   assert.equal(PANEL.width, 280);
 });
@@ -142,11 +143,18 @@ test("the toggle guard: a moon click within 400 ms of the popup closing doesn't 
   for (const never of [undefined, null, "x", {}]) assert.equal(closedJustNow(never, NOW), false, JSON.stringify(never));
 });
 
-test("makeRequest: a command with its time and an id of its own", () => {
-  const a = makeRequest("toggle", NOW);
-  const b = makeRequest("toggle", NOW);
+test("the toggle guard goes by the press: holding the button doesn't reopen what that press closed", () => {
+  assert.equal(closedJustNow(NOW + 2, NOW + 700, NOW), true, "closed just after the press, released 700 ms later");
+  assert.equal(closedJustNow(NOW - 2, NOW + 700, NOW), true, "closed just before the press reached the moon");
+  assert.equal(closedJustNow(NOW, NOW + 1_100, NOW + 1_000), false, "closed long before this press: it opens");
+  assert.equal(closedJustNow(NOW + 5_000, NOW, NOW), false, "a time ahead of the clock doesn't block the moon");
+});
+
+test("makeRequest: a command, the copy it asks and an id of its own", () => {
+  const a = makeRequest("toggle", NOW, COPY);
+  const b = makeRequest("toggle", NOW, COPY);
   assert.equal(a.command, "toggle");
-  assert.equal(a.at, NOW);
+  assert.equal(a.owner, COPY);
   assert.equal(typeof a.id, "string");
   assert.notEqual(a.id, b.id, "the same click twice in a millisecond is two requests");
 });
@@ -230,6 +238,28 @@ test("a key goes through the same table; an unknown one says so and does nothing
   assert.ok(w.logs.some((l) => l.includes('no command "nope"')));
 });
 
+test("a key before the settings are read waits for them: toggle and more act on what the file says", async () => {
+  const { w, co } = setup({ settings: { enabled: true, idleMinutes: 60 } });
+  assert.equal(co.command("toggle"), true);
+  assert.equal(co.command("more"), true);
+  assert.equal(co.command("nope"), false, "an unknown one is still refused at once");
+  await at(co, w, NOW);
+  assert.deepEqual(saved(w), { enabled: false, idleMinutes: stepMinutes(60, 1) });
+});
+
+test("the popup's lines follow the shown setting: no \"off\" under a switch just turned on, and the other way", async () => {
+  const off = setup({ settings: { enabled: false, idleMinutes: 30 } });
+  await at(off.co, off.w, NOW);
+  assert.equal(off.co.view().next, "Automatic sleep is off");
+  off.co.command("toggle");
+  assert.equal(off.co.view().next, null, "before the save");
+
+  const on = setup();
+  await at(on.co, on.w, NOW);
+  on.co.command("toggle");
+  assert.equal(on.co.view().next, "Automatic sleep is off", "before the save");
+});
+
 // ── A request runs once (D14) ──────────────────────────────────────────────
 
 test("the same id runs once, however many renders and pulses see it", async () => {
@@ -305,7 +335,21 @@ test("a click while the last change is being saved counts on top of it, and the 
   assert.equal(saved(w).enabled, true);
 });
 
-test("a request older than 5 s is ignored: shared values outlive a restart, and a fresh copy has no last id", async () => {
+test("a new copy never runs its predecessor's request, however recent: a reload doesn't undo a click", async () => {
+  const { w, co } = setup();
+  await at(co, w, NOW);
+  w.now = NOW + 1_000;
+  ask(w, "r1", "toggle");
+  await at(co, w, NOW + 1_000);
+  assert.equal(saved(w).enabled, false);
+
+  const fresh = new Coordinator({ ...deps(w), copyId: "copy-after-reload" });
+  await at(fresh, w, NOW + 1_001);
+  await at(fresh, w, NOW + 2_000);
+  assert.equal(saved(w).enabled, false, "not flipped back");
+});
+
+test("an old click in shared.json types nothing in a new copy", async () => {
   const { w, co } = setup();
   await at(co, w, NOW);
   w.now = NOW + 1_000;
@@ -316,24 +360,23 @@ test("a request older than 5 s is ignored: shared values outlive a restart, and 
   await at(co, w, NOW + 2_000);
 
   const before = w.sends.length;
-  const fresh = new Coordinator(deps(w));
-  await at(fresh, w, NOW + 1_000 + REQUEST_MAX_AGE_MS + 1);
-  await at(fresh, w, NOW + 1_000 + REQUEST_MAX_AGE_MS + 2);
-  assert.equal(w.sends.length, before, "nothing typed for an old click");
-  assert.equal(REQUEST_MAX_AGE_MS, 5_000);
+  const fresh = new Coordinator({ ...deps(w), copyId: "copy-after-restart" });
+  await at(fresh, w, NOW + 2_001);
+  await at(fresh, w, NOW + 3_000);
+  assert.equal(w.sends.length, before);
 });
 
-test("exactly 5 s old still runs; a time far from the clock, or none, doesn't", async () => {
+test("only the copy that opened the popup runs its clicks: another window's, or none, doesn't", async () => {
   const { w, co } = setup();
   await at(co, w, NOW);
-  ask(w, "edge", "toggle", { at: NOW - REQUEST_MAX_AGE_MS });
-  assert.equal(co.takeRequest(), true);
-  co.command("toggle"); // back to where it was
-  for (const [id, stamp] of [["old", NOW - REQUEST_MAX_AGE_MS - 1], ["future", NOW + REQUEST_MAX_AGE_MS + 1], ["none", undefined], ["text", "soon"]]) {
-    ask(w, id, "toggle", { at: stamp });
+  for (const [id, owner] of [["other", "copy-of-another-window"], ["none", undefined], ["number", 7]]) {
+    ask(w, id, "toggle", { owner });
     assert.equal(co.takeRequest(), false, id);
   }
   assert.equal(co.shownSettings().enabled, true);
+  ask(w, "mine", "toggle");
+  assert.equal(co.takeRequest(), true);
+  assert.equal(co.shownSettings().enabled, false);
 });
 
 test("an unknown command, or a request that isn't one, is ignored", async () => {
@@ -420,17 +463,26 @@ test("only the loop copy has a coordinator: the panel view draws from shared and
   for (const io of [/\bCoordinator\b/, /writeTextFile|readTextFile|\bhc\(|\bexec\(/]) assert.doesNotMatch(panel, io);
 });
 
-test("the view is published from a task, never from inside render", () => {
-  assert.match(src("main.js"), /viewToPublish\(\);[\s\S]{0,120}cx\.spawn\(async \(\) => setShared\(VIEW_KEY, view\)\)/);
+test("the view is published after render, by a task that yields first", () => {
+  assert.match(src("main.js"), /viewToPublish\(view\)[\s\S]{0,160}cx\.spawn\(async \(cx\) => \{\s*await cx\.sleep\(0\);\s*setShared\(VIEW_KEY, published\);/);
 });
 
-test("the moon measures and remembers its cell as claude-accounts' footer does, and the popup marks its close", () => {
+test("the first frame has no window size yet: pulses redraw the moon until its place is known", () => {
+  assert.match(src("main.js"), /\(await this\.co\.pulse\(\{[^}]*\}\)\) \|\| this\.anchor === null\) cx\.notify\(\)/);
+});
+
+test("a key after a click opens over the moon's cell as it is now: the click's bounds are used once", () => {
+  assert.match(src("main.js"), /openPanel\(\) \{[\s\S]{0,420}this\.pressed = null;/);
+});
+
+test("the moon knows its cell with no press and no size event, and the popup marks its close", () => {
   const main = src("main.js");
-  assert.match(main, /footerBounds\(window\.viewport_size\(\), this\.size\)/);
+  assert.match(main, /moonBounds\(window\.viewport_size\(\), zoomOf\(settings\(\)\)\)/);
+  assert.doesNotMatch(main, /this\.size|measure\(/, "a fixed cell has no size change to wait for");
   assert.match(main, /async close\(\) \{\s*if \(this\.overlay\) setShared\(CLOSED_KEY, Date\.now\(\)\);/);
-  assert.match(main, /closedJustNow\(shared\(CLOSED_KEY\), Date\.now\(\)\)/);
+  assert.match(main, /closedJustNow\(shared\(CLOSED_KEY\), Date\.now\(\), this\.pressedAt \?\? undefined\)/);
   const status = src("views/status.js");
-  assert.match(status, /\.on_size_change\(onSize\)/);
+  assert.doesNotMatch(status, /on_size_change/);
   assert.match(status, /\.on_mouse_down\("left", onPress\)/);
   assert.match(status, /\.tooltip\(model\.headline\)/);
 });
