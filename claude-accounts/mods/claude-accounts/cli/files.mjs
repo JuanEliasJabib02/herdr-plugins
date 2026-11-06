@@ -170,6 +170,7 @@ function contractAccount(account, usage) {
     // A folder with no login needs one whatever usage says (Orca's rule).
     needsSignIn: account.signedIn !== true || u.needsSignIn === true,
     error: u.error ?? null,
+    errorDetail: u.errorDetail ?? null,
     usage: Object.fromEntries(WINDOWS.map((w) => [w, u.usage?.[w] ?? null])),
     credits: u.credits ?? null,
     usageUpdatedAt: u.usageUpdatedAt ?? null,

@@ -53,6 +53,7 @@ change without notice.
 | `isDefault` | boolean | True for System default only. |
 | `needsSignIn` | boolean | Its login is missing or lapsed: Claude can't run on it until you sign in again (the plugin shows "Sign in again"). |
 | `error` | string or null | Why the last usage read failed (see Error values below); null when it worked. The last good `usage` stays alongside. |
+| `errorDetail` | string or null | The error's own text where the plugin shows it: the server's message for a login without the profile scope (`unavailable`), or an unexpected failure's text (`refreshFailed`). Null otherwise. |
 | `usage` | object | `{session, weekly, fable, monthly}`, each a usage window (below) or null when Claude doesn't report it for this account. |
 | `credits` | `{balance, limit}` or null | Extra-usage credits, when the account has them. |
 | `usageUpdatedAt` | epoch ms or null | When this account's usage was last read; null before the first read. |
@@ -104,8 +105,10 @@ run).
 
 ### `usage [--refresh] [--account <id>] --json`
 
-Reads usage that is due (each account at most every 5 minutes; `--refresh`
-reads now, at most every 30 seconds per account), merges it, and prints the
+Reads usage that is due (each account at most every 5 minutes, later after
+failures or a rate limit's Retry-After; `--refresh` reads now, at most every
+30 seconds for the active account and every 60 seconds for the others),
+merges it, and prints the
 `accounts.v1.json` document. `--account` limits the reading to one account;
 the output still lists every account. It answers within 15 seconds: an
 account whose read hasn't finished by then keeps its last data, and the exit

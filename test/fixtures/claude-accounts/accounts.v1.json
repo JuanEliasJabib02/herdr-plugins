@@ -12,6 +12,7 @@
       "isDefault": true,
       "needsSignIn": true,
       "error": null,
+      "errorDetail": null,
       "usage": { "session": null, "weekly": null, "fable": null, "monthly": null },
       "credits": null,
       "usageUpdatedAt": null,
@@ -27,6 +28,7 @@
       "isDefault": false,
       "needsSignIn": false,
       "error": null,
+      "errorDetail": null,
       "usage": {
         "session": { "percent": 41, "resetsAt": 1794010920000 },
         "weekly": { "percent": 65, "resetsAt": 1794367200000 },
@@ -47,6 +49,7 @@
       "isDefault": false,
       "needsSignIn": false,
       "error": "rateLimited",
+      "errorDetail": null,
       "usage": {
         "session": null,
         "weekly": { "percent": 94, "resetsAt": 1794183600000 },

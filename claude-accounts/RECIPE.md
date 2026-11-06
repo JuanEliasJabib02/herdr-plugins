@@ -90,7 +90,8 @@ the same files and run the same commands: see [CONTRACT.md](CONTRACT.md).
 - **Usage.**
   - Each account's limits come from Claude's usage endpoint, with its own
     login. It's asked every 15 minutes, at most every 5 minutes per account
-    (30 seconds with refresh), and less often after failures.
+    (30 seconds with refresh, 60 for accounts that aren't active), less often
+    after failures, and not before a rate limit's Retry-After.
   - Between polls, the numbers follow every Claude turn: Claude Code hands
     its statusline the current limits, and the statusline drops them in the
     state folder. Fable comes from polling only.
