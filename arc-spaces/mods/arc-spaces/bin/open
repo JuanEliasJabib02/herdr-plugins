@@ -25,47 +25,66 @@ case $parent in
   *) exec "$real" "$@" ;;
 esac
 
+home=${HERDR_APP_HOME:-"$HOME/.config/herdr-app"}
+
+# Off, or no group has a name: nothing to ask Herdr.
+jq -e '(.["arc-spaces.v1"] // {}) | .enabled == true and any((.names // {})[]?; type == "string" and test("\\S"))' \
+  "$home/shared.json" >/dev/null 2>&1 || exec "$real" "$@"
+
 # Runs a command for at most $1 seconds. A command that can't start fails too.
 limit() { /usr/bin/perl -e 'alarm shift; exec { $ARGV[0] } @ARGV or exit 127' "$@"; }
 
 listing=$(limit "${ARC_SPACES_LOOKUP_TIMEOUT:-3}" "${ARC_SPACES_HERDR:-$parent}" ls 2>/dev/null) || exec "$real" "$@"
 
 # Where the shown space is now, as projects-sidebar's placeOf: its first
-# terminal's live folder (herdr-core's record, which Herdr reads), else the
-# folder it was made in. A space on another machine has no terminal looked at.
+# terminal with a live folder (herdr-core's record, which Herdr reads), else the
+# folder it was made in. A terminal hc can't read is skipped; one that takes too
+# long ends the search. A space on another machine has no terminal looked at.
 live=
+set -f
+IFS='
+'
 for terminal in $(printf '%s\n' "$listing" | jq -r '[.spaces[]? | select(.active == true)][0]
     | select((.machine // null) == null) | .tabs[]?.terminals[]?.terminal | strings' 2>/dev/null); do
-  record=$(limit "${ARC_SPACES_LOOKUP_TIMEOUT:-3}" "${ARC_SPACES_HC:-hc}" get "$terminal" 2>/dev/null) || break
-  live=$(printf '%s\n' "$record" | jq -r '.foreground.cwd // .cwd // empty | strings' 2>/dev/null)
-  [ -n "$live" ] && break
+  record=$(limit "${ARC_SPACES_LOOKUP_TIMEOUT:-3}" "${ARC_SPACES_HC:-hc}" get "$terminal" 2>/dev/null)
+  case $? in
+    0)
+      live=$(printf '%s\n' "$record" | jq -r '.foreground.cwd // .cwd // empty | strings' 2>/dev/null)
+      [ -n "$live" ] && break
+      ;;
+    142) break ;; # stopped by the limit's SIGALRM
+  esac
 done
+unset IFS
+set +f
 
-# The Arc space, or nothing when it's off, the group has no name, or anything
-# here fails. Asked at the click, so it can't be stale: the place gives the
-# project (the longest checkout holding it, as projects-sidebar's matchSpaces),
-# the project gives the group. A space outside every group, or on another
-# machine, uses the active group, as Orca does.
-home=${HERDR_APP_HOME:-"$HOME/.config/herdr-app"}
+# The Arc space, or nothing when the group has no name or anything here fails.
+# Asked at the click, so it can't be stale: the place gives the project (the
+# longest checkout holding it, as projects-sidebar's matchSpaces), the project
+# gives the group. A space outside every group, or on another machine, uses the
+# active group, as Orca does.
 space=$(printf '%s\n' "$listing" | jq -r --arg live "$live" --arg userhome "$HOME" --slurpfile shared "$home/shared.json" '
-  # projects-sidebar normPath: forward slashes, ~ expanded, no trailing slash.
-  def norm: if type == "string" and . != "" then
-      (gsub("\\\\"; "/")
-       | if $userhome != "" and (. == "~" or startswith("~/")) then ($userhome | sub("/+$"; "")) + .[1:] else . end
-       | sub("/+$"; "") | if . == "" then "/" else . end)
-    else "" end;
+  # projects-sidebar normPath: forward slashes, no trailing slash ("/" stays).
+  def slashes: if type == "string" then gsub("\\\\"; "/") else . end;
+  def norm: slashes | if type == "string" and . != "" then (sub("/+$"; "") | if . == "" then "/" else . end) else "" end;
+  # Only the place gets ~ expanded (normPath with home, in matchSpaces). Stored
+  # paths count only when absolute, as parseRegistry and parseCache keep them.
+  def expand: slashes | if type == "string" and $userhome != "" and (. == "~" or startswith("~/")) then ($userhome | norm) + .[1:] else . end;
+  def absolute: type == "string" and startswith("/");
   def inside($dir): . == $dir or startswith(if $dir == "/" then "/" else $dir + "/" end);
   $shared[0] as $s
   | ($s["arc-spaces.v1"] // {}) as $config
   | select($config.enabled == true)
   | $s["projects.v1"] as $registry
   | ([.spaces[] | select(.active == true)][0]) as $shown
-  | (if ($shown.machine // null) != null then "" elif $live != "" then $live else $shown.folder end | norm) as $at
-  | ([($s["projects.cache.v1"] // {}) | to_entries[] | (.key | norm) as $project | .value[]?
+  | (if ($shown.machine // null) != null then "" elif $live != "" then $live else $shown.folder end | expand | norm) as $at
+  | ([($s["projects.cache.v1"] // {}) | objects | to_entries[]
+      | select((.key | absolute) and (.value | type == "array" and all(.[]; type == "object" and (.path | absolute))))
+      | (.key | norm) as $project | .value[]
       | {project: $project, path: (.path | norm)}
-      | select(.path as $path | $path != "" and ($at | inside($path)))]
+      | select(.path as $path | $at | inside($path))]
      | max_by(.path | length) | .project?) as $project
-  | ([$registry.groups[] | select(any(.projects[]?; (.path | norm) == $project))][0].id) as $own
+  | ([$registry.groups[] | select(any(.projects[]?; (.path | absolute) and (.path | norm) == $project))][0].id) as $own
   | ($own // (if any($registry.groups[]; .id == $registry.activeGroup) then $registry.activeGroup else $registry.groups[0].id end)) as $group
   | ($config.names[$group] // "") | gsub("^\\s+|\\s+$"; "")
 ' 2>/dev/null)

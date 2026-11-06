@@ -28,8 +28,8 @@ const logOf = (name) => {
   return existsSync(path) ? readFileSync(path, "utf8").trimEnd().split("\n") : null;
 };
 
-// What Herdr's `ls` answers: `active` names the shown space.
-const lsAnswer = (spaces) => tool("herdr", `cat <<'EOF'\n${JSON.stringify({ spaces })}\nEOF`);
+// What Herdr's `ls` answers: `active` names the shown space. Each call is logged.
+const lsAnswer = (spaces) => tool("herdr", `echo "$1" >> "${join(dir, "herdr.log")}"\ncat <<'EOF'\n${JSON.stringify({ spaces })}\nEOF`);
 
 const space = (folder, extra = {}) => ({ id: `s-${folder}`, folder, machine: null, active: true, tabs: [], ...extra });
 // A space's tabs holding these terminals, in order, as `ls` lists them.
@@ -176,10 +176,18 @@ test("never configured: off", () => {
   assertPassedThrough([URL_A]);
 });
 
-test("switched off, names kept: off", () => {
+test("switched off, names kept: off, and Herdr isn't asked", () => {
   writeShared(shared({ enabled: false, names: NAMES }));
   run([URL_A]);
   assertPassedThrough([URL_A]);
+  assert.equal(logOf("herdr"), null);
+});
+
+test("on with no group named: Herdr isn't asked", () => {
+  writeShared(shared({ enabled: true, names: { g1: "  ", g2: "" } }));
+  run([URL_A]);
+  assertPassedThrough([URL_A]);
+  assert.equal(logOf("herdr"), null);
 });
 
 test("a group with a blank name doesn't route", () => {
@@ -299,6 +307,23 @@ test("hc failing: the folder the space was made in", () => {
   assertRouted("Bulbasour");
 });
 
+test("a terminal hc can't read is skipped, as the sidebar skips a pane with no folder", () => {
+  lsAnswer([space("/repos/ag", withTerminals("gone", "t2"))]);
+  hcAnswer({ t2: { cwd: "/repos/action" } });
+  run([URL_A]);
+  assertRouted("Action");
+  assert.deepEqual(logOf("hc"), ["gone", "t2"]);
+});
+
+test("a hung hc: stopped at the limit, then the folder the space was made in", () => {
+  lsAnswer([space("/repos/ag", withTerminals("t1", "t2"))]);
+  tool("hc", "exec sleep 600");
+  const started = Date.now();
+  run([URL_A], { env: { ARC_SPACES_LOOKUP_TIMEOUT: "1" } });
+  assert.ok(Date.now() - started < 300_000, "it must not wait for the sleep to end");
+  assertRouted("Bulbasour");
+});
+
 test("a space on another machine: its terminals aren't asked", () => {
   lsAnswer([space("/repos/action", { machine: "vps", ...withTerminals("vps/t1") })]);
   hcAnswer({ "vps/t1": { cwd: "/repos/ag" } });
@@ -307,14 +332,28 @@ test("a space on another machine: its terminals aren't asked", () => {
   assert.equal(logOf("hc"), null);
 });
 
-test("~ in a stored path is the home folder, as projects-sidebar reads it", () => {
+test("~ in the space's place is the home folder, as projects-sidebar reads it", () => {
+  const action = join(dir, "repos/action");
   writeShared(shared(undefined, {
-    "projects.v1": { ...GROUPS, groups: [{ id: "g1", name: "Action Experience", projects: [{ path: "~/repos/action" }] }, ...GROUPS.groups.slice(1)] },
-    "projects.cache.v1": { "~/repos/action": [{ path: "~/repos/action/" }] },
+    "projects.v1": { ...GROUPS, groups: [{ id: "g1", name: "Action Experience", projects: [{ path: action }] }, ...GROUPS.groups.slice(1)] },
+    "projects.cache.v1": { [action]: [{ path: action }] },
   }));
-  lsAnswer([space(join(dir, "repos/action/src"))]);
+  lsAnswer([space("~/repos/action/src")]);
   run([URL_A]);
   assertRouted("Action");
+});
+
+test("a stored path that isn't absolute counts for nothing, as projects-sidebar drops it", () => {
+  writeShared(shared(undefined, {
+    "projects.v1": { ...GROUPS, groups: [{ id: "g1", name: "Action Experience", projects: [{ path: "~/repos/action" }] }, ...GROUPS.groups.slice(1)] },
+    "projects.cache.v1": { "~/repos/action": [{ path: "~/repos/action" }], "/repos/ag": [{ path: "/repos/ag" }, { path: "relative/ag" }] },
+  }));
+  for (const folder of [join(dir, "repos/action"), "/repos/ag"]) {
+    lsAnswer([space(folder)]);
+    rmSync(join(dir, "osascript.log"), { force: true });
+    run([URL_A]);
+    assertRouted("Personal");
+  }
 });
 
 test("the name is trimmed", () => {
