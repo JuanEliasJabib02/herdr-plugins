@@ -1,13 +1,15 @@
 // T10: Task mode's model (M/task-model.js): a workspace's task key, ported
 // from Orca (D30); the Task-mode tree, lanes regrouped from buildTree (D31);
 // the group menu's items with the Organize toggle (D32); T13: the task
-// menu's items (D35).
+// menu's items (D35); T14b: Delete task's targets, what its dialog says and
+// what its outcome does, and when the task's note goes (D36).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { emptyRegistry, addProject, addGroup, setOrganize } from "../projects-sidebar/mods/projects/lib.js";
+import { emptyRegistry, addProject, addGroup, setOrganize, selectGroup } from "../projects-sidebar/mods/projects/lib.js";
 import { buildTree } from "../projects-sidebar/mods/projects/tree-model.js";
 import {
   findTicket, taskKeyOf, buildTaskTree, groupMenuItems, taskMenuItems, SERVERS_LANE, NO_TASK_LANE,
+  laneTargets, deleteTaskPrompt, deleteTaskOutcome, taskStillUsed,
 } from "../projects-sidebar/mods/projects/task-model.js";
 
 const HOME = "/Users/demo";
@@ -218,4 +220,168 @@ test("task menu: Add note… or Edit note…, a separator, Delete task… in dan
   for (const lane of [NO_TASK_LANE, SERVERS_LANE, "task:Constructor", "task:__PROTO__", "login", null]) {
     assert.deepEqual(taskMenuItems(lane, { note: null, targets }), [], `for ${lane}`);
   }
+});
+
+// ── Delete task (D36, S30) ─────────────────────────────────────────────────
+
+// A lane's workspaces as buildTaskTree draws them, unfolded, in laneTargets'
+// shape.
+const laneRows = (t, lane) => {
+  const at = t.rows.findIndex((r) => r.kind === "task" && r.lane === lane);
+  const out = [];
+  for (const r of t.rows.slice(at + 1)) {
+    if (r.kind === "task") break;
+    if (r.kind === "workspace") out.push({ project: r.project, path: r.path, label: r.label, projectName: r.projectName });
+  }
+  return out;
+};
+
+test("laneTargets: a lane's non-main workspaces in the active group, the same as its rows, folded or not", () => {
+  // web's main checkout sits on a branch that reads as AX-99: it never counts.
+  const cache = { ...CACHE, "/code/web": [main("/code/web", "ax-99"), wt("web", "AX-99", "feat/ax-99-copy")], "/code/other": [main("/code/other"), wt("other", "login", "feat/login")] };
+  // /code/other has a login worktree too, in a group that isn't active.
+  let r = addGroup(registry(), "Clients");
+  r = addProject(r, { path: "/code/other" }, "g2");
+  assert.equal(r.activeGroup, "g1");
+  for (const lane of ["task:login", "task:AX-99", "task:AX-1000"]) {
+    const unfolded = buildTaskTree({ ...ARGS, registry: r, cache });
+    assert.deepEqual(laneTargets(r, cache, lane), laneRows(unfolded, lane), lane);
+  }
+  assert.deepEqual(laneTargets(r, cache, "task:login"), [
+    { project: "/code/app", path: `${W}/app/login`, label: "login", projectName: "app" },
+    { project: "/code/api", path: `${W}/api/login`, label: "login", projectName: "api" },
+  ]);
+  assert.deepEqual(laneTargets(r, cache, "task:AX-99").map((t) => t.path), [`${W}/app/ax-99`, `${W}/web/AX-99`], "main checkouts never count");
+  const folded = buildTaskTree({ ...ARGS, registry: r, cache, tasks: ["task:login"] });
+  assert.deepEqual(laneRows(folded, "task:login"), [], "the folded lane draws no rows");
+  assert.equal(laneTargets(r, cache, "task:login").length, 2, "a folded lane keeps its targets");
+  assert.deepEqual(laneTargets(r, cache, SERVERS_LANE), [], "Servers holds main checkouts only");
+  assert.deepEqual(laneTargets(selectGroup(r, "g2"), cache, "task:login").map((t) => t.project), ["/code/other"], "the active group's only");
+  assert.deepEqual(laneTargets(r, cache, "task:nothing"), []);
+  assert.deepEqual(laneTargets(r, cache, null), []);
+});
+
+const APP_LOGIN = `${W}/app/login`;
+const API_LOGIN = `${W}/api/login`;
+const WEB_LOGIN = `${W}/web/login`;
+const checkout = (path, branch = "feat/login") => ({ path, branch, main: false });
+const checkOf = (project, path, over = {}) => ({
+  deletable: true, reason: "", failed: false, locked: false, lockReason: null, changes: false, submodules: false,
+  branch: "feat/login", mainBranch: "main", list: [main(project), checkout(path)], ...over,
+});
+// One of the dialog's rows before deleteTaskPrompt: what the dialog knows of a target.
+const target = (project, path, projectName, over = {}) => ({
+  path, row: checkout(path), check: checkOf(project, path), projectName, spaces: 0, terminals: 0, ...over,
+});
+const APP = () => target("/code/app", APP_LOGIN, "app");
+const API = (over) => target("/code/api", API_LOGIN, "api", over);
+
+test("deleteTaskPrompt: Orca's singular and plural copy; Delete anyway for one row with changes; off while checking; no button when nothing is ready", () => {
+  const one = deleteTaskPrompt({ label: "login", rows: [APP()] });
+  assert.deepEqual([one.title, one.body], ["Delete Workspace", "Remove 1 workspace from git and delete its workspace folder."]);
+  assert.deepEqual([one.ready, one.button, one.notes], [true, "Delete", []]);
+
+  const two = deleteTaskPrompt({ label: "login", rows: [APP(), API()] });
+  assert.deepEqual([two.title, two.body], ["Delete Workspaces", "Remove 2 workspaces from git and delete their workspace folders."]);
+  assert.deepEqual(two.rows.map((r) => [r.label, r.projectName, r.ready, r.checking]), [["login", "app", true, false], ["login", "api", true, false]]);
+
+  const dirty = deleteTaskPrompt({ label: "login", rows: [APP(), API({ check: checkOf("/code/api", API_LOGIN, { changes: true }) })] });
+  assert.equal(dirty.button, "Delete anyway");
+  assert.deepEqual(dirty.rows.map((r) => r.warnings), [[], ["login has changes that aren't committed. They'll be lost."]]);
+  assert.equal(dirty.ready, true);
+
+  const asking = deleteTaskPrompt({ label: "login", rows: [APP(), API({ check: null })] });
+  assert.deepEqual([asking.ready, asking.button, asking.rows[1].checking], [false, "Delete", true], "Delete waits for every check");
+  assert.equal(asking.title, "Delete Workspaces", "a row still checking may run");
+
+  const reason = `Locked by git. Unlock it with \`git worktree unlock ${APP_LOGIN}\`.`;
+  const none = deleteTaskPrompt({ label: "login", rows: [target("/code/app", APP_LOGIN, "app", { check: checkOf("/code/app", APP_LOGIN, { deletable: false, locked: true, lockReason: "", reason }) })] });
+  assert.deepEqual([none.ready, none.button], [false, null]);
+  assert.equal(none.body, "None of the workspaces of login can be deleted.");
+  assert.deepEqual(none.rows[0].reason, reason);
+});
+
+test("deleteTaskPrompt: a locked target and a stale one are skipped; spaces and terminals add up over the ready rows only", () => {
+  const lockReason = `Locked by git: on a USB disk. Unlock it with \`git worktree unlock ${API_LOGIN}\`.`;
+  const locked = checkOf("/code/api", API_LOGIN, { deletable: false, locked: true, lockReason: "on a USB disk", changes: true, reason: lockReason });
+  const staleReason = `${WEB_LOGIN} isn't one of web's workspaces.`;
+  const stale = checkOf("/code/web", WEB_LOGIN, { deletable: false, reason: staleReason, branch: null, list: [main("/code/web")] });
+  const p = deleteTaskPrompt({ label: "login", rows: [
+    target("/code/app", APP_LOGIN, "app", { spaces: 1, terminals: 2 }),
+    API({ check: locked, spaces: 2, terminals: 1 }),
+    target("/code/web", WEB_LOGIN, "web", { check: stale, spaces: 1, terminals: 3 }),
+  ] });
+  assert.deepEqual(p.rows.map((r) => [r.projectName, r.ready, r.locked, r.reason]), [
+    ["app", true, false, ""],
+    ["api", false, true, lockReason],
+    ["web", false, false, staleReason],
+  ]);
+  assert.deepEqual(p.rows[1].warnings, [], "nothing to confirm on a row that doesn't run");
+  assert.deepEqual([p.title, p.body, p.ready, p.button], ["Delete Workspace", "Remove 1 workspace from git and delete its workspace folder.", true, "Delete"]);
+  assert.deepEqual(p.notes, ["1 space closes, with its agents.", "2 more terminals are in its folder and stay open."]);
+
+  const sum = deleteTaskPrompt({ label: "login", rows: [
+    target("/code/app", APP_LOGIN, "app", { spaces: 1, terminals: 1 }),
+    API({ spaces: 2, terminals: 0 }),
+    target("/code/web", WEB_LOGIN, "web", { check: stale, spaces: 4, terminals: 4 }),
+  ] });
+  assert.deepEqual(sum.notes, ["3 spaces close, with their agents.", "1 more terminal is in their folders and stays open."]);
+});
+
+// removeTask's entries (remove-workspace-model.js), with the label and the
+// project's name the dialog adds from its targets.
+const CHECKED = checkOf("/code/app", APP_LOGIN);
+const ran = (path, projectName, status, more = {}) => ({
+  project: `/code/${projectName}`, path, status, err: null, branch: null, branchErr: null, list: [], check: CHECKED,
+  label: "login", projectName, ...more,
+});
+const removed = (path, projectName, branch = "deleted") => ran(path, projectName, "removed", { branch });
+const failed = (path, projectName, err) => ran(path, projectName, "failed", { err });
+
+test("deleteTaskOutcome: all that ran removed closes with a toast naming the skipped and kept branches; a partial run stays open; a closed dialog gets one toast", () => {
+  const lockedRow = { label: "login", projectName: "api", ready: false, locked: true, reason: "Locked by git." };
+  const kept = deleteTaskOutcome([removed(APP_LOGIN, "app")], { label: "login", skipped: [lockedRow], open: true });
+  assert.deepEqual([kept.close, kept.error], [true, ""]);
+  assert.deepEqual(kept.toast, { title: "Deleted 1 workspace of login", body: "Kept 1 locked workspace.", level: "success" });
+  assert.equal(kept.done, false, "a skipped workspace keeps the task: its note stays");
+
+  const all = deleteTaskOutcome([removed(APP_LOGIN, "app"), removed(API_LOGIN, "api", "kept"), removed(WEB_LOGIN, "web", "in-use")], { label: "AX-3653", skipped: [], open: true });
+  assert.deepEqual(all.toast, {
+    title: "Deleted 3 workspaces of AX-3653",
+    body: "Kept branch feat/login: it isn't merged into main. Kept branch feat/login: another workspace has it checked out.",
+    level: "success",
+  });
+  assert.deepEqual([all.close, all.done], [true, true]);
+  const other = { label: "spike", projectName: "web", ready: false, locked: false, reason: "Couldn't check it." };
+  assert.equal(deleteTaskOutcome([removed(APP_LOGIN, "app")], { label: "login", skipped: [lockedRow, lockedRow, other], open: true }).toast.body,
+    "Kept 2 locked workspaces. Skipped 1 other workspace.");
+
+  const part = deleteTaskOutcome([removed(APP_LOGIN, "app"), failed(API_LOGIN, "api", "fatal: cannot remove")], { label: "login", skipped: [], open: true });
+  assert.deepEqual([part.close, part.toast, part.done, part.error], [false, null, false, "Deleted 1 of 2 workspaces."]);
+  assert.deepEqual(part.rows.map((r) => [r.path, r.status, r.text]), [
+    [APP_LOGIN, "removed", "Deleted, with branch feat/login."],
+    [API_LOGIN, "failed", "fatal: cannot remove"],
+  ]);
+  const stopped = ran(WEB_LOGIN, "web", "skipped", { err: "Stopped: the plugin was reloaded.", check: null, list: null });
+  const cut = deleteTaskOutcome([removed(APP_LOGIN, "app"), stopped], { label: "login", skipped: [], open: true });
+  assert.deepEqual([cut.close, cut.done, cut.rows[1].text], [false, false, "Stopped: the plugin was reloaded."], "a run the reload stopped isn't all removed");
+  assert.equal(deleteTaskOutcome([failed(APP_LOGIN, "app", "x")], { label: "login", skipped: [], open: true }).error, "Nothing was deleted.");
+
+  const gone = deleteTaskOutcome([removed(APP_LOGIN, "app"), failed(API_LOGIN, "api", "fatal: cannot remove"), failed(WEB_LOGIN, "web", "fatal: other")], { label: "login", skipped: [], open: false });
+  assert.deepEqual([gone.close, gone.done], [false, false]);
+  assert.deepEqual(gone.toast, { title: "Deleted 1 of 3 workspaces of login", body: "login · api: fatal: cannot remove", level: "warning" });
+  assert.equal(deleteTaskOutcome([failed(APP_LOGIN, "app", "x")], { label: "login", skipped: [], open: false }).toast.level, "error");
+  const closedAll = deleteTaskOutcome([removed(APP_LOGIN, "app")], { label: "login", skipped: [], open: false });
+  assert.deepEqual([closedAll.close, closedAll.done, closedAll.toast.title], [false, true, "Deleted 1 workspace of login"], "nothing left to close");
+});
+
+test("taskStillUsed: another non-main checkout with the task's key, names compared lowercased; a folder's ticket counts; main checkouts don't", () => {
+  assert.equal(taskStillUsed({ "/code/api": [main("/code/api"), wt("api", "Login", "Login")] }, "login"), true, "Login keeps login");
+  assert.equal(taskStillUsed({ "/code/api": [main("/code/api"), wt("api", "ax_77-login", "fix-login")] }, "AX-77"), true, "a ticket from the folder name");
+  assert.equal(taskStillUsed({ "/code/api": [main("/code/api", "login"), wt("api", "other", "other")] }, "login"), false, "a main checkout on the branch doesn't count");
+  assert.equal(taskStillUsed({ "/code/AX-12": [{ path: "/code/AX-12", branch: "AX-12", main: true }] }, "AX-12"), false);
+  assert.equal(taskStillUsed(CACHE, "login"), true, "every project's cache, not only the active group's");
+  assert.equal(taskStillUsed(CACHE, "logout"), false);
+  assert.equal(taskStillUsed({}, "login"), false);
+  assert.equal(taskStillUsed(null, "login"), false);
 });

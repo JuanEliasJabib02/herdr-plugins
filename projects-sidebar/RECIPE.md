@@ -62,8 +62,25 @@ across repos.
   - Click a lane header to fold it; folds survive a reload.
   - Right-click a ticket or name lane for its menu: "Add note…" ("Edit
     note…" once it has one), a separator, then "Delete task…" in the
-    blocked color, dimmed for now ("Coming next"). "No task" and "Servers"
+    blocked color, dimmed with "No workspaces" when the lane has none in
+    this group. A folded lane has the same menu. "No task" and "Servers"
     have no menu.
+  - "Delete task…" deletes every workspace of the lane in this group (main
+    checkouts never count), each the way Delete… does, one after another.
+    The dialog takes the lane's workspaces when it opens, so one created
+    after that is never deleted, and asks git about each. Only the rows git
+    allows run: a locked one, one git couldn't check, or one that is no
+    longer a workspace says why and is skipped. A row with changes makes the
+    button "Delete anyway", which forces that row only. One failure doesn't
+    stop the others.
+    - All of them deleted: the dialog closes and a toast reads "Deleted 2
+      workspaces of AX-3653", with the skipped ones ("Kept 1 locked
+      workspace.") and any branch git kept.
+    - Otherwise each row shows what happened and the dialog waits for
+      Close. Closed meanwhile, one toast gives the count and the first
+      failure.
+    - The task's note goes once every workspace was deleted, none was
+      skipped, and no other workspace, in any group, has the task.
   - A task's note is a word or two to recall it by ("contratos"): a small
     dialog, "Note for AX-3695", with one input. Enter saves, Esc cancels,
     and saving it empty removes the note. It is kept as one line of up to
@@ -130,6 +147,18 @@ across repos.
       <path>`." and no Delete button;
     - footer: Cancel, and Delete as a `blocked` outline button, off until git
       has answered ("Checking with git…"), "Deleting…" while it runs.
+  - The Delete task dialog is a 400 × 380 modal:
+    - "Delete Workspaces" ("Delete Workspace" for one), the task, and Orca's
+      "Remove N workspaces from git and delete their workspace folders.",
+      counting the rows that will run;
+    - how many spaces close and how many other terminals stay, added up
+      over the rows that will run;
+    - a row per workspace: its label, its project's name on the right, and
+      what applies: changes that will be lost, why it is skipped, "Checking
+      with git…", "Deleting…", "Waiting…", then what happened;
+    - footer: Cancel, and Delete (or "Delete anyway") as a `blocked` outline
+      button, off until git has answered for every row, "Deleting…" while it
+      runs; only Close once a run left rows behind.
   - The group menu is a 210 × 104 popup: Rename…, Delete group. The New /
     Rename group form is a 380 × 214 dialog.
 
@@ -275,7 +304,8 @@ across repos.
   - `new-workspace` = `new-workspace.js`;
   - `delete-workspace` = `delete-workspace.js`;
   - `rename-workspace` = `rename-workspace.js`;
-  - `task-menu` = `task-menu.js`, `task-note` = `task-note.js`;
+  - `task-menu` = `task-menu.js`, `task-note` = `task-note.js`,
+    `delete-task` = `delete-task.js`;
   - `project-menu`, `workspace-menu`, `group-menu`, `group-form`.
   - Pure logic is in `lib.js`, `tree-model.js`, `task-model.js`,
     `new-workspace-model.js`, `remove-workspace-model.js` and
@@ -337,6 +367,10 @@ across repos.
 - **Delete deletes.** It removes the worktree's folder, its uncommitted
   work after "Delete anyway", and its merged branch. Its spaces close with
   their agents, including an agent session running in that worktree.
+- **Delete task deletes several workspaces at once,** in every project of
+  the group, with their spaces and agents. It keeps going past one that
+  fails. Its run, like Delete's, finishes even when the dialog closes; a
+  reload of the plugin stops it before the next workspace.
 - **exec's 30 s limit:** `git worktree remove` on a big worktree can hit it.
   The dialog then says "git didn't finish; the folder may be partly deleted.
   Check `git worktree list` in <project>."
@@ -400,6 +434,10 @@ across repos.
 - Right-click a throwaway worktree → Delete… → Delete: its space closes, and
   its folder, its row and its merged branch are gone. A dirty one asks
   "Delete anyway"; a locked one has no Delete.
+- With a throwaway task `odd-t14` (one worktree in each of two projects of
+  a Task-mode group, one holding an untracked file), right-click its lane →
+  Delete task…: the button reads "Delete anyway", and afterwards both
+  folders, both merged branches and the lane are gone, and so is its note.
 - Right-click a throwaway worktree → Rename… → a new name → Enter: with no
   terminal in it, its branch and its folder take the name. With a space
   open there, the folder stays and the row shows the new name. A branch

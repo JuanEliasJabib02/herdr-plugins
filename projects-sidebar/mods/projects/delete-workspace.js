@@ -33,15 +33,17 @@ export function openDeleteWorkspace(project, path) {
 }
 
 // The spaces that show the workspace at `path` now (D7's matching): they
-// close with it.
-const closingSpaces = (path) => spacesToClose(matchSpaces(store.cache(), spaces(), panes(), home()), path);
+// close with it. Delete task's dialog (delete-task.js) asks it per target.
+export const closingSpaces = (path) => spacesToClose(matchSpaces(store.cache(), spaces(), panes(), home()), path);
 
 // D23 step 2: closes the workspace's spaces (asked at this moment, so one
 // opened since the dialog did closes too), then waits until spaces() no
 // longer lists them, bounded. A space.close that throws rejects, before
 // anything was removed (removeWorkspace reports it); the wait itself never
-// rejects: a sleep that throws (a reloaded build) only ends the wait.
-async function closeSpaces(path, cx) {
+// rejects: a sleep that throws (a reloaded build) only ends the wait. `cx`:
+// the spawned task's, the one no view owns. Delete task's run (delete-task.js)
+// binds removeTask's closeSpaces(target) to it too.
+export async function closeSpaces(path, cx) {
   const ids = closingSpaces(path);
   for (const id of ids) run("space.close", { id, confirmed: true });
   for (let waited = 0; waited < CLOSE_WAIT; waited += CLOSE_STEP) {

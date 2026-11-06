@@ -111,3 +111,24 @@ test("Task notes and the task menu: a lane's right-click and its tooltip, and th
   assert.match(dialog, /setNote\(/, "Save goes through store.js");
   assert.match(src("store.js"), /export function setNote/);
 });
+
+test("Delete task: the task menu's Delete task… opens its dialog, a view of the mod whose run outlives it (D36)", () => {
+  const src = (f) => readFileSync(new URL(`../projects-sidebar/mods/projects/${f}`, import.meta.url), "utf8");
+  const menu = src("task-menu.js");
+  assert.match(menu, /openDeleteTask\(/, "the menu's Delete task… opens the dialog");
+  assert.match(menu, /laneTargets\(/, "the menu reads the lane's workspaces on render");
+  assert.doesNotMatch(menu, /Coming next/, "Delete task… is wired");
+  assert.match(src("main.js"), /"delete-task":\s*DeleteTask/);
+  const dialog = src("delete-task.js");
+  assert.match(dialog, /export default class DeleteTask/);
+  assert.match(dialog, /view:\s*"delete-task"/);
+  assert.match(dialog, /modal:\s*true/);
+  assert.match(dialog, /laneTargets\(/, "it captures the targets once, on open");
+  assert.match(dialog, /removeTask\(/);
+  assert.match(dialog, /\{\s*owner:\s*null\s*\}/, "the run lives in a task no view owns");
+  assert.match(dialog, /alive:\s*\(\)\s*=>\s*bg\.sleep\(0\)/, "a reload stops the run between targets");
+  assert.match(dialog, /taskStillUsed\(/, "the note goes only when no other workspace has the task");
+  const del = src("delete-workspace.js");
+  assert.match(del, /export async function closeSpaces\b/);
+  assert.match(del, /export const closingSpaces\b/);
+});

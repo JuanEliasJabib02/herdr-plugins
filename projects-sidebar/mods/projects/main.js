@@ -12,6 +12,7 @@
 //   group-form        New group / Rename group
 //   task-menu         a task lane's right-click menu (Task mode)
 //   task-note         a task's note
+//   delete-task       the Delete task dialog (a task lane's workspaces)
 // Copies never reach into each other: they share state through store.js
 // (setShared re-renders every copy) and act through herdr commands.
 
@@ -27,6 +28,7 @@ import GroupForm from "./group-form.js";
 import GroupMenu from "./group-menu.js";
 import TaskMenu from "./task-menu.js";
 import TaskNote from "./task-note.js";
+import DeleteTask from "./delete-task.js";
 import NewWorkspace, { commands as newWorkspaceCommands } from "./new-workspace.js";
 
 const VIEWS = {
@@ -41,6 +43,7 @@ const VIEWS = {
   "group-form": GroupForm,
   "task-menu": TaskMenu,
   "task-note": TaskNote,
+  "delete-task": DeleteTask,
 };
 
 // Every key command of the mod ("projects.<name>" in keys.json, or

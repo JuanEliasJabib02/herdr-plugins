@@ -1,10 +1,12 @@
 // A task lane's right-click menu (D35, S30), a popup with props { lane,
 // label }: Add note… or Edit note… (the note dialog, D34), then, after a
-// separator, Delete task… in the blocked color. The items come from
-// task-model.js taskMenuItems. An item with a `why` is drawn dimmed with it
-// and can't run: a click does nothing, ↑/↓ skip it, so Enter never reaches
-// it. Esc closes. Only ticket and name lanes open it (tree.js); No task and
-// Servers have no menu.
+// separator, Delete task… in the blocked color (the Delete task dialog,
+// D36), dimmed with "No workspaces" when the lane has none in the active
+// group. The items come from task-model.js taskMenuItems, and the lane's
+// workspaces from laneTargets, read on every render, folded or not. An item
+// with a `why` is drawn dimmed with it and can't run: a click does nothing,
+// ↑/↓ skip it, so Enter never reaches it. Esc closes. Only ticket and name
+// lanes open it (tree.js); No task and Servers have no menu.
 //   props: { view: "task-menu", lane: "task:AX-3695", label: "AX-3695" }
 
 import { div } from "gpui-kit";
@@ -13,18 +15,15 @@ import { theme, props, openOverlay, closeOverlay } from "herdr";
 import { MOD } from "./config.js";
 import { noteKeyOf, noteOf } from "./lib.js";
 import * as store from "./store.js";
-import { taskMenuItems } from "./task-model.js";
+import { taskMenuItems, laneTargets } from "./task-model.js";
 import { openTaskNote } from "./task-note.js";
+import { openDeleteTask } from "./delete-task.js";
 
 // The only place that opens the menu, at the pointer. A popup is as tall as
 // its items; height is only the most.
 export function openTaskMenu(lane, label) {
   return openOverlay({ mod: MOD, kind: "popup", width: 210, height: 140, props: { view: "task-menu", lane, label } });
 }
-
-// Delete task… isn't wired yet: T14b gives it the lane's workspaces
-// (laneTargets) and its dialog. Until then it says so and can't run.
-const NOT_YET = "Coming next";
 
 export default class TaskMenu {
   init(p, cx) {
@@ -36,15 +35,15 @@ export default class TaskMenu {
   }
 
   // taskMenuItems for this lane, with what each one does: [{ ..., run }].
+  // The Delete task dialog takes the lane's workspaces again when it opens.
   items() {
     const note = noteOf(store.notes(), noteKeyOf(this.lane));
+    const targets = laneTargets(store.registry(), store.cache(), this.lane);
     const runs = {
       note: () => openTaskNote(this.lane, this.label),
-      delete: () => {},
+      delete: () => openDeleteTask(this.lane, this.label),
     };
-    return taskMenuItems(this.lane, { note, targets: [] })
-      .map((it) => (it.id === "delete" ? { ...it, why: NOT_YET } : it))
-      .map((it) => ({ ...it, run: runs[it.id] }));
+    return taskMenuItems(this.lane, { note, targets }).map((it) => ({ ...it, run: runs[it.id] }));
   }
 
   choose(item) {
