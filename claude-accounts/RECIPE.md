@@ -12,6 +12,8 @@ All the logic is a command-line program, `claude-accounts`, that ships inside
 the mod. The mod only draws and runs it. Other plugins (Spotlight first) read
 the same files and run the same commands: see [CONTRACT.md](CONTRACT.md).
 
+![Claude accounts](preview.png)
+
 **What you see**
 
 - **Footer** (the sidebar's status row, right of the workspace status): the
@@ -23,7 +25,7 @@ the same files and run the same commands: see [CONTRACT.md](CONTRACT.md).
   - As the column narrows: bars and labels, then one number per window, then
     the icon only.
   - Signed out: "Sign in to see usage" and a **Sign in** action.
-  - Click it for the popover.
+  - Click it for the popover; click again to close it.
 - **Popover** (above the footer): `Usage`, a refresh button and a
   `Detailed | Compact` toggle for the footer. Then the `Claude` row with
   "Resets in 3h 2m" and its `5h`, `wk` and `Fable` bars (it opens the
@@ -33,7 +35,9 @@ the same files and run the same commands: see [CONTRACT.md](CONTRACT.md).
   in …", plus the monthly spend and credits when the account has them. Then
   the `Claude Account` list: System default and each saved account, ✓ on
   the active one, and the others with their `wk` and `Fable` bars. Click one
-  to switch. "No other accounts" when there are none.
+  to switch. An account whose login lapsed says "Sign in again to use this
+  account", and its row opens the sign-in tab. "No other accounts" when
+  there are none.
 - **Manage Accounts** (a dialog):
   - One row per account: its email, "This device", `org · date` of its last
     sign-in, `Sign in again ▾` (its menu: "Copy sign-in link instead") and
@@ -152,8 +156,10 @@ scripts/install.sh claude-accounts
     `confirm` = `confirm.js`, `details` = `details.js` (a window).
   - Pure modules, tested with `node --test`: `store.js` (reading the CLI's
     files), `format.js` (percent, durations, dates, colors, error copy,
-    density, "since <date>" and the cache-coverage note), `details-model.js`
-    (what the details window draws) and `toasts.js`.
+    density, "since <date>" and the cache-coverage note), `footer-model.js`
+    (what the footer, popover and panel draw, and where they open),
+    `accounts-model.js` (what the accounts and confirm views draw),
+    `details-model.js` (what the details window draws) and `toasts.js`.
 - **CLI `mods/claude-accounts/bin/claude-accounts`** (Node, `cli/*.mjs`).
   Every command takes `--json`:
 
@@ -184,9 +190,9 @@ scripts/install.sh claude-accounts
   `claude-accounts.open-accounts`, `claude-accounts.open-confirm`,
   `claude-accounts.open-details` and `claude-accounts.refresh`, reached
   through the footer copy (`herdr-app do claude-accounts.<name>`).
-- **Herdr functions:** `exec`, `readTextFile`, `watchFolder`, `openOverlay`,
-  `closeOverlay`, `notify`, `shared`, `setShared`, `theme`, `props`,
-  `nextCommand`, `home`, `appHome`.
+- **Herdr functions:** `exec`, `run`, `readTextFile`, `watchFolder`,
+  `openOverlay`, `closeOverlay`, `notify`, `shared`, `setShared`, `settings`,
+  `window`, `theme`, `props`, `nextCommand`, `home`, `appHome`.
 - **Programs the CLI runs:** `security find-generic-password` (reads a
   login, never writes one), `/usr/bin/sqlite3` (Orca's settings, read-only),
   `hc` (Herdr's terminals: list, read, type), `claude auth login`,

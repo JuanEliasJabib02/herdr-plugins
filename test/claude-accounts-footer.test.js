@@ -487,15 +487,15 @@ test("the CLI's argv: the timer and a merge batch fetch only what's due, every r
 
 test("useFailure: nothing when it worked, Orca's refusal as the CLI says it, else that it exited", () => {
   assert.equal(useFailure({ code: 0, stdout: "{}", stderr: "" }), null);
-  const refusal = "juan@iot4a.com needs you to sign in again.";
+  const refusal = "ana@example.com needs you to sign in again.";
   assert.equal(useFailure({ code: 5, stdout: "", stderr: `note\n${refusal}\n` }), refusal);
   assert.equal(useFailure({ code: 7, stdout: "", stderr: "" }), "claude-accounts use exited 7");
   assert.equal(useFailure(new Error("no such file")), "no such file");
 });
 
 test("panelModel: a failed switch's text is in the model, and its height holds", () => {
-  const m = panelModel({ doc: DOC, now: NOW, error: "juan@iot4a.com needs you to sign in again." });
-  assert.equal(m.error, "juan@iot4a.com needs you to sign in again.");
+  const m = panelModel({ doc: DOC, now: NOW, error: "ana@example.com needs you to sign in again." });
+  assert.equal(m.error, "ana@example.com needs you to sign in again.");
   assert.equal(panelModel({ doc: DOC, now: NOW }).error, null);
   assert.equal(panelHeight(m), panelHeight(panelModel({ doc: DOC, now: NOW })));
 });
