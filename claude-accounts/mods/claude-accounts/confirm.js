@@ -106,7 +106,12 @@ export default class Confirm {
             await cx.sleep(RETRY);
           }
           await cx.sleep(SETTLE);
-          if (await this.reload()) cx.notify();
+          const asked = this.pending;
+          if (await this.reload()) {
+            // Answered elsewhere: nothing's left to ask.
+            if (asked && !this.pending && !this.answered && !this.busy) closeOverlay(this.overlay);
+            else cx.notify();
+          }
         }
       } catch {
         // The dialog closed, or this build was reloaded: its cx is gone.

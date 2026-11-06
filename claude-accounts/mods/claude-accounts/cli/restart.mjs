@@ -494,6 +494,16 @@ async function cancelTerminal(terminalId, json) {
   return 0;
 }
 
+// The question lists addresses; `--terminal` takes a name too, as every other
+// command does.
+async function addressOf(t) {
+  try {
+    return (await getTerminal(t))?.address ?? t;
+  } catch {
+    return t;
+  }
+}
+
 // The confirm view's answer (Orca's answerClaudeAccountSwitchPrompt): only
 // sessions the question listed may restart, re-read now (D7).
 async function answer(choice, ticked, json) {
@@ -504,7 +514,8 @@ async function answer(choice, ticked, json) {
   const queued = [];
   if (pending && typeof pending === "object" && Array.isArray(pending.sessions) && typeof pending.to === "string") {
     const listed = pending.sessions.filter((s) => s && (s.group === "onAccount" || s.group === "elsewhere"));
-    const picked = choice === "keep" ? [] : listed.filter((s) => !ticked || ticked.includes(s.terminal));
+    const addresses = ticked && (await Promise.all(ticked.map(addressOf)));
+    const picked = choice === "keep" ? [] : listed.filter((s) => !addresses || addresses.includes(s.terminal));
     const found = await Promise.all(picked.map((s) => inspectTerminal(s.terminal, known)));
     const ids = await underLock(home, known, t, async (doc, now) => {
       const current = await readJson(pendingPath(home)).catch(() => null);

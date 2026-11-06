@@ -641,6 +641,22 @@ test("use, Ask: --answer restart queues only the listed sessions that were ticke
   assert.deepEqual(s.queue().filter((i) => i.state !== "done"), []);
 });
 
+test("use, Ask: --answer restart takes a terminal's name as well as its address", async () => {
+  const s = sandbox({ active: A, switchMode: "ask" });
+  const t1 = s.term("t1", { on: A });
+  const t2 = s.term("t2", { on: A });
+  s.json(["use", B]);
+  s.world("named", s.worldOf("t2"));
+
+  const { queued } = s.json(["restart", "--answer", "restart", "--terminal", "named"]);
+  assert.equal(queued.length, 1);
+  const item = s.queue().find((i) => i.id === queued[0]);
+  assert.equal(item.terminal, "t2");
+  await until(() => s.item((i) => i.id === item.id && i.state === "done"), WAIT, "t2's restart");
+  assert.ok(alive(t1.pid), "t1 wasn't named");
+  assert.ok(!alive(t2.pid));
+});
+
 test("queue rules: a later switch drops a waiting restart whose terminal is now on the target, and moves the rest to the new target", async () => {
   const s = sandbox({ active: A, switchMode: "restart" });
   const t1 = s.term("t1", { on: A, status: "busy", state: "working" });
