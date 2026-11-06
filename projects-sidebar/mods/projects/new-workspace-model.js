@@ -1,11 +1,12 @@
 // The New workspace dialog's model, with no herdr or gpui-kit imports so
 // `node --test` can load it: the name a workspace gets (slug, smart input,
-// a name free in every repo), the base it starts from, the projects and
+// a name free in every repo), the base it starts from (a project's saved
+// base, D37, and the Default branch… menu's rows), the projects and
 // agents the dialog offers, the agent's argv, and the creation itself. git
 // and the file check are passed in (M/git.js binds them to Herdr's exec;
 // tests pass a real git), like lib.js's repo resolution.
 
-import { normPath, baseName, activeGroup, findProject } from "./lib.js";
+import { normPath, baseName, activeGroup, findProject, setProjectBase } from "./lib.js";
 
 // ── Names (D12) ────────────────────────────────────────────────────────────
 
@@ -154,6 +155,16 @@ export async function recentBasesOf(repo, git) {
   return r.ok ? lines(r.out).map(shortRef).filter((b) => b !== "origin/HEAD").slice(0, 30) : [];
 }
 
+// Whether origin/<branch> (`base`, a short ref) is there: one exact
+// for-each-ref lookup, as defaultBaseOf does. for-each-ref also matches a
+// pattern up to a slash, so the answer must name the ref itself:
+// origin/release/1 alone is not origin/release.
+export async function baseExistsIn(repo, base, git) {
+  const ref = `refs/remotes/${base}`;
+  const r = await git(repo, GIT.refs([ref]));
+  return r.ok && lines(r.out).includes(ref);
+}
+
 export async function branchExistsIn(repo, name, git) {
   return (await git(repo, GIT.branch(name))).ok;
 }
@@ -170,6 +181,7 @@ export function gitOps(git) {
     fetch: (repo) => fetchOrigin(repo, git),
     defaultBase: (repo) => defaultBaseOf(repo, git),
     recentBases: (repo) => recentBasesOf(repo, git),
+    baseExists: (repo, base) => baseExistsIn(repo, base, git),
     branchExists: (repo, name) => branchExistsIn(repo, name, git),
     addWorktree: (repo, spec) => addWorktreeIn(repo, spec, git),
   };
@@ -180,6 +192,52 @@ export function gitOps(git) {
 export function nameTaken(io, root, home) {
   return async (project, name) =>
     (await io.branchExists(project.path, name)) || (await io.exists(worktreePath(root, repoName(project), name, home)));
+}
+
+// ── A project's saved base (D37, S33) ──────────────────────────────────────
+// Saved on the project in projects.v1 (lib.js setProjectBase): from the
+// Default branch… menu, or remembered from a Create. Without one, a repo's
+// default is origin's (defaultBaseOf). The root's branch never counts: it
+// moves.
+
+// A repo's default base: the project's saved base when git has it (`has`:
+// baseExistsIn's answer), else `originDefault` (defaultBaseOf). { def, gone }:
+// gone is the saved base git doesn't have ("origin/develop"), else null. A
+// repo that isn't git (originDefault null) has neither.
+export function baseFor(project, originDefault, has) {
+  if (originDefault === null) return { def: null, gone: null };
+  const saved = project?.base ?? null;
+  if (!saved) return { def: originDefault, gone: null };
+  return has ? { def: saved, gone: null } : { def: originDefault, gone: saved };
+}
+
+// The registry after a successful Create, which `ran` (the primary's step
+// base) started: origin's default clears the saved base, another base is
+// saved, and the saved one changes nothing (the same registry). Picking a
+// base in the dialog alone never saves. A base setProjectBase refuses (a
+// local one: "main", "HEAD") changes nothing either.
+export function rememberBase(registry, path, ran, originDefault) {
+  if (ran === originDefault) return setProjectBase(registry, path, null);
+  const saved = findProject(registry, path)?.project.base ?? null;
+  return ran === saved ? registry : setProjectBase(registry, path, ran);
+}
+
+// The Default branch… menu's rows: [{ base, label, checked }], base null for
+// "origin's default (<ref>)", which clears the saved base and comes first;
+// then the saved base, pinned right after it when the recent branches lack
+// it; then the recent branches (recentBasesOf) without origin's default,
+// which the first row already is. The saved one is checked, else the first.
+// None outside git (originDefault null), nor with no remote branch and
+// nothing saved: the menu says "No remote branches".
+export function baseMenuRows(originDefault, recent, saved) {
+  const list = recent ?? [];
+  if (originDefault === null || (list.length === 0 && !saved)) return [];
+  const rest = list.filter((b) => b !== originDefault && b !== "origin/HEAD");
+  const pinned = saved && !rest.includes(saved) ? [saved] : [];
+  return [
+    { base: null, label: `origin's default (${originDefault})`, checked: !saved },
+    ...[...pinned, ...rest].map((b) => ({ base: b, label: b, checked: b === saved })),
+  ];
 }
 
 // ── Projects (D16) ─────────────────────────────────────────────────────────
@@ -289,14 +347,18 @@ const firstLine = (s) => String(s ?? "").split("\n").map((l) => l.trim()).find(B
 
 // Creates a workspace in the primary and every companion:
 //   req = { primary, companions, text, base, agent, access, root, home }
-//   io  = { fetch, defaultBase, branchExists, addWorktree, exists } (gitOps
-//         plus a file check)
+//   io  = { fetch, defaultBase, baseExists, branchExists, addWorktree, exists }
+//         (gitOps plus a file check)
 // Refuses, before any git runs, projects whose workspaces would share a path
 // (pathClashes). Fetches every repo at once (a failure warns, the local refs
-// are used), finds a name free in all of them, adds the companions then the
-// primary, and stops at the first failure without undoing anything. Resolves
-//   { ok: true, name, created, warnings, launch }  launch: space.new's args,
-//     for the primary only: { folder, name, argv?, task? }
+// are used), resolves each repo's default (baseFor: its saved base when git
+// has it, else origin's, with a warning when the saved one is gone and is
+// the one that would have been used), finds a name free in all of them, adds
+// the companions then the primary, and stops at the first failure without
+// undoing anything. Resolves
+//   { ok: true, name, created, warnings, launch, originDefault }  launch:
+//     space.new's args, for the primary only: { folder, name, argv?, task? };
+//     originDefault: the primary's origin default, for rememberBase
 //   { ok: false, error, name?, created, warnings }
 export async function createWorkspace(req, io) {
   const { primary, companions = [], text, base, agent, access, root, home } = req;
@@ -312,10 +374,17 @@ export async function createWorkspace(req, io) {
     if (!r?.ok) warnings.push(`Couldn't fetch origin in ${repoName(repos[i])} (${firstLine(r?.err) || "no answer"}): used the local refs.`);
   });
   const defaults = {};
-  for (const p of repos) {
+  let originDefault = null;
+  for (const [i, p] of repos.entries()) {
     const d = await io.defaultBase(p.path);
     if (d === null) return { ok: false, error: `${repoName(p)} is not a git repository.`, created: [], warnings };
-    defaults[p.path] = d;
+    const isPrimary = i === repos.length - 1;
+    const { def, gone } = baseFor(p, d, p.base ? await io.baseExists(p.path, p.base) : false);
+    // A base picked in the dialog replaces the primary's default: then a gone
+    // saved base changed nothing.
+    if (gone && !(isPrimary && base)) warnings.push(`${isPrimary ? "" : `${repoName(p)}: `}${gone} is gone: created from ${def}`);
+    defaults[p.path] = def;
+    if (isPrimary) originDefault = d;
   }
   const name = await freeName(wanted, repos, nameTaken(io, root, home));
   const plan = creationPlan({ primary, companions, name, base, defaults, root, home });
@@ -334,5 +403,5 @@ export async function createWorkspace(req, io) {
   }
   const argv = agentArgv(agent, plan.filter((s) => !s.primary).map((s) => s.path), access);
   const launch = { folder: plan.at(-1).path, name, ...(argv ? { argv } : {}), ...(argv && task ? { task } : {}) };
-  return { ok: true, name, created, warnings, launch };
+  return { ok: true, name, created, warnings, launch, originDefault };
 }

@@ -145,6 +145,34 @@ test("New workspace's add-project click hands addToGroup the spawn's async conte
   assert.doesNotMatch(dialog, /spawn\(async \(\) => this\.addToGroup\(cx\)\)/, "the click's cx is never kept across an await");
 });
 
+test("Default branch…: the project menu opens the base menu, a view of the mod that loads in init with cx.spawn and scrolls past LIST_ROWS (D37, S33)", () => {
+  const src = (f) => readFileSync(new URL(`../projects-sidebar/mods/projects/${f}`, import.meta.url), "utf8");
+  const pm = src("project-menu.js");
+  assert.match(pm, /"default-branch":\s*icon\("branch"\)/, "the menu draws it with the branch icon");
+  assert.match(pm, /case "default-branch":\s*openBaseMenu\(path\)/, "Default branch… opens the base menu");
+  assert.match(src("main.js"), /"base-menu":\s*BaseMenu/);
+  const menu = src("base-menu.js");
+  assert.match(menu, /export default class BaseMenu/);
+  assert.match(menu, /export function openBaseMenu\(path\)/);
+  assert.match(menu, /kind:\s*"popup"[\s\S]*?view:\s*"base-menu"/);
+  const start = menu.indexOf("  init(");
+  assert.ok(start >= 0, "the base menu has an init");
+  const init = menu.slice(start, menu.indexOf("\n  }\n", start));
+  assert.match(init, /cx\.spawn\(async \(cx\) =>[\s\S]*?G\.defaultBase\(path\)[\s\S]*?G\.recentBases\(path\)/, "it loads in init, in a spawned task");
+  assert.match(menu, /baseMenuRows\(/, "its rows come from new-workspace-model.js");
+  assert.match(menu, /setProjectBase\(/, "picking saves through lib.js");
+  assert.match(menu, /import \{[^}]*\bLIST_ROWS\b[^}]*\} from "\.\/new-workspace\.js"/, "at most the dialog's LIST_ROWS rows show");
+  assert.match(menu, /overflow_y_scrollbar\(\)/, "then it scrolls");
+  for (const state of ["Not a git repository", "No remote branches"]) assert.ok(menu.includes(`"${state}"`), `it says "${state}"`);
+  const dialog = src("new-workspace.js");
+  assert.match(dialog, /export const LIST_ROWS = 7/);
+  assert.match(dialog, /baseFor\(/, "the dialog's default is the saved base when git has it");
+  assert.match(dialog, /G\.baseExists\(/, "found by the same exact lookup");
+  assert.match(dialog, /rememberBase\(/, "a successful Create remembers the primary's base");
+  assert.match(dialog, /origin's default/);
+  assert.match(src("git.js"), /export const baseExists\b/);
+});
+
 test("A press that isn't a drag start never leaves a project drag set (D33, R1b-C)", () => {
   const src = (f) => readFileSync(new URL(`../projects-sidebar/mods/projects/${f}`, import.meta.url), "utf8");
   const tree = src("tree.js");

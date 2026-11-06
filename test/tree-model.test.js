@@ -5,6 +5,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   emptyRegistry, addProject, addGroup, selectGroup, matchSpaces, setOrganize, parseRegistry, needsBackup,
+  setProjectBase, findProject,
 } from "../projects-sidebar/mods/projects/lib.js";
 import {
   buildTree, openAction, openMainAction, railAction, workspaceLabel, workspaceMenuItems, initials, mostUrgent,
@@ -261,15 +262,25 @@ test("open main: the main checkout's space is selected when open, else opened (t
 
 // ── Project menu (D11) ─────────────────────────────────────────────────────
 
-test("project menu: Open main, New workspace…, Move to group ▸ (the other groups), Remove from list", () => {
+test("project menu: Open main, New workspace…, Default branch…, Move to group ▸ (the other groups), Remove from list", () => {
   const r = registry();
-  assert.deepEqual(projectMenuItems(r, "/code/app").map((i) => i.label), ["Open main", "New workspace…", "Move to group", "Remove from list"]);
+  assert.deepEqual(projectMenuItems(r, "/code/app").map((i) => i.label), ["Open main", "New workspace…", "Default branch…", "Move to group", "Remove from list"]);
   assert.equal(projectMenuItems(r, "/code/app").find((i) => i.id === "move").disabled, false);
   assert.deepEqual(projectMenuItems(r, "/code/app", true), [{ id: "move-to", label: "Clients", group: r.groups[1].id }]);
   assert.deepEqual(projectMenuItems(r, "/code/client", true).map((i) => i.label), ["Projects"]);
   const one = addProject(emptyRegistry(), { path: "/code/app" });
   assert.equal(projectMenuItems(one, "/code/app").find((i) => i.id === "move").disabled, true, "no other group to move to");
   assert.deepEqual(projectMenuItems(r, "/code/unknown"), []);
+});
+
+test("project menu: Default branch… comes right after New workspace…, on every project, git or not (D37, S33)", () => {
+  const r = registry();
+  const items = projectMenuItems(r, "/code/app");
+  const at = items.findIndex((i) => i.id === "new-workspace");
+  assert.deepEqual(items[at + 1], { id: "default-branch", label: "Default branch…" });
+  const saved = setProjectBase(r, "/code/client", "origin/develop");
+  assert.deepEqual(projectMenuItems(saved, "/code/client").map((i) => i.id), ["open-main", "new-workspace", "default-branch", "move", "remove"], "with a base saved too");
+  assert.deepEqual(projectMenuItems(r, "/code/app", true).map((i) => i.id), ["move-to"], "not in the Move to group submenu");
 });
 
 test("remove from list: its cached worktrees go too, so no space matches it any more (S14, S15, D11)", () => {
@@ -662,11 +673,12 @@ test("reorder: nothing moves → the same registry (D33)", () => {
   assert.equal(reorderProject(r, "/code/app", "/code/nope", false), r, "an unknown target");
 });
 
-test("reorder: other groups, the mode and the stored value are kept (D33, D29)", () => {
-  const r = setOrganize(three(), "g1", "task");
+test("reorder: other groups, the mode, a project's saved base and the stored value are kept (D33, D29, D37)", () => {
+  const r = setProjectBase(setOrganize(three(), "g1", "task"), "/code/web", "origin/develop");
   const next = reorderProject(r, "/code/web", "/code/app", false);
   assert.deepEqual(order(next, 1), ["/code/client"]);
   assert.equal(next.groups[0].organize, "task");
+  assert.equal(findProject(next, "/code/web").project.base, "origin/develop", "the base follows a dragged project");
   assert.equal(next.activeGroup, r.activeGroup);
   const stored = JSON.parse(JSON.stringify(next));
   assert.deepEqual(parseRegistry(stored), next);

@@ -1,6 +1,7 @@
 // A project's right-click menu, a popup with props { project, move }:
-// Open main, New workspace…, Move to group ▸, Remove from list. `move`: the
-// Move to group submenu (the other groups), reopened at the pointer.
+// Open main, New workspace…, Default branch… (the base menu, D37), Move to
+// group ▸, Remove from list. `move`: the Move to group submenu (the other
+// groups), reopened at the pointer.
 // ↑/↓ move, Enter (→ on Move to group) runs, Esc closes. Remove from list
 // never touches files, worktrees or spaces (D11).
 
@@ -12,6 +13,7 @@ import { findProject, moveProject, removeProject } from "./lib.js";
 import * as store from "./store.js";
 import { projectMenuItems, openMainAction, withoutProject } from "./tree-model.js";
 import { openNewWorkspace } from "./new-workspace.js";
+import { openBaseMenu } from "./base-menu.js";
 
 // The only place that opens the menu. A popup is as tall as its items;
 // height is only the most.
@@ -22,6 +24,7 @@ export function openProjectMenu(path, move = false) {
 const ICONS = {
   "open-main": icon("home"),
   "new-workspace": icon("plus"),
+  "default-branch": icon("branch"),
   move: icon("folder"),
   "move-to": icon("folder"),
   remove: "mods/workspace-chrome/x.svg",
@@ -56,6 +59,9 @@ export default class ProjectMenu {
       }
       case "new-workspace":
         openNewWorkspace(path);
+        break;
+      case "default-branch":
+        openBaseMenu(path);
         break;
       case "move":
         openProjectMenu(path, true);

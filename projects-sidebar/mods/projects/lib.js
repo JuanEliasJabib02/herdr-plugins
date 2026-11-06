@@ -6,16 +6,17 @@
 // after T2: later tasks add their pure helpers to their own model files. The
 // exceptions change the persisted keys here: T10 added two optional fields,
 // a group's `organize` (D29) and the folded Task-mode lanes, `tasks` (D31);
-// T13 added the task notes, `projects.notes.v1`, and their helpers (D34).
+// T13 added the task notes, `projects.notes.v1`, and their helpers (D34);
+// T15 added a project's saved base, `base`, and setProjectBase (D37).
 
 // ── Persisted keys ─────────────────────────────────────────────────────────
 
 // The shared() keys this mod persists, read and written only by store.js.
 // A format change gets a new key (projects.v2), never a reshaped v1. An
-// optional field that an older build simply drops (organize, tasks) is not a
-// format change.
+// optional field that an older build simply drops (organize, tasks, a
+// project's base) is not a format change.
 export const KEYS = {
-  registry: "projects.v1", // { version: 1, groups: [{ id, name, projects: [{ path, name }], organize?: "task" }], activeGroup }
+  registry: "projects.v1", // { version: 1, groups: [{ id, name, projects: [{ path, name, base? }], organize?: "task" }], activeGroup }; base: the project's saved base, "origin/<branch>" (D37)
   registryBackup: "projects.v1.backup", // the first stored projects.v1 that didn't read back as itself, as it was (needsBackup)
   ui: "projects.ui.v1", // { collapsed: [projectPath], tasks?: [lane] }: tasks, the folded Task-mode lanes, only when there are any
   cache: "projects.cache.v1", // { [projectPath]: [{ path, branch, main }] }
@@ -70,6 +71,22 @@ const isGroup = (g) => isObject(g) && typeof g.id === "string" && g.id !== "" &&
 
 const isProject = (p) => isObject(p) && isAbsolute(p.path) && typeof p.name === "string";
 
+// The longest saved base kept (D37).
+const BASE_MAX = 200;
+
+// A project's saved base (D37, S33): the branch its new workspaces start from,
+// a short ref under origin/ ("origin/develop") of at most BASE_MAX chars that
+// git would take as a ref name. The rules are modeled on slug's
+// (new-workspace-model.js) and git check-ref-format's: no space or control
+// character; none of ~ ^ : ? * [ \ (the last four would also make it a
+// for-each-ref glob); no "..", "@{" or "//"; no trailing "/" or "."; and no
+// component that starts with "." or "-" or ends with ".lock".
+function isBase(value) {
+  if (typeof value !== "string" || value.length > BASE_MAX || !value.startsWith("origin/")) return false;
+  if (/[\s\x00-\x1f\x7f~^:?*[\\]/.test(value) || /\.\.|@\{|\/\//.test(value) || /[/.]$/.test(value)) return false;
+  return value.split("/").every((c) => c !== "" && !c.startsWith(".") && !c.startsWith("-") && !c.endsWith(".lock"));
+}
+
 // A stored `projects.v1` value as a registry, salvaging what it can: a
 // malformed group is dropped with its projects, a malformed project alone,
 // and every valid group and project is kept. A value that isn't a v1
@@ -79,7 +96,9 @@ const isProject = (p) => isObject(p) && isAbsolute(p.path) && typeof p.name === 
 // group that doesn't exist falls back to the first group. A group's
 // `organize` is kept only when it is "task", as its last key (D29): that is
 // where setOrganize puts it, so a stored Task-mode group reads back as itself
-// and never needs a backup. Never throws.
+// and never needs a backup. A project's `base` (D37) is kept the same way,
+// only when isBase takes it, as the project's last key, where
+// setProjectBase puts it. Never throws.
 export function parseRegistry(value) {
   if (!isObject(value) || value.version !== 1 || !Array.isArray(value.groups)) return emptyRegistry();
   const ids = new Set();
@@ -94,7 +113,7 @@ export function parseRegistry(value) {
       const path = normPath(p.path);
       if (paths.has(path)) continue;
       paths.add(path);
-      projects.push({ path, name: p.name });
+      projects.push({ path, name: p.name, ...(isBase(p.base) ? { base: p.base } : {}) });
     }
     groups.push({ id: g.id, name: g.name, projects, ...(g.organize === "task" ? { organize: "task" } : {}) });
   }
@@ -219,6 +238,27 @@ export function setOrganize(registry, groupId, mode) {
     const { organize: _, ...rest } = g;
     return rest;
   });
+}
+
+// A project's saved base set or replaced, or, with null, removed (the key
+// goes, never left undefined), like setOrganize, so the stored value reads
+// back as itself. A new key goes last ({ path, name, base }, parseRegistry's
+// order). The same registry when the project is unknown, it already has that
+// base (or none, to clear), or `base` is one parseRegistry wouldn't keep.
+// Moving, reordering and renaming keep it: they carry the project as it is.
+export function setProjectBase(registry, path, base) {
+  const found = findProject(registry, path);
+  if (!found || (base !== null && !isBase(base))) return registry;
+  if ((found.project.base ?? null) === base) return registry;
+  return mapGroup(registry, found.group.id, (g) => ({
+    ...g,
+    projects: g.projects.map((p) => {
+      if (p !== found.project) return p;
+      if (base !== null) return { ...p, base };
+      const { base: _, ...rest } = p;
+      return rest;
+    }),
+  }));
 }
 
 // ── Other persisted keys ───────────────────────────────────────────────────

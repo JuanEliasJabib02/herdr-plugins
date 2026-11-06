@@ -507,6 +507,8 @@ export function reorderProject(registry, path, target, after) {
 
 // The right-click menu of a project: [{ id, label, disabled?, group? }].
 // `move`: the Move to group submenu, the other groups. Unknown project: [].
+// Default branch… (D37) opens the base menu, where the project's saved base
+// is set; it shows on every project, and the menu says when one isn't git.
 export function projectMenuItems(registry, path, move = false) {
   const found = findProject(registry, path);
   if (!found) return [];
@@ -515,6 +517,7 @@ export function projectMenuItems(registry, path, move = false) {
   return [
     { id: "open-main", label: "Open main" },
     { id: "new-workspace", label: "New workspace…" },
+    { id: "default-branch", label: "Default branch…" },
     { id: "move", label: "Move to group", disabled: others.length === 0 },
     { id: "remove", label: "Remove from list" },
   ];

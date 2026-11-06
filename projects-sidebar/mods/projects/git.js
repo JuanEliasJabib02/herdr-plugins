@@ -7,7 +7,7 @@
 
 import { exec } from "herdr";
 import { resolveProject, listCheckouts } from "./lib.js";
-import { fetchOrigin, defaultBaseOf, recentBasesOf, branchExistsIn, addWorktreeIn } from "./new-workspace-model.js";
+import { fetchOrigin, defaultBaseOf, recentBasesOf, baseExistsIn, branchExistsIn, addWorktreeIn } from "./new-workspace-model.js";
 import { removalCheck as checkRemoval, removeWorkspace as removeWith, removeTask as removeTaskWith } from "./remove-workspace-model.js";
 import { renameCheck as checkRename, renameWorkspace as renameWith, sshHostnameOf } from "./rename-workspace-model.js";
 
@@ -46,6 +46,10 @@ export const defaultBase = (repo) => defaultBaseOf(repo, git);
 
 // The 30 most recently committed origin/… branches, newest first.
 export const recentBases = (repo) => recentBasesOf(repo, git);
+
+// Whether a project's saved base (origin/<branch>) is there, by one exact
+// ref lookup (D37): a gone one makes the default origin's again.
+export const baseExists = (repo, base) => baseExistsIn(repo, base, git);
 
 // refs/heads/<name> exists in the repo.
 export const branchExists = (repo, name) => branchExistsIn(repo, name, git);

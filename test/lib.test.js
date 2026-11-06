@@ -11,7 +11,7 @@ import {
   KEYS, COMMON_DIR, WORKTREE_LIST,
   normPath, placeOf, changed,
   emptyRegistry, parseRegistry, needsBackup, registryWrites, activeGroup, findProject,
-  addProject, removeProject, moveProject, addGroup, renameGroup, deleteGroup, selectGroup, setOrganize,
+  addProject, removeProject, moveProject, addGroup, renameGroup, deleteGroup, selectGroup, setOrganize, setProjectBase,
   parseUi, withCollapsed, withTaskCollapsed, parseCache, parseAgents,
   noteKeyOf, noteOf, normalizeNote, parseNotes, withNote, notesFull, notesWrites,
   resolveProject, parseWorktrees, listCheckouts,
@@ -330,6 +330,71 @@ test("organize: renaming the group or moving a project in or out keeps the mode"
   const into = moveProject(setOrganize(twoGroups(), "g2", "task"), "/code/app", "g2");
   assert.equal(into.groups[1].organize, "task");
   for (const next of [renamed, out, into]) assert.equal(needsBackup(roundTrip(next), parseRegistry(roundTrip(next))), false);
+});
+
+// ── Registry: a project's saved base (D37) ─────────────────────────────────
+
+test("base: a valid saved base is kept as the project's last key and reads back as itself; a bad one is dropped (D37)", () => {
+  const longest = `origin/${"a".repeat(193)}`;
+  const stored = {
+    version: 1,
+    groups: [{ id: "g1", name: "Projects", projects: [
+      { path: "/code/app", name: "app", base: "origin/develop" },
+      { path: "/code/api", name: "api", base: "origin/feat/x-1.2_b" },
+      { path: "/code/web", name: "web", base: longest },
+      { path: "/code/cli", name: "cli" },
+    ] }],
+    activeGroup: "g1",
+  };
+  assert.equal(longest.length, 200);
+  const parsed = parseRegistry(stored);
+  assert.deepEqual(parsed, stored);
+  assert.deepEqual(Object.keys(parsed.groups[0].projects[0]), ["path", "name", "base"], "the key order is path, name, base");
+  assert.deepEqual(Object.keys(parsed.groups[0].projects[3]), ["path", "name"], "no base: no key, not even undefined");
+  assert.equal(needsBackup(stored, parsed), false, "a stored base never spends the backup");
+  assert.deepEqual(registryWrites(stored, null, parsed), []);
+  const bad = [
+    "develop", "main", "HEAD", "upstream/main", "origin", "origin/",
+    "origin/a b", "origin/a\tb", "origin/a\nb", "origin/a\u0001b", "origin/a\u007fb",
+    "origin/a~1", "origin/a^", "origin/a:b", "origin/a?", "origin/a*", "origin/a[b", "origin/a\\b",
+    "origin/a..b", "origin/a@{1}", "origin/a//b", "origin/a/", "origin/a.", "origin/a.lock", "origin/a.lock/b",
+    "origin/.hidden", "origin/a/.hidden", "origin/-x", "origin/a/-x",
+    `origin/${"a".repeat(194)}`,
+    7, null, true, {}, ["origin/develop"],
+  ];
+  for (const base of bad) {
+    const one = { version: 1, groups: [{ id: "g1", name: "Projects", projects: [{ path: "/code/app", name: "app", base }] }], activeGroup: "g1" };
+    assert.deepEqual(parseRegistry(one).groups[0].projects, [{ path: "/code/app", name: "app" }], `base ${JSON.stringify(base)} is dropped`);
+  }
+});
+
+test("base: setProjectBase sets, replaces, clears by removing the key, is the same registry on a no-op; moving or removing the project takes it along (D37)", () => {
+  const r = roundTrip(twoGroups()); // app and api in Projects (g1); Clients (g2) empty
+  const set = setProjectBase(r, "/code/app", "origin/develop");
+  assert.deepEqual(set.groups[0].projects[0], { path: "/code/app", name: "app", base: "origin/develop" });
+  assert.deepEqual(Object.keys(set.groups[0].projects[0]), ["path", "name", "base"]);
+  assert.equal(r.groups[0].projects[0].base, undefined, "the input is never mutated");
+  assert.deepEqual(parseRegistry(roundTrip(set)), set);
+  assert.equal(needsBackup(roundTrip(set), parseRegistry(roundTrip(set))), false);
+  const replaced = setProjectBase(set, "/code/app/", "origin/release");
+  assert.equal(replaced.groups[0].projects[0].base, "origin/release", "the path is normalized");
+  const cleared = setProjectBase(replaced, "/code/app", null);
+  assert.ok(!("base" in cleared.groups[0].projects[0]), "cleared: the key is gone, never undefined");
+  assert.deepEqual(cleared, r);
+  assert.deepEqual(registryWrites(r, null, cleared), [], "set then cleared: nothing to write");
+  assert.equal(setProjectBase(set, "/code/app", "origin/develop"), set, "already saved");
+  assert.equal(setProjectBase(r, "/code/app", null), r, "nothing saved to clear");
+  assert.equal(setProjectBase(r, "/code/none", "origin/develop"), r, "an unknown project");
+  assert.equal(setProjectBase(r, "/code/app", "develop"), r, "a base parseRegistry wouldn't keep");
+  assert.equal(setProjectBase(r, "/code/app", "origin/a..b"), r);
+  const moved = moveProject(set, "/code/app", "g2");
+  assert.deepEqual(moved.groups[1].projects, [{ path: "/code/app", name: "app", base: "origin/develop" }], "it follows the project to its new group");
+  assert.deepEqual(parseRegistry(roundTrip(moved)), moved);
+  const renamed = renameGroup(set, "g1", "Work");
+  assert.equal(findProject(renamed, "/code/app").project.base, "origin/develop");
+  const removed = removeProject(set, "/code/app");
+  assert.equal(findProject(removed, "/code/app"), null, "it goes with the project");
+  assert.deepEqual(addProject(removed, { path: "/code/app" }).groups[0].projects.at(-1), { path: "/code/app", name: "app" }, "added again: no base");
 });
 
 // ── Other persisted keys ───────────────────────────────────────────────────

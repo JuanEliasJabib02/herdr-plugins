@@ -2,8 +2,10 @@
 // project, a name (or #issue, a GitHub or Jira link), the base it starts
 // from, the agent, and "Also create in": the same branch as a worktree in
 // other projects of the group, which the agent is given access to. Only the
-// primary gets a space (S16). What it decides lives in
-// new-workspace-model.js; this file draws it and runs it.
+// primary gets a space (S16). A project's default base is its saved one
+// (D37) when git has it, else origin's; a successful Create remembers the
+// primary's (rememberBase). What it decides lives in new-workspace-model.js;
+// this file draws it and runs it.
 
 import { div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input } from "gpui-base";
@@ -13,12 +15,13 @@ import { matchSpaces, findProject, normPath, addProject } from "./lib.js";
 import * as store from "./store.js";
 import * as G from "./git.js";
 import {
-  parseInput, freeName, nameTaken, worktreePath, repoName, baseChoices,
+  parseInput, freeName, nameTaken, worktreePath, repoName, baseChoices, baseFor, rememberBase,
   agentChoices, defaultAgent, takesDirs, projectChoices, companionChoices, initialProject, clashError, createWorkspace,
 } from "./new-workspace-model.js";
 
-// The most rows an open select shows before it scrolls.
-const LIST_ROWS = 7;
+// The most rows an open select shows before it scrolls; the Default
+// branch… menu (base-menu.js) shows as many.
+export const LIST_ROWS = 7;
 
 // Herdr's own glyphs (shipped with every install).
 const CHEVRON = "mods/workspace-chrome/chevron-down.svg";
@@ -52,7 +55,7 @@ export default class NewWorkspace {
     this.base = null; // the primary's Create from; null: its default
     this.agentKey = null; // null: defaultAgent ("" is Blank terminal)
     this.agents = store.agents(); // the last knownAgents(), shown while it's asked again
-    this.bases = {}; // repo path -> { def, recent }; def undefined: looking, null: not git
+    this.bases = {}; // repo path -> { def, origin, recent, gone }; def undefined: looking, null: not git
     this.open = null; // the open list: "project" | "base" | "agent"
     this.text = "";
     this.free = ""; // the name the last check found free in every repo
@@ -126,19 +129,43 @@ export default class NewWorkspace {
     return choices.find((a) => a.key === this.agentKey) ?? defaultAgent(choices);
   }
 
-  // A repo's default base and recent branches, asked once.
+  // A repo's default base and recent branches, asked once. def: the
+  // project's saved base when the same exact lookup createWorkspace runs
+  // finds it, else origin's default (baseFor); origin: origin's default;
+  // gone: a saved base git doesn't have, or null.
   loadBases(path, cx) {
     if (this.bases[path]) return;
-    this.bases[path] = { def: undefined, recent: [] };
+    this.bases[path] = { def: undefined, origin: undefined, recent: [], gone: null };
+    const project = findProject(store.registry(), path)?.project ?? null;
+    const saved = project?.base ?? null;
     cx.spawn(async (cx) => {
-      let def = null;
+      let origin = null;
       let recent = [];
+      let has = false;
       try {
-        [def, recent] = await Promise.all([G.defaultBase(path), G.recentBases(path)]);
+        [origin, recent, has] = await Promise.all([G.defaultBase(path), G.recentBases(path), saved ? G.baseExists(path, saved) : false]);
       } catch {}
-      this.bases[path] = { def, recent };
+      const { def, gone } = baseFor(project, origin, has);
+      this.bases[path] = { def, origin, recent, gone };
       cx.notify();
     });
+  }
+
+  // After a successful Create: the primary's saved base becomes what ran
+  // (rememberBase: origin's default clears it), and the dialog's default
+  // with it, so Create more goes on from the same base, now marked default.
+  remember(path, r) {
+    const ran = r.created.at(-1)?.base;
+    if (!ran || r.originDefault == null) return;
+    const now = store.registry();
+    const next = rememberBase(now, path, ran, r.originDefault);
+    if (next === now) return;
+    store.saveRegistry(next);
+    const b = this.bases[path];
+    if (b && b.origin !== undefined) {
+      this.bases[path] = { ...b, def: findProject(next, path)?.project.base ?? b.origin, gone: null };
+      this.base = null;
+    }
   }
 
   // The name the live line shows: checked a moment after typing stops, in
@@ -247,6 +274,7 @@ export default class NewWorkspace {
         cx.notify();
         return;
       }
+      this.remember(req.primary.path, r);
       const before = spaces().find((s) => s.active)?.id ?? null;
       run("space.new", r.launch); // the primary only; companions never get a space
       if (this.more) {
@@ -373,15 +401,19 @@ export default class NewWorkspace {
     const projectOptions = projectChoices(reg).map((p) => ({ key: p.path, label: p.name, hint: "", icon: folder }));
     const projectSelect = this.select(t, "project", { key: primary.path, label: primary.name, icon: folder }, projectOptions, (o, cx) => this.pickProject(o.key, cx));
 
-    // Create from: the primary's default, then its recent remote branches.
+    // Create from: the primary's default (its saved base, else origin's),
+    // then origin's default, so it can always be picked, then its recent
+    // remote branches.
     const bases = this.bases[primary.path];
     const def = bases?.def;
     const base = this.base ?? def;
+    const hint = (b) => (b === def ? "default" : b === bases?.origin ? "origin's default" : "");
     const baseSelect = def
-      ? this.select(t, "base", { key: base, label: base, hint: base === def ? "default" : "" },
-        baseChoices(def, bases.recent).map((b) => ({ key: b, label: b, hint: b === def ? "default" : "" })),
+      ? this.select(t, "base", { key: base, label: base, hint: hint(base) },
+        baseChoices(def, [bases.origin, ...bases.recent]).map((b) => ({ key: b, label: b, hint: hint(b) })),
         (o) => { this.base = o.key === def ? null : o.key; })
       : this.still(t, def === null ? "not a git repository" : "…", def === null ? t.blocked : t.dim);
+    const gone = def && bases.gone ? `${bases.gone} is gone` : "";
 
     // Agent: the installed ones, then Blank terminal.
     const agent = this.agent();
@@ -431,7 +463,8 @@ export default class NewWorkspace {
       .when(taken, (el) => el.child(div().pt(2).text_size(11.5).text_color(t.dim).child(`${parsed.name} is taken in one of the repos.`)))
       .when(Boolean(parsed.task) && Boolean(agent.run), (el) => el.child(div().pt(2).text_size(11.5).text_color(t.dim).truncate().child(`The agent starts with: ${parsed.task}`)))
       .child(h_flex().gap(12).items_start()
-        .child(v_flex().flex_1().min_w(0).child(label("Create from")).child(baseSelect))
+        .child(v_flex().flex_1().min_w(0).child(label("Create from")).child(baseSelect)
+          .when(Boolean(gone), (el) => el.child(div().pt(4).text_size(11.5).text_color(t.muted).truncate().child(gone))))
         .child(v_flex().flex_1().min_w(0).child(label("Agent")).child(agentSelect)))
       // Shown even with no other project in the group, so the feature can be
       // found: the hint says where companions come from.

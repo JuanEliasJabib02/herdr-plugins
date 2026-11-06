@@ -5,6 +5,7 @@
 //   groups            the groups bar (F1–F3), above the sidebar footer
 //   new-workspace     the New workspace dialog
 //   project-menu      a project's right-click menu
+//   base-menu         a project's Default branch… (its saved base, D37)
 //   workspace-menu    a workspace's right-click menu
 //   delete-workspace  the Delete dialog (a worktree, its spaces, its branch)
 //   rename-workspace  the Rename dialog (a worktree's branch and folder)
@@ -20,6 +21,7 @@ import { View, div } from "gpui-kit";
 import { props, nextCommand } from "herdr";
 import Tree, { commands as treeCommands } from "./tree.js";
 import ProjectMenu from "./project-menu.js";
+import BaseMenu from "./base-menu.js";
 import WorkspaceMenu from "./workspace-menu.js";
 import DeleteWorkspace from "./delete-workspace.js";
 import RenameWorkspace from "./rename-workspace.js";
@@ -36,6 +38,7 @@ const VIEWS = {
   groups: Groups,
   "new-workspace": NewWorkspace,
   "project-menu": ProjectMenu,
+  "base-menu": BaseMenu,
   "workspace-menu": WorkspaceMenu,
   "delete-workspace": DeleteWorkspace,
   "rename-workspace": RenameWorkspace,

@@ -100,8 +100,13 @@ across repos.
   - Name input: takes a name, a branch, `#123`, or a GitHub issue / pull
     request or Jira link. Under it, a live line:
     `~/orca/workspaces/<repo>/<name> · branch <name> · from <base>`.
-  - "Create from": `origin/HEAD`'s target marked "default", then the 30
-    latest remote branches.
+  - "Create from": the project's saved base (D37) marked "default" when
+    origin still has it, else `origin/HEAD`'s target; origin's default
+    labelled "origin's default"; then the 30 latest remote branches. A
+    saved base origin no longer has shows "origin/develop is gone" and the
+    workspace starts from origin's default, with a warning. Companions start
+    from their own saved base the same way. After a Create, the base the
+    primary used is saved as its default (origin's default clears it).
   - "Agent": installed agents plus "Blank terminal".
   - "Also create in · <group>": chips for the group's other projects; a
     chosen chip shows a check.
@@ -187,7 +192,10 @@ across repos.
   no space open.
 - **Right-click a project:** opens the project menu. "Remove from list"
   forgets the project and never touches files, worktrees or spaces. "Move
-  to group ▸" lists the other groups.
+  to group ▸" lists the other groups. "Default branch…" picks the base New
+  workspace starts from (kept on the project in `projects.v1` as `base`,
+  e.g. `origin/develop`): origin's default first (clears it), then the
+  saved one, then the latest remote branches.
 - **Right-click a workspace:** opens the workspace menu. Copy Path and Copy
   Worktree Name (the folder's name) go to the clipboard, and a toast says
   "Copied".

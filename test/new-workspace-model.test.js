@@ -8,11 +8,11 @@ import { execFile, execFileSync } from "node:child_process";
 import { mkdtempSync, realpathSync, rmSync, mkdirSync, existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { emptyRegistry, addProject, addGroup, selectGroup } from "../projects-sidebar/mods/projects/lib.js";
+import { emptyRegistry, addProject, addGroup, selectGroup, findProject } from "../projects-sidebar/mods/projects/lib.js";
 import {
   NAME_MAX, CLAUDE_SETTINGS,
   slug, parseInput, pickName, freeName, worktreePath,
-  pickDefaultBase, baseChoices,
+  pickDefaultBase, baseChoices, baseFor, rememberBase, baseMenuRows,
   agentChoices, defaultAgent, agentArgv,
   projectChoices, companionChoices, initialProject,
   creationPlan, pathClashes, clashError, gitOps, nameTaken, createWorkspace,
@@ -109,6 +109,51 @@ test("base choices: the default first, then the recent remote branches, no origi
   assert.deepEqual(baseChoices("main", []), ["main"]);
   const many = Array.from({ length: 40 }, (_, i) => `origin/b${i}`);
   assert.equal(baseChoices("origin/main", many).length, 31, "the default plus 30");
+});
+
+// ── A project's saved base (D37, S33) ──────────────────────────────────────
+
+test("baseFor: the saved base when git has it; else origin's default, naming the gone one; no saved base is origin's default (D37)", () => {
+  const app = { path: "/code/app", name: "app", base: "origin/develop" };
+  assert.deepEqual(baseFor(app, "origin/main", true), { def: "origin/develop", gone: null });
+  assert.deepEqual(baseFor(app, "origin/main", false), { def: "origin/main", gone: "origin/develop" });
+  assert.deepEqual(baseFor({ path: "/code/app", name: "app" }, "origin/main", false), { def: "origin/main", gone: null });
+  assert.deepEqual(baseFor({ path: "/code/app", name: "app" }, "origin/main", true), { def: "origin/main", gone: null }, "nothing saved: the lookup means nothing");
+  assert.deepEqual(baseFor(app, null, false), { def: null, gone: null }, "not a git repository");
+  assert.deepEqual(baseFor(null, "origin/main", false), { def: "origin/main", gone: null });
+});
+
+test("rememberBase: origin's default clears, another base saves, the saved one returns the same registry (D37, S33)", () => {
+  const r = addProject(emptyRegistry(), { path: "/code/app" });
+  const saved = rememberBase(r, "/code/app", "origin/develop", "origin/main");
+  assert.equal(findProject(saved, "/code/app").project.base, "origin/develop", "a create from another base saves it");
+  assert.equal(rememberBase(saved, "/code/app", "origin/develop", "origin/main"), saved, "the saved one ran: the same registry");
+  const other = rememberBase(saved, "/code/app", "origin/release", "origin/main");
+  assert.equal(findProject(other, "/code/app").project.base, "origin/release", "a different one replaces it");
+  const cleared = rememberBase(other, "/code/app", "origin/main", "origin/main");
+  assert.ok(!("base" in findProject(cleared, "/code/app").project), "origin's default ran: the saved base goes");
+  assert.deepEqual(cleared, r);
+  assert.equal(rememberBase(r, "/code/app", "origin/main", "origin/main"), r, "nothing saved, origin's default ran");
+  assert.equal(rememberBase(r, "/code/app", "main", "HEAD"), r, "a local base is never saved");
+  assert.equal(rememberBase(r, "/code/none", "origin/develop", "origin/main"), r, "an unknown project");
+});
+
+test("base menu rows: origin's default first (it clears), the saved base pinned after it when the recent lack it, then the recent; the saved one checked (D37)", () => {
+  const recent = ["origin/feat", "origin/master", "origin/develop"];
+  assert.deepEqual(baseMenuRows("origin/master", recent, null), [
+    { base: null, label: "origin's default (origin/master)", checked: true },
+    { base: "origin/feat", label: "origin/feat", checked: false },
+    { base: "origin/develop", label: "origin/develop", checked: false },
+  ], "origin's default is listed once, as the first row");
+  assert.deepEqual(baseMenuRows("origin/master", recent, "origin/develop").map((r) => [r.base, r.checked]), [
+    [null, false], ["origin/feat", false], ["origin/develop", true],
+  ], "a saved base among the recent: checked where it is");
+  assert.deepEqual(baseMenuRows("origin/master", recent, "origin/old").map((r) => [r.base, r.checked]), [
+    [null, false], ["origin/old", true], ["origin/feat", false], ["origin/develop", false],
+  ], "a saved base the recent lack: pinned right after origin's default");
+  assert.deepEqual(baseMenuRows("main", [], null), [], "no remote branch and nothing saved: no rows");
+  assert.deepEqual(baseMenuRows("main", [], "origin/develop").map((r) => [r.base, r.checked]), [[null, false], ["origin/develop", true]], "a saved base can still be cleared");
+  assert.deepEqual(baseMenuRows(null, recent, null), [], "not a git repository");
 });
 
 // ── Projects and agents (D15, D16) ─────────────────────────────────────────
@@ -418,6 +463,51 @@ test("create: a failed fetch warns and goes on with the local refs", async () =>
   assert.equal(r.warnings.length, 1);
   assert.match(r.warnings[0], /offline/);
   assert.equal(head(join(ws, "offline", "work")), head(p.path, "origin/main"));
+});
+
+test("create: from the project's saved base, companions too; a gone one falls back to origin/HEAD with a warning; the lookup is exact (D37, S33)", async () => {
+  const shop = makeProject("saved-shop", { branches: ["release"] });
+  const api = makeProject("saved-api", { branches: ["develop"] });
+  const ws = join(root, "ws-saved");
+  const primary = { path: shop.path, name: shop.name, base: "origin/release" };
+  const companion = { path: api.path, name: api.name, base: "origin/develop" };
+  const req = { primary, companions: [companion], base: null, agent: claude, access: true, root: ws, home: "/nowhere" };
+
+  const r = await createWorkspace({ ...req, text: "saved" }, io);
+  assert.equal(r.error, undefined);
+  assert.equal(r.ok, true);
+  assert.deepEqual(r.created.map((s) => [s.project, s.base]), [["saved-api", "origin/develop"], ["saved-shop", "origin/release"]]);
+  assert.equal(head(join(ws, "saved-shop", "saved")), head(shop.path, "origin/release"), "the primary starts at its saved base");
+  assert.equal(head(join(ws, "saved-api", "saved")), head(api.path, "origin/develop"), "the companion starts at its own saved base");
+  assert.deepEqual(r.warnings, []);
+  assert.equal(r.originDefault, "origin/main", "origin's default comes back, for rememberBase");
+
+  // Gone on origin and pruned here: the next create starts at origin/HEAD's target.
+  sh(shop.origin, ["branch", "-q", "-D", "release"]);
+  sh(shop.path, ["branch", "-q", "-d", "-r", "origin/release"]);
+  // origin/release/1 is not origin/release: for-each-ref also matches up to a slash.
+  const prefix = makeProject("saved-prefix", { branches: ["release/1"] });
+  const gone = await createWorkspace({ ...req, companions: [{ path: prefix.path, name: prefix.name, base: "origin/release" }], text: "after" }, io);
+  assert.equal(gone.ok, true);
+  assert.deepEqual(gone.created.map((s) => [s.project, s.base]), [["saved-prefix", "origin/main"], ["saved-shop", "origin/main"]]);
+  assert.equal(head(join(ws, "saved-shop", "after")), head(shop.path, "origin/main"));
+  assert.deepEqual(gone.warnings, [
+    "saved-prefix: origin/release is gone: created from origin/main",
+    "origin/release is gone: created from origin/main",
+  ]);
+  assert.equal(gone.originDefault, "origin/main");
+
+  // A base picked in the dialog wins, and says nothing of the saved one.
+  const picked = await createWorkspace({ ...req, companions: [], base: "origin/main", text: "picked" }, io);
+  assert.deepEqual(picked.created.map((s) => s.base), ["origin/main"]);
+  assert.deepEqual(picked.warnings, []);
+
+  // The plan takes the resolved defaults: saved bases for the companions, and for the primary when nothing was picked.
+  const plan = creationPlan({
+    primary, companions: [companion], name: "fix", base: null,
+    defaults: { [shop.path]: "origin/release", [api.path]: "origin/develop" }, root: "/w", home: "/h",
+  });
+  assert.deepEqual(plan.map((s) => [s.project, s.base, s.primary]), [["saved-api", "origin/develop", false], ["saved-shop", "origin/release", true]]);
 });
 
 // ── What other files import (pins) ─────────────────────────────────────────
