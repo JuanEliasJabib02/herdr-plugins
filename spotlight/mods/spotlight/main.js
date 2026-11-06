@@ -1,0 +1,69 @@
+// Spotlight: Orca Pro Max's Spotlight and test queue for Herdr. One mod in
+// views; the layout and the overlays give each copy props { view }:
+//   footer (default)  the flask in the status row. The only copy that runs the
+//                     background loops (reaper, badges, auto-sync) and reads
+//                     key commands, badge commands included.
+//   board             the "Cola de pruebas" popup
+//   settings          the settings dialog
+//   server            a repo's server popup (env, variant, URLs, actions)
+// Every view and loop lives in its own file, so tasks never share this one.
+// The engine is the `spotlight` CLI (cli.mjs, never imported here): copies
+// read its state.json and act by exec-ing it.
+
+import { View, div } from "gpui-kit";
+import { props, nextCommand } from "herdr";
+import Footer from "./footer.js";
+import Board from "./board.js";
+import SettingsView from "./settings-view.js";
+import ServerView from "./server-view.js";
+import { startReaper } from "./reaper.js";
+import { startBadges, handleCommand } from "./badges.js";
+import { startAutosync } from "./autosync.js";
+
+const VIEWS = {
+  footer: Footer,
+  board: Board,
+  settings: SettingsView,
+  server: ServerView,
+};
+
+export default class Spotlight extends View {
+  init(p, cx) {
+    const pr = props() ?? p ?? {};
+    this.name = pr.view ?? "footer";
+    const V = VIEWS[this.name];
+    this.view = V ? new V() : null;
+    this.view?.init?.(pr, cx);
+    if (this.name === "footer") {
+      startReaper(cx);
+      startBadges(cx);
+      startAutosync(cx);
+      this.listen(cx);
+    }
+  }
+
+  // Key and badge commands ("spotlight.<name>") reach every shown copy; only
+  // the footer's answers, so each runs once.
+  listen(cx) {
+    cx.spawn(async (cx) => {
+      for (;;) {
+        const c = await nextCommand();
+        try {
+          if (!(await handleCommand(c, { cx }))) console.log(`spotlight: no command "${c}"`);
+        } catch (e) {
+          console.log(`spotlight: ${c} failed: ${e}`);
+        }
+        cx.notify();
+      }
+    });
+  }
+
+  async close(cx) {
+    await this.view?.close?.(cx);
+  }
+
+  render(cx) {
+    if (!this.view) return div().child(`spotlight: no view "${this.name}"`);
+    return this.view.render(cx);
+  }
+}
