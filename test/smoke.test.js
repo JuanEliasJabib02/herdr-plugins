@@ -109,6 +109,8 @@ test("working mark: Claude Code's glyphs change in place with frames(), never sp
   const tree = readFileSync(new URL("../projects-sidebar/mods/projects/tree.js", import.meta.url), "utf8");
   assert.match(tree, /WORKING_FRAMES = Object\.freeze\(\["·", "✢", "✳", "✶", "✻", "✽", "✻", "✶", "✳", "✢"\]\)/);
   assert.match(tree, /\.frames\(WORKING_FRAMES, 120\)\.child\(WORKING_FRAMES\[0\]\)/, "native frames, starting on the first glyph");
+  assert.match(tree, /const CLAUDE_ORANGE = "#D97757"/, "Claude's orange, the fill of Herdr's icons/claude.svg (S37)");
+  assert.match(tree, /\.text_color\(CLAUDE_ORANGE\)\s*\.frames\(WORKING_FRAMES/, "the glyphs are drawn in it");
   assert.doesNotMatch(tree, /\.spin\(/, "no spin(): Herdr turns it at about 30 fps, which stutters");
 });
 

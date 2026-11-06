@@ -177,7 +177,7 @@ across repos.
 **How it behaves**
 
 - **Status marks:** Claude Code's working glyphs, · ✢ ✳ ✶ ✻ ✽ changing in
-  place (`working`; Herdr's `spin()` turns at about 30 fps, which stutters),
+  place, in Claude's orange (`working`; Herdr's `spin()` turns at about 30 fps, which stutters),
   "!" (`blocked`), or a dot (`done`).
   Idle and unknown show the home or branch icon. A project row that is
   collapsed shows the most urgent status among its workspaces.

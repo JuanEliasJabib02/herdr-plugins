@@ -459,11 +459,14 @@ function railRow(p, t) {
 // turning: Herdr runs spin() at about 30 fps, which shows as a stutter, and
 // frames() runs natively without that cap.
 const WORKING_FRAMES = Object.freeze(["·", "✢", "✳", "✶", "✻", "✽", "✻", "✶", "✳", "✢"]);
+// In Claude's orange (S37), the fill of Herdr's icons/claude.svg, not the
+// theme's yellow `working`.
+const CLAUDE_ORANGE = "#D97757";
 
 // mods/agents/main.js `status`: working glyphs, "!" blocked, a dot done, a ring idle.
 function statusMark(status, t) {
   if (status === "working") {
-    return div().size(12).flex_none().flex().items_center().justify_center().text_size(12).text_color(t.working)
+    return div().size(12).flex_none().flex().items_center().justify_center().text_size(12).text_color(CLAUDE_ORANGE)
       .frames(WORKING_FRAMES, 120).child(WORKING_FRAMES[0]);
   }
   if (status === "blocked") {
