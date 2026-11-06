@@ -97,10 +97,15 @@ test("field rules: the icon path, text and tooltip cuts, the tone, unknown field
 });
 
 test("actions: a command by pattern, or exec as argv (1–20 strings, no NUL, a bare or absolute program); a bad action goes, the badge stays", () => {
-  for (const command of ["spotlight.toggle", "projects.new-workspace", "pr.open_2", "a1.b.c-d"]) {
+  // `one` publishes under badges.spotlight, so only spotlight.… commands
+  // can pass (the publisher rule has its own test below).
+  for (const command of ["spotlight.toggle", "spotlight.new-workspace", "spotlight.open_2", "spotlight.b.c-d"]) {
     assert.deepEqual(actionOf({ command }), { command }, command);
   }
-  for (const command of ["Spotlight.toggle", "spotlight", ".toggle", "spotlight.", "spot light.x", "-a.b", "a.-b", "a.b c", "", 7]) {
+  for (const command of [
+    "Spotlight.toggle", "spotlight", ".toggle", "spotlight.", "spot light.x", "-a.b", "a.-b", "a.b c", "", 7,
+    "spotlight.Toggle", "spotlight.-b", "spotlight.b c",
+  ]) {
     assert.equal(actionOf({ command }), null, JSON.stringify(command));
   }
 
@@ -131,6 +136,57 @@ test("actions: a command by pattern, or exec as argv (1–20 strings, no NUL, a 
   assert.equal(startFailure(new Error("No such file or directory (os error 2)\nmore")), "No such file or directory (os error 2)");
   assert.equal(startFailure(new Error("")), "couldn't start");
   assert.equal(startFailure(undefined), "couldn't start");
+});
+
+test("a command must be its publisher's own: Herdr's commands and another plugin's drop the action, the rest of the badge stays (L29)", () => {
+  const badge = { icon: "mods/spotlight/eye.svg", text: "on", tone: "working", tooltip: "Spotlight on" };
+  // The badge one key's value draws on "/w", carrying `command`.
+  const under = (key, command) => parseBadges([{ "/w": [{ ...badge, action: { command } }] }], [key])["/w"][0];
+
+  // The part before the first `.` is the key's name after `badges.`.
+  assert.deepEqual(under("badges.spotlight", "spotlight.toggle").action, { command: "spotlight.toggle" });
+  assert.deepEqual(under("badges.spotlight", "spotlight.b.c-d").action, { command: "spotlight.b.c-d" });
+  assert.deepEqual(under("badges.pr", "pr.open").action, { command: "pr.open" });
+  assert.deepEqual(under("badges.hibernate", "hibernate.sleep").action, { command: "hibernate.sleep" });
+  // Through the fixed list too: pr's value is the second.
+  assert.deepEqual(parseBadges([undefined, { "/w": [{ text: "#1", action: { command: "pr.open" } }] }])["/w"][0].action, { command: "pr.open" });
+  // A breaking change's new key (badges.spotlight.v2) is still spotlight's.
+  assert.deepEqual(under("badges.spotlight.v2", "spotlight.toggle").action, { command: "spotlight.toggle" });
+
+  // `run` also runs Herdr's own commands, and other plugins' are theirs.
+  for (const command of [
+    "app.quit", "window.close", "app.reset", "pane.close", "tab.close", "space.close", "layout.reset",
+    "pr.open", "hibernate.sleep", "projects.new-workspace", "spotlights.toggle", "spot.toggle", "v2.toggle",
+  ]) {
+    for (const key of ["badges.spotlight", "badges.spotlight.v2"]) {
+      const b = under(key, command);
+      assert.equal(Object.hasOwn(b, "action"), false, `${key}: ${command}`);
+      assert.deepEqual(b, { key, index: 0, ...badge }, `${key}: ${command}, the rest of the badge stays`);
+    }
+  }
+  assert.equal(Object.hasOwn(under("badges.pr", "spotlight.toggle"), "action"), false, "spotlight's command under pr's key");
+
+  // A value with no badges.* key (past the end of the list) runs no command.
+  assert.equal(Object.hasOwn(parseBadges([{ "/w": [{ text: "x", action: { command: "0.x" } }] }], [])["/w"][0], "action"), false);
+
+  // exec actions don't name a mod: any publisher's stays.
+  assert.deepEqual(parseBadges([{ "/w": [{ text: "x", action: { exec: ["/usr/bin/true"] } }] }], ["badges.pr"])["/w"][0].action, { exec: ["/usr/bin/true"] });
+});
+
+test("a tooltip reads as one line, so what a click runs stays in view (L29)", () => {
+  const b = one({ text: "x", tooltip: "  Spotlight on\n\nport 3000\t\r\n ", action: { exec: ["spotlight", "toggle"] } });
+  assert.equal(b.tooltip, "Spotlight on port 3000");
+  assert.equal(badgeTooltip(b), "Spotlight on port 3000 · runs spotlight");
+
+  // Collapsed before the 200-code-point cut; the suffix comes after it.
+  const long = one({ text: "x", tooltip: "line\n".repeat(100), action: { exec: ["/usr/local/bin/spotlight"] } });
+  assert.doesNotMatch(long.tooltip, /\n/);
+  assert.equal([...long.tooltip].length, 200);
+  assert.match(badgeTooltip(long), / · runs \/usr\/local\/bin\/spotlight$/);
+  assert.doesNotMatch(badgeTooltip(long), /\n/);
+
+  // Only whitespace is no tooltip.
+  for (const tooltip of [" ", "\n", " \n\t "]) assert.equal(Object.hasOwn(one({ text: "x", tooltip }), "tooltip"), false, JSON.stringify(tooltip));
 });
 
 test("caps: 3 per plugin and 4 per row, in key order; a badge with neither icon nor text is dropped and doesn't count", () => {

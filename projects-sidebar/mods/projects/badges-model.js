@@ -9,6 +9,7 @@
 //              worktree list` prints them
 //   a badge:   { icon?, text?, tone?, tooltip?, action? }
 //   action:    { command: "<mod>.<command>" } | { exec: [program, ...args] }
+//              (<mod> is the key's first name after `badges.`: its own commands)
 //
 // Anything else is dropped field by field: a bad icon or action goes and the
 // badge stays; a badge left with neither icon nor text goes; a value that
@@ -51,18 +52,38 @@ function textOf(text) {
   return line ? cut(line, TEXT_MAX) : null;
 }
 
-const tooltipOf = (tooltip) => (typeof tooltip === "string" && tooltip ? cut(tooltip, TOOLTIP_MAX) : null);
+// One line too, like textOf, so what a click runs (badgeTooltip puts it
+// after the tooltip) stays in view.
+function tooltipOf(tooltip) {
+  if (typeof tooltip !== "string") return null;
+  const line = tooltip.replace(/\s+/g, " ").trim();
+  return line ? cut(line, TOOLTIP_MAX) : null;
+}
 
 // argv[0] runs as given: a bare name is looked up on Herdr's PATH, an
 // absolute path is that file. A relative path (./x, bin/x) would run a file
 // from whatever branch the workspace has checked out, so it's refused.
 const programOk = (p) => p !== "" && (p.startsWith("/") || !p.includes("/"));
 
-function actionOf(action) {
+// The plugin that published under `key`: the name right after `badges.`
+// (badges.spotlight and badges.spotlight.v2 are both spotlight's). null for
+// any other key, which then runs no command.
+function publisherOf(key) {
+  if (typeof key !== "string" || !key.startsWith("badges.")) return null;
+  return key.slice("badges.".length).split(".")[0] || null;
+}
+
+// `run` also runs Herdr's own commands (app.quit, window.close, app.reset…),
+// so a command must be its publisher's: the part before its first `.` is
+// the publisher's name. Any other command drops the action.
+const ownCommand = (command, publisher) =>
+  typeof command === "string" && COMMAND.test(command) && publisher !== null && command.split(".")[0] === publisher;
+
+function actionOf(action, publisher) {
   if (!isObject(action)) return null;
   const { command, exec } = action;
   if (command !== undefined && exec !== undefined) return null;
-  if (command !== undefined) return typeof command === "string" && COMMAND.test(command) ? { command } : null;
+  if (command !== undefined) return ownCommand(command, publisher) ? { command } : null;
   if (!Array.isArray(exec) || exec.length < 1 || exec.length > ARGV_MAX) return null;
   if (!exec.every((a) => typeof a === "string" && a.length <= ARG_MAX && !a.includes("\0"))) return null;
   return programOk(exec[0]) ? { exec: [...exec] } : null;
@@ -77,7 +98,7 @@ function badgeOf(raw, key, index) {
   const text = textOf(raw.text);
   if (!icon && !text) return null;
   const tooltip = tooltipOf(raw.tooltip);
-  const action = actionOf(raw.action);
+  const action = actionOf(raw.action, publisherOf(key));
   return {
     key,
     index,

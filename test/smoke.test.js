@@ -162,7 +162,9 @@ test("Default branch…: the project menu opens the base menu, a view of the mod
   assert.match(menu, /baseMenuRows\(/, "its rows come from new-workspace-model.js");
   assert.match(menu, /setProjectBase\(/, "picking saves through lib.js");
   assert.match(menu, /import \{[^}]*\bLIST_ROWS\b[^}]*\} from "\.\/new-workspace\.js"/, "at most the dialog's LIST_ROWS rows show");
-  assert.match(menu, /overflow_y_scrollbar\(\)/, "then it scrolls");
+  assert.match(menu, /v_virtual_list\(/, "then it scrolls");
+  assert.match(menu, /\.track_scroll\(this\.scroll\)/, "a list the menu scrolls from code");
+  assert.match(menu, /scroll_to_item\(/, "the highlighted row is kept in view");
   for (const state of ["Not a git repository", "No remote branches"]) assert.ok(menu.includes(`"${state}"`), `it says "${state}"`);
   const dialog = src("new-workspace.js");
   assert.match(dialog, /export const LIST_ROWS = 7/);

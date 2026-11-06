@@ -392,17 +392,26 @@ against.
     runs of whitespace become one space.
   - `tone`: `accent`, `dim`, `working`, `blocked` or `done`, the theme's
     colors of those names; anything else is `dim`.
-  - `tooltip`: at most 200 code points.
+  - `tooltip`: at most 200 code points (a longer one is cut), on one line
+    like `text`: runs of whitespace (newlines too) become one space, so
+    what a click runs, shown after it, stays in view.
   - A badge needs an icon or a text; one with neither is dropped.
   - A field that breaks a rule is dropped alone: a bad icon or action goes
     and the rest of the badge stays. Unknown fields are ignored.
 - **`action`:** `{ "command": "<mod>.<command>" }` or
   `{ "exec": [program, ...args] }`, never both (both drop the action):
-  - `command` must match `^[a-z0-9][a-z0-9-]*\.[a-z0-9][a-z0-9._-]*$`. It
-    goes through `run(command)`: it reaches that mod's shown copies only,
-    with no args (`nextCommand()` yields only the name), and it can't
-    report a failure (`run` returns null). An action that needs args, or
-    must say it failed, uses `exec`.
+  - `command` must match `^[a-z0-9][a-z0-9-]*\.[a-z0-9][a-z0-9._-]*$`,
+    and the part before its first `.` must be your key's first name after
+    `badges.`: a badge under `badges.spotlight` (or `badges.spotlight.v2`)
+    may run `spotlight.toggle`, never `pr.open` nor `app.quit`. `run` also
+    runs Herdr's own commands (`app.quit`, `window.close`, `app.reset`…),
+    so any other command drops the action. A mod an install renamed
+    (`spotlight-2`) can't use `command`, since its commands no longer match
+    its key: use `exec`. It goes through `run(command)`:
+    it reaches that mod's shown copies only, with no args
+    (`nextCommand()` yields only the name), and it can't report a failure
+    (`run` returns null). An action that needs args, or must say it
+    failed, uses `exec`.
   - `exec`: 1 to 20 strings, each at most 500 chars, with no NUL.
     `argv[0]` is a bare name (no `/`) or an absolute path. A relative path
     (`./x`, `bin/x`) drops the action: it would run a file from whatever
