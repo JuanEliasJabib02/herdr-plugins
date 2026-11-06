@@ -222,8 +222,10 @@ across repos.
     version.
 - **Rename…** (never on the main checkout): the input starts as the branch,
   and the untouched branch never renames. Each `/` segment of the name is
-  slugged like a new workspace's (`Fix Login!` → `fix-login`), so `user/feat`
-  keeps its namespace. On open the dialog asks git whether the folder can
+  slugged like a new workspace's (`Fix Login!` → `Fix-Login`), so `user/feat`
+  keeps its namespace. A name that differs from the branch only in case
+  (`AX-1` for `ax-1`) counts as unchanged: on macOS git finds that branch
+  already there. On open the dialog asks git whether the folder can
   move (a fresh `worktree list`: the lock, and submodule checkouts as Delete
   counts them), and it checks the typed name a moment after typing stops.
   - **A pushed branch** (a copy on a remote, or an upstream of its own
@@ -515,7 +517,8 @@ against.
   from a copy whose `main.js` defaults to them.
 - **Limits:**
   - Only the first three groups have keys.
-  - Branch names have no user prefix and are slugged to 48 characters.
+  - Branch names have no user prefix and are slugged to 48 characters,
+    keeping the case typed (`AX-3735` stays `AX-3735`, as in Orca).
   - Linear, GitLab and fetching issue titles aren't supported; such a link
     is named by its slug.
   - The main checkout is never renamed or deleted, and a branch is deleted

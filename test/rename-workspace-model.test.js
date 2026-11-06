@@ -21,17 +21,18 @@ import {
 
 // ── Names (D25) ────────────────────────────────────────────────────────────
 
-test("name: each / segment is slugged like D12, so a namespace survives; text equal to the old branch is unchanged", () => {
-  assert.equal(branchName("Fix Login!"), "fix-login");
-  assert.equal(branchName("user/Feat X"), "user/feat-x", "the namespace survives");
-  assert.equal(branchName("Feature/ABC-123"), "feature/abc-123");
+test("name: each / segment is slugged like D12, case kept, so a namespace survives; text equal to the old branch is unchanged", () => {
+  assert.equal(branchName("Fix Login!"), "Fix-Login");
+  assert.equal(branchName("user/Feat X"), "user/Feat-X", "the namespace survives");
+  assert.equal(branchName("Feature/ABC-123"), "Feature/ABC-123");
   assert.equal(branchName("/a//b/"), "a/b", "empty segments dropped");
   assert.equal(branchName("-rf/..x"), "rf/x", "no segment starts with a dash or a dot");
   assert.equal(branchName("  "), "");
   assert.equal(branchName(null), "");
   assert.deepEqual(renameTarget("Feature/ABC-1", "Feature/ABC-1"), { name: "Feature/ABC-1", unchanged: true }, "an untouched prefill is never slugged into a rename");
   assert.deepEqual(renameTarget(" user/feat ", "user/feat"), { name: "user/feat", unchanged: true });
-  assert.deepEqual(renameTarget("FIX-LOGIN", "fix-login"), { name: "fix-login", unchanged: true }, "slugs to the same branch");
+  assert.deepEqual(renameTarget("FIX-LOGIN", "fix-login"), { name: "FIX-LOGIN", unchanged: true }, "only the case differs: macOS git finds that branch already there");
+  assert.deepEqual(renameTarget("AX-3735", "ax-3735"), { name: "AX-3735", unchanged: true });
   assert.deepEqual(renameTarget("user/new", "user/old"), { name: "user/new", unchanged: false });
   assert.deepEqual(renameTarget("!!!", "old"), { name: "", unchanged: false });
   assert.equal(folderFor("/w/shop/old", "user/new"), "/w/shop/new", "a sibling named after the last segment");
@@ -326,13 +327,13 @@ test("rename: locked → branch renamed, folder kept with git's first line", asy
   assert.ok(!existsSync(join(p.ws, "unpinned")));
 });
 
-test("rename: the name is slugged per segment (Fix Login! → fix-login, user/old → user/new); an unchanged name → refused", async () => {
+test("rename: the name is slugged per segment (Fix Login! → Fix-Login, user/old → user/new); an unchanged name → refused", async () => {
   const p = makeProject("names");
   const plain = addWorkspace(p, "start");
   const r = await rename(p, plain, "Fix Login!");
   assert.equal(r.status, "renamed", r.err);
-  assert.equal(r.branch, "fix-login");
-  assert.ok(existsSync(join(p.ws, "fix-login")));
+  assert.equal(r.branch, "Fix-Login");
+  assert.ok(existsSync(join(p.ws, "Fix-Login")));
   const ns = addWorkspace(p, "user/old");
   const n = await rename(p, ns, "user/new");
   assert.equal(n.status, "renamed", n.err);
@@ -488,8 +489,8 @@ test("check: renameCheck answers before anything runs; GIT holds the argv, with 
   const c = await renameCheck({ project: p.path, path, name: "user/Seen" }, watched);
   assert.equal(c.status, "ok");
   assert.equal(c.branch, "user/look");
-  assert.equal(c.name, "user/seen");
-  assert.equal(c.newPath, join(p.ws, "seen"));
+  assert.equal(c.name, "user/Seen");
+  assert.equal(c.newPath, join(p.ws, "Seen"));
   assert.equal(c.tracking, true, "an upstream with another name, to unset after");
   assert.ok(!calls.some((a) => /^(branch -m|branch --unset-upstream|worktree move)/.test(a)), "the check changes nothing");
   assert.equal(has(p, "user/look"), true);

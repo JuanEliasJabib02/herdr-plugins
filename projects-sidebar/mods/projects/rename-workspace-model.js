@@ -24,13 +24,14 @@ export function branchName(text) {
 
 // The rename the typed text asks of a branch: { name, unchanged }. Text
 // equal to the old branch (spaces around it aside) is unchanged before any
-// slugging, so an untouched prefill of `Feature/ABC-1` never becomes
-// `feature/abc-1`; a text that slugs to the old branch is unchanged too.
+// slugging, so an untouched prefill is never slugged into a rename; a text
+// that slugs to the old branch, or differs from it only in case, is
+// unchanged too: on macOS git finds ax-1 already there when asked for AX-1.
 export function renameTarget(text, oldBranch) {
   const typed = typeof text === "string" ? text.trim() : "";
   if (oldBranch && typed === oldBranch) return { name: oldBranch, unchanged: true };
   const name = branchName(typed);
-  return { name, unchanged: Boolean(name) && name === oldBranch };
+  return { name, unchanged: Boolean(name) && Boolean(oldBranch) && name.toLowerCase() === oldBranch.toLowerCase() };
 }
 
 // Where a renamed workspace's folder goes: a sibling of the one it is in,

@@ -491,7 +491,7 @@ test("rename dialog: prefilled with the branch, which never renames; Rename wait
   const untouched = rprompt();
   assert.deepEqual([untouched.checking, untouched.ready, untouched.line], [false, false, "Type a new name for the branch."], "an untouched prefill never renames");
   assert.equal(rprompt({ text: "  " }).ready, false, "an empty name");
-  assert.equal(rprompt({ text: "FEAT/LOGIN" }).ready, false, "a name that slugs to the branch is unchanged");
+  assert.equal(rprompt({ text: "FEAT/LOGIN" }).ready, false, "a name that differs from the branch only in case is unchanged");
 });
 
 test("rename dialog: the live line says the branch and the folder; a namespace survives and the name is slugged (S22, D25)", () => {
@@ -499,7 +499,7 @@ test("rename dialog: the live line says the branch and the folder; a namespace s
   assert.equal(p.line, "branch feat/login → feat/signup · folder signup");
   assert.deepEqual([p.name, p.ready, p.moveFolder, p.reason], ["feat/signup", true, true, ""]);
   const slugged = rprompt({ text: "Fix Login!" });
-  assert.deepEqual([slugged.name, slugged.line], ["fix-login", "branch feat/login → fix-login · folder fix-login"]);
+  assert.deepEqual([slugged.name, slugged.line], ["Fix-Login", "branch feat/login → Fix-Login · folder Fix-Login"]);
   assert.equal(rprompt({ text: "team/feat-login" }).line, "branch feat/login → team/feat-login · folder stays feat-login", "the folder already has that name");
 });
 

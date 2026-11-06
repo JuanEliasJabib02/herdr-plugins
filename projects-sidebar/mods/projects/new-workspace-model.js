@@ -16,14 +16,14 @@ export const NAME_MAX = 48;
 // or ends with one, and a name that starts with a dash would read as a flag.
 const trimEnds = (s) => s.replace(/^[-.]+|[-.]+$/g, "");
 
-// What a typed name becomes, as the branch and the folder: lowercase,
-// accents dropped, every run of other characters one dash, no dashes or dots
+// What a typed name becomes, as the branch and the folder: the case typed
+// (AX-3735 stays AX-3735, as in Orca), accents dropped, every run of other characters one dash, no dashes or dots
 // at the ends, no "..", no ".lock" ending, at most NAME_MAX characters.
 // Always a name git takes as a branch, or "".
 export function slug(text) {
   if (typeof text !== "string") return "";
-  let s = text.normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase()
-    .replace(/[^a-z0-9._-]+/g, "-")
+  let s = text.normalize("NFD").replace(/[̀-ͯ]/g, "")
+    .replace(/[^A-Za-z0-9._-]+/g, "-")
     .replace(/\.{2,}/g, ".");
   s = trimEnds(trimEnds(s).slice(0, NAME_MAX));
   while (s.endsWith(".lock")) s = trimEnds(s.slice(0, -5));
@@ -35,7 +35,7 @@ const JIRA = /^https?:\/\/[^/]+(?:\/[^?#]*)?\/browse\/([A-Za-z][A-Za-z0-9_]*-\d+
 
 // The name field read the way Orca reads it: `#12` or `12` → issue-12, a
 // GitHub pull or issue URL → pr-N / issue-N, a Jira /browse/KEY-N link →
-// key-n, anything else its slug. A URL also becomes the agent's first
+// KEY-N, anything else its slug. A URL also becomes the agent's first
 // message, `Complete <url>`; nothing is fetched. { name, task }
 export function parseInput(text) {
   const t = typeof text === "string" ? text.trim() : "";

@@ -20,10 +20,11 @@ import {
 
 // ── Names (D12) ────────────────────────────────────────────────────────────
 
-test("slug: lowercase, other characters become one dash, trimmed of dashes, at most 48", () => {
-  assert.equal(slug("Fix Login Bug!"), "fix-login-bug");
-  assert.equal(slug("  --Hello__World--  "), "hello__world");
-  assert.equal(slug("feat/new  UI (v2)"), "feat-new-ui-v2");
+test("slug: keeps the case typed, other characters become one dash, trimmed of dashes, at most 48", () => {
+  assert.equal(slug("AX-3735"), "AX-3735", "a ticket keeps its case, like Orca");
+  assert.equal(slug("Fix Login Bug!"), "Fix-Login-Bug");
+  assert.equal(slug("  --Hello__World--  "), "Hello__World");
+  assert.equal(slug("feat/new  UI (v2)"), "feat-new-UI-v2");
   assert.equal(slug("release-1.2.0"), "release-1.2.0");
   assert.equal(slug("a".repeat(60)), "a".repeat(NAME_MAX));
   assert.equal(slug(`${"b".repeat(47)}-tail`), "b".repeat(47), "no dash left at the cut");
@@ -40,7 +41,7 @@ test("slug: never starts with a dash, and is always a name git takes as a branch
   assert.equal(slug("a..b"), "a.b");
   assert.equal(slug("ends."), "ends");
   assert.equal(slug("x.lock"), "x");
-  assert.equal(slug("Añadir café"), "anadir-cafe", "accents dropped, not turned into dashes");
+  assert.equal(slug("Añadir café"), "Anadir-cafe", "accents dropped, not turned into dashes");
   for (const s of ["-rf", "..hidden", "a..b", "x.lock", "Añadir café", "  --Hello__World--  "]) {
     assert.ok(!slug(s).startsWith("-"));
   }
@@ -77,10 +78,10 @@ test("smart input: GitHub pull and issue URLs; the URL becomes the agent's first
 
 test("smart input: a Jira link is its key; plain text is its slug", () => {
   const jira = "https://acme.atlassian.net/browse/PROJ-123";
-  assert.deepEqual(parseInput(jira), { name: "proj-123", task: `Complete ${jira}` });
+  assert.deepEqual(parseInput(jira), { name: "PROJ-123", task: `Complete ${jira}` });
   const self = "https://jira.acme.dev/browse/AB_C-9?focusedCommentId=1";
-  assert.deepEqual(parseInput(self), { name: "ab_c-9", task: `Complete ${self}` });
-  assert.deepEqual(parseInput("Fix the login bug"), { name: "fix-the-login-bug", task: null });
+  assert.deepEqual(parseInput(self), { name: "AB_C-9", task: `Complete ${self}` });
+  assert.deepEqual(parseInput("Fix the login bug"), { name: "Fix-the-login-bug", task: null });
   assert.deepEqual(parseInput("issue 12 follow-up"), { name: "issue-12-follow-up", task: null });
   assert.deepEqual(parseInput(""), { name: "", task: null });
 });
@@ -366,15 +367,15 @@ test("create: companions then the primary, each from its base, and one space for
   const api = makeProject("api");
   const web = makeProject("web", { head: "master" });
   const ws = join(root, "ws-create");
-  sh(web.path, ["branch", "fix-login"]); // taken in one companion: -2 for all
+  sh(web.path, ["branch", "Fix-Login"]); // taken in one companion: -2 for all
   const r = await createWorkspace({
     primary: shop, companions: [api, web], text: "Fix Login", base: "origin/release",
     agent: claude, access: true, root: ws, home: "/nowhere",
   }, io);
   assert.equal(r.error, undefined);
   assert.equal(r.ok, true);
-  assert.equal(r.name, "fix-login-2");
-  const paths = { api: join(ws, "api", "fix-login-2"), web: join(ws, "web", "fix-login-2"), shop: join(ws, "shop", "fix-login-2") };
+  assert.equal(r.name, "Fix-Login-2");
+  const paths = { api: join(ws, "api", "Fix-Login-2"), web: join(ws, "web", "Fix-Login-2"), shop: join(ws, "shop", "Fix-Login-2") };
   assert.deepEqual(r.created.map((s) => [s.project, s.path, s.base]), [
     ["api", paths.api, "origin/main"],
     ["web", paths.web, "origin/master"],
@@ -384,12 +385,12 @@ test("create: companions then the primary, each from its base, and one space for
   assert.equal(head(paths.web), head(web.path, "origin/master"));
   assert.equal(head(paths.shop), head(shop.path, "origin/release"));
   for (const [dir, repo] of [[paths.api, api], [paths.web, web], [paths.shop, shop]]) {
-    assert.equal(sh(dir, ["branch", "--show-current"]), "fix-login-2");
-    assert.equal(upstream(repo.path, "fix-login-2"), null, "--no-track: no upstream");
+    assert.equal(sh(dir, ["branch", "--show-current"]), "Fix-Login-2");
+    assert.equal(upstream(repo.path, "Fix-Login-2"), null, "--no-track: no upstream");
   }
   assert.deepEqual(r.launch, {
     folder: paths.shop,
-    name: "fix-login-2",
+    name: "Fix-Login-2",
     argv: ["claude", "--add-dir", paths.api, "--add-dir", paths.web, "--settings", CLAUDE_SETTINGS],
   });
   assert.deepEqual(r.warnings, []);
