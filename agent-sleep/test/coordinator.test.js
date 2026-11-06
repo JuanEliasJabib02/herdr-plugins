@@ -404,6 +404,7 @@ test("the tab shown during the probe → no sleep (the x is still erased)", asyn
 test("a Claude that couldn't come back is never stopped: refused flag, unsupported shell", async () => {
   for (const over of [{ flags: ["--agent-id", "x"] }, { argv: ["/usr/bin/nu"] }]) {
     const w = makeWorld();
+    w.files[SETTINGS] = JSON.stringify({ enabled: true, idleMinutes: 30 });
     addClaude(w, "t1", { pid: 100, fgPid: 200, sid: SID1, ...over });
     const co = new Coordinator(deps(w));
     await sleepT1(co, w);
@@ -747,7 +748,7 @@ test("settings changed in the block: shown at once, saved by the next pulse, Nex
   assert.equal(co.model().next, "Next: app in 30 min");
   co.requestSettings({ idleMinutes: 45 });
   assert.deepEqual(co.shownSettings(), { enabled: true, idleMinutes: 45 });
-  assert.equal(w.files[SETTINGS], undefined, "nothing is written outside a pulse");
+  assert.deepEqual(JSON.parse(w.files[SETTINGS]), { enabled: true, idleMinutes: 30 }, "nothing is written outside a pulse");
   await at(co, w, NOW + 1_000);
   assert.deepEqual(JSON.parse(w.files[SETTINGS]), { enabled: true, idleMinutes: 45 });
   assert.equal(co.model().next, "Next: app in 45 min", "before the next tick");

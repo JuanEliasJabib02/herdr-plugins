@@ -236,8 +236,11 @@ export async function sleepT1(co, w, start = NOW) {
   return start + 31 * MIN;
 }
 
-export function setup({ t1 = true, t2 = false } = {}) {
+// `settings`: what settings.json holds. Automatic sleep is off by default
+// (D11), so the world starts with it on; null means no file, a fresh install.
+export function setup({ t1 = true, t2 = false, settings = { enabled: true, idleMinutes: 30 } } = {}) {
   const w = makeWorld();
+  if (settings) w.files[SETTINGS] = JSON.stringify(settings);
   if (t1) addClaude(w, "t1", { pid: 100, fgPid: 200, sid: SID1 });
   if (t2) addClaude(w, "t2", { pid: 101, fgPid: 201, sid: SID2, cwd: "/code/checkout-flow" });
   return { w, co: new Coordinator(deps(w)) };

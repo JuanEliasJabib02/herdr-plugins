@@ -45,6 +45,17 @@ test("projects layout: tree replaces Spaces, groups block sits above the footer"
   assert.deepEqual(groups.size, { px: 44 });
 });
 
+test("projects layout: the agent-sleep block sits between the lists and the groups, and requires installs it (agent-sleep D10)", () => {
+  const layout = read("layouts/projects.json");
+  const ids = find(layout, "sidebar").children.map((c) => c.id);
+  assert.deepEqual(ids.slice(ids.indexOf("sidebar-lists"), ids.indexOf("sidebar-lists") + 3), ["sidebar-lists", "agent-sleep", "groups"]);
+  // No props: the copy with no view runs the plugin's loop.
+  assert.deepEqual(find(layout, "agent-sleep").content, { mod: "agent-sleep" });
+  assert.deepEqual(find(layout, "agent-sleep").size, { px: 124 });
+  const requires = readFileSync(new URL("../projects-sidebar/requires", import.meta.url), "utf8");
+  assert.ok(requires.split("\n").includes("agent-sleep"));
+});
+
 test("projects layout: the status bar is a row, workspace-status then the claude-accounts footer (claude-accounts D10)", () => {
   const status = find(read("layouts/projects.json"), "status");
   assert.equal(status.type, "row");

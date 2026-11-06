@@ -376,7 +376,10 @@ export class Coordinator {
     }
     await this.reconcileWith(terminals, now);
     const sessions = await this.sessionsOf(terminals);
-    await this.keepLive(terminals, sessions, now);
+    // Off (D11): nothing kept for restart recovery, and a live record left
+    // from before goes, so a later restart resumes nothing on its own.
+    if (this.settings?.enabled === true) await this.keepLive(terminals, sessions, now);
+    else await this.dropLive();
     const plan = await this.plan({ now, terminals, sessions, manual: false });
     this.due = plan.due;
     this.dueLabels = plan.labels;
@@ -716,6 +719,14 @@ export class Coordinator {
       if (r && Object.keys(want).every((k) => JSON.stringify(r[k] ?? null) === JSON.stringify(want[k]))) continue;
       if (holder === undefined) holder = await this.holder();
       next = withRecord(next, t.address, { state: "live", ...want, rssKb: null, holder, at: r?.at ?? now, by: "auto" });
+    }
+    if (next !== this.records) await this.save(next);
+  }
+
+  async dropLive() {
+    let next = this.records;
+    for (const [address, r] of Object.entries(this.records)) {
+      if (r.state === "live") next = withoutRecord(next, address);
     }
     if (next !== this.records) await this.save(next);
   }

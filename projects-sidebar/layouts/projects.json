@@ -67,6 +67,16 @@
           ]
         },
         {
+          "id": "agent-sleep",
+          "type": "block",
+          "size": {
+            "px": 124
+          },
+          "content": {
+            "mod": "agent-sleep"
+          }
+        },
+        {
           "id": "groups",
           "type": "block",
           "size": {

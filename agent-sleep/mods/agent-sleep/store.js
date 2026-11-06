@@ -18,7 +18,9 @@ import { DEFAULT_IDLE_MINUTES, MIN_IDLE_MINUTES, MAX_IDLE_MINUTES } from "./rule
 export const VERSION = 1;
 export const STATES = Object.freeze(["live", "stopping", "asleep"]);
 export const BY = Object.freeze(["auto", "manual", "restart"]);
-export const DEFAULT_SETTINGS = Object.freeze({ enabled: true, idleMinutes: DEFAULT_IDLE_MINUTES });
+// Off until you turn it on (D11): installing projects-sidebar installs this
+// plugin too, and nobody gets an /exit they didn't ask for.
+export const DEFAULT_SETTINGS = Object.freeze({ enabled: false, idleMinutes: DEFAULT_IDLE_MINUTES });
 
 export function paths(appHome) {
   const dir = `${String(appHome).replace(/\/+$/, "")}/agent-sleep`;

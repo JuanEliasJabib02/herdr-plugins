@@ -29,7 +29,7 @@ const line = (id, text, color) => div().id(id).w_full().truncate().text_size(11.
 // { t: theme(), model: blockModel(), moon: the icon path or null,
 //   onSleepNow, onWakeAll, onSettings: click handlers }
 export function renderBlock({ t, model, moon, onSleepNow, onWakeAll, onSettings }) {
-  return v_flex().id("agent-sleep").w_full().px(10).py(8).gap(3).text_color(t.foreground)
+  return v_flex().id("agent-sleep").size_full().overflow_hidden().px(10).py(8).gap(3).text_color(t.foreground)
     .child(h_flex().items_center().gap(6)
       .when(Boolean(moon), (el) => el.child(svg(moon).size(13).flex_none().text_color(t.muted)))
       .child(div().flex_1().min_w(0).truncate().text_size(12.5).font_medium().child(model.headline))

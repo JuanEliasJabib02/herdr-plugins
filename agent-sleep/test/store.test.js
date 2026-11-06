@@ -56,7 +56,7 @@ test("paths live under appHome()/agent-sleep", () => {
 
 test("settings: absent file → defaults (on, 30 min), not bad", () => {
   assert.deepEqual(parseSettings(null), { settings: DEFAULT_SETTINGS, bad: false });
-  assert.deepEqual(DEFAULT_SETTINGS, { enabled: true, idleMinutes: 30 });
+  assert.deepEqual(DEFAULT_SETTINGS, { enabled: false, idleMinutes: 30 });
 });
 
 test("settings: valid values are kept", () => {
@@ -78,7 +78,7 @@ test("settings: a broken file → defaults, flagged bad", () => {
   for (const text of ["{nope", "[]", "42", '"x"']) {
     assert.deepEqual(parseSettings(text), { settings: DEFAULT_SETTINGS, bad: true }, text);
   }
-  assert.equal(parseSettings(JSON.stringify({ enabled: "yes" })).settings.enabled, true);
+  assert.equal(parseSettings(JSON.stringify({ enabled: "yes" })).settings.enabled, false);
 });
 
 test("records: absent → empty, not bad; round trip through serialize", () => {

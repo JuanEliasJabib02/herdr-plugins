@@ -2,3 +2,6 @@
 # The layout's status bar draws claude-accounts' footer; without it the
 # block shows "claude-accounts did not load".
 claude-accounts
+# The sidebar's Agent sleep block runs the agent-sleep plugin's loop. It stays
+# off until turned on in its Settings.
+agent-sleep
