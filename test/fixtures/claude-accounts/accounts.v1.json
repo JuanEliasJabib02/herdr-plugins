@@ -15,7 +15,8 @@
       "usage": { "session": null, "weekly": null, "fable": null, "monthly": null },
       "credits": null,
       "usageUpdatedAt": null,
-      "lastAuthenticatedAt": null
+      "lastAuthenticatedAt": null,
+      "duplicateOf": "1b9d6bcd-bbfd-4b2d-9b5d-ab8dfbbd4bed"
     },
     {
       "id": "1b9d6bcd-bbfd-4b2d-9b5d-ab8dfbbd4bed",
@@ -34,7 +35,8 @@
       },
       "credits": null,
       "usageUpdatedAt": 1793999820000,
-      "lastAuthenticatedAt": 1793300000000
+      "lastAuthenticatedAt": 1793300000000,
+      "duplicateOf": null
     },
     {
       "id": "7c9e6679-7425-40de-944b-e07fc1f90ae7",
@@ -53,7 +55,8 @@
       },
       "credits": { "balance": 12.5, "limit": 50 },
       "usageUpdatedAt": 1793997600000,
-      "lastAuthenticatedAt": 1793658301633
+      "lastAuthenticatedAt": 1793658301633,
+      "duplicateOf": null
     }
   ]
 }

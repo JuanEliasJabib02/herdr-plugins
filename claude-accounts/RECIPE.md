@@ -67,12 +67,19 @@ the same files and run the same commands: see [CONTRACT.md](CONTRACT.md).
   - A saved account is a Claude config folder with its own login in the
     macOS Keychain. Orca's accounts are imported the first time, in place
     (they're never moved, which would mean signing in again), along with
-    Orca's active account and switch setting.
+    Orca's active account and switch setting. `claude-accounts import-orca`
+    imports again: the Orca accounts added since, and fresh emails, orgs
+    and sign-in dates. It never changes the active account or the switch
+    setting.
   - **Add account** makes a new folder under
     `~/.config/herdr-app/claude-accounts-profiles/`, sharing your
     `~/.claude` settings, skills, agents, commands and history through
-    symlinks. It's kept only when the sign-in succeeds with an email and
-    org that aren't saved yet; otherwise the folder goes.
+    symlinks, with a copy of `~/.claude.json` minus its login and every
+    account-bound key (as Orca does). It's kept only when the sign-in
+    succeeds with an email and org that aren't saved yet; otherwise the
+    folder goes.
+  - An account whose folder holds no login can't be picked until it signs
+    in again, as in Orca.
   - **Sign in** opens a Herdr tab running `claude auth login`. Closing the
     tab cancels it. "Copy sign-in link instead" puts the one-click link on
     the clipboard instead of opening the browser.
@@ -151,11 +158,13 @@ scripts/install.sh claude-accounts
   | `details --range <7\|30\|90\|all>` | refreshes the details window's data |
   | `--version` | its version |
 
-  Exit codes: 0 ok, 2 no session id, 3 terminal missing or not Claude, 4
+  Exit codes: 0 ok, 1 any other failure (a state file that can't be read,
+  a failed sign-in), 2 no session id, 3 terminal missing or not Claude, 4
   timeout, 5 account needs sign-in, 6 landed on another account, 7 unknown
   account or job, 8 terminal can't move, 9 job failed, 10 job cancelled, 64
-  bad usage, 75 still running (under `--wait`). The full contract, with
-  every output shape, is [CONTRACT.md](CONTRACT.md).
+  bad usage, 75 still running (under `--wait`). The contract other plugins
+  code against (`accounts.v1.json`, and `list`, `usage`, `terminal`, `use`
+  and `resume` with their output shapes) is [CONTRACT.md](CONTRACT.md).
 - **Commands:** `claude-accounts.open-popup`, `claude-accounts.open-panel`,
   `claude-accounts.open-accounts`, `claude-accounts.open-confirm`,
   `claude-accounts.open-details` and `claude-accounts.refresh`, reached
@@ -173,7 +182,9 @@ scripts/install.sh claude-accounts
 The state folder is `~/.config/herdr-app/claude-accounts/`
 (`$CLAUDE_ACCOUNTS_HOME` replaces it, for tests). The CLI is its only
 writer, except `live/`, which only the statusline writes. Every write is a
-temporary file and a rename, under a lock held only for the write.
+temporary file and a rename, under a lock held only for the write. A state
+file that isn't valid JSON stops the CLI with its path (exit 1) and is never
+overwritten.
 
 | File | Holds |
 |---|---|
