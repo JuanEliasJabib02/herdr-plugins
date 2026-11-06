@@ -1,9 +1,10 @@
 // T7: Delete's model (M/remove-workspace-model.js, D22–D24): removalCheck
 // (on a fresh list: changes, submodules by git's own refusal test, the lock,
 // the branch), removeWorkspace's order (check again → close the spaces →
-// remove → the branch → the fresh list), and spacesToClose. The git cases run
-// against a real git in throwaway repos; outcomes come from git's state, never
-// from its words, so one case runs under LANG=es_ES.UTF-8 too.
+// remove → the branch → the fresh list), and spacesToClose. T14a: removeTask
+// (D36's Run), a task's workspaces one at a time. The git cases run against a
+// real git in throwaway repos; outcomes come from git's state, never from its
+// words, so one case runs under LANG=es_ES.UTF-8 too.
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import { execFile, execFileSync } from "node:child_process";
@@ -11,7 +12,7 @@ import { mkdtempSync, realpathSync, rmSync, mkdirSync, existsSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join, basename } from "node:path";
 import {
-  GIT, lockOf, removalCheck, removeWorkspace, spacesToClose,
+  GIT, lockOf, removalCheck, removeWorkspace, removeTask, spacesToClose,
 } from "../projects-sidebar/mods/projects/remove-workspace-model.js";
 
 // ── Real git (throwaway repos, no global config or hooks) ──────────────────
@@ -32,21 +33,40 @@ const gitIn = (extra = {}) => (cwd, args) => new Promise((resolve, reject) => {
 const realGit = gitIn();
 const exists = async (p) => existsSync(p);
 
-// An io whose git and closeSpaces write what they did to `calls`, in order:
-// "closeSpaces", or git's argv joined by spaces.
-function recording(git = realGit, closeSpaces = async () => {}) {
+// An io whose git and closeSpaces (and removeTask's alive and each) write
+// what they did to `calls`, in order: git's argv joined by spaces,
+// "closeSpaces", "alive", or "each <i>". `log` has the same entries as
+// { call, at }: where it ran (git's cwd; the target's path for closeSpaces,
+// which removeTask calls with its target, and for each), else null.
+// closeSpaces gets the target; alive and each are called as they are, so a
+// synchronous throw stays synchronous.
+function recording(git = realGit, closeSpaces = async () => {}, { alive = async () => {}, each = () => {} } = {}) {
   const calls = [];
+  const log = [];
+  const note = (call, at = null) => {
+    calls.push(call);
+    log.push({ call, at });
+  };
   return {
     calls,
+    log,
     io: {
       git: async (cwd, args) => {
-        calls.push(args.join(" "));
+        note(args.join(" "), cwd);
         return git(cwd, args);
       },
       exists,
-      closeSpaces: async () => {
-        calls.push("closeSpaces");
-        await closeSpaces();
+      closeSpaces: async (target) => {
+        note("closeSpaces", target?.path ?? null);
+        await closeSpaces(target);
+      },
+      alive: () => {
+        note("alive");
+        return alive();
+      },
+      each: (result, i) => {
+        note(`each ${i}`, result?.path ?? null);
+        return each(result, i);
       },
     },
   };
@@ -478,6 +498,156 @@ test("13. spacesToClose returns only the ids matched to that path", () => {
   assert.deepEqual(spacesToClose(null, "/w/app/feat"), []);
 });
 
+// ── 14. A task's workspaces (removeTask, D36's Run) ────────────────────────
+
+const STOPPED = "Stopped: the plugin was reloaded.";
+
+// removeTask's targets for [project, path] pairs, each with its own check as
+// the dialog's row showed it.
+const checkedTargets = (pairs) =>
+  Promise.all(pairs.map(async ([project, path]) => ({ project, path, seen: await removalCheck({ project, path }, { git: realGit, exists }) })));
+
+const isHook = (call) => call === "closeSpaces" || call === "alive" || call.startsWith("each ");
+
+test("14a. removeTask runs one target at a time: every git call of the first comes before the second's closeSpaces (two repos, one branch name)", async () => {
+  const repoA = makeRepo("task-a");
+  const repoB = makeRepo("task-b");
+  const wtA = addWorktree(repoA, "odd-task");
+  const wtB = addWorktree(repoB, "odd-task");
+  const targets = await checkedTargets([[repoA, wtA], [repoB, wtB]]);
+  const closed = [];
+  // alive bound like the dialog's bg.sleep(0): resolving without throwing is alive.
+  const { calls, log, io } = recording(realGit, async (target) => closed.push(target), { alive: async () => {} });
+  const rs = await removeTask({ targets }, io);
+
+  assert.deepEqual(rs.map((r) => [r.project, r.path, r.status, r.err, r.branch]), [[repoA, wtA, "removed", null, "deleted"], [repoB, wtB, "removed", null, "deleted"]]);
+  assert.ok(!existsSync(wtA) && !existsSync(wtB), "both folders are gone");
+  assert.equal(hasBranch(repoA, "odd-task"), false, "each repo's own branch -d");
+  assert.equal(hasBranch(repoB, "odd-task"), false);
+  assert.deepEqual(rs.map((r) => r.list.map((c) => c.path)), [[repoA], [repoB]], "each result carries its own repo's fresh list");
+
+  const owner = ({ at }) => ([repoA, wtA].includes(at) ? "A" : [repoB, wtB].includes(at) ? "B" : null);
+  assert.ok(log.filter((e) => !isHook(e.call)).every(owner), "every git call ran in one target's repo or folder");
+  const closeB = log.findIndex((e) => e.call === "closeSpaces" && e.at === wtB);
+  const lastA = log.findLastIndex((e) => owner(e) === "A" && !isHook(e.call));
+  assert.ok(closeB > 0 && lastA < closeB, `every call of target 1 comes before target 2's closeSpaces: ${calls.join(" | ")}`);
+  assert.ok(lastA < log.findIndex((e) => owner(e) === "B"), "target 2's check starts after target 1 is done");
+  assert.deepEqual(calls.filter(isHook), ["closeSpaces", "each 0", "alive", "closeSpaces", "each 1"], "alive is asked before the second target only");
+  assert.deepEqual(closed, targets, "closeSpaces gets each target as it was given");
+});
+
+test("14b. a target that fails doesn't stop the next: the first refused by git, the second removed", async () => {
+  const repo = makeRepo("task-refused");
+  const one = addWorktree(repo, "task-one");
+  const two = addWorktree(repo, "task-two");
+  const targets = await checkedTargets([[repo, one], [repo, two]]);
+  // The refusing git of 11c, for the first target's folder only.
+  const refusing = async (cwd, args) => (isRemove(args) && args.includes(one) ? { ok: false, out: "", err: "error: boom\nhint: more" } : realGit(cwd, args));
+  const { calls, io } = recording(refusing);
+  const rs = await removeTask({ targets }, io);
+
+  assert.deepEqual(rs.map((r) => [r.project, r.path, r.status, r.err]), [[repo, one, "failed", "error: boom"], [repo, two, "removed", null]]);
+  assert.equal(rs[0].branch, null);
+  assert.equal(rs[1].branch, "deleted");
+  assert.ok(existsSync(one), "the refused folder is intact");
+  assert.equal(hasBranch(repo, "task-one"), true);
+  assert.ok(!existsSync(two));
+  assert.equal(hasBranch(repo, "task-two"), false);
+  assert.deepEqual(ran(calls, "worktree remove"), [`worktree remove -- ${one}`, `worktree remove -- ${two}`]);
+  assert.deepEqual(rs[1].list.map((c) => c.path), [repo, one], "the second's fresh list still has the first");
+  assert.deepEqual(calls.filter((c) => c.startsWith("each ")), ["each 0", "each 1"], "each runs after the failed target too");
+});
+
+test("14c. each target's seen forces only its own row: one --force, on the row that had changes", async () => {
+  const repo = makeRepo("task-force");
+  const dirty = addWorktree(repo, "task-dirty");
+  const late = addWorktree(repo, "task-late");
+  const clean = addWorktree(repo, "task-clean");
+  writeFileSync(join(dirty, "draft.txt"), "seen in the dialog\n");
+  const targets = await checkedTargets([[repo, dirty], [repo, late], [repo, clean]]);
+  assert.deepEqual(targets.map((t) => t.seen.changes), [true, false, false]);
+  writeFileSync(join(late, "late.txt"), "written after the dialog checked it\n");
+  const { calls, log, io } = recording();
+  const rs = await removeTask({ targets }, io);
+
+  assert.deepEqual(rs.map((r) => [r.path, r.status]), [[dirty, "removed"], [late, "changed"], [clean, "removed"]]);
+  assert.deepEqual(ran(calls, "worktree remove"), [`worktree remove --force -- ${dirty}`, `worktree remove -- ${clean}`]);
+  assert.equal(calls.flatMap((c) => c.split(" ")).filter((a) => a === "--force" || a === "-f").length, 1, "one --force in the whole run");
+  assert.deepEqual(log.filter((e) => e.call === "closeSpaces").map((e) => e.at), [dirty, clean], "the changed row's spaces stay open");
+  assert.ok(!existsSync(dirty) && !existsSync(clean));
+  assert.ok(existsSync(join(late, "late.txt")), "changes nobody saw are kept");
+  assert.equal(hasBranch(repo, "task-late"), true);
+});
+
+test("14d. alive false (or throwing) after the first target: the rest read skipped, and none of their git runs", async () => {
+  const repo = makeRepo("task-reload");
+  const ways = [
+    ["false", () => false],
+    ["a rejection", async () => {
+      throw new Error("task dropped");
+    }],
+    ["a throw", () => {
+      throw new Error("task dropped");
+    }],
+  ];
+  for (const [k, [how, alive]] of ways.entries()) {
+    const [one, two, three] = ["one", "two", "three"].map((n) => addWorktree(repo, `reload-${k}-${n}`));
+    const targets = await checkedTargets([[repo, one], [repo, two], [repo, three]]);
+    const { calls, log, io } = recording(realGit, async () => {}, { alive });
+    const rs = await removeTask({ targets }, io);
+
+    assert.deepEqual(rs.map((r) => [r.project, r.path, r.status]), [[repo, one, "removed"], [repo, two, "skipped"], [repo, three, "skipped"]], how);
+    assert.deepEqual(rs.slice(1).map((r) => r.err), [STOPPED, STOPPED], how);
+    assert.deepEqual(rs.slice(1).map((r) => [r.branch, r.list]), [[null, null], [null, null]], how);
+    assert.equal(calls.filter((c) => c === "alive").length, 1, `asked once, never again (${how})`);
+    assert.deepEqual(calls.slice(calls.indexOf("alive") + 1), [], `nothing runs after it (${how})`);
+    assert.deepEqual(log.filter((e) => e.at === two || e.at === three), [], how);
+    assert.deepEqual(calls.filter((c) => c.startsWith("each ")), ["each 0"], how);
+    assert.ok(!existsSync(one), how);
+    assert.ok(existsSync(two) && existsSync(three), how);
+    assert.equal(hasBranch(repo, `reload-${k}-two`), true, how);
+  }
+});
+
+test("14e. an each that throws or rejects, or a closeSpaces that throws, never rejects the run", async () => {
+  const repo = makeRepo("task-throws");
+  const fails = [
+    ["a throw", () => {
+      throw new Error("view gone");
+    }],
+    ["a rejection", async () => {
+      throw new Error("view gone");
+    }],
+  ];
+  for (const [k, [how, each]] of fails.entries()) {
+    const [one, two] = ["one", "two"].map((n) => addWorktree(repo, `each-${k}-${n}`));
+    const targets = await checkedTargets([[repo, one], [repo, two]]);
+    const { calls, io } = recording(realGit, async () => {}, { each });
+    const rs = await removeTask({ targets }, io);
+    assert.deepEqual(rs.map((r) => [r.path, r.status]), [[one, "removed"], [two, "removed"]], how);
+    assert.deepEqual(calls.filter((c) => c.startsWith("each ")), ["each 0", "each 1"], how);
+    assert.ok(!existsSync(one) && !existsSync(two), how);
+  }
+
+  // closeSpaces throws for the first target: it fails before git removes it.
+  const [one, two] = ["one", "two"].map((n) => addWorktree(repo, `close-${n}`));
+  const targets = await checkedTargets([[repo, one], [repo, two]]);
+  const { calls, io } = recording(realGit, async (target) => {
+    if (target.path === one) throw new Error("space.close failed");
+  });
+  const rs = await removeTask({ targets }, io);
+  assert.deepEqual(rs.map((r) => [r.path, r.status]), [[one, "failed"], [two, "removed"]]);
+  assert.equal(rs[0].err, "Couldn't close the spaces of close-one: space.close failed.");
+  assert.deepEqual(ran(calls, "worktree remove"), [`worktree remove -- ${two}`]);
+  assert.ok(existsSync(one) && !existsSync(two));
+
+  // No closeSpaces at all throws too, so nothing is deleted with its spaces open.
+  const lone = addWorktree(repo, "close-none");
+  const bare = await removeTask({ targets: await checkedTargets([[repo, lone]]) }, { git: realGit, exists });
+  assert.deepEqual(bare.map((r) => [r.path, r.status]), [[lone, "failed"]]);
+  assert.ok(existsSync(lone));
+});
+
 // ── The git it runs, and what other files import ───────────────────────────
 
 test("GIT: status counts untracked files and submodules; remove forces at most once; the branch goes with -d, never -D", () => {
@@ -490,10 +660,11 @@ test("GIT: status counts untracked files and submodules; remove forces at most o
   assert.ok(!JSON.stringify(GIT.deleteBranch("x")).includes("-D"));
 });
 
-test("pins: git.js binds removalCheck and removeWorkspace, and keeps its earlier exports", () => {
+test("pins: git.js binds removalCheck, removeWorkspace and removeTask, and keeps its earlier exports", () => {
   const git = readFileSync(new URL("../projects-sidebar/mods/projects/git.js", import.meta.url), "utf8");
-  for (const name of ["git", "repoOf", "listWorktrees", "fetch", "defaultBase", "recentBases", "branchExists", "addWorktree", "pathExists", "removalCheck", "removeWorkspace"]) {
+  for (const name of ["git", "repoOf", "listWorktrees", "fetch", "defaultBase", "recentBases", "branchExists", "addWorktree", "pathExists", "removalCheck", "removeWorkspace", "removeTask"]) {
     assert.match(git, new RegExp(`export (async function|const|function) ${name}\\b`), `git.js exports ${name}`);
   }
   assert.match(git, /from "\.\/remove-workspace-model\.js"/);
+  assert.match(git, /\{ git, exists: pathExists, closeSpaces, each, alive \}/, "removeTask runs with the real git; callers pass only closeSpaces, each and alive");
 });

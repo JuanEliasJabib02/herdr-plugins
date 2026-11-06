@@ -8,7 +8,7 @@
 import { exec } from "herdr";
 import { resolveProject, listCheckouts } from "./lib.js";
 import { fetchOrigin, defaultBaseOf, recentBasesOf, branchExistsIn, addWorktreeIn } from "./new-workspace-model.js";
-import { removalCheck as checkRemoval, removeWorkspace as removeWith } from "./remove-workspace-model.js";
+import { removalCheck as checkRemoval, removeWorkspace as removeWith, removeTask as removeTaskWith } from "./remove-workspace-model.js";
 import { renameCheck as checkRename, renameWorkspace as renameWith, sshHostnameOf } from "./rename-workspace-model.js";
 
 // { ok, out, err } (mods/worktree/main.js `git`). Rejects when git can't
@@ -67,6 +67,16 @@ export const removalCheck = ({ project, path }) => checkRemoval({ project, path 
 // rejects.
 export const removeWorkspace = ({ project, path, seen }, { closeSpaces }) =>
   removeWith({ project, path, seen }, { git, exists: pathExists, closeSpaces });
+
+// Deletes a task's workspaces (D36's Run): targets = [{ project, path, seen
+// }], one at a time, each through removeWorkspace with closeSpaces(target)
+// (required: without it nothing is removed). each(result, i): after every
+// target that ran (a throw is ignored). alive(): asked before every target
+// after the first; false or a throw skips the rest ("Stopped: the plugin was
+// reloaded."). Resolves [{ project, path, status, err, branch, branchErr,
+// list, check }] in the targets' order; never rejects.
+export const removeTask = ({ targets }, { closeSpaces, each, alive }) =>
+  removeTaskWith({ targets }, { git, exists: pathExists, closeSpaces, each, alive });
 
 // ── Rename (D25–D26, D28) ──────────────────────────────────────────────────
 

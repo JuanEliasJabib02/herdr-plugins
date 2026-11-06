@@ -1,7 +1,8 @@
 // Delete's model (S20–S21, D22–D24), with no herdr or gpui-kit imports so
 // `node --test` can load it: what a workspace's deletion would take
-// (removalCheck), the deletion itself in a fixed order (removeWorkspace), and
-// which spaces close with it (spacesToClose). git and the file check are
+// (removalCheck), the deletion itself in a fixed order (removeWorkspace),
+// which spaces close with it (spacesToClose), and a task's workspaces deleted
+// one after another (removeTask, S30, D36). git and the file check are
 // passed in (M/git.js binds them to Herdr's exec; tests pass a real git), like
 // createWorkspace. Every outcome is read from git's state (the worktree list,
 // the refs, the exit code), never from its words: they are translated under
@@ -243,4 +244,70 @@ export async function removeWorkspace({ project, path, seen }, io) {
     still = true; // unknown: never report a deletion that wasn't seen
   }
   return still ? removed("kept", firstLine(deletion?.err) || `git kept ${b}.`) : removed("deleted");
+}
+
+// ── A task's deletion ──────────────────────────────────────────────────────
+
+const STOPPED = "Stopped: the plugin was reloaded.";
+
+// Whether the run may go on to the next target: io.alive() (the dialog binds
+// it to its task's bg.sleep(0)), awaited. Only false, a throw or a rejection
+// stop it: bg.sleep(0)'s undefined goes on. No alive: it always goes on.
+async function goesOn(io) {
+  if (typeof io?.alive !== "function") return true;
+  try {
+    return (await io.alive()) !== false;
+  } catch {
+    return false;
+  }
+}
+
+// Deletes a task's workspaces (S30, D36's Run). targets = [{ project, path,
+// seen }], each `seen` its own row's removalCheck as the dialog showed it, so
+// "Delete anyway" forces only the rows that had changes or submodules.
+//   - One target at a time, never together: targets share repos, and git
+//     locks .git/worktrees. Each runs removeWorkspace's whole D23 sequence
+//     (check again, close its spaces, remove, branch -d only if merged), with
+//     closeSpaces bound to it: io.closeSpaces(target). A missing closeSpaces
+//     fails that target before anything is removed.
+//   - A failure doesn't stop the others.
+//   - io.each(result, i) is awaited after every target that ran, with its
+//     entry of the result and its index; a throw or a rejection is ignored.
+//   - Before every target after the first, io.alive() is asked (goesOn).
+//     Once it says no, it isn't asked again: that target and the rest don't
+//     run, read "skipped" with "Stopped: the plugin was reloaded.", and get
+//     no each.
+// io = { git, exists, closeSpaces(target), each?(result, i), alive?() }.
+// Never rejects. Resolves, in the targets' order,
+//   [{ project, path, ...removeWorkspace's { status, err, branch, branchErr,
+//      list, check } }]
+// with status "skipped" too (branch, branchErr, list and check null), and
+// project and path as the target gave them.
+export async function removeTask(req, io) {
+  const targets = Array.isArray(req?.targets) ? req.targets : [];
+  const results = [];
+  let stopped = false;
+  for (const [i, target] of targets.entries()) {
+    const { project, path, seen } = target ?? {};
+    if (i > 0 && !stopped) stopped = !(await goesOn(io));
+    if (stopped) {
+      results.push({ project, path, status: "skipped", err: STOPPED, branch: null, branchErr: null, list: null, check: null });
+      continue;
+    }
+    let result;
+    try {
+      result = await removeWorkspace({ project, path, seen }, { ...io, closeSpaces: () => io.closeSpaces(target) });
+    } catch (e) {
+      // removeWorkspace never rejects; this keeps removeTask's promise anyway.
+      result = { status: "failed", err: message(e), branch: null, branchErr: null, list: null, check: null };
+    }
+    const entry = { project, path, ...result };
+    results.push(entry);
+    try {
+      await io?.each?.(entry, i);
+    } catch {
+      // the dialog that stores it may be gone; the run goes on
+    }
+  }
+  return results;
 }
