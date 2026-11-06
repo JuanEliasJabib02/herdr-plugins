@@ -21,8 +21,9 @@
 // on every render. A pulse is cheap unless there is work:
 //   - a settings change made in the block is saved first;
 //   - every TICK_MS a tick (D2): settings and records read again, Core's
-//     terminals gathered, records reconciled (D4), live records kept (D13),
-//     the plan made, confirmed against the last tick, and at most one stop;
+//     terminals gathered, records reconciled (D4), live records kept while
+//     automatic sleep is on and dropped while it's off (D13), the plan made,
+//     confirmed against the last tick, and at most one stop;
 //   - while a stop is young (SETTLE_MS), its terminal is checked each pulse,
 //     so a Claude that exits in 12 s is asleep a second later (D4);
 //   - "Sleep now" / "Wake all" requests (D9);
@@ -107,10 +108,11 @@ export function startLoop(props, timer, onPulse) {
 
 // ── Core's terminals: terminals() or `hc get` ──────────────────────────────
 
-// herdr.d.ts says terminals() is "as `hc ls --json` describes it", and that
-// is a summary (address, agent, cwd, state, status word, turn, where): no
-// pid, foreground or status_ms. A terminal with all three is used as is;
-// any other one the plan needs is completed with `hc get <t> --json`.
+// herdr.d.ts says terminals() is "as `hc ls --json` describes it", which is a
+// summary (address, agent, cwd, state, status word, turn, where), but a live
+// Herdr also gives pid, foreground and status_ms (the block then says "fields:
+// terminals()"). A terminal with all three is used as is; any other one the
+// plan needs is completed with `hc get <t> --json`.
 const hasCoreFields = (t) =>
   Number.isInteger(t.pid) && Object.hasOwn(t, "foreground") && Object.hasOwn(t, "status_ms");
 
