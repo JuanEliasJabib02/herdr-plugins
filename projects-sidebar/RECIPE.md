@@ -94,7 +94,7 @@ across repos.
   herdr-plugins) with the most urgent status among their workspaces. Group
   chips shrink to 26 px and center, and "+" hides.
 - **New workspace dialog:** a 560 × 600 modal with these parts:
-  - Project select: the current group first, then "Other groups".
+  - Project select: the current group's projects only (the space you're in); switch groups for another's.
   - Name input: takes a name, a branch, `#123`, or a GitHub issue / pull
     request or Jira link. Under it, a live line:
     `~/orca/workspaces/<repo>/<name> · branch <name> · from <base>`.

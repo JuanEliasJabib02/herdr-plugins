@@ -184,12 +184,12 @@ export function nameTaken(io, root, home) {
 
 // ── Projects (D16) ─────────────────────────────────────────────────────────
 
-// The Project list: the active group's projects, then every other group's
-// (`other`: shown under "Other groups"). [{ path, name, group, other }]
+// The Project list: the active group's projects only, the space you're in
+// (Juan: "no esta filtrado x el space en el q estoy"). Another group's
+// projects are reached by switching groups. [{ path, name, group }]
 export function projectChoices(registry) {
   const active = activeGroup(registry);
-  const of = (g, other) => g.projects.map((p) => ({ path: p.path, name: p.name, group: g.name, other }));
-  return [...of(active, false), ...registry.groups.filter((g) => g.id !== active.id).flatMap((g) => of(g, true))];
+  return (active?.projects ?? []).map((p) => ({ path: p.path, name: p.name, group: active.name }));
 }
 
 // The "Also create in" chips: the other projects of the primary's group.
@@ -199,12 +199,15 @@ export function companionChoices(registry, primaryPath) {
   return { group: found.group, projects: found.group.projects.filter((p) => p.path !== found.project.path) };
 }
 
-// The project the dialog opens on: `wanted` when it is registered, else the
-// active group's first, else any group's first, else null (empty state).
+// The project the dialog opens on: `wanted` when it is in the active group,
+// else the active group's first, else null (the empty state, whose Add
+// project adds to the active group). Never another group's: the focused
+// space may belong to one.
 export function initialProject(registry, wanted) {
+  const active = activeGroup(registry);
   const found = wanted ? findProject(registry, wanted) : null;
-  if (found) return found.project;
-  return activeGroup(registry).projects[0] ?? registry.groups.flatMap((g) => g.projects)[0] ?? null;
+  if (found && found.group.id === active?.id) return found.project;
+  return active?.projects[0] ?? null;
 }
 
 // ── Agents (D15) ───────────────────────────────────────────────────────────

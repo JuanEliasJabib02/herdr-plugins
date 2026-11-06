@@ -362,12 +362,8 @@ export default class NewWorkspace {
     const reg = store.registry();
     const folder = () => svg(icon("folder")).size(14).flex_none().text_color(t.muted);
 
-    // Project: the active group first, then the others.
-    const projectOptions = [];
-    for (const p of projectChoices(reg)) {
-      if (p.other && !projectOptions.some((o) => o.header)) projectOptions.push({ header: "Other groups" });
-      projectOptions.push({ key: p.path, label: p.name, hint: p.other ? p.group : "", icon: folder });
-    }
+    // Project: the active group's only (projectChoices).
+    const projectOptions = projectChoices(reg).map((p) => ({ key: p.path, label: p.name, hint: "", icon: folder }));
     const projectSelect = this.select(t, "project", { key: primary.path, label: primary.name, icon: folder }, projectOptions, (o, cx) => this.pickProject(o.key, cx));
 
     // Create from: the primary's default, then its recent remote branches.

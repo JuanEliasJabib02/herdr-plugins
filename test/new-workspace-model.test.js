@@ -124,12 +124,13 @@ function registryWithGroups() {
   return r;
 }
 
-test("project choices: the active group first, then the other groups; chips are the rest of the primary's group", () => {
+test("project choices: only the active group's projects (the space you're in); chips are the rest of the primary's group", () => {
   const r = registryWithGroups();
-  assert.deepEqual(projectChoices(r).map((p) => [p.name, p.group, p.other]), [
-    ["shop", "AG", false], ["api", "AG", false], ["web", "AG", false],
-    ["notes", "Projects", true],
+  assert.deepEqual(projectChoices(r).map((p) => [p.name, p.group]), [
+    ["shop", "AG"], ["api", "AG"], ["web", "AG"],
   ]);
+  assert.deepEqual(projectChoices(selectGroup(r, "g1")).map((p) => p.name), ["notes"]);
+  assert.deepEqual(projectChoices(selectGroup(addGroup(r, "Empty"), "g3")), [], "an empty group offers none");
   const chips = companionChoices(r, "/code/api");
   assert.equal(chips.group.name, "AG");
   assert.deepEqual(chips.projects.map((p) => p.name), ["shop", "web"]);
@@ -137,12 +138,13 @@ test("project choices: the active group first, then the other groups; chips are 
   assert.deepEqual(companionChoices(r, "/elsewhere"), { group: null, projects: [] });
 });
 
-test("initial project: the one asked for when registered, else the active group's first, else none", () => {
+test("initial project: the one asked for when it is in the active group, else the active group's first, else none", () => {
   const r = registryWithGroups();
   assert.equal(initialProject(r, "/code/web/").path, "/code/web");
-  assert.equal(initialProject(r, "/code/notes").path, "/code/notes", "another group's project is fine");
+  assert.equal(initialProject(r, "/code/notes").path, "/code/shop", "another group's project isn't offered: the active group's first");
   assert.equal(initialProject(r, "/not/registered").path, "/code/shop");
   assert.equal(initialProject(r, null).path, "/code/shop");
+  assert.equal(initialProject(selectGroup(addGroup(r, "Empty"), "g3"), "/code/shop"), null, "an empty active group: none, never another group's");
   assert.equal(initialProject(emptyRegistry(), null), null);
 });
 
