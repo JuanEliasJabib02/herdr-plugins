@@ -494,6 +494,19 @@ test("rename dialog: prefilled with the branch, which never renames; Rename wait
   assert.equal(rprompt({ text: "FEAT/LOGIN" }).ready, false, "a name that differs from the branch only in case is unchanged");
 });
 
+test("rename dialog: a name that only changes the case says so and Rename stays off; the prefill and an empty name ask for a name (L31)", () => {
+  const caseOnly = "Only the case changes: git on macOS can't rename a branch that way.";
+  for (const text of ["FEAT/LOGIN", "Feat/Login", "feat/LOGIN!"]) {
+    const p = rprompt({ text });
+    assert.deepEqual([p.line, p.ready, p.reason], [caseOnly, false, ""], text);
+  }
+  const live = { status: "refused", reason: "unchanged", err: "The branch is already feat/login.", text: "FEAT/LOGIN" };
+  assert.deepEqual([rprompt({ text: "FEAT/LOGIN", live }).line, rprompt({ text: "FEAT/LOGIN", live }).reason], [caseOnly, ""], "said once, by the line");
+  assert.equal(rprompt().line, "Type a new name for the branch.", "the untouched prefill");
+  assert.equal(rprompt({ text: "  " }).line, "Type a new name for the branch.", "an empty name");
+  assert.equal(rprompt({ text: "feat//login" }).line, "Type a new name for the branch.", "slugs to the branch itself: no case change");
+});
+
 test("rename dialog: the live line says the branch and the folder; a namespace survives and the name is slugged (S22, D25)", () => {
   const p = rprompt({ text: "feat/signup" });
   assert.equal(p.line, "branch feat/login → feat/signup · folder signup");

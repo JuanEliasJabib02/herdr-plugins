@@ -31,12 +31,22 @@ test("name: each / segment is slugged like D12, case kept, so a namespace surviv
   assert.equal(branchName(null), "");
   assert.deepEqual(renameTarget("Feature/ABC-1", "Feature/ABC-1"), { name: "Feature/ABC-1", unchanged: true }, "an untouched prefill is never slugged into a rename");
   assert.deepEqual(renameTarget(" user/feat ", "user/feat"), { name: "user/feat", unchanged: true });
-  assert.deepEqual(renameTarget("FIX-LOGIN", "fix-login"), { name: "FIX-LOGIN", unchanged: true }, "only the case differs: macOS git finds that branch already there");
-  assert.deepEqual(renameTarget("AX-3735", "ax-3735"), { name: "AX-3735", unchanged: true });
+  assert.deepEqual(renameTarget("FIX-LOGIN", "fix-login"), { name: "FIX-LOGIN", unchanged: true, caseOnly: true }, "only the case differs: macOS git finds that branch already there");
+  assert.deepEqual(renameTarget("AX-3735", "ax-3735"), { name: "AX-3735", unchanged: true, caseOnly: true });
+  assert.deepEqual(renameTarget("Fix Login", "fix-login"), { name: "Fix-Login", unchanged: true, caseOnly: true }, "after slugging too");
+  assert.deepEqual(renameTarget("fix login", "fix-login"), { name: "fix-login", unchanged: true }, "slugs to the branch itself: not a case change");
   assert.deepEqual(renameTarget("user/new", "user/old"), { name: "user/new", unchanged: false });
   assert.deepEqual(renameTarget("!!!", "old"), { name: "", unchanged: false });
   assert.equal(folderFor("/w/shop/old", "user/new"), "/w/shop/new", "a sibling named after the last segment");
   assert.equal(folderFor("/w/shop/old/", "fix"), "/w/shop/fix");
+});
+
+test("name: a HEAD segment is dropped and a .lock segment end goes in any case, like slug (L31)", () => {
+  assert.equal(branchName("HEAD"), "", "git refuses it: the dialog asks for a name");
+  assert.equal(branchName("user/HEAD"), "user");
+  assert.equal(branchName("HEAD/fix"), "fix");
+  assert.equal(branchName("x.LOCK/y.Lock.lock"), "x/y");
+  assert.deepEqual(renameTarget("HEAD", "old"), { name: "", unchanged: false });
 });
 
 // ── Real git (throwaway repos, no global config or hooks) ──────────────────
@@ -549,7 +559,7 @@ test("rename (T9c 2): on GitHub → gh renames it there, the branch here, and th
   const c = await renameCheck({ project: p.path, path, name: "feat-b" }, t.io);
   assert.equal(c.status, "ok", c.err);
   assert.deepEqual(c.origin, { published: true, route: "github", gone: false, repo: { owner: "acme", repo: "shop" }, prs: [], sha });
-  assert.ok(t.git.includes("ls-remote origin refs/heads/feat-a refs/heads/feat-b refs/heads/feat-b/*"), "one ls-remote, exact refnames, and what would be in the way of feat-b");
+  assert.ok(t.git.includes("ls-remote --heads origin"), "one ls-remote: origin's branches, compared in JS ignoring case");
   const r = await rename(p, path, "feat-b", true, t.io, { route: "github", prs: [] });
   assert.equal(r.status, "renamed", r.err);
   assert.equal(r.remote, "renamed");
@@ -963,10 +973,106 @@ test("rename: origin's branch in the way of the new name → refused before anyt
   assert.deepEqual(c.git.filter((x) => isLsRemote(x.split(" ")) || x.startsWith("push ") || isBranchMove(x)), [], "the cheap first filter, offline: no ls-remote");
   assert.deepEqual(heads(p), ["local-only", "main", "other"]);
   assert.deepEqual(Object.keys(onOrigin(p)).sort(), ["feat", "main", "other", "ui/x"], "origin gets nothing");
-  assert.deepEqual(GIT.branchesNear("a/b/c"), ["for-each-ref", "--format=%(refname)", "refs/heads/a", "refs/heads/a/b", "refs/heads/a/b/c/"]);
-  assert.deepEqual(GIT.remotesNear("a/b"), ["for-each-ref", "--format=%(refname)", "refs/remotes/*/a", "refs/remotes/*/a/b/**"], "`*` is one segment, `**` crosses them");
-  assert.deepEqual(GIT.lsRemoteNear("o", "a/b"), ["ls-remote", "origin", "refs/heads/o", "refs/heads/a/b", "refs/heads/a", "refs/heads/a/b/*"]);
+  assert.deepEqual(GIT.refs, ["for-each-ref", "--format=%(refname)", "refs/heads/", "refs/remotes/"], "every local branch and remote copy, loose or packed: compared in JS ignoring case");
+  assert.deepEqual(GIT.lsRemoteNear("o", "a/b"), ["ls-remote", "--heads", "origin"], "every branch of origin: its patterns are exact-case");
   assert.deepEqual(GIT.lsRemoteNear("o", null), GIT.lsRemote("o", null), "no name yet: only <old>");
+});
+
+// Names are compared ignoring case, the way a Mac's disk does (L31): a loose
+// ref is a file, so ax-1 and AX-1 are one, and git's own checks miss a case
+// variant once it is packed, or on origin.
+
+test("rename: a branch taken in another case, packed and with no folder → refused before anything changes, here or on origin (L31)", async () => {
+  const p = makeProject("case-taken");
+  sh(p.path, ["branch", "ax-1"]);
+  const path = pushed(p, "other");
+  sh(p.path, ["pack-refs", "--all", "--prune"]);
+  assert.ok(!existsSync(join(p.path, ".git", "refs", "heads", "ax-1")), "only in packed-refs");
+  const before = sh(p.path, ["rev-parse", "refs/heads/ax-1"]);
+  const t = githubIo(p, { push: "missing" });
+  const r = await rename(p, path, "AX-1", true, t.io, { route: "copy", prs: [] });
+  assert.equal(r.status, "refused", r.err);
+  assert.equal(r.reason, "branch-exists");
+  assert.equal(r.err, "Branch ax-1 already exists.");
+  assert.equal(r.branch, "other");
+  assert.deepEqual(heads(p), ["ax-1", "main", "other"], "no AX-1 next to ax-1");
+  assert.equal(sh(p.path, ["rev-parse", "refs/heads/ax-1"]), before);
+  assert.ok(existsSync(path), "the folder stays");
+  assert.deepEqual(Object.keys(onOrigin(p)).sort(), ["main", "other"], "origin gets nothing");
+  assert.deepEqual(t.git.filter((c) => c.startsWith("push ") || isBranchMove(c) || c.startsWith("worktree move")), [], "no push, no branch -m, no move");
+  const local = addWorkspace(p, "local-only");
+  sh(p.path, ["pack-refs", "--all", "--prune"]);
+  const l = await rename(p, local, "AX-1");
+  assert.deepEqual([l.status, l.reason, l.err], ["refused", "branch-exists", "Branch ax-1 already exists."], "an unpushed branch too");
+  assert.deepEqual(heads(p), ["ax-1", "local-only", "main", "other"]);
+});
+
+test("rename: a local branch in the way in another case (feat for Feat/y, Feat/x for feat) → refused before anything runs (L31)", async () => {
+  const p = makeProject("case-in-the-way");
+  const path = pushed(p, "other");
+  sh(p.path, ["branch", "feat"]);
+  const t = githubIo(p, { push: "missing" });
+  const under = await rename(p, path, "Feat/y", true, t.io, { route: "copy", prs: [] });
+  assert.equal(under.status, "refused", under.err);
+  assert.equal(under.reason, "branch-exists");
+  assert.equal(under.err, "Branch feat already exists: git can't also have Feat/y.");
+  assert.deepEqual(heads(p), ["feat", "main", "other"]);
+
+  const q = makeProject("case-in-the-way-under");
+  const qpath = pushed(q, "other");
+  sh(q.path, ["branch", "Feat/x"]);
+  const u = githubIo(q, { push: "missing" });
+  const over = await rename(q, qpath, "feat", true, u.io, { route: "copy", prs: [] });
+  assert.equal(over.status, "refused", over.err);
+  assert.equal(over.reason, "branch-exists");
+  assert.equal(over.err, "Branch Feat/x already exists: git can't also have feat.");
+  assert.deepEqual(heads(q), ["Feat/x", "main", "other"]);
+
+  for (const calls of [t.git, u.git]) {
+    assert.deepEqual(calls.filter((c) => isLsRemote(c.split(" ")) || c.startsWith("push ") || isBranchMove(c)), [], "no ls-remote, no push, no branch -m");
+  }
+  assert.deepEqual(Object.keys(onOrigin(p)).sort(), ["main", "other"], "origin gets nothing");
+  assert.deepEqual(Object.keys(onOrigin(q)).sort(), ["main", "other"]);
+  const solo = addWorkspace(p, "Solo");
+  const own = await renameCheck({ project: p.path, path: solo, name: "Solo/inner" }, io);
+  assert.equal(own.status, "ok", `the branch being renamed isn't in its own way: ${own.err}`);
+  const into = await renameCheck({ project: p.path, path: solo, name: "solo/inner" }, io);
+  assert.equal(into.status, "refused", "into its own path in another case: on a Mac's disk git refuses Solo → solo/inner ('refs/heads/solo' exists)");
+  assert.equal(into.reason, "branch-exists");
+  const out = await renameCheck({ project: p.path, path: addWorkspace(p, "Up/x"), name: "up" }, io);
+  assert.equal(out.status, "ok", `out of its own path, in any case, git takes it (Up/x → up): ${out.err}`);
+});
+
+test("rename: the new name in another case on a remote → refused: a copy fetched and packed (offline), or only on origin (L31)", async () => {
+  const p = makeProject("case-remote");
+  sh(p.origin, ["branch", "ax-1", "main"]);
+  sh(p.origin, ["branch", "UI/x", "main"]);
+  sh(p.path, ["fetch", "-q", "origin"]);
+  sh(p.path, ["pack-refs", "--all", "--prune"]);
+  assert.ok(!existsSync(join(p.path, ".git", "refs", "remotes", "origin", "ax-1")), "origin/ax-1 only in packed-refs");
+  const local = addWorkspace(p, "local-only");
+  const c = githubIo(p);
+  const fetched = await rename(p, local, "AX-1", true, c.io);
+  assert.deepEqual([fetched.status, fetched.reason, fetched.err], ["refused", "remote-exists", "origin already has ax-1."]);
+  const near = await rename(p, local, "ui", true, c.io);
+  assert.deepEqual([near.status, near.reason, near.err], ["refused", "remote-exists", "origin already has UI/x: git can't also have ui."]);
+  assert.deepEqual(c.git.filter((x) => isLsRemote(x.split(" ")) || x.startsWith("push ") || isBranchMove(x)), [], "the cheap first filter, offline: no ls-remote");
+  assert.deepEqual(heads(p), ["local-only", "main"]);
+
+  const q = makeProject("case-origin");
+  const path = pushed(q, "other");
+  sh(q.origin, ["branch", "ax-1", "main"]);
+  sh(q.origin, ["branch", "Feat", "main"]);
+  const t = githubIo(q);
+  const there = await rename(q, path, "AX-1", true, t.io, { route: "github", prs: [] });
+  assert.deepEqual([there.status, there.reason, there.err], ["refused", "remote-exists", "origin already has ax-1."]);
+  const under = await rename(q, path, "feat/x", true, t.io, { route: "github", prs: [] });
+  assert.deepEqual([under.status, under.reason, under.err], ["refused", "remote-exists", "origin already has Feat: git can't also have feat/x."]);
+  assert.ok(t.git.some((x) => isLsRemote(x.split(" "))), "not fetched: origin itself says it");
+  assert.deepEqual(t.git.filter((x) => x.startsWith("push ") || isBranchMove(x)), [], "no push, no branch -m");
+  assert.deepEqual(renamedOnGitHub(t.gh), [], "GitHub is never asked to rename");
+  assert.deepEqual(heads(q), ["main", "other"]);
+  assert.deepEqual(Object.keys(onOrigin(q)).sort(), ["Feat", "ax-1", "main", "other"], "origin gets nothing");
 });
 
 test("rename (T9c): remoteOutcome decides from origin's state after the call, never from the call alone (D28 step 2)", () => {
