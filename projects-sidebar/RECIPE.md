@@ -203,7 +203,9 @@ across repos.
   to group ▸" lists the other groups. "Default branch…" picks the base New
   workspace starts from (kept on the project in `projects.v1` as `base`,
   e.g. `origin/develop`): origin's default first (clears it), then the
-  saved one, then the latest remote branches.
+  saved one, then the latest remote branches. A search box on top filters
+  every origin branch as you type, not only the latest, ignoring case; the
+  keyboard stays on it (↑/↓ move, Enter picks, Esc closes).
 - **Right-click a workspace:** opens the workspace menu. Copy Path and Copy
   Worktree Name (the folder's name) go to the clipboard, and a toast says
   "Copied".

@@ -179,6 +179,21 @@ test("base menu rows: origin's default first (it clears), the saved base pinned 
   assert.deepEqual(baseMenuRows(null, recent, null), [], "not a git repository");
 });
 
+test("base menu search: empty shows the 30 most recent; typed text filters every origin branch, ignoring case (S41)", () => {
+  const all = Array.from({ length: 40 }, (_, i) => `origin/feat-${i}`).concat(["origin/master", "origin/Staging", "origin/release/staging-2"]);
+  const rows = baseMenuRows("origin/master", all, null);
+  assert.equal(rows.length, 1 + 30, "origin's default plus the 30 most recent, as before");
+  assert.equal(rows.at(-1).base, "origin/feat-29");
+  assert.deepEqual(baseMenuRows("origin/master", all, null, "  STAGING ").map((r) => r.base), ["origin/Staging", "origin/release/staging-2"],
+    "past the 30 most recent, in recency order, trimmed and ignoring case");
+  assert.deepEqual(baseMenuRows("origin/master", all, null, "master").map((r) => [r.base, r.label]), [[null, "origin's default (origin/master)"]],
+    "origin's default matches by its label, and origin/master isn't listed twice");
+  assert.deepEqual(baseMenuRows("origin/master", all, "origin/feat-39", "feat-39").map((r) => [r.base, r.checked]), [["origin/feat-39", true]], "the saved one stays checked");
+  assert.deepEqual(baseMenuRows("origin/master", all, "origin/gone", "gone").map((r) => r.base), ["origin/gone"], "a saved base origin lacks can be found too");
+  assert.deepEqual(baseMenuRows("origin/master", all, null, "nothing-like-it"), [], "no match: no rows");
+  assert.deepEqual(baseMenuRows("origin/master", all, null, "   "), rows, "blank text is no search");
+});
+
 // ── Projects and agents (D15, D16) ─────────────────────────────────────────
 
 function registryWithGroups() {
@@ -314,7 +329,9 @@ const realGit = (cwd, args) => new Promise((resolve, reject) => {
   });
 });
 const io = { ...gitOps(realGit), exists: async (p) => existsSync(p) };
-const at = (n) => ({ GIT_AUTHOR_DATE: `2026-01-0${n}T00:00:00Z`, GIT_COMMITTER_DATE: `2026-01-0${n}T00:00:00Z` });
+// Day n of 2026 (Jan 1 is 1; past 31 it runs into February).
+const day = (n) => new Date(Date.UTC(2026, 0, n)).toISOString().replace(".000Z", "Z");
+const at = (n) => ({ GIT_AUTHOR_DATE: day(n), GIT_COMMITTER_DATE: day(n) });
 
 // A project cloned from a bare origin of its own: origin/HEAD points at
 // `head`; every name in `branches` is a remote branch, committed in order
@@ -356,6 +373,16 @@ test("git: default base and recent bases from a real clone; null and none outsid
   mkdirSync(plain);
   assert.equal(await io.defaultBase(plain), null, "not a git repository");
   assert.deepEqual(await io.recentBases(plain), []);
+  assert.deepEqual(await io.remoteBases(plain), []);
+});
+
+test("git: remoteBases lists every origin branch, newest first, without origin/HEAD (S41)", async () => {
+  const p = makeProject("all-bases", { branches: Array.from({ length: 32 }, (_, i) => `b-${i}`) });
+  const all = await io.remoteBases(p.path);
+  assert.equal(all.length, 33, "the 32 branches and main, past recentBases' 30");
+  assert.ok(!all.includes("origin/HEAD"));
+  assert.equal((await io.recentBases(p.path)).length, 30);
+  assert.deepEqual(all.slice(0, 30), await io.recentBases(p.path), "the same order as recentBases");
 });
 
 test("git: fetch from origin brings new commits; a broken origin fails without throwing", async () => {

@@ -210,7 +210,12 @@ test("Default branch…: the project menu opens the base menu, a view of the mod
   const start = menu.indexOf("  init(");
   assert.ok(start >= 0, "the base menu has an init");
   const init = menu.slice(start, menu.indexOf("\n  }\n", start));
-  assert.match(init, /cx\.spawn\(async \(cx\) =>[\s\S]*?G\.defaultBase\(path\)[\s\S]*?G\.recentBases\(path\)/, "it loads in init, in a spawned task");
+  assert.match(init, /cx\.spawn\(async \(cx\) =>[\s\S]*?G\.defaultBase\(path\)[\s\S]*?G\.remoteBases\(path\)/, "it loads in init, in a spawned task, every origin branch (S41)");
+  assert.match(init, /InputState\.new\(\{ placeholder: "Search branches" \}\)/, "a search box (S41)");
+  assert.match(init, /this\.input\.on\("change"[\s\S]*?this\.at = 0/, "typing filters and highlights the first row");
+  assert.match(init, /this\.input\.on\("submit"[\s\S]*?this\.choose\(/, "Enter picks the highlighted row");
+  assert.match(menu, /baseMenuRows\(this\.origin, this\.branches, [^)]*, this\.query\)/, "the rows filter by the typed text");
+  assert.ok(menu.includes('"No branch matches"'), "it says when nothing matches");
   assert.match(menu, /baseMenuRows\(/, "its rows come from new-workspace-model.js");
   assert.match(menu, /setProjectBase\(/, "picking saves through lib.js");
   assert.match(menu, /import \{[^}]*\bLIST_ROWS\b[^}]*\} from "\.\/new-workspace\.js"/, "at most the dialog's LIST_ROWS rows show");

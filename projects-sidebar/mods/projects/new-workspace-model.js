@@ -138,6 +138,8 @@ export const GIT = {
   originHead: ["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"],
   refs: (refs) => ["for-each-ref", "--format=%(refname)", ...refs],
   recent: ["for-each-ref", "--sort=-committerdate", "--count=31", "--format=%(refname)", "refs/remotes/origin"],
+  // Every origin/… branch, newest first: the Default branch… search (S41).
+  remotes: ["for-each-ref", "--sort=-committerdate", "--format=%(refname)", "refs/remotes/origin"],
   // Every local branch, loose or packed: findBranch compares them ignoring
   // case, which git's own lookups don't.
   branches: ["for-each-ref", "--format=%(refname)", "refs/heads/"],
@@ -172,6 +174,13 @@ export async function recentBasesOf(repo, git) {
   return r.ok ? lines(r.out).map(shortRef).filter((b) => b !== "origin/HEAD").slice(0, 30) : [];
 }
 
+// Every remote branch (origin/…), newest first, as recentBasesOf orders them
+// but past its 30; none outside git. The Default branch… menu searches them.
+export async function remoteBasesOf(repo, git) {
+  const r = await git(repo, GIT.remotes);
+  return r.ok ? lines(r.out).map(shortRef).filter((b) => b !== "origin/HEAD") : [];
+}
+
 // Whether origin/<branch> (`base`, a short ref) is there: one exact
 // for-each-ref lookup, as defaultBaseOf does. for-each-ref also matches a
 // pattern up to a slash, so the answer must name the ref itself:
@@ -201,6 +210,7 @@ export function gitOps(git) {
     fetch: (repo) => fetchOrigin(repo, git),
     defaultBase: (repo) => defaultBaseOf(repo, git),
     recentBases: (repo) => recentBasesOf(repo, git),
+    remoteBases: (repo) => remoteBasesOf(repo, git),
     baseExists: (repo, base) => baseExistsIn(repo, base, git),
     branchExists: (repo, name) => branchExistsIn(repo, name, git),
     addWorktree: (repo, spec) => addWorktreeIn(repo, spec, git),
@@ -245,20 +255,25 @@ export function rememberBase(registry, path, ran, originDefault) {
 
 // The Default branch… menu's rows: [{ base, label, checked }], base null for
 // "origin's default (<ref>)", which clears the saved base and comes first;
-// then the saved base, pinned right after it when the recent branches lack
-// it; then the recent branches (recentBasesOf) without origin's default,
-// which the first row already is. The saved one is checked, else the first.
-// None outside git (originDefault null), nor with no remote branch and
-// nothing saved: the menu says "No remote branches".
-export function baseMenuRows(originDefault, recent, saved) {
-  const list = recent ?? [];
+// then the saved base, pinned right after it when the listed branches lack
+// it; then the branches (`branches`: remoteBasesOf, newest first) without
+// origin's default, which the first row already is: the 30 most recent, or,
+// with `query` (S41), every one whose row label holds it, ignoring case and
+// the spaces around it. The saved one is checked, else the first. None
+// outside git (originDefault null), nor with no remote branch and nothing
+// saved: the menu says "No remote branches".
+export function baseMenuRows(originDefault, branches, saved, query = "") {
+  const list = branches ?? [];
   if (originDefault === null || (list.length === 0 && !saved)) return [];
-  const rest = list.filter((b) => b !== originDefault && b !== "origin/HEAD");
+  const q = String(query ?? "").trim().toLowerCase();
+  const all = list.filter((b) => b !== originDefault && b !== "origin/HEAD");
+  const rest = q ? all : all.slice(0, 30);
   const pinned = saved && !rest.includes(saved) ? [saved] : [];
-  return [
+  const rows = [
     { base: null, label: `origin's default (${originDefault})`, checked: !saved },
     ...[...pinned, ...rest].map((b) => ({ base: b, label: b, checked: b === saved })),
   ];
+  return q ? rows.filter((r) => r.label.toLowerCase().includes(q)) : rows;
 }
 
 // ── Projects (D16) ─────────────────────────────────────────────────────────
