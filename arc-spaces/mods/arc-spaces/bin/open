@@ -31,39 +31,32 @@ home=${HERDR_APP_HOME:-"$HOME/.config/herdr-app"}
 jq -e '(.["arc-spaces.v1"] // {}) | .enabled == true and any((.names // {})[]?; type == "string" and test("\\S"))' \
   "$home/shared.json" >/dev/null 2>&1 || exec "$real" "$@"
 
-# Runs a command for at most $1 whole seconds, in its own process group, so
-# that what it started dies with it. 142 when time runs out (SIGALRM's code), 127
-# when it can't start, else its own code.
-limit() {
-  /usr/bin/perl -e '
-    my $secs = shift;
-    my $pid = fork // exit 127;
-    if (!$pid) { setpgrp(0, 0); exec { $ARGV[0] } @ARGV or exit 127 }
-    setpgrp($pid, $pid);
-    $SIG{ALRM} = sub { kill "KILL", -$pid; exit 142 };
-    alarm $secs;
-    waitpid $pid, 0;
-    exit($? & 127 ? 128 + ($? & 127) : $? >> 8);
-  ' "$@"
-}
+# Runs a command for at most $1 whole seconds (a bad or zero value: 1). The
+# alarm goes with the command itself (perl execs it), so it holds even when
+# whoever started it is gone. 142 when time runs out (SIGALRM's code), 127 when
+# it can't start, else its own code.
+limit_pl='my $s = int(shift); alarm($s > 0 ? $s : 1); exec { $ARGV[0] } @ARGV or exit 127'
+limit() { /usr/bin/perl -e "$limit_pl" "$@"; }
 
 listing=$(limit "${ARC_SPACES_LS_TIMEOUT:-3}" "${ARC_SPACES_HERDR:-$parent}" ls 2>/dev/null) || exec "$real" "$@"
 
 # Where the shown space is now, as projects-sidebar's placeOf: its first
 # terminal with a live folder (herdr-core's record, which Herdr reads), else the
 # folder it was made in. A terminal hc can't read is skipped. The whole search
-# runs under one limit; when it runs out, the folder it was made in. A space on
-# another machine has no terminal looked at.
-live=$(printf '%s\n' "$listing" | limit "${ARC_SPACES_HC_TIMEOUT:-3}" /bin/sh -c '
+# runs under one limit; when it runs out, the folder it was made in. Each hc get
+# carries the same limit, so one left running when the search is cut ends by
+# itself. A space on another machine has no terminal looked at.
+hc_timeout=${ARC_SPACES_HC_TIMEOUT:-3}
+live=$(printf '%s\n' "$listing" | limit "$hc_timeout" /bin/sh -c '
   set -f
   IFS="
 "
   for terminal in $(jq -r "[.spaces[]? | select(.active == true)][0]
       | select((.machine // null) == null) | .tabs[]?.terminals[]?.terminal | strings" 2>/dev/null); do
-    record=$("$1" get "$terminal" 2>/dev/null) || continue
+    record=$(/usr/bin/perl -e "$3" "$2" "$1" get "$terminal" 2>/dev/null) || continue
     live=$(printf "%s\n" "$record" | jq -r ".foreground.cwd // .cwd // empty | strings" 2>/dev/null)
     [ -n "$live" ] && { printf "%s\n" "$live"; exit 0; }
-  done' sh "${ARC_SPACES_HC:-hc}" 2>/dev/null)
+  done' sh "${ARC_SPACES_HC:-hc}" "$hc_timeout" "$limit_pl" 2>/dev/null)
 
 # The Arc space, or nothing when the group has no name or anything here fails.
 # Asked at the click, so it can't be stale: the place gives the project (the
@@ -84,18 +77,17 @@ space=$(printf '%s\n' "$listing" | jq -r --arg live "$live" --arg userhome "$HOM
   def checkout: type == "object" and (.path | absolute) and has("branch") and (.branch == null or (.branch | type == "string")) and (.main | type == "boolean");
   def inside($dir): . == $dir or startswith(if $dir == "/" then "/" else $dir + "/" end);
   # parseRegistry as {groups: [{id, paths}], active}: version 1 or nothing; the
-  # first group of an id and the first claim of a path win; no group left
-  # reads as emptyRegistry (g1); an unknown active group is the first.
+  # first group of an id wins; no group left reads as emptyRegistry (g1); an
+  # unknown active group is the first. (Its first-claim-of-a-path rule needs no
+  # copy: the first group listing a project is the one found below anyway.)
+  # test/arc-spaces-open.test.js runs lib.js and this on the same cases.
   def registry:
     . as $raw
     | (if type == "object" and .version == 1 and (.groups | type == "array") then
-         reduce (.groups[] | select(group)) as $g ({seen: {}, taken: {}, groups: []};
+         reduce (.groups[] | select(group)) as $g ({seen: {}, groups: []};
            if .seen[$g.id] then . else
              .seen[$g.id] = true
-             | .kept = []
-             | reduce ($g.projects[] | select(project) | .path | norm) as $p (.;
-                 if .taken[$p] then . else .taken[$p] = true | .kept += [$p] end)
-             | .groups += [{id: $g.id, paths: .kept}]
+             | .groups += [{id: $g.id, paths: [$g.projects[] | select(project) | .path | norm]}]
            end)
          | .groups
        else [] end) as $groups

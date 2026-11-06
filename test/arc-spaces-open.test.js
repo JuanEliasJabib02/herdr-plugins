@@ -8,6 +8,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, sy
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { parseRegistry, parseCache, matchSpaces, findProject, activeGroup } from "../projects-sidebar/mods/projects/lib.js";
 
 const WRAPPER = fileURLToPath(new URL("../arc-spaces/mods/arc-spaces/bin/open", import.meta.url));
 const URL_A = "https://example.com/a?x=1&y=2";
@@ -76,10 +77,13 @@ const shared = (config = { enabled: true, names: NAMES }, more = {}) => ({
 
 // Runs the wrapper with `parent` as its parent process. The trailing `true`
 // keeps bash from exec-ing the wrapper, which would make the parent node.
-function run(args, { parent = herdrParent, env = {} } = {}) {
+function run(args, { parent = herdrParent, env = {}, capMs } = {}) {
   const quoted = args.map((a) => `'${a}'`).join(" ");
   return spawnSync(parent, ["-c", `'${WRAPPER}' ${quoted}; code=$?; exit $code`], {
     encoding: "utf8",
+    // The timing tests' cap: a limit that stops holding fails them instead of
+    // hanging the suite.
+    timeout: capMs,
     env: {
       PATH: process.env.PATH,
       HOME: dir,
@@ -337,20 +341,35 @@ test("a hung hc: stopped at the limit with what it started, then the folder the 
   // A number no other command line holds, so pgrep finds only this sleep.
   const marker = `sleep ${700_000 + Math.floor(Math.random() * 100_000)}`;
   slowHc(`exec ${marker}`);
-  const started = Date.now();
-  run([URL_A], { env: { ARC_SPACES_HC_TIMEOUT: "3" } });
-  assert.ok(Date.now() - started < 300_000, "it must not wait for the sleep to end");
+  const result = run([URL_A], { env: { ARC_SPACES_HC_TIMEOUT: "3" }, capMs: 120_000 });
+  assert.equal(result.signal, null, "the click must not wait for the sleep to end");
   assertRouted("Bulbasour");
   assert.deepEqual(logOf("hc"), ["t1"], "t1 is asked, and nothing after the limit");
-  spawnSync("sleep", ["0.3"]);
-  assert.equal(running(marker), false, "the hung hc is killed, not left behind");
+  // Its own alarm ends the hc left running when the search was cut.
+  let gone = false;
+  for (let i = 0; i < 60 && !gone; i += 1) {
+    gone = !running(marker);
+    if (!gone) spawnSync("sleep", ["0.1"]);
+  }
+  assert.ok(gone, "the hung hc ends by itself, not left behind");
+});
+
+test("a zero or bad limit is 1 s, not none", () => {
+  lsAnswer([space("/repos/ag", withTerminals("t1"))]);
+  slowHc("exec sleep 600");
+  for (const value of ["0", "0.5", "soon"]) {
+    rmSync(join(dir, "osascript.log"), { force: true });
+    const result = run([URL_A], { env: { ARC_SPACES_HC_TIMEOUT: value }, capMs: 120_000 });
+    assert.equal(result.signal, null, `ARC_SPACES_HC_TIMEOUT=${value} must still stop the search`);
+    assertRouted("Bulbasour");
+  }
 });
 
 test("many terminals hc can't read share one limit", () => {
   const terminals = Array.from({ length: 10 }, (_, i) => `t${i + 1}`);
   lsAnswer([space("/repos/ag", withTerminals(...terminals))]);
-  slowHc("sleep 0.6\nexit 1");
-  run([URL_A], { env: { ARC_SPACES_HC_TIMEOUT: "2" } });
+  slowHc("sleep 1\nexit 1");
+  run([URL_A], { env: { ARC_SPACES_HC_TIMEOUT: "3" }, capMs: 120_000 });
   assertRouted("Bulbasour");
   const asked = logOf("hc") ?? [];
   assert.ok(asked.length >= 1 && asked.length < terminals.length, `asked ${asked.length} terminals`);
@@ -427,6 +446,67 @@ test("the name is trimmed", () => {
   assertRouted("Action");
 });
 
+// ── The same group as the sidebar ──────────────────────────────────────────
+// Each case runs through projects-sidebar's own lib.js and through the wrapper:
+// the Arc space that opens must be the one of the group the sidebar puts the
+// space in. The wrapper copies those rules into jq, so this is what keeps the
+// two from drifting apart.
+
+const ALL_NAMES = Object.fromEntries(["g1", "g2", "g3", "g4"].map((id) => [id, `Space-${id}`]));
+
+function sidebarGroup({ registry, cache, folder, live, machine = null }) {
+  const sp = space(folder, { machine, ...withTerminals("t1") });
+  const panes = live ? [{ tab: "tb1", cwd: live }] : [];
+  const parsed = parseRegistry(registry);
+  const match = matchSpaces(parseCache(cache), [sp], panes, dir)[sp.id];
+  return ((match && findProject(parsed, match.project)?.group) ?? activeGroup(parsed)).id;
+}
+
+const twoGroupsWithAction = (first, second) => ({ ...GROUPS, groups: [first, second, GROUPS.groups[2]] });
+const PARITY = [
+  { name: "a checkout of a project", folder: "/repos/action/src" },
+  { name: "a worktree", folder: "/work/action/feature" },
+  { name: "the longest checkout", folder: "/repos/mine/nested-ag/src" },
+  { name: "a prefix that isn't a folder", folder: "/repos/action-other" },
+  { name: "outside every group", folder: "/Users/someone" },
+  { name: "on another machine", folder: "/repos/action", machine: "vps", live: "/repos/ag" },
+  { name: "a terminal moved into a checkout", folder: "/Users/someone", live: "/repos/ag/web" },
+  { name: "a terminal moved out of one", folder: "/repos/ag", live: "/Users/someone" },
+  { name: "~ in the place", folder: "~/repos/action", cache: { "DIR/repos/action": [checkout("DIR/repos/action", true)] }, registry: twoGroupsWithAction({ id: "g1", name: "A", projects: [project("DIR/repos/action")] }, GROUPS.groups[1]) },
+  { name: "trailing slashes stored", folder: "/repos/action", cache: { "/repos/action/": [checkout("/repos/action/", true)] }, registry: twoGroupsWithAction({ id: "g1", name: "A", projects: [project("/repos/action/")] }, GROUPS.groups[1]) },
+  { name: "~ stored", folder: "DIR/repos/action", cache: { "~/repos/action": [checkout("~/repos/action", true)] }, registry: twoGroupsWithAction({ id: "g1", name: "A", projects: [project("~/repos/action")] }, GROUPS.groups[1]) },
+  { name: "a checkout without branch", folder: "/repos/action", cache: { ...CACHE, "/repos/action": [{ path: "/repos/action", main: true }] } },
+  { name: "a project without name", folder: "/repos/action", registry: twoGroupsWithAction({ id: "g1", name: "A", projects: [{ path: "/repos/action" }] }, GROUPS.groups[1]) },
+  { name: "a repeated group id", folder: "/repos/action", registry: { ...GROUPS, groups: [{ id: "g3", name: "First", projects: [] }, ...GROUPS.groups] } },
+  { name: "a path in two groups", folder: "/repos/action", registry: { ...GROUPS, groups: [{ id: "g4", name: "Also", projects: [project("/repos/action")] }, ...GROUPS.groups] } },
+  { name: "a group with no id", folder: "/Users/someone", registry: { ...GROUPS, activeGroup: "gone", groups: [{ id: "", name: "No id", projects: [] }, ...GROUPS.groups.slice(1)] } },
+  { name: "an unknown active group", folder: "/Users/someone", registry: { ...GROUPS, activeGroup: "gone" } },
+  { name: "another registry version", folder: "/repos/ag", registry: { ...GROUPS, version: 2 } },
+  { name: "a registry of the wrong shape", folder: "/repos/ag", registry: "nope" },
+  { name: "no registry", folder: "/repos/ag", registry: undefined },
+  { name: "a cache of the wrong shape", folder: "/repos/ag", cache: 7 },
+];
+
+test("every case lands in the group projects-sidebar's lib.js picks", () => {
+  const withDir = (value) => (value === undefined ? undefined : JSON.parse(JSON.stringify(value).replaceAll("DIR", dir)));
+  for (const c of PARITY) {
+    const kase = {
+      ...c,
+      folder: c.folder.replace("DIR", dir),
+      registry: "registry" in c ? withDir(c.registry) : GROUPS,
+      cache: "cache" in c ? withDir(c.cache) : CACHE,
+    };
+    const stored = { "arc-spaces.v1": { enabled: true, names: ALL_NAMES }, "projects.cache.v1": kase.cache };
+    if (kase.registry !== undefined) stored["projects.v1"] = kase.registry;
+    writeShared(stored);
+    lsAnswer([space(kase.folder, { machine: kase.machine ?? null, ...withTerminals("t1") })]);
+    hcAnswer(kase.live ? { t1: { cwd: kase.live } } : {});
+    for (const log of ["osascript.log", "real-open.log"]) rmSync(join(dir, log), { force: true });
+    run([URL_A]);
+    assert.deepEqual(routed()?.space, `Space-${sidebarGroup(kase)}`, c.name);
+  }
+});
+
 // ── The script ─────────────────────────────────────────────────────────────
 
 test("the URL and the name reach AppleScript as arguments, never as script text", () => {
@@ -500,6 +580,13 @@ test("no shared.json: the real open", () => {
   rmSync(join(home, "shared.json"));
   run([URL_A]);
   assertPassedThrough([URL_A]);
+});
+
+test("no stored registry at all reads as the sidebar's empty one: g1", () => {
+  const { "projects.v1": _, ...rest } = shared();
+  writeShared(rest);
+  run([URL_A]);
+  assertRouted("Action");
 });
 
 test("a stored registry of the wrong shape reads as the sidebar's empty one: g1", () => {
