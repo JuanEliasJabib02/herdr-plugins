@@ -94,6 +94,13 @@ test("Task mode: lanes, their folding, and New workspace in the header (D31, D32
   assert.match(src("store.js"), /export function toggleTaskCollapsed/);
 });
 
+test("working mark: Claude Code's glyphs change in place with frames(), never spin()'s ~30 fps turn (S36)", () => {
+  const tree = readFileSync(new URL("../projects-sidebar/mods/projects/tree.js", import.meta.url), "utf8");
+  assert.match(tree, /WORKING_FRAMES = Object\.freeze\(\["·", "✢", "✳", "✶", "✻", "✽", "✻", "✶", "✳", "✢"\]\)/);
+  assert.match(tree, /\.frames\(WORKING_FRAMES, 120\)\.child\(WORKING_FRAMES\[0\]\)/, "native frames, starting on the first glyph");
+  assert.doesNotMatch(tree, /\.spin\(/, "no spin(): Herdr turns it at about 30 fps, which stutters");
+});
+
 test("Task notes and the task menu: a lane's right-click and its tooltip, and their views (D34, D35)", () => {
   const src = (f) => readFileSync(new URL(`../projects-sidebar/mods/projects/${f}`, import.meta.url), "utf8");
   const tree = src("tree.js");

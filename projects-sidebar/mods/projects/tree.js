@@ -42,7 +42,7 @@ const FALLBACK = 60000;
 // After a watch wakes: a worktree add writes several files; list once after.
 const SETTLE = 500;
 
-// Herdr's shipped chrome icons (chevrons, the spinner): there in every install.
+// Herdr's shipped chrome icons (chevrons): there in every install.
 const chrome = (name) => `mods/workspace-chrome/${name}.svg`;
 
 // D33 (S28): the project row being dragged, { from, y, moving, over, after },
@@ -455,9 +455,17 @@ function railRow(p, t) {
     .child(div().text_color(t[p.status] ?? t.dim).child(loud ? "●" : "·"));
 }
 
-// mods/agents/main.js `status`: a spinner working, "!" blocked, a dot done, a ring idle.
+// Claude Code's working glyphs (S36). They change in place instead of
+// turning: Herdr runs spin() at about 30 fps, which shows as a stutter, and
+// frames() runs natively without that cap.
+const WORKING_FRAMES = Object.freeze(["·", "✢", "✳", "✶", "✻", "✽", "✻", "✶", "✳", "✢"]);
+
+// mods/agents/main.js `status`: working glyphs, "!" blocked, a dot done, a ring idle.
 function statusMark(status, t) {
-  if (status === "working") return svg(chrome("spinner")).size(12).flex_none().text_color(t.working).spin(900);
+  if (status === "working") {
+    return div().size(12).flex_none().flex().items_center().justify_center().text_size(12).text_color(t.working)
+      .frames(WORKING_FRAMES, 120).child(WORKING_FRAMES[0]);
+  }
   if (status === "blocked") {
     return div().size(14).flex_none().rounded(4).bg(`${t.blocked}26`).text_size(10.5).font_bold().text_color(t.blocked)
       .flex().items_center().justify_center().child("!");

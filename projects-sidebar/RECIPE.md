@@ -176,7 +176,9 @@ across repos.
 
 **How it behaves**
 
-- **Status marks:** a spinner (`working`), "!" (`blocked`), or a dot (`done`).
+- **Status marks:** Claude Code's working glyphs, · ✢ ✳ ✶ ✻ ✽ changing in
+  place (`working`; Herdr's `spin()` turns at about 30 fps, which stutters),
+  "!" (`blocked`), or a dot (`done`).
   Idle and unknown show the home or branch icon. A project row that is
   collapsed shows the most urgent status among its workspaces.
 - **Click a workspace:** selects its space (when two spaces share it, the
@@ -377,7 +379,7 @@ across repos.
   - Whatever program another plugin's badge names in its `exec`, when you
     click that badge; its hover says which ("· runs <program>").
 - **Art:** its own Lucide-style icons in `icons/` (folder, branch, home,
-  plus, code, copy), plus chevrons, check, x, square-pen and spinner from
+  plus, code, copy), plus chevrons, check, x and square-pen from
   Herdr's `workspace-chrome` and agent icons from Herdr's `icons/`.
 
 **Badges from other plugins**
