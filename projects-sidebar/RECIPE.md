@@ -330,11 +330,10 @@ across repos.
   `sidebar-lists` and `sidebar-footer`. The status bar (`status`, px 28)
   is a row: `workspace-status`, then `{ "mod": "claude-accounts", "props":
   { "view": "footer" } }`, Claude's usage at its right as in Orca, both
-  weight 1 (the claude-accounts plugin draws it). Block `agents` →
-  `{ "mod": "projects-agents" }`. Block `agent-sleep` →
-  `{ "mod": "agent-sleep" }` (px 124) between `sidebar-lists` and `groups`:
-  the agent-sleep plugin's block, which must be in the shown layout for its
-  loop to run. Preview `layouts/projects.svg`.
+  weight 1 (the claude-accounts plugin draws it), and last
+  `status-agent-sleep` → `{ "mod": "agent-sleep" }` (px 40): the agent-sleep
+  plugin's moon, which must be in the shown layout for its loop to run. Block
+  `agents` → `{ "mod": "projects-agents" }`. Preview `layouts/projects.svg`.
 - **Mod `mods/projects-agents/`:** a copy of Herdr 0.1.13's shipped
   `agents` mod, made the way `mod.clone` makes one (`mod.json` records
   `cloned_from: { name: "agents", version: "0.1.13" }`, and the sort menu

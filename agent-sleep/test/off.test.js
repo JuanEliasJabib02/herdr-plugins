@@ -93,7 +93,7 @@ test("off: Wake all resumes a Claude asleep in a hidden tab, exactly once", asyn
   assert.equal(records(w).t1, undefined);
 });
 
-test("turned on from the block: live records start and the next one due shows", async () => {
+test("turned on from the popup: live records start and the next one due shows", async () => {
   const { w, co } = setup({ settings: null });
   await at(co, w, NOW);
   assert.equal(w.files[SLEEPING], undefined);

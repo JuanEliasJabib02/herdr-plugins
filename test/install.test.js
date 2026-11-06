@@ -265,7 +265,7 @@ test("the real agent-sleep plugin: its mod is copied, its keys merged, projects-
   const r = run(INSTALL, home, "agent-sleep");
   assert.equal(r.status, 0, r.stderr);
   assert.deepEqual(manifest(home, "agent-sleep"), ["mods/agent-sleep"]);
-  for (const file of ["main.js", "mod.json", "coordinator.js", "views/block.js", "icons/moon.svg"]) {
+  for (const file of ["main.js", "mod.json", "coordinator.js", "panel-model.js", "views/status.js", "views/panel.js", "icons/moon.svg"]) {
     assert.ok(existsSync(join(home, "mods/agent-sleep", file)), file);
   }
   assert.deepEqual(JSON.parse(readFileSync(join(home, "keys.json"), "utf8"))["layout:projects"], {

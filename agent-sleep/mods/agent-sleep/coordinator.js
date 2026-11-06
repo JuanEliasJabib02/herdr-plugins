@@ -17,9 +17,11 @@
 //   }
 //
 // One copy runs it (D11): the one with no props().view and no
-// props().overlay. main.js calls pulse() every PULSE_MS and observeNow()
-// on every render. A pulse is cheap unless there is work:
-//   - a settings change made in the block is saved first;
+// props().overlay, the moon in the status row. main.js calls pulse() every
+// PULSE_MS, and takeRequest(), observeNow() and viewToPublish() on every
+// render. It is the one writer (D14): the popup draws what viewToPublish gave
+// and asks by naming a command. A pulse is cheap unless there is work:
+//   - a request the popup left is taken, and a settings change saved, first;
 //   - every TICK_MS a tick (D2): settings and records read again, Core's
 //     terminals gathered, records reconciled (D4), live records kept while
 //     automatic sleep is on and dropped while it's off (D13), the plan made,
@@ -48,6 +50,12 @@ import { resumeFlags, resumeCommand, canResumeIn, hintDifference, REPLAYABLE_ENV
 // (Herdr's mod.clone rewrites it in a copy).
 export const MOD = "agent-sleep";
 export const PULSE_MS = 1000;
+// Shared values (D14): what the loop copy says to the popup, and the popup to it.
+export const VIEW_KEY = "agent-sleep.view";
+export const REQUEST_KEY = "agent-sleep.request";
+// A request older than this is ignored: shared values may outlive a restart
+// (shared.json), and a fresh loop copy has no last id to compare.
+export const REQUEST_MAX_AGE_MS = 5000;
 // After /exit, the stopping terminal is checked on every pulse for this
 // long; later, ticks reconcile it (D4: asleep whenever the shell is back).
 export const SETTLE_MS = 30_000;
@@ -69,7 +77,7 @@ const statusWord = (s) => {
 };
 const basename = (p) => (typeof p === "string" ? p.replace(/\/+$/, "").split("/").pop() || p : "");
 
-// The workspace a record or a due terminal is named after in the block and
+// The workspace a record or a due terminal is named after in the popup and
 // the toast: its worktree's folder name ("checkout-flow").
 const labelOf = (r) => basename(r?.workspacePath || r?.cwd) || null;
 
@@ -88,7 +96,7 @@ export const lostTerminal = (t, r) =>
 // changes the screen and would make the terminal a candidate again.
 const claudeSignature = (c) => [c.address, c.state, c.statusMs, c.turn, c.sessionId].map(String).join("|");
 
-// The block's line for a Claude kept asleep because its exit hint asked for
+// The popup's line for a Claude kept asleep because its exit hint asked for
 // an env assignment the resume can't replay (Log L10).
 const envHold = (label, env) => `${label} stays asleep: Claude asked for ${env}`;
 
@@ -110,8 +118,8 @@ export function startLoop(props, timer, onPulse) {
 
 // herdr.d.ts says terminals() is "as `hc ls --json` describes it", which is a
 // summary (address, agent, cwd, state, status word, turn, where), but a live
-// Herdr also gives pid, foreground and status_ms (the block then says "fields:
-// terminals()"). A terminal with all three is used as is; any other one the
+// Herdr also gives pid, foreground and status_ms (the popup's headline then has
+// "fields: terminals()" as its tooltip). A terminal with all three is used as is; any other one the
 // plan needs is completed with `hc get <t> --json`.
 const hasCoreFields = (t) =>
   Number.isInteger(t.pid) && Object.hasOwn(t, "foreground") && Object.hasOwn(t, "status_ms");
@@ -131,9 +139,9 @@ export function isClaudeCodeTerminal(t) {
   );
 }
 
-// ── The block (S6) ─────────────────────────────────────────────────────────
+// ── What the moon and the popup show (S6, S12) ─────────────────────────────
 
-// The settings view's −/+ on "After N min": the next step down or up, a
+// The popup's −/+ on "After N min": the next step down or up, a
 // value written by hand snapping to the nearest one; 1 min to 24 h (D2).
 const MINUTE_STEPS = [1, 5, 10, 15, 20, 30, 45, 60, 90, 120, 180, 240, 480, 720, 1440];
 
@@ -142,19 +150,22 @@ export function stepMinutes(minutes, direction) {
   return [...MINUTE_STEPS].reverse().find((m) => m < minutes) ?? MINUTE_STEPS[0];
 }
 
-// The settings view's "After 30 min" (S6); whole hours as hours ("After 24 h").
+// The popup's "After 30 min" (S6); whole hours as hours ("After 24 h").
 export function windowLabel(minutes) {
   return minutes >= 60 && minutes % 60 === 0 ? `After ${minutes / 60} h` : `After ${minutes} min`;
 }
 
-// What the block shows, from the coordinator's state:
-//   headline  "Agent sleep · 2 asleep · ~620 MB freed" ("nothing asleep")
+// What they show, from the coordinator's state:
+//   headline  "Agent sleep · 2 asleep · ~620 MB freed" ("nothing asleep"), the
+//             moon's tooltip and the popup's first line
 //   next      "Next: <workspace> in N min", "Automatic sleep is off", or null
 //   last      the last thing it did ("Woke checkout-flow"), or null
 //   holds     why an asleep Claude isn't resumed, one line each
 //   debug     which path gave Core's fields ("fields: terminals()" or
-//             "fields: hc get ×N (…)"), or null before the first tick
-//   asleep    how many are asleep (Wake all has nothing to do at 0)
+//             "fields: hc get ×N (…)"), the headline's tooltip in the popup, or
+//             null before the first tick
+//   asleep    how many are asleep (the moon's number; Wake all has nothing to
+//             do at 0)
 export function blockModel({ now, records, settings, due, labels, lastEvent, holds, fields }) {
   const asleep = Object.values(isObject(records) ? records : {}).filter((r) => isObject(r) && r.state === "asleep");
   const kb = asleep.reduce((sum, r) => sum + (Number.isFinite(r.rssKb) && r.rssKb > 0 ? r.rssKb : 0), 0);
@@ -188,6 +199,20 @@ export function blockModel({ now, records, settings, due, labels, lastEvent, hol
   };
 }
 
+// ── Commands (D14) ─────────────────────────────────────────────────────────
+
+// One table, for keys ("agent-sleep.<name>" in keys.json, or `herdr-app do
+// agent-sleep.<name>`) and for the popup's requests. None does I/O: each only
+// sets what the next pulse acts on, so a render can run them. `panel` isn't
+// here: it opens the popup, from main.js.
+export const COMMANDS = Object.freeze({
+  "sleep-now": (co) => co.requestSleepNow(),
+  "wake-all": (co) => co.requestWakeAll(),
+  toggle: (co) => co.requestSettings({ enabled: !co.shownSettings().enabled }),
+  less: (co) => co.requestSettings({ idleMinutes: stepMinutes(co.shownSettings().idleMinutes, -1) }),
+  more: (co) => co.requestSettings({ idleMinutes: stepMinutes(co.shownSettings().idleMinutes, 1) }),
+});
+
 // ── The coordinator ────────────────────────────────────────────────────────
 
 export class Coordinator {
@@ -201,6 +226,7 @@ export class Coordinator {
     this.records = {};
     this.recordsText = null;
     this.started = false;
+    this.loaded = false; // the settings and records have been read once
     this.running = false;
     this.lastTickAt = null;
     this.seen = { previousVisible: [], lastSeen: {}, firstSeen: {} };
@@ -218,8 +244,11 @@ export class Coordinator {
     this.sleepNowRequested = false;
     this.queue = null;
     this.wakeAllRequested = false;
-    this.pendingSettings = null; // the block's settings changes, saved by the next pulse
-    this.lastView = null; // what the last pulse left on the block (pulse's return)
+    this.pendingSettings = null; // settings changes asked for, saved by the next pulse
+    this.savingSettings = null; // the change that pulse is writing now
+    this.lastRequestId = null; // the popup's last request seen (D14: it runs once)
+    this.lastView = null; // what the last pulse left to show (pulse's return)
+    this.publishedView = null; // the view as last handed out to share with the popup
     this.badge = undefined;
     this.worktrees = new Map(); // cwd → workspace path (or null)
     this.transcripts = new Map(); // find argv → its result, found transcripts only
@@ -228,7 +257,7 @@ export class Coordinator {
   // ── Entry points ──
 
   // One pulse. `sleep(ms)` is the caller's (cx.sleep), for D5's probe.
-  // True when what the block shows differs from what the last pulse left
+  // True when what it shows differs from what the last pulse left
   // (a minute rolling over between pulses included): main.js redraws only
   // then, since every redraw redraws the whole window.
   async pulse({ sleep } = {}) {
@@ -237,6 +266,7 @@ export class Coordinator {
     if (typeof sleep === "function") this.sleep = sleep;
     try {
       if (!this.started) await this.start();
+      this.takeRequest(); // a render normally took it already
       if (this.pendingSettings) await this.applySettings();
       this.observeNow();
       const now = this.d.now();
@@ -280,16 +310,16 @@ export class Coordinator {
     this.wakeAllRequested = true;
   }
 
-  // The block's settings rows: a change is shown at once and saved by the
+  // The popup's switch and −/+: a change is shown at once and saved by the
   // next pulse, so it never races a tick's read of settings.json.
   requestSettings(change) {
     if (isObject(change)) this.pendingSettings = { ...(this.pendingSettings ?? {}), ...change };
   }
 
-  // The settings as the block shows them: the saved ones with any pending
-  // change, clamped as they will be saved.
+  // The settings as the moon and the popup show them: the saved ones with the
+  // change being written and any pending one, clamped as they will be saved.
   shownSettings() {
-    return parseSettings(JSON.stringify({ ...this.settings, ...(this.pendingSettings ?? {}) })).settings;
+    return parseSettings(JSON.stringify({ ...this.settings, ...(this.savingSettings ?? {}), ...(this.pendingSettings ?? {}) })).settings;
   }
 
   model() {
@@ -305,13 +335,51 @@ export class Coordinator {
     });
   }
 
-  // Everything the block draws: its lines and the settings rows.
+  // Everything the popup draws: its lines and the settings rows.
   view() {
     return { ...this.model(), settings: this.shownSettings() };
   }
 
+  // A command by name, from a key or a request. False, with a log line, for a
+  // name the table doesn't have.
+  command(name) {
+    if (typeof name !== "string" || !Object.hasOwn(COMMANDS, name)) {
+      this.log(`no command ${JSON.stringify(name)}`);
+      return false;
+    }
+    COMMANDS[name](this);
+    return true;
+  }
+
+  // What the popup left under REQUEST_KEY. A render calls this, so no I/O: the
+  // command only sets what the next pulse acts on. It runs once (D14): the same
+  // id is ignored, and so is a time more than REQUEST_MAX_AGE_MS from the clock.
+  // Until the settings are read it isn't even looked at: toggle would flip the
+  // defaults, and the first pulse takes it. True when a command ran.
+  takeRequest() {
+    if (!this.loaded) return false;
+    const request = this.safe(() => this.d.shared(REQUEST_KEY), null);
+    if (!isObject(request) || typeof request.id !== "string" || request.id === this.lastRequestId) return false;
+    this.lastRequestId = request.id;
+    if (!Number.isFinite(request.at) || Math.abs(this.d.now() - request.at) > REQUEST_MAX_AGE_MS) return false;
+    return this.command(request.command);
+  }
+
+  // What the loop copy's render shares under VIEW_KEY: the view when its JSON
+  // changed since the last one, else null. setShared re-renders every mod, so
+  // publishing on every render would never end. Null before the first pulse:
+  // the defaults say less than what shared.json still has.
+  viewToPublish() {
+    if (!this.loaded) return null;
+    const view = this.view();
+    const json = JSON.stringify(view);
+    if (json === this.publishedView) return null;
+    this.publishedView = json;
+    return view;
+  }
+
   // Asleep Claudes whose stored env the resume can't replay: said by the
-  // block from their record, so a reload keeps saying it.
+  // popup from their record, so a reload keeps saying it.
   envHolds() {
     const out = {};
     for (const [address, r] of Object.entries(this.records)) {
@@ -322,7 +390,7 @@ export class Coordinator {
     return out;
   }
 
-  // Settings view: merges `change` in, clamps it (store.js), saves it with a
+  // A settings change: merges `change` in, clamps it (store.js), saves it with a
   // compare-and-swap. False (and the file's settings reloaded) when the file
   // changed since it was read.
   async saveSettings(change) {
@@ -347,12 +415,17 @@ export class Coordinator {
 
   // ── The pulse's steps ──
 
-  // The block's pending settings change; tried once more on a file that
+  // The pending settings change; tried once more on a file that
   // changed under it (the change applies to what the file says now).
   async applySettings() {
     const change = this.pendingSettings;
     this.pendingSettings = null;
-    if (!(await this.saveSettings(change))) await this.saveSettings(change);
+    this.savingSettings = change;
+    try {
+      if (!(await this.saveSettings(change))) await this.saveSettings(change);
+    } finally {
+      this.savingSettings = null;
+    }
   }
 
   async start() {
@@ -360,6 +433,7 @@ export class Coordinator {
     await this.loadSettings();
     await this.loadRecords();
     this.badge = this.safe(() => this.d.shared(BADGE_KEY), undefined);
+    this.loaded = true;
   }
 
   // D2: one tick. The first one, right after start, also reconciles a stop

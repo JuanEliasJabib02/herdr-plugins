@@ -2,7 +2,7 @@
 // with no props().view or overlay: a pulse every second, a tick every
 // minute (D2), the stop sequence (re-plan, D5's prompt check and probe, the
 // `stopping` record, D4's re-read, /exit), reconcile, live records (D13),
-// the resume on reveal (D8), "Sleep now" / "Wake all" (D9), the block's
+// the resume on reveal (D8), "Sleep now" / "Wake all" (D9), the popup's
 // lines and the moon badge (D11). Everything it touches is injected here:
 // a fake Core (`hc`), exec, files, clock and Herdr's live data.
 import { test } from "node:test";
@@ -25,7 +25,7 @@ test("only the copy with no view and no overlay runs the loop; an overlay copy s
     const t = { every: [], after: [] };
     return { t, api: { every: (ms, fn) => t.every.push(ms), after: (ms, fn) => t.after.push(ms) } };
   };
-  for (const props of [{ overlay: "o1" }, { view: "settings" }, { view: "settings", overlay: "o2" }]) {
+  for (const props of [{ overlay: "o1" }, { view: "panel" }, { view: "panel", overlay: "o2" }]) {
     const { t, api } = timer();
     assert.equal(isLoopCopy(props), false, JSON.stringify(props));
     assert.equal(startLoop(props, api, () => {}), false);
@@ -554,7 +554,7 @@ test("an exit hint with CLAUDE_CODE_EXPERIMENTAL_CODE_MODE=1 is stored as env an
   assert.equal(resumes(w)[0].text, `CLAUDE_CODE_EXPERIMENTAL_CODE_MODE=1 claude --dangerously-skip-permissions --resume ${SID1}`);
 });
 
-test("any other env in the hint: kept asleep, never resumed without it, and the block says why", async () => {
+test("any other env in the hint: kept asleep, never resumed without it, and the popup says why", async () => {
   for (const env of ["FOO=1", "FOO=bar"]) {
     const { w, co } = setup();
     const t = await sleepT1(co, w);
@@ -571,7 +571,7 @@ test("any other env in the hint: kept asleep, never resumed without it, and the 
 
 // J-003: the hold lives in the record, so it outlasts the hint on screen
 // and a reload of the mod.
-test("an env the resume can't replay (FOO=bar) is stored; hint gone + a reload → still never resumed, the block says why", async () => {
+test("an env the resume can't replay (FOO=bar) is stored; hint gone + a reload → still never resumed, the popup says why", async () => {
   const { w, co } = setup();
   const t = await sleepT1(co, w);
   exitClaude(w, "t1", EXIT.replace(`claude --resume ${SID1}`, `FOO=bar claude --resume ${SID1}`));
@@ -629,7 +629,7 @@ test("Wake all resumes every asleep Claude whose shell is at a bare prompt, show
 
 // ── Terminal fields (the T5 probe: hc ls --json is a summary) ─────────────
 
-test("summary-shaped terminals(): Claude terminals are completed with hc get, and the block says so", async () => {
+test("summary-shaped terminals(): Claude terminals are completed with hc get, and the popup says so", async () => {
   const { w, co } = setup();
   w.summary = true;
   await at(co, w, NOW);
@@ -641,7 +641,7 @@ test("summary-shaped terminals(): Claude terminals are completed with hc get, an
   assert.equal(exits(w).length, 1);
 });
 
-test("full terminals(): no hc get on ticks, and the block says terminals()", async () => {
+test("full terminals(): no hc get on ticks, and the popup says terminals()", async () => {
   const { w, co } = setup();
   await at(co, w, NOW);
   await at(co, w, NOW + 1 * MIN);
@@ -658,11 +658,11 @@ test("summary shape: the child check before a stop asks Core for every terminal'
   assert.equal(exits(w).length, 0, "t1 has a live child");
 });
 
-// ── The block and the badge (S6, D11) ────────────────────────────────────
+// ── The popup's lines and the badge (S6, D11) ────────────────────────────
 
 const asleep = (over = {}) => ({ state: "asleep", rssKb: 317_440, workspacePath: "/code/app", cwd: "/code/app", at: NOW, ...over });
 
-test("block lines for 0, 1 and 2 asleep", () => {
+test("the headline for 0, 1 and 2 asleep", () => {
   const base = { now: NOW, settings: { enabled: true, idleMinutes: 30 }, due: {}, labels: {}, lastEvent: null, holds: {}, fields: null };
   assert.equal(blockModel({ ...base, records: {} }).headline, "Agent sleep · nothing asleep");
   assert.equal(blockModel({ ...base, records: { t1: asleep() } }).headline, "Agent sleep · 1 asleep · ~310 MB freed");
@@ -671,7 +671,7 @@ test("block lines for 0, 1 and 2 asleep", () => {
   assert.equal(blockModel({ ...base, records: { t1: asleep({ rssKb: null }) } }).headline, "Agent sleep · 1 asleep");
 });
 
-test("block: Next names the earliest due workspace in whole minutes; off when automatic sleep is off", () => {
+test("Next names the earliest due workspace in whole minutes; off when automatic sleep is off", () => {
   const base = { now: NOW, records: {}, settings: { enabled: true, idleMinutes: 30 }, lastEvent: "Woke checkout-flow", holds: {}, fields: "terminals()" };
   const m = blockModel({ ...base, due: { t1: NOW + 30 * MIN, t2: NOW + 12 * MIN + 1 }, labels: { t1: "app", t2: "checkout-flow" } });
   assert.equal(m.next, "Next: checkout-flow in 13 min");
@@ -682,7 +682,7 @@ test("block: Next names the earliest due workspace in whole minutes; off when au
   assert.equal(blockModel({ ...base, settings: { enabled: false, idleMinutes: 30 }, due: { t1: NOW + MIN }, labels: {} }).next, "Automatic sleep is off");
 });
 
-test("the coordinator's block: Next after the first tick, then asleep with MB freed", async () => {
+test("the coordinator's model: Next after the first tick, then asleep with MB freed", async () => {
   const { w, co } = setup();
   await at(co, w, NOW);
   assert.equal(co.model().next, "Next: app in 30 min");
@@ -742,7 +742,7 @@ test("settings are read each tick and saved with a compare-and-swap; out-of-rang
   assert.deepEqual(co.settings, { enabled: false, idleMinutes: 10 });
 });
 
-test("settings changed in the block: shown at once, saved by the next pulse, Next follows the new window", async () => {
+test("settings changed: shown at once, saved by the next pulse, Next follows the new window", async () => {
   const { w, co } = setup();
   await at(co, w, NOW);
   assert.equal(co.model().next, "Next: app in 30 min");
@@ -760,7 +760,7 @@ test("settings changed in the block: shown at once, saved by the next pulse, Nex
   assert.equal(co.model().next, "Automatic sleep is off");
 });
 
-test("a pulse says the block changed when its lines differ from the last pulse's, a minute rolling over included", async () => {
+test("a pulse says the view changed when its lines differ from the last pulse's, a minute rolling over included", async () => {
   const { w, co } = setup();
   assert.equal(await at(co, w, NOW), true, "the first tick: Next appears");
   assert.equal(await at(co, w, NOW + 1_000), false);
@@ -770,7 +770,7 @@ test("a pulse says the block changed when its lines differ from the last pulse's
   assert.equal(await at(co, w, NOW + 1 * MIN + 3_000), true, "automatic sleep off");
 });
 
-test("an env Claude asked for that can't be replayed is a hold in the block from the moment Claude exits", async () => {
+test("an env Claude asked for that can't be replayed is a hold in the popup from the moment Claude exits", async () => {
   const { w, co } = setup();
   const t = await sleepT1(co, w);
   exitClaude(w, "t1", EXIT.replace(`claude --resume ${SID1}`, `FOO=1 claude --resume ${SID1}`));
@@ -797,7 +797,7 @@ test("automatic sleep off: nothing is stopped automatically, a reveal still resu
   assert.equal(resumes(w).length, 1);
 });
 
-test("the settings view steps the window through whole minutes, 1 min to 24 h", () => {
+test("the popup's −/+ step the window through whole minutes, 1 min to 24 h", () => {
   assert.equal(stepMinutes(30, 1), 45);
   assert.equal(stepMinutes(30, -1), 20);
   assert.equal(stepMinutes(1, -1), 1);
@@ -806,7 +806,7 @@ test("the settings view steps the window through whole minutes, 1 min to 24 h", 
   assert.equal(stepMinutes(37, -1), 30);
 });
 
-test("the settings view names the window in minutes, or in hours when it is whole hours", () => {
+test("the popup names the window in minutes, or in hours when it is whole hours", () => {
   assert.equal(windowLabel(30), "After 30 min");
   assert.equal(windowLabel(1), "After 1 min");
   assert.equal(windowLabel(90), "After 90 min");
@@ -846,5 +846,5 @@ test("main.js is the only file importing herdr; its only timer is startLoop's (a
   assert.match(main, /startLoop\(\s*\w+,\s*cx\.timer,/);
   assert.doesNotMatch(main, /\.timer\.(every|after)\(|setTimeout|setInterval/);
   const manifest = JSON.parse(readFileSync(new URL("mod.json", mod), "utf8"));
-  assert.equal(manifest.place, "none", "placed by projects-sidebar's slot (D10, T6), never docked by Herdr");
+  assert.equal(manifest.place, "none", "placed by projects-sidebar's status row (D14), never docked by Herdr");
 });

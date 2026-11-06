@@ -32,9 +32,9 @@ herdr-app do layout.switch '{"name":"projects"}'  # ctrl-shift-l switches back
   their folder. Without it, that block shows "claude-accounts did not load".
   `scripts/install.sh --alone` installs projects-sidebar only, and
   `--uninstall` never removes claude-accounts.
-- **Requires agent-sleep too:** the layout's sidebar runs its block, so it is
-  installed the same way. Automatic sleep stays off until you turn it on in
-  the block's Settings.
+- **Requires agent-sleep too:** the layout's status bar draws its moon, so it
+  is installed the same way. Automatic sleep stays off until you turn it on in
+  the popup the moon opens.
 - **Keys:** F1–F3 come from the plugin's `keys.json`, which the installer
   merges into yours. It adds only keys you don't use and backs the file up
   first (`keys.json.bak-<time>`). Once your keys.json is edited, Herdr stops
