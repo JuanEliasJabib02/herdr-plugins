@@ -1,0 +1,224 @@
+# Claude accounts
+
+Orca's Claude usage and accounts, in Herdr. The sidebar footer shows how much
+of its session, weekly and Fable limits the active Claude account has used,
+and when each one resets. A popover and a panel show every account. Manage
+Accounts signs accounts in, adds and removes them, and picks which one new
+Claude terminals start on. When you switch accounts while Claude is running
+in terminals, those conversations can restart on the new account. A details
+window shows usage by model, project and account over 7, 30 or 90 days.
+
+All the logic is a command-line program, `claude-accounts`, that ships inside
+the mod. The mod only draws and runs it. Other plugins (Spotlight first) read
+the same files and run the same commands: see [CONTRACT.md](CONTRACT.md).
+
+**What you see**
+
+- **Footer** (the sidebar's status row, right of the workspace status): the
+  active account's usage,
+  `Used [Claude icon][bar] 41% 3h 2m · 65% 4d 6h · 22% Fable [refresh]`:
+  session, weekly and Fable, each with the time left until it resets.
+  - Colors: under 60% `muted`, 60–79% `working` (amber), 80% or more
+    `blocked` (red).
+  - As the column narrows: bars and labels, then one number per window, then
+    the icon only.
+  - Signed out: "Sign in to see usage" and a **Sign in** action.
+  - Click it for the popover.
+- **Popover** (above the footer): `Usage`, a refresh button and a
+  `Detailed | Compact` toggle for the footer. Then the `Claude` row with
+  "Resets in 3h 2m" and its `5h`, `wk` and `Fable` bars (it opens the
+  panel), `Usage details & history` and `Manage Accounts…`.
+- **Claude panel:** "Claude · Updated 3m ago" (or "Not yet updated"). The
+  active account's card: Session, Weekly and Fable, each "N% used · Resets
+  in …", plus the monthly spend and credits when the account has them. Then
+  the `Claude Account` list: System default and each saved account, ✓ on
+  the active one, and the others with their `wk` and `Fable` bars. Click one
+  to switch. "No other accounts" when there are none.
+- **Manage Accounts** (a dialog):
+  - One row per account: its email, "This device", `org · date` of its last
+    sign-in, `Sign in again ▾` (its menu: "Copy sign-in link instead") and
+    `Remove`. Then `Add account ▾`, with the same menu.
+  - "System default: {email}" / "Use your current {email} Claude login.",
+    and Orca's notice when System default is signed in as an email that is
+    also a saved account.
+  - "Switching applies to the next Claude you start in any tab."
+  - The setting **When you switch accounts while Claude is running in
+    terminals**, "Restarting continues each terminal conversation on the new
+    account.": Ask, Always restart or Never restart.
+- **Switch dialog** (Ask): "Switched to {account}", the sessions still
+  running on the previous account with a checkbox each, "Don't ask again
+  (restart automatically)", **Keep as is** and **Restart N sessions**.
+- **Toasts:** "Restarting N Claude sessions on {account}", "N other sessions
+  weren't moved." with **Review**, a terminal waiting for idle, a restart
+  that failed with the `claude --resume <session>` command to run by hand,
+  and "Sign-in link copied. Open it in a private window to sign in with a
+  different account."
+- **Usage details & history** (a window): 7, 30 or 90 days or all time;
+  usage by model, by project and by account; cache read, cache write and
+  reuse rate (labelled "since <date>" when the range starts before the cache
+  figures do); recent sessions; a daily chart; and how often and how fast
+  each account hits its 5-hour and weekly limits.
+
+**How it behaves**
+
+- **Accounts.**
+  - System default is `~/.claude`, the login Claude uses with no
+    `CLAUDE_CONFIG_DIR`.
+  - A saved account is a Claude config folder with its own login in the
+    macOS Keychain. Orca's accounts are imported the first time, in place
+    (they're never moved, which would mean signing in again), along with
+    Orca's active account and switch setting.
+  - **Add account** makes a new folder under
+    `~/.config/herdr-app/claude-accounts-profiles/`, sharing your
+    `~/.claude` settings, skills, agents, commands and history through
+    symlinks. It's kept only when the sign-in succeeds with an email and
+    org that aren't saved yet; otherwise the folder goes.
+  - **Sign in** opens a Herdr tab running `claude auth login`. Closing the
+    tab cancels it. "Copy sign-in link instead" puts the one-click link on
+    the clipboard instead of opening the browser.
+  - **Remove** forgets the account. It deletes the folder only for one added
+    here, and never touches the Keychain. Removing the active account goes
+    back to System default.
+- **Usage.**
+  - Each account's limits come from Claude's usage endpoint, with its own
+    login. It's asked every 15 minutes, at most every 5 minutes per account
+    (30 seconds with refresh), and less often after failures.
+  - Between polls, the numbers follow every Claude turn: Claude Code hands
+    its statusline the current limits, and the statusline drops them in the
+    state folder. Fable comes from polling only.
+  - Logins are never refreshed, written or logged: Claude Code owns them. An
+    account whose login lapsed shows "Sign in again".
+- **Which account a terminal runs.** Inside Herdr, the `claude` launcher
+  starts each new Claude on the active account. A running terminal's
+  account is the config folder holding its live session file.
+- **Switching while Claude runs.**
+  - Always restart: every Claude terminal on the previous account restarts
+    on the new one, continuing its conversation. Ask: the switch dialog
+    first. Never restart: they stay as they are.
+  - A restart waits until that terminal's Claude is idle, however long it
+    takes, stops it, types `CLAUDE_ACCOUNTS_DIR=<folder> claude <its flags>
+    --resume <session>` in the same shell, and checks the new Claude landed
+    on the new account. Terminals restart independently.
+  - Only safe flags are kept (`--model`, `--permission-mode`, `--effort`,
+    `--settings`, `--add-dir`, `--dangerously-skip-permissions`), so a
+    resumed agent never gets its first task again.
+  - A terminal whose program is Claude itself (no shell to come back to)
+    can't move, and says so.
+
+**Install**
+
+```sh
+scripts/install.sh claude-accounts
+```
+
+- The footer lives in the projects layout's status row
+  (`projects-sidebar/layouts/projects.json`), so install `projects-sidebar`
+  too and switch to the `projects` layout.
+- New terminals follow the active account only through the `claude`
+  launcher (`~/my-mac-scripts/bin/claude`), which reads the `active` file.
+- Live numbers between polls need the statusline drop in
+  `~/.claude/statusline.sh`.
+- Usage details & history runs `~/.local/bin/claude-usage --json`.
+- Node 22 or newer on the PATH Herdr's `exec` sees.
+
+**Built from**
+
+- **Mod `mods/claude-accounts/`** (`mod.json` `{ "place": "none" }`), one mod
+  in views picked by `props.view`:
+  - none or `footer` = `footer.js`: the only copy that reads key commands. It
+    also keeps the 15-minute timer and the watch on the state folder, and
+    turns the CLI's progress into toasts (`toasts.js`).
+  - `popup` = `popup.js`, `panel` = `panel.js`, `accounts` = `accounts.js`,
+    `confirm` = `confirm.js`, `details` = `details.js` (a window).
+  - Pure modules, tested with `node --test`: `store.js` (reading the CLI's
+    files), `format.js` (percent, durations, dates, colors, error copy,
+    density) and `toasts.js`.
+- **CLI `mods/claude-accounts/bin/claude-accounts`** (Node, `cli/*.mjs`).
+  Every command takes `--json`:
+
+  | Command | Does |
+  |---|---|
+  | `list` | the accounts and the active one |
+  | `use <id\|default>` | switches the active account, then applies the switch setting to running terminals |
+  | `remove <id>` | forgets an account |
+  | `login <id\|new\|default> [--link]` | signs an account in, in the current terminal |
+  | `import-orca` | imports Orca's accounts again |
+  | `settings [set switchMode ask\|restart\|keep]` | reads or sets the switch setting |
+  | `usage [--refresh] [--account <id>]` | the usage, fetched when due |
+  | `terminal <t>` | a Herdr terminal's account, session and status |
+  | `restart --cancel <t>` | drops a terminal's queued restart |
+  | `resume --terminal <t> --account <id\|default> [--message <text>] [--wait <s>]` | restarts one terminal on an account and sends a message; `--status <job>`, `--cancel <job>` |
+  | `details --range <7\|30\|90\|all>` | refreshes the details window's data |
+  | `--version` | its version |
+
+  Exit codes: 0 ok, 2 no session id, 3 terminal missing or not Claude, 4
+  timeout, 5 account needs sign-in, 6 landed on another account, 7 unknown
+  account or job, 8 terminal can't move, 9 job failed, 10 job cancelled, 64
+  bad usage, 75 still running (under `--wait`). The full contract, with
+  every output shape, is [CONTRACT.md](CONTRACT.md).
+- **Commands:** `claude-accounts.open-popup`, `claude-accounts.open-panel`,
+  `claude-accounts.open-accounts`, `claude-accounts.open-confirm`,
+  `claude-accounts.open-details` and `claude-accounts.refresh`, reached
+  through the footer copy (`herdr-app do claude-accounts.<name>`).
+- **Herdr functions:** `exec`, `readTextFile`, `watchFolder`, `openOverlay`,
+  `closeOverlay`, `notify`, `shared`, `setShared`, `theme`, `props`,
+  `nextCommand`, `home`, `appHome`.
+- **Programs the CLI runs:** `security find-generic-password` (reads a
+  login, never writes one), `/usr/bin/sqlite3` (Orca's settings, read-only),
+  `hc` (Herdr's terminals: list, read, type), `claude auth login`,
+  `claude-usage`, and HTTPS to `api.anthropic.com/api/oauth/usage`.
+
+**Files**
+
+The state folder is `~/.config/herdr-app/claude-accounts/`
+(`$CLAUDE_ACCOUNTS_HOME` replaces it, for tests). The CLI is its only
+writer, except `live/`, which only the statusline writes. Every write is a
+temporary file and a rename, under a lock held only for the write.
+
+| File | Holds |
+|---|---|
+| `accounts.json` | the saved accounts: id, email, org, config folder, last sign-in, and whether Orca or Herdr made it |
+| `active` | the active account's config folder, the exact string; empty for System default |
+| `settings.json` | the switch setting: `ask`, `restart` or `keep` |
+| `accounts.v1.json` | what other plugins read: every account with its usage ([CONTRACT.md](CONTRACT.md)) |
+| `usage-state.json` | when each account was fetched, its last data, and its failures |
+| `restart.json` | the queued restarts and `resume` jobs, with their progress |
+| `pending-switch.json` | a switch waiting in the switch dialog |
+| `live/` | the statusline's latest limits, one file per account |
+| `details.json` | the details window's last results per range |
+| `login-link` | a captured sign-in link |
+| `lock/` | the lock |
+
+**Watch out**
+
+- **It reads your Claude logins.** The CLI reads each account's OAuth token
+  from the Keychain to ask for its usage. Tokens never leave that request:
+  they aren't logged, written or refreshed.
+- **The usage endpoint, Claude's session files and the statusline limits
+  aren't documented.** A Claude Code update can change them; the footer then
+  shows "Usage unavailable" or stale numbers.
+- **A restart stops Claude.** It waits for idle first, but a half-typed
+  prompt in that terminal is lost. Never restart (or Ask) avoids it.
+- **exec's 30 s limit:** restarts and the details refresh run in a detached
+  process, so a command returns at once and the work goes on.
+- **Orca shares the accounts.** Imported accounts are Orca's own folders, so
+  signing in or out in either app affects both.
+- **Install by copying.** Herdr doesn't load a mod folder that is a symlink;
+  `scripts/install.sh claude-accounts` copies it and lists what it copied in
+  `<home>/.herdr-plugins/claude-accounts.txt`.
+- **`herdr-app check` draws only the footer.** `scripts/check-views.sh
+  claude-accounts/mods/claude-accounts <views…>` checks the others.
+
+**Done when**
+
+- `node --test 'test/*.test.js'` reports `fail 0`, and
+  `scripts/check-views.sh claude-accounts/mods/claude-accounts footer popup
+  panel accounts confirm details` prints `ok` for each view.
+- `claude-accounts list --json` shows System default and each Orca account,
+  with the active one marked.
+- The footer shows the active account's session, weekly and Fable usage, and
+  the popover, panel and Manage Accounts show Orca's texts with the same
+  numbers.
+- Switching accounts with a Claude terminal open restarts it on the new
+  account (Always restart) or asks first (Ask), and the conversation goes on.
+- Usage details & history shows every section for each range.

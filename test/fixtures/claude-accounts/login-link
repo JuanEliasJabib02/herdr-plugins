@@ -1,0 +1,1 @@
+https://claude.com/cai/oauth/authorize?code=true&client_id=00000000-0000-4000-8000-000000000000&response_type=code&redirect_uri=http%3A%2F%2Flocalhost%3A54545%2Fcallback&scope=user%3Ainference&code_challenge=fixture-challenge&code_challenge_method=S256&state=fixture-state

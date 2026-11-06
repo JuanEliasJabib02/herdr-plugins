@@ -1,0 +1,158 @@
+{
+  "ranges": {
+    "7": {
+      "result": {
+        "version": 1,
+        "generatedAt": 1794000000000,
+        "range": {
+          "from": "2026-10-31",
+          "to": "2026-11-06"
+        },
+        "cacheSince": "2026-11-03",
+        "totals": {
+          "tokens": 18450000,
+          "responses": 2310,
+          "seconds": 151200,
+          "cacheRead": 15200000,
+          "cacheWrite": 1900000,
+          "reuseRate": 0.89
+        },
+        "byAccount": [
+          {
+            "account": "ana@example.com",
+            "tokens": 12300000,
+            "responses": 1540
+          },
+          {
+            "account": "ben@example.org",
+            "tokens": 6150000,
+            "responses": 770
+          }
+        ],
+        "byModel": [
+          {
+            "model": "claude-opus-5-5",
+            "tokens": 14100000,
+            "responses": 1620
+          },
+          {
+            "model": "claude-sonnet-4-6",
+            "tokens": 4350000,
+            "responses": 690
+          }
+        ],
+        "byProject": [
+          {
+            "project": "herdr-plugins",
+            "path": "/Users/ana/src/herdr-plugins",
+            "tokens": 9800000,
+            "sessions": 14
+          },
+          {
+            "project": "orca",
+            "path": "/Users/ana/src/orca",
+            "tokens": 6550000,
+            "sessions": 9
+          },
+          {
+            "project": "-Users-ana-src-old-app",
+            "path": null,
+            "tokens": 2100000,
+            "sessions": 3
+          }
+        ],
+        "daily": [
+          {
+            "date": "2026-10-31",
+            "tokens": 1200000
+          },
+          {
+            "date": "2026-11-01",
+            "tokens": 2450000
+          },
+          {
+            "date": "2026-11-02",
+            "tokens": 900000
+          },
+          {
+            "date": "2026-11-03",
+            "tokens": 3800000
+          },
+          {
+            "date": "2026-11-04",
+            "tokens": 4100000
+          },
+          {
+            "date": "2026-11-05",
+            "tokens": 3300000
+          },
+          {
+            "date": "2026-11-06",
+            "tokens": 2700000
+          }
+        ],
+        "recentSessions": [
+          {
+            "id": "3f1c2b7e-8a4d-4e55-9a51-0c2d6f1b7a10",
+            "project": "herdr-plugins",
+            "account": "ana@example.com",
+            "model": "claude-opus-5-5",
+            "startedAt": 1793988000000,
+            "endedAt": 1793999820000,
+            "tokens": 1450000
+          },
+          {
+            "id": "b6a0e3d1-27c4-4f0e-8d3b-5e9f1a2c4d6e",
+            "project": "orca",
+            "account": "ben@example.org",
+            "model": "claude-sonnet-4-6",
+            "startedAt": 1793970000000,
+            "endedAt": 1793976000000,
+            "tokens": 380000
+          },
+          {
+            "id": "e2d4c6b8-1a3f-4e5d-9c7b-8a6f4e2d0c1b",
+            "project": "-Users-ana-src-old-app",
+            "account": "ana@example.com",
+            "model": "claude-opus-5-5",
+            "startedAt": 1793900000000,
+            "endedAt": 1793903600000,
+            "tokens": 210000
+          }
+        ],
+        "limits": [
+          {
+            "account": "ana@example.com",
+            "window": "5h",
+            "hits": 5,
+            "avgSecondsToLimit": 11880
+          },
+          {
+            "account": "ben@example.org",
+            "window": "weekly",
+            "hits": 2,
+            "avgSecondsToLimit": 302400
+          }
+        ]
+      },
+      "running": false,
+      "startedAt": 1793999940000,
+      "finishedAt": 1793999952000,
+      "error": null
+    },
+    "30": {
+      "result": null,
+      "running": true,
+      "startedAt": 1793999990000,
+      "finishedAt": null,
+      "error": null
+    },
+    "90": {
+      "result": null,
+      "running": false,
+      "startedAt": 1793990000000,
+      "finishedAt": 1793990030000,
+      "error": "claude-usage exited 1: no usage-cache.jsonl"
+    }
+  }
+}

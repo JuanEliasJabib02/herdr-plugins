@@ -9,6 +9,7 @@ like Herdr's home, with a `RECIPE.md` and a `preview.png`).
 | Folder | What it does |
 |---|---|
 | [`projects-sidebar/`](projects-sidebar/) | Replaces Herdr's Spaces list with projects and their workspaces (git worktrees), groups switched with F1–F3, Add project, and a New workspace dialog that can make the same branch in companion repos and give the agent access to them. [Recipe](projects-sidebar/RECIPE.md) |
+| [`claude-accounts/`](claude-accounts/) | Orca's Claude usage and accounts: the active account's session, weekly and Fable usage in the sidebar footer, a popover and a panel with every account, Manage Accounts (sign in, add, remove), the account new Claude terminals start on, restarting running Claude terminals onto a new account, and a usage details window. Its CLI publishes the accounts and their usage for other plugins. [Recipe](claude-accounts/RECIPE.md) |
 
 ![Projects sidebar](projects-sidebar/preview.png)
 
@@ -54,3 +55,10 @@ Herdr doesn't load a mod folder that is a symlink, so the installer copies.
 After an edit, run it again and Herdr hot-reloads the copy a moment later.
 `herdr-app check` draws only the tree view: to check another view, use a copy
 whose `main.js` defaults to it.
+
+`scripts/install.sh claude-accounts` installs the other plugin. Its views are
+checked with `scripts/check-views.sh claude-accounts/mods/claude-accounts
+footer popup panel accounts confirm details`, which makes such a copy per
+view. `scripts/check-snapshot.sh <task> <files…> [-- <views…>]` runs the
+suite and those checks on `HEAD` plus the given files, so tasks that share a
+worktree don't check each other's unfinished edits.

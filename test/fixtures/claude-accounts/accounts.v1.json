@@ -1,0 +1,59 @@
+{
+  "version": 1,
+  "updatedAt": 1794000000000,
+  "active": "1b9d6bcd-bbfd-4b2d-9b5d-ab8dfbbd4bed",
+  "accounts": [
+    {
+      "id": "default",
+      "label": "System default",
+      "email": "ana@example.com",
+      "org": "Example Org",
+      "configDir": null,
+      "isDefault": true,
+      "needsSignIn": true,
+      "error": null,
+      "usage": { "session": null, "weekly": null, "fable": null, "monthly": null },
+      "credits": null,
+      "usageUpdatedAt": null,
+      "lastAuthenticatedAt": null
+    },
+    {
+      "id": "1b9d6bcd-bbfd-4b2d-9b5d-ab8dfbbd4bed",
+      "label": "ana@example.com",
+      "email": "ana@example.com",
+      "org": "Example Org",
+      "configDir": "/Users/ana/Library/Application Support/Orca Dev/claude-profiles/1b9d6bcd-bbfd-4b2d-9b5d-ab8dfbbd4bed/home",
+      "isDefault": false,
+      "needsSignIn": false,
+      "error": null,
+      "usage": {
+        "session": { "percent": 41, "resetsAt": 1794010920000 },
+        "weekly": { "percent": 65, "resetsAt": 1794367200000 },
+        "fable": { "percent": 22, "resetsAt": 1794367200000 },
+        "monthly": null
+      },
+      "credits": null,
+      "usageUpdatedAt": 1793999820000,
+      "lastAuthenticatedAt": 1793300000000
+    },
+    {
+      "id": "7c9e6679-7425-40de-944b-e07fc1f90ae7",
+      "label": "ben@example.org",
+      "email": "ben@example.org",
+      "org": "Acme",
+      "configDir": "/Users/ana/.config/herdr-app/claude-accounts-profiles/7c9e6679-7425-40de-944b-e07fc1f90ae7/home",
+      "isDefault": false,
+      "needsSignIn": false,
+      "error": "rateLimited",
+      "usage": {
+        "session": null,
+        "weekly": { "percent": 94, "resetsAt": 1794183600000 },
+        "fable": { "percent": 42, "resetsAt": 1794183600000 },
+        "monthly": { "percent": 12, "resetsAt": 1795728000000 }
+      },
+      "credits": { "balance": 12.5, "limit": 50 },
+      "usageUpdatedAt": 1793997600000,
+      "lastAuthenticatedAt": 1793658301633
+    }
+  ]
+}
