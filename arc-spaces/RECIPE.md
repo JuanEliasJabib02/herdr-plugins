@@ -5,6 +5,8 @@ workspace's group, the way Orca Pro Max does it: one group for work, another
 for personal projects, each with its own space in Arc. Arc stays your default
 browser, and links from any other app open as they always did.
 
+![Arc spaces](preview.png)
+
 **What you need**
 
 - macOS, Arc, and `jq` (macOS 15 ships it; before that, `brew install jq`).
