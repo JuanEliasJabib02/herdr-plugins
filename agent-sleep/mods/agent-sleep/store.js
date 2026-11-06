@@ -8,6 +8,8 @@
 // Record states (D4, D13): "live" (a running Claude, kept for restart
 // recovery), "stopping" (written before /exit), "asleep" (the shell is back).
 // `flags` holds only the user's own flags (D8): launcher flags never get here.
+// `env` (optional) is the `NAME=1` assignment Claude's exit hint put before
+// `claude` (Log L10), replayed on resume; resume.js says which it accepts.
 
 import { DEFAULT_IDLE_MINUTES, MIN_IDLE_MINUTES, MAX_IDLE_MINUTES } from "./rules.js";
 
@@ -64,6 +66,8 @@ export async function loadSettings(io, p) {
 const isText = (v) => typeof v === "string" && v.length > 0;
 const isTextOrNull = (v) => v === null || v === undefined || typeof v === "string";
 const isCountOrNull = (v) => v === null || v === undefined || (Number.isFinite(v) && v >= 0);
+export const ENV_PATTERN = /^[A-Z_][A-Z0-9_]*=1$/;
+const isEnvOrNull = (v) => v === null || v === undefined || (typeof v === "string" && ENV_PATTERN.test(v));
 
 function validRecord(r) {
   return (
@@ -77,7 +81,8 @@ function validRecord(r) {
     isTextOrNull(r.workspacePath) &&
     isTextOrNull(r.holder) &&
     isCountOrNull(r.rssKb) &&
-    isCountOrNull(r.rootPid)
+    isCountOrNull(r.rootPid) &&
+    isEnvOrNull(r.env)
   );
 }
 

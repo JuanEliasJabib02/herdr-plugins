@@ -238,3 +238,20 @@ test("claim: stopping and live records are not claimable by a reveal", () => {
   assert.equal(claim(records, "t2").claimed, null);
   assert.equal(claim(records, "t2", { states: ["live"] }).claimed.state, "live");
 });
+
+// T5: the optional `env` a Claude's exit hint asked for (Log L10), replayed
+// before `claude` on resume. Only a `NAME=1` assignment is storable.
+test("records: env is optional and, when set, must be NAME=1", () => {
+  const ok = [undefined, null, "CLAUDE_CODE_EXPERIMENTAL_CODE_MODE=1", "_X=1", "A1=1"];
+  for (const env of ok) {
+    const records = { t1: env === undefined ? rec() : rec({ env }) };
+    const parsed = parseRecords(serializeRecords(records));
+    assert.equal(parsed.bad, false, `env ${JSON.stringify(env)}`);
+    assert.deepEqual(parsed.records, records);
+  }
+  for (const env of ["", "FOO=bar", "lower=1", "1X=1", "X=1 Y=1", "X=1;rm", 1, ["X=1"]]) {
+    const parsed = parseRecords(serializeRecords({ t1: rec({ env }) }));
+    assert.equal(parsed.bad, true, `env ${JSON.stringify(env)}`);
+    assert.deepEqual(parsed.records, {}, `env ${JSON.stringify(env)}`);
+  }
+});

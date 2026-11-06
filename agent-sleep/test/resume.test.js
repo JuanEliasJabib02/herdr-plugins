@@ -10,7 +10,7 @@ import { execFileSync } from "node:child_process";
 import {
   CLAUDE_VERSION, SKIP, REFUSE,
   claudeOption, filterFlags, isClaudeExecutable, resumeFlags,
-  quoteArg, canResumeIn, resumeCommand, hintDifference,
+  quoteArg, canResumeIn, resumeCommand, hintDifference, REPLAYABLE_ENV,
 } from "../mods/agent-sleep/resume.js";
 import { parseExitScreen } from "../mods/agent-sleep/claude-session.js";
 
@@ -221,4 +221,29 @@ test("resume.js is pure: no herdr import, no I/O", () => {
   const src = readFileSync(new URL("../mods/agent-sleep/resume.js", import.meta.url), "utf8");
   assert.doesNotMatch(src, /from\s+["']herdr["']/);
   assert.doesNotMatch(src, /\brequire\(|\bDate\.now\(|node:child_process|node:fs/);
+});
+
+// ── T5: the env assignment Claude's hint asks for (Log L10) ───────────────
+
+test("resumeCommand replays CLAUDE_CODE_EXPERIMENTAL_CODE_MODE=1 before claude, and only that", () => {
+  assert.deepEqual(REPLAYABLE_ENV, ["CLAUDE_CODE_EXPERIMENTAL_CODE_MODE=1"]);
+  assert.deepEqual(command({ env: "CLAUDE_CODE_EXPERIMENTAL_CODE_MODE=1" }), {
+    ok: true, command: `CLAUDE_CODE_EXPERIMENTAL_CODE_MODE=1 claude --resume ${SID}`,
+  });
+  assert.deepEqual(command({ env: "CLAUDE_CODE_EXPERIMENTAL_CODE_MODE=1", shellCwd: "/elsewhere", flags: ["--model", "opus"] }), {
+    ok: true, command: `cd /code/app && CLAUDE_CODE_EXPERIMENTAL_CODE_MODE=1 claude --model opus --resume ${SID}`,
+  });
+  for (const env of [null, undefined]) assert.equal(command({ env }).command, `claude --resume ${SID}`);
+  for (const env of ["FOO=1", "CLAUDE_CODE_EXPERIMENTAL_CODE_MODE=0", "X=$(id)", "", 1]) {
+    assert.deepEqual(command({ env }), { ok: false, reason: "unsupported-env" }, `env ${JSON.stringify(env)}`);
+  }
+});
+
+test("hintDifference: an env the command replays is no difference; another one is", () => {
+  const hint = (env) => parseExitScreen(["Resume this session with:", `${env} claude --resume ${SID}`, ""].join("\n"));
+  const mode = "CLAUDE_CODE_EXPERIMENTAL_CODE_MODE=1";
+  assert.equal(hintDifference(hint(mode), [], mode), null);
+  assert.match(hintDifference(hint(mode), []), /sets CLAUDE_CODE_EXPERIMENTAL_CODE_MODE=1, the resume command doesn't/);
+  assert.match(hintDifference(hint("FOO=1"), [], mode), /FOO=1/);
+  assert.match(hintDifference(parseExitScreen(fixture("claude-exit.txt")), [], mode), /the resume command sets CLAUDE_CODE_EXPERIMENTAL_CODE_MODE=1/);
 });

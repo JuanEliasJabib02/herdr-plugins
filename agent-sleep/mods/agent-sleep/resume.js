@@ -20,6 +20,10 @@
 //   finds the transcript by the folder it runs in.
 // - Every part shell-quoted (Orca's portable Unix form), only for shells
 //   whose quoting that is: the sh family and fish.
+// - `CLAUDE_CODE_EXPERIMENTAL_CODE_MODE=1` before `claude` when Claude's
+//   exit hint asked for it (the only assignment 2.1.318 prints: `GI` in its
+//   binary); any other assignment refuses, so that Claude is never resumed
+//   without it (Log L10).
 
 import { normalizeSessionId } from "./claude-session.js";
 import { shellName } from "./prompt.js";
@@ -253,32 +257,40 @@ export function canResumeIn(shell) {
   return name !== null && QUOTABLE.has(name);
 }
 
+// The env assignments a resume replays before `claude` (record field `env`).
+export const REPLAYABLE_ENV = Object.freeze(["CLAUDE_CODE_EXPERIMENTAL_CODE_MODE=1"]);
+
 const hasControl = (s) => /[\u0000-\u001f\u007f]/.test(s);
 const sameTokens = (a, b) => a.length === b.length && a.every((t, i) => t === b[i]);
 
 // { flags (resumeFlags' list, as stored), sessionId, cwd (the session's),
-//   shellCwd (the shell's now; unknown → cd anyway), shell }
+//   shellCwd (the shell's now; unknown → cd anyway), shell, env (optional,
+//   one of REPLAYABLE_ENV) }
 // → { ok: true, command } or { ok: false, reason }: "unsupported-shell",
-// "invalid-session-id", "bad-cwd" (not absolute, or a control character),
-// "bad-flags" (not what rjo would keep: the record was edited or broken).
-export function resumeCommand({ flags, sessionId, cwd, shellCwd, shell } = {}) {
+// "unsupported-env", "invalid-session-id", "bad-cwd" (not absolute, or a
+// control character), "bad-flags" (not what rjo would keep: the record was
+// edited or broken).
+export function resumeCommand({ flags, sessionId, cwd, shellCwd, shell, env } = {}) {
   if (!canResumeIn(shell)) return { ok: false, reason: "unsupported-shell" };
+  if (env !== null && env !== undefined && !REPLAYABLE_ENV.includes(env)) return { ok: false, reason: "unsupported-env" };
   const id = normalizeSessionId(sessionId);
   if (id === null) return { ok: false, reason: "invalid-session-id" };
   if (typeof cwd !== "string" || !cwd.startsWith("/") || hasControl(cwd)) return { ok: false, reason: "bad-cwd" };
   if (!Array.isArray(flags) || !flags.every((f) => typeof f === "string")) return { ok: false, reason: "bad-flags" };
   const again = filterFlags(flags);
   if (!again.ok || !sameTokens(again.flags, flags)) return { ok: false, reason: "bad-flags" };
-  const claude = ["claude", ...flags, "--resume", id].map(quoteArg).join(" ");
+  const words = ["claude", ...flags, "--resume", id].map(quoteArg);
+  // REPLAYABLE_ENV entries are plain words: written as they are, never quoted.
+  const claude = (env ? [env, ...words] : words).join(" ");
   return { ok: true, command: cwd === shellCwd ? claude : `cd ${quoteArg(cwd)} && ${claude}` };
 }
 
 // D3: the flags Claude printed in its exit hint (parseExitScreen) against
 // the ones this command replays. A line for the log when they differ (or
-// Claude asked for an env assignment the command doesn't set), else null.
-// Expected for launcher-run Claudes: rjo refuses the launcher's JSON, so
-// Claude prints no flags at all.
-export function hintDifference(parsed, flags) {
+// the hint's env assignment isn't the one the command sets, `env`), else
+// null. Expected for launcher-run Claudes: rjo refuses the launcher's JSON,
+// so Claude prints no flags at all.
+export function hintDifference(parsed, flags, env = null) {
   if (typeof parsed !== "object" || parsed === null || parsed.shape !== "resume" || !Array.isArray(parsed.flags)) {
     return null;
   }
@@ -286,6 +298,12 @@ export function hintDifference(parsed, flags) {
   const printed = parsed.flags.join(" ");
   const ours = Array.isArray(flags) ? flags.join(" ") : "";
   if (printed !== ours) notes.push(`Claude's hint printed flags "${printed}", the resume command has "${ours}"`);
-  if (parsed.env) notes.push(`Claude's hint sets ${parsed.env}, the resume command doesn't`);
+  const replayed = env ?? null;
+  const theirs = parsed.env ?? null;
+  if (theirs !== replayed) {
+    notes.push(theirs === null
+      ? `Claude's hint sets no env, the resume command sets ${replayed}`
+      : `Claude's hint sets ${theirs}, the resume command ${replayed === null ? "doesn't" : `sets ${replayed}`}`);
+  }
   return notes.length > 0 ? notes.join("; ") : null;
 }
