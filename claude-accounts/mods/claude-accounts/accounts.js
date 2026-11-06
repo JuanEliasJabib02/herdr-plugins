@@ -232,7 +232,7 @@ export default class Accounts {
 
     const body = v_flex().id("ca-accounts-body").flex_1().min_h(0).overflow_y_scrollbar()
       .child(v_flex().px(18).pb(16).gap(14)
-        .child(div().text_size(12).text_color(t.muted).child(m.intro))
+        .when(Boolean(m.intro), (el) => el.child(div().text_size(12).text_color(t.muted).child(m.intro)))
         .child(v_flex().gap(10)
           .child(v_flex().gap(2)
             .child(div().text_size(13).font_semibold().child(m.title))
@@ -254,7 +254,7 @@ export default class Accounts {
               })
               .child("Hide"))))
           .child(v_flex().gap(8)
-            .child(this.systemDefaultRow(t, m))
+            .when(Boolean(m.systemDefault), (el) => el.child(this.systemDefaultRow(t, m)))
             .when(Boolean(m.duplicate), (el) => el.child(h_flex().gap(8).items_start()
               .child(div().flex_1().min_w(0).text_size(11.5).text_color(t.muted).child(m.duplicate?.text ?? ""))
               .child(this.button(t, "ca-accounts-dismiss", m.duplicate?.dismiss ?? "", "ghost", true, (cx) => this.dismissDuplicate(cx, m.duplicate?.email)))))

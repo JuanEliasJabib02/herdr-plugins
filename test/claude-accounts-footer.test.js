@@ -284,20 +284,16 @@ test("panel: Claude · Updated 3m ago, the active account's card with Session, W
   assert.equal(m.manage, "Manage Accounts…");
 });
 
-test("panel (S9): the list has only the other accounts, System default first, wk and Fable bars; the card shows the active one", () => {
+test("panel (S9, S10): the list has only the other saved accounts, with wk and Fable bars; the card shows the active one", () => {
   const m = panelModel({ doc: DOC, now: NOW });
   assert.equal(m.card.label, "ana@example.com");
   assert.equal(m.heading, "Other accounts");
-  assert.deepEqual(m.rows.map((r) => [r.id, r.label, r.active]), [
-    ["default", "System default", false],
-    [BEN, "ben@example.org", false],
-  ]);
-  const [def, ben] = m.rows;
-  // System default's login lapsed: Orca's hint, and the row signs it in.
-  assert.equal(def.hint, "Sign in again to use this account");
-  assert.equal(def.signIn, "default");
-  assert.deepEqual(def.bars, []);
-  assert.equal(def.disabled, false);
+  // S10: System default is the Mac's own login, not one of Herdr's accounts.
+  assert.deepEqual(m.rows.map((r) => [r.id, r.label, r.active]), [[BEN, "ben@example.org", false]]);
+  const [ben] = m.rows;
+  // A saved account whose login lapsed: Orca's hint, and the row signs it in.
+  const lapsed = panelModel({ doc: docWith(ANA, { [BEN]: { needsSignIn: true } }), now: NOW }).rows[0];
+  assert.deepEqual([lapsed.hint, lapsed.signIn, lapsed.bars, lapsed.disabled], ["Sign in again to use this account", BEN, [], false]);
   // S1: `[red bar] 94% used wk` and `[bar] 42% used Fable`; monthly stays out
   // while there's a weekly window (InlineUsageBars).
   assert.deepEqual(ben.bars.map((b) => [b.text, b.fill, b.color]), [["94% used wk", 94, "blocked"], ["42% used Fable", 42, "muted"]]);
@@ -311,16 +307,15 @@ const elsewhere = { signedInAs: "dee@example.com", needsSignIn: true, usage: NO_
 
 test("panel (S8): a folder signed in as someone else keeps its saved email, names the login, signs in, and has no bars", () => {
   const m = panelModel({ doc: docWith(ANA, { [BEN]: elsewhere }), now: NOW });
-  const ben = m.rows[1];
+  const ben = m.rows[0];
   assert.deepEqual(
     [ben.label, ben.hint, ben.signIn, ben.bars, ben.status, ben.active, ben.disabled],
     ["ben@example.org", "Now signed in as dee@example.com", BEN, [], null, false, false],
   );
-  assert.equal(m.rows[0].hint, "Sign in again to use this account", "a lapsed login keeps Orca's hint");
   // Its row reads like itself even when the login it holds is another row's.
   const taken = panelModel({ doc: docWith(ANA, { [BEN]: { ...elsewhere, signedInAs: "ana@example.com" } }), now: NOW });
-  assert.deepEqual(taken.rows.map((r) => r.label), ["System default", "ben@example.org"]);
-  assert.equal(taken.rows[1].hint, "Now signed in as ana@example.com");
+  assert.deepEqual(taken.rows.map((r) => r.label), ["ben@example.org"]);
+  assert.equal(taken.rows[0].hint, "Now signed in as ana@example.com");
 
   // Active: its card has its name and no numbers, and its row stays, because
   // it's the only way to sign in (S9's exception).
@@ -329,7 +324,7 @@ test("panel (S8): a folder signed in as someone else keeps its saved email, name
   assert.deepEqual(active.card.windows, []);
   assert.equal(active.card.credits, null);
   assert.equal(active.card.notice.label, "Sign in again");
-  assert.deepEqual([active.rows[2].label, active.rows[2].hint, active.rows[2].signIn, active.rows[2].bars, active.rows[2].disabled], ["ben@example.org", "Now signed in as dee@example.com", BEN, [], false]);
+  assert.deepEqual([active.rows[1].label, active.rows[1].hint, active.rows[1].signIn, active.rows[1].bars, active.rows[1].disabled], ["ben@example.org", "Now signed in as dee@example.com", BEN, [], false]);
   assert.equal(footerModel({ doc: docWith(BEN, { [BEN]: elsewhere }), width: 400, now: NOW }).kind, "signIn");
 });
 
@@ -339,16 +334,14 @@ test("readAccounts: signedInAs is a login's email or null, on any account of an 
 });
 
 test("panel rows: a session bar counts down, monthly alone shows, an error without numbers says its label; busy disables all", () => {
-  const doc = docWith(ANA, {
-    [BEN]: { usage: { session: w(30, NOW + 47 * MIN), weekly: w(10), fable: null, monthly: null } },
-    default: { needsSignIn: false, usage: { ...NO_USAGE, monthly: w(12) } },
-  });
+  const doc = docWith(ANA, { [BEN]: { usage: { session: w(30, NOW + 47 * MIN), weekly: w(10), fable: null, monthly: null } } });
   const m = panelModel({ doc, now: NOW });
-  assert.deepEqual(m.rows[1].bars.map((b) => b.text), ["30% used 47m", "10% used wk"]);
-  assert.deepEqual(m.rows[0].bars.map((b) => b.text), ["12% used 30d"]);
-  assert.equal(m.rows[0].signIn, null);
+  assert.deepEqual(m.rows[0].bars.map((b) => b.text), ["30% used 47m", "10% used wk"]);
+  const monthly = panelModel({ doc: docWith(ANA, { [BEN]: { usage: { ...NO_USAGE, monthly: w(12) } } }), now: NOW }).rows[0];
+  assert.deepEqual(monthly.bars.map((b) => b.text), ["12% used 30d"]);
+  assert.equal(monthly.signIn, null);
   const failed = docWith(ANA, { [BEN]: { usage: NO_USAGE, error: "network" } });
-  assert.equal(panelModel({ doc: failed, now: NOW }).rows[1].status, "Network issue");
+  assert.equal(panelModel({ doc: failed, now: NOW }).rows[0].status, "Network issue");
   assert.ok(panelModel({ doc: DOC, now: NOW, busy: true }).rows.every((r) => r.disabled));
 });
 
@@ -381,7 +374,7 @@ test("panel card without numbers: Sign in again, an error, loading; Not yet upda
   assert.deepEqual(def.card.windows, []);
   assert.deepEqual(def.card.notice, {
     label: "Sign in again",
-    message: "The selected Claude account needs you to sign in again. Open Manage Accounts…, or choose System default.",
+    message: "The selected Claude account needs you to sign in again. Open Manage Accounts…, or choose another account.",
   });
   assert.equal(def.updated, "Not yet updated");
   const failed = panelModel({ doc: docWith(BEN, { [BEN]: { usage: NO_USAGE, error: "refreshFailed", errorDetail: "socket hang up" } }), now: NOW });
@@ -1212,12 +1205,13 @@ test("panel view: Orca's refusal (exit 5) shows under the heading, and the next 
   assert.ok(withText(view.render(), "cannot start"));
 });
 
-test("panel view: an account whose login lapsed signs in from its row, in a tab, and the panel closes", async () => {
-  const { view, world } = await panel();
-  const row = find(view.render(), "ca-panel-row-default");
-  assert.match(textOf(row), /System default Sign in again to use this account Sign in/);
+test("panel view: an account whose login lapsed signs in from its row, in a tab, and the panel closes; System default has no row (S10)", async () => {
+  const { view, world } = await panel(liveDoc(ANA, { [BEN]: { needsSignIn: true } }));
+  assert.equal(find(view.render(), "ca-panel-row-default"), null);
+  const row = find(view.render(), `ca-panel-row-${BEN}`);
+  assert.match(textOf(row), /ben@example.org Sign in again to use this account Sign in/);
   row.handlers.click({}, world.cx);
-  assert.deepEqual(world.tabs(), [{ name: "Claude sign-in", argv: [CLI, "login", "default"] }]);
+  assert.deepEqual(world.tabs(), [{ name: "Claude sign-in", argv: [CLI, "login", BEN] }]);
   assert.deepEqual(world.closed(), ["ov-this"]);
   assert.equal(world.execs.filter((a) => a[0] === "use").length, 0);
 });

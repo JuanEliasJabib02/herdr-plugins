@@ -33,8 +33,10 @@ the same files and run the same commands: see [CONTRACT.md](CONTRACT.md).
 - **Claude panel:** "Claude · Updated 3m ago" (or "Not yet updated"). The
   active account's card: Session, Weekly and Fable, each "N% used · Resets
   in …", plus the monthly spend and credits when the account has them. Then
-  the `Other accounts` list: System default and each saved account but the
-  active one, with their `wk` and `Fable` bars. Click one to switch. An
+  the `Other accounts` list: each saved account but the active one, with
+  their `wk` and `Fable` bars. System default, the Mac's own login (what
+  `claude` uses outside Herdr), isn't listed here or in Manage Accounts
+  unless it's the active account. Click one to switch. An
   active account that needs signing in keeps its row, with its ✓, to do it
   from there. An account whose login lapsed says "Sign in again to use this
   account", and its row opens the sign-in tab. One whose folder got someone
@@ -47,9 +49,9 @@ the same files and run the same commands: see [CONTRACT.md](CONTRACT.md).
     sign-in ("Now signed in as {login}" under it when its folder got someone
     else's login), `Sign in again ▾` (its menu: "Copy sign-in link instead")
     and `Remove`. Then `Add account ▾`, with the same menu.
-  - "System default: {email}" / "Use your current {email} Claude login.",
-    and Orca's notice when System default is signed in as an email that is
-    also a saved account.
+  - Only while System default is the active account: "System default:
+    {email}" / "Use your current {email} Claude login.", and Orca's notice
+    when it is signed in as an email that is also a saved account.
   - "Switching applies to the next Claude you start in any tab."
   - The setting **When you switch accounts while Claude is running in
     terminals**, "Restarting continues each terminal conversation on the new

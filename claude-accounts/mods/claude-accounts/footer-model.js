@@ -418,11 +418,12 @@ export function panelModel({ doc, now = Date.now(), busy = false, error = null }
     card: active ? card(active, now) : null,
     heading: "Other accounts",
     // The card has the active account (S9). Its row stays only to sign it in,
-    // since nothing else in the panel does.
+    // since nothing else in the panel does. System default, the Mac's own
+    // login, shows only while it's the active one (S10).
     rows: accounts
-      .filter((a) => a.id !== active?.id || a.needsSignIn)
+      .filter((a) => (a.id === active?.id ? a.needsSignIn : !a.isDefault))
       .map((a) => accountRow(a, a.id === active?.id, now, busy === true)),
-    empty: accounts.some((a) => a.id !== active?.id) ? null : "No other accounts",
+    empty: accounts.some((a) => a.id !== active?.id && !a.isDefault) ? null : "No other accounts",
     error,
     manage: "Manage Accounts…",
   };

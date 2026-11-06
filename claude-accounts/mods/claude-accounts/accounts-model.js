@@ -87,9 +87,12 @@ export function accountsModel({ accounts, settings, dismissed = null, signingIn 
   const dupEmail = def && str(def.duplicateOf) && defEmail ? defEmail : null;
   const isDismissed = dupEmail && typeof dismissed === "string" && dismissed.trim().toLowerCase() === dupEmail.toLowerCase();
 
+  // System default is the Mac's own login, not one of Herdr's accounts: it,
+  // its duplicate notice and the intro that offers it show only while it's
+  // the active one (S10).
   return {
     heading: "Claude",
-    intro: "Optional. Herdr can use your normal Claude login; add accounts only if you want quick switching without moving chat sessions.",
+    intro: !defActive ? null : "Optional. Herdr can use your normal Claude login; add accounts only if you want quick switching without moving chat sessions.",
     title: "Claude Accounts",
     help: "Switching applies to the next Claude you start in any tab.",
     listTitle: "Accounts",
@@ -99,7 +102,7 @@ export function accountsModel({ accounts, settings, dismissed = null, signingIn 
     signInAgain: "Sign in again",
     remove: "Remove",
     activeBadge: "Active",
-    systemDefault: {
+    systemDefault: !defActive ? null : {
       id: "default",
       title: defEmail ? `System default: ${defEmail}` : SYSTEM_DEFAULT,
       subtitle: `Use your current ${THIS_DEVICE_SENTENCE} Claude login.`,
@@ -110,7 +113,7 @@ export function accountsModel({ accounts, settings, dismissed = null, signingIn 
       // it lapsed or there's none.
       canSignIn: def?.needsSignIn === true || !defEmail,
     },
-    duplicate: dupEmail && !isDismissed
+    duplicate: defActive && dupEmail && !isDismissed
       ? {
         email: dupEmail,
         text: `System default is signed in as ${dupEmail}, which is also a saved account. An earlier Orca version may have copied that login there. If it is not your own login, select System default and run claude /login.`,

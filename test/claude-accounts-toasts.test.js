@@ -370,20 +370,17 @@ test("confirm: the answers are T4's `restart --answer`, plus `settings set switc
 
 // ── The accounts view (Manage Accounts…, S2) ───────────────────────────────
 
-test("accounts: one row per saved account: email, This device, org · date, Active; System default with its email", () => {
+test("accounts: one row per saved account: email, This device, org · date, Active; no System default while it isn't active (S10)", () => {
   const m = accountsModel({ accounts: accounts(), settings: readSettings(fixture("settings.json")) });
   assert.equal(m.title, "Claude Accounts");
   assert.equal(m.help, "Switching applies to the next Claude you start in any tab.");
   assert.equal(m.add, "Add Account");
   assert.equal(m.copyLink, "Copy sign-in link instead");
-  assert.deepEqual(m.systemDefault, {
-    id: "default",
-    title: "System default: ana@example.com",
-    subtitle: "Use your current this device Claude login.",
-    active: false,
-    canSelect: true,
-    canSignIn: true,
-  });
+  // S10: the Mac's own login isn't one of Herdr's accounts, so neither it, its
+  // duplicate notice nor the intro that offers it show.
+  assert.equal(m.systemDefault, null);
+  assert.equal(m.duplicate, null);
+  assert.equal(m.intro, null);
   assert.deepEqual(m.rows, [
     { id: ANA, email: "ana@example.com", badges: ["This device", "Active"], subtitle: "Example Org · Oct 29, 1:53 PM", hint: null, active: true, needsSignIn: false, canSelect: false },
     { id: BEN, email: "ben@example.org", badges: ["This device"], subtitle: "Acme · Nov 2, 5:25 PM", hint: null, active: false, needsSignIn: false, canSelect: true },
@@ -407,15 +404,25 @@ test("accounts: S2's setting, with Orca's title, help text and three choices", (
   assert.equal(accountsModel({ accounts: accounts(), settings: readSettings(null) }).setting.valueLabel, "Ask", "Orca's default");
 });
 
-test("accounts: Orca's duplicate notice for System default, until dismissed for that email", () => {
-  const m = accountsModel({ accounts: accounts(), settings: readSettings(null) });
+test("accounts: Orca's duplicate notice for an active System default, until dismissed for that email", () => {
+  const active = () => ({ ...accounts(), active: "default" });
+  const m = accountsModel({ accounts: active(), settings: readSettings(null) });
+  assert.deepEqual(m.systemDefault, {
+    id: "default",
+    title: "System default: ana@example.com",
+    subtitle: "Use your current this device Claude login.",
+    active: true,
+    canSelect: false,
+    canSignIn: true,
+  });
+  assert.ok(m.intro);
   assert.deepEqual(m.duplicate, {
     email: "ana@example.com",
     text: "System default is signed in as ana@example.com, which is also a saved account. An earlier Orca version may have copied that login there. If it is not your own login, select System default and run claude /login.",
     dismiss: "Dismiss",
   });
-  assert.equal(accountsModel({ accounts: accounts(), dismissed: "ANA@example.com" }).duplicate, null);
-  assert.ok(accountsModel({ accounts: accounts(), dismissed: "someone@else.com" }).duplicate);
+  assert.equal(accountsModel({ accounts: active(), dismissed: "ANA@example.com" }).duplicate, null);
+  assert.ok(accountsModel({ accounts: active(), dismissed: "someone@else.com" }).duplicate);
 });
 
 test("accounts: a row that needs sign-in says Orca's line and can't be picked; System default is active when `active` is default", () => {

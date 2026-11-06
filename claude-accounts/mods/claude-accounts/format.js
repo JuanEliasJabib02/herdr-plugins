@@ -125,7 +125,7 @@ const ERRORS = Object.freeze({
   unavailable: { label: "Usage unavailable", message: "Claude usage is unavailable right now." },
   needsSignIn: {
     label: "Sign in again",
-    message: "The selected Claude account needs you to sign in again. Open Manage Accounts…, or choose System default.",
+    message: "The selected Claude account needs you to sign in again. Open Manage Accounts…, or choose another account.",
   },
 });
 

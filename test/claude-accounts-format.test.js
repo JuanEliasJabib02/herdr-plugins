@@ -160,7 +160,7 @@ test("errorCopy unavailable: 'Usage unavailable' / 'Claude usage is unavailable 
 test("errorCopy needsSignIn: 'Sign in again' / Orca's message, with Manage Accounts… for Settings > AI Provider Accounts", () => {
   assert.deepEqual(errorCopy("needsSignIn"), {
     label: "Sign in again",
-    message: "The selected Claude account needs you to sign in again. Open Manage Accounts…, or choose System default.",
+    message: "The selected Claude account needs you to sign in again. Open Manage Accounts…, or choose another account.",
   });
 });
 
