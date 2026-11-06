@@ -1,0 +1,1 @@
+{"address": "t2", "argv": ["/bin/zsh", "-l"], "keep": true, "state": "live", "reason": null, "foreground": {"argv": ["/bin/zsh", "-l"], "cwd": "/tmp/scratch", "name": "zsh", "pid": 92734}, "status": null, "turn": 0, "exit_code": null, "signal": null}
