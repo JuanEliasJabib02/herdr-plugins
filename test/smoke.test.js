@@ -45,6 +45,17 @@ test("projects layout: tree replaces Spaces, groups block sits above the footer"
   assert.deepEqual(groups.size, { px: 44 });
 });
 
+test("projects layout: the status bar is a row, workspace-status then the claude-accounts footer (claude-accounts D10)", () => {
+  const status = find(read("layouts/projects.json"), "status");
+  assert.equal(status.type, "row");
+  assert.equal(status.resizable, false);
+  assert.deepEqual(status.size, { px: 28 });
+  assert.deepEqual(status.children, [
+    { id: "status-workspace", type: "block", size: { weight: 1 }, content: { mod: "workspace-status" } },
+    { id: "status-usage", type: "block", size: { weight: 1 }, content: { mod: "claude-accounts", props: { view: "footer" } } },
+  ]);
+});
+
 test("the workspace menu is a view of the mod (D20)", () => {
   const src = (f) => readFileSync(new URL(`../projects-sidebar/mods/projects/${f}`, import.meta.url), "utf8");
   assert.match(src("main.js"), /"workspace-menu":\s*WorkspaceMenu/);
@@ -92,6 +103,13 @@ test("Task mode: lanes, their folding, and New workspace in the header (D31, D32
   assert.match(tree, /toggleTaskCollapsed\(/);
   assert.match(tree, /"projects-new-workspace"[\s\S]*?openNewWorkspace\(focusedProject\(\)\)/, "the header's New workspace opens the dialog");
   assert.match(src("store.js"), /export function toggleTaskCollapsed/);
+});
+
+test("working mark: Claude Code's glyphs change in place with frames(), never spin()'s ~30 fps turn (S36)", () => {
+  const tree = readFileSync(new URL("../projects-sidebar/mods/projects/tree.js", import.meta.url), "utf8");
+  assert.match(tree, /WORKING_FRAMES = Object\.freeze\(\["·", "✢", "✳", "✶", "✻", "✽", "✻", "✶", "✳", "✢"\]\)/);
+  assert.match(tree, /\.frames\(WORKING_FRAMES, 120\)\.child\(WORKING_FRAMES\[0\]\)/, "native frames, starting on the first glyph");
+  assert.doesNotMatch(tree, /\.spin\(/, "no spin(): Herdr turns it at about 30 fps, which stutters");
 });
 
 test("Task notes and the task menu: a lane's right-click and its tooltip, and their views (D34, D35)", () => {

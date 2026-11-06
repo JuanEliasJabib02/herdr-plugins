@@ -124,7 +124,9 @@ across repos.
     - a "Branch" input, prefilled with the branch and selected;
     - under it, a live line: "branch <old> → <new> · folder <new>", or
       "· folder stays <old> (a terminal is open there)", "(locked by git)"
-      or "(has submodules)";
+      or "(has submodules)"; for a name that differs from the branch only
+      in case, "Only the case changes: git on macOS can't rename a branch
+      that way.", and Rename stays off;
     - for a pushed branch, from the moment it opens, what Rename does on
       origin: "Renames it on GitHub too (<owner>/<repo>).", "Pushes a copy
       as <new>; origin keeps <old>." or "origin no longer has <old>: renames
@@ -133,8 +135,10 @@ across repos.
       #<n> when its branch is renamed.", and the button reads "Rename
       anyway";
     - a refusal in `blocked` once git has checked the typed name: "origin
-      already has <new>.", "Branch <new> already exists." or "<path> already
-      exists." (only when the folder would move); and, whatever the name:
+      already has <new>.", "Branch <new> already exists." (naming the branch
+      in the case it has: "Branch ax-1 already exists." for `AX-1`) or
+      "<path> already exists." (only when the folder would move); and,
+      whatever the name:
       "Couldn't reach origin: <git's first line>.", "Also pushed as
       <remote>/<old>: renaming would split it." or "You can't push to
       <owner>/<repo>.";
@@ -172,7 +176,9 @@ across repos.
 
 **How it behaves**
 
-- **Status marks:** a spinner (`working`), "!" (`blocked`), or a dot (`done`).
+- **Status marks:** Claude Code's working glyphs, · ✢ ✳ ✶ ✻ ✽ changing in
+  place (`working`; Herdr's `spin()` turns at about 30 fps, which stutters),
+  "!" (`blocked`), or a dot (`done`).
   Idle and unknown show the home or branch icon. A project row that is
   collapsed shows the most urgent status among its workspaces.
 - **Click a workspace:** selects its space (when two spaces share it, the
@@ -223,16 +229,24 @@ across repos.
 - **Rename…** (never on the main checkout): the input starts as the branch,
   and the untouched branch never renames. Each `/` segment of the name is
   slugged like a new workspace's (`Fix Login!` → `Fix-Login`), so `user/feat`
-  keeps its namespace. A name that differs from the branch only in case
+  keeps its namespace; a `HEAD` segment is dropped and a `.lock` ending
+  goes, in any case. A name that differs from the branch only in case
   (`AX-1` for `ax-1`) counts as unchanged: on macOS git finds that branch
-  already there. On open the dialog asks git whether the folder can
+  already there, and the live line says so. Other names are compared the
+  way a Mac's disk does, ignoring case: a new name is refused, before
+  anything changes here or on origin, when a local branch has it (packed
+  ones too: `ax-1` refuses `AX-1`), when a local branch would sit under or
+  over it (`feat` refuses `Feat/y`, `Feat/x` refuses `feat`), or when a
+  remote's copy (`origin/ax-1`) or origin itself has it or such a
+  neighbour. On open the dialog asks git whether the folder can
   move (a fresh `worktree list`: the lock, and submodule checkouts as Delete
   counts them), and it checks the typed name a moment after typing stops.
   - **A pushed branch** (a copy on a remote, or an upstream of its own
     name) is decided by what origin has, read once with `git ls-remote
-    origin refs/heads/<old> refs/heads/<new>` (exact names, so
-    `someone/<new>` doesn't count):
-    - origin has `<new>` → refused;
+    --heads origin` (only `refs/heads/<old>` before a name is typed); whole
+    names count, ignoring case, so `someone/<new>` doesn't and `ax-1` does
+    for `AX-1`:
+    - origin has `<new>` in any case → refused;
     - another remote has `<old>` too → refused, since renaming would split
       it;
     - origin no longer has `<old>` (a merged PR's deleted branch) → renamed
@@ -287,8 +301,9 @@ across repos.
     (the focused space's project, else the active group's first).
   - Choosing companions: each gets a worktree with the same branch from its
     own default branch, and no space.
-  - A name taken in any chosen repo (branch or folder) becomes `-2`, `-3`… for
-    all of them.
+  - A name taken in any chosen repo, by a branch (packed ones too) or a
+    folder, in any case (`ax-3735` takes `AX-3735`, as a Mac's disk does),
+    becomes `-2`, `-3`… for all of them.
   - ⌘↵ creates:
     1. A fetch from origin, in every repo at once. A failure warns and the
        create continues.
@@ -310,7 +325,11 @@ across repos.
 - **Layout `layouts/projects.json`:** Herdr's `main` tree with block
   `spaces` → `{ "mod": "projects" }`, and a new block `groups` →
   `{ "mod": "projects", "props": { "view": "groups" } }` (px 44) between
-  `sidebar-lists` and `sidebar-footer`. Preview `layouts/projects.svg`.
+  `sidebar-lists` and `sidebar-footer`. The status bar (`status`, px 28)
+  is a row: `workspace-status`, then `{ "mod": "claude-accounts", "props":
+  { "view": "footer" } }`, Claude's usage at its right as in Orca, both
+  weight 1 (the claude-accounts plugin draws it). Preview
+  `layouts/projects.svg`.
 - **Mod `mods/projects/`** (`mod.json` `{ "place": "none" }`), one mod in
   views picked by `props.view`:
   - none = `tree.js` (the tree; the only copy that reads key commands);
@@ -364,7 +383,7 @@ across repos.
   - Whatever program another plugin's badge names in its `exec`, when you
     click that badge; its hover says which ("· runs <program>").
 - **Art:** its own Lucide-style icons in `icons/` (folder, branch, home,
-  plus, code, copy), plus chevrons, check, x, square-pen and spinner from
+  plus, code, copy), plus chevrons, check, x and square-pen from
   Herdr's `workspace-chrome` and agent icons from Herdr's `icons/`.
 
 **Badges from other plugins**
@@ -518,7 +537,13 @@ against.
 - **Limits:**
   - Only the first three groups have keys.
   - Branch names have no user prefix and are slugged to 48 characters,
-    keeping the case typed (`AX-3735` stays `AX-3735`, as in Orca).
+    keeping the case typed (`AX-3735` stays `AX-3735`, as in Orca). A name
+    is never `HEAD` (git refuses it, so the dialog asks for a name) and
+    never ends in `.lock` in any case (`x.LOCK` becomes `x`: on a Mac's
+    disk it is the lock file of `x`).
+  - Names are compared ignoring case, as a Mac's disk does, so `ax-1` and
+    `AX-1` never both come from the plugin, and a branch can't be renamed
+    to a case change of itself.
   - Linear, GitLab and fetching issue titles aren't supported; such a link
     is named by its slug.
   - The main checkout is never renamed or deleted, and a branch is deleted

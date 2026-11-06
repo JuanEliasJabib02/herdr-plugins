@@ -343,8 +343,13 @@ export function deleteOutcome(r, { label, open }) {
 // at all, so the dialog has no input and no Rename.
 const STUCK = ["missing", "main", "detached"];
 
-// Refusals the live line already says ("Type a new name for the branch.").
+// Refusals the live line already says ("Type a new name for the branch.", or
+// CASE_ONLY).
 const UNNAMED = ["empty", "unchanged"];
+
+// The live line for a name that differs from the branch only in case
+// (renameTarget's caseOnly): git on macOS finds that branch already there.
+const CASE_ONLY = "Only the case changes: git on macOS can't rename a branch that way.";
 
 // renameCheck refusals of what origin has, whatever name is typed (D28):
 // shown until a check says otherwise, with the input still there.
@@ -387,13 +392,14 @@ function folderStays(check, spaces, terminals) {
 // moveFolder, reason, checking, ready, button, editable }: branch: the
 // branch now (the input's prefill); name: what the text becomes
 // (renameTarget); line: the live line, "branch <old> → <new> · folder <new>"
-// or "· folder stays <old> (<why>)"; remote: what Rename does on origin
-// (D28), "" when nothing; warnings: the PRs GitHub closes; moveFolder: what
-// renameWorkspace gets; reason: a refusal, of the workspace (detached, the
-// main checkout: no input, no Rename; origin unreachable, pushed elsewhere,
-// no push access) or of the typed name (on origin, taken), shown before
-// Enter; ready: Enter may rename; button: "Rename", "Rename anyway" (a PR
-// closes) or null.
+// or "· folder stays <old> (<why>)", CASE_ONLY when only the case changes,
+// else "Type a new name for the branch." while unnamed; remote: what Rename
+// does on origin (D28), "" when nothing; warnings: the PRs GitHub closes;
+// moveFolder: what renameWorkspace gets; reason: a refusal, of the workspace
+// (detached, the main checkout: no input, no Rename; origin unreachable,
+// pushed elsewhere, no push access) or of the typed name (on origin, taken),
+// shown before Enter; ready: Enter may rename; button: "Rename", "Rename
+// anyway" (a PR closes) or null.
 export function renamePrompt({ path, row, text, check, live, spaces, terminals, home }) {
   const at = normPath(path);
   const label = row ? workspaceLabel({ ...row, path: normPath(row.path) || at }) : baseName(at);
@@ -414,7 +420,8 @@ export function renamePrompt({ path, row, text, check, live, spaces, terminals, 
   const named = Boolean(target.name) && !target.unchanged;
   const warnings = origin?.route === "github" ? origin.prs.map((pr) => `GitHub closes PR #${pr.number} when its branch is renamed.`) : [];
   let line = "";
-  if (!stuck && (!target.name || target.unchanged)) line = "Type a new name for the branch.";
+  if (!stuck && target.caseOnly) line = CASE_ONLY;
+  else if (!stuck && (!target.name || target.unchanged)) line = "Type a new name for the branch.";
   else if (!stuck && old) {
     line = `branch ${old} → ${target.name}`;
     // The folder part waits for git. A folder that already has the name

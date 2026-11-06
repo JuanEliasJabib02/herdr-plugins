@@ -11,7 +11,7 @@ import { join } from "node:path";
 import { emptyRegistry, addProject, addGroup, selectGroup, findProject } from "../projects-sidebar/mods/projects/lib.js";
 import {
   NAME_MAX, CLAUDE_SETTINGS,
-  slug, parseInput, pickName, freeName, worktreePath,
+  slug, parseInput, pickName, freeName, worktreePath, findBranch,
   pickDefaultBase, baseChoices, baseFor, rememberBase, baseMenuRows,
   agentChoices, defaultAgent, agentArgv,
   projectChoices, companionChoices, initialProject,
@@ -45,6 +45,28 @@ test("slug: never starts with a dash, and is always a name git takes as a branch
   for (const s of ["-rf", "..hidden", "a..b", "x.lock", "Añadir café", "  --Hello__World--  "]) {
     assert.ok(!slug(s).startsWith("-"));
   }
+});
+
+test("slug: never HEAD, and no .lock ending in any case (on a Mac's disk x.LOCK is x's lock file)", () => {
+  assert.equal(slug("HEAD"), "", "git refuses it: the dialog asks for a name");
+  assert.equal(slug("  HEAD  "), "");
+  assert.equal(slug("HEAD.lock"), "", "HEAD once .lock is gone");
+  assert.equal(slug("x.LOCK"), "x");
+  assert.equal(slug("x.Lock.lock"), "x", "every .lock ending, whatever its case");
+  assert.equal(slug("x.LOCK."), "x");
+  assert.equal(slug("head"), "", "nor head: on a Mac's disk origin/head is origin/HEAD");
+  assert.equal(slug("Head"), "");
+  assert.equal(slug("HEAD-2"), "HEAD-2", "only HEAD itself, in any case");
+  assert.equal(slug("locksmith"), "locksmith");
+});
+
+test("findBranch: the branch a name is on a Mac's disk, compared ignoring case; null when none", () => {
+  assert.equal(findBranch(["main", "ax-3735"], "AX-3735"), "ax-3735", "a case variant is that branch");
+  assert.equal(findBranch(["main", "AX-3735"], "AX-3735"), "AX-3735");
+  assert.equal(findBranch(["main", "user/Feat"], "USER/feat"), "user/Feat");
+  assert.equal(findBranch(["main", "ax-3735-2"], "AX-3735"), null, "whole names only");
+  assert.equal(findBranch([], "x"), null);
+  assert.equal(findBranch(null, "x"), null);
 });
 
 test("pickName: a name taken in one companion moves every repo to -2", () => {
@@ -360,6 +382,29 @@ test("git: a name is taken by a branch in any repo or by an existing folder in t
   mkdirSync(join(ws, "taken-a", "fix-2"), { recursive: true });
   assert.equal(await taken(a, "fix-2"), true, "a folder");
   assert.equal(await freeName("fix", [a, b], taken), "fix-3", "fix is taken in b, fix-2 in a: fix-3 for both");
+});
+
+// The branches of a repo as git has them, exact case, loose and packed.
+const branchRefs = (dir) => sh(dir, ["for-each-ref", "--format=%(refname)", "refs/heads/"]).split("\n").filter(Boolean).sort();
+
+test("create: a branch taken in another case, packed or loose, moves the name to -2; no twin is made (S35, L31)", async () => {
+  for (const packed of [true, false]) {
+    const p = makeProject(packed ? "case-packed" : "case-loose");
+    const ws = join(root, packed ? "ws-case-packed" : "ws-case-loose");
+    sh(p.path, ["branch", "ax-3735"]);
+    const before = head(p.path, "refs/heads/ax-3735");
+    if (packed) {
+      sh(p.path, ["pack-refs", "--all", "--prune"]);
+      assert.ok(!existsSync(join(p.path, ".git", "refs", "heads", "ax-3735")), "only in packed-refs: show-ref misses it in another case");
+    }
+    assert.equal(await io.branchExists(p.path, "AX-3735"), true, "ax-3735 is AX-3735 on a Mac's disk");
+    const r = await createWorkspace({ primary: p, companions: [], text: "AX-3735", base: null, agent: claude, access: false, root: ws, home: "/nowhere" }, io);
+    assert.equal(r.error, undefined);
+    assert.equal(r.name, "AX-3735-2", packed ? "packed" : "loose");
+    assert.deepEqual(branchRefs(p.path), ["refs/heads/AX-3735-2", "refs/heads/ax-3735", "refs/heads/main"], "no AX-3735 next to ax-3735");
+    assert.equal(head(p.path, "refs/heads/ax-3735"), before, "the old branch is untouched");
+    assert.equal(r.launch.folder, join(ws, "case-" + (packed ? "packed" : "loose"), "AX-3735-2"));
+  }
 });
 
 test("create: companions then the primary, each from its base, and one space for the primary with the companions added", async () => {

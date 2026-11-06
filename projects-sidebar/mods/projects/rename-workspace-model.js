@@ -10,28 +10,30 @@
 // are translated under es_ES and change across versions.
 
 import { normPath, baseName, listCheckouts } from "./lib.js";
-import { slug } from "./new-workspace-model.js";
+import { slug, sameBranch, findBranch } from "./new-workspace-model.js";
 
 // ── Names (D25) ────────────────────────────────────────────────────────────
 
 // What typed text becomes as a branch: each `/` segment slugged like D12,
-// empty ones dropped, so a namespace (user/feat) survives and every segment
-// is a name git takes. "" when nothing is left.
+// empty ones dropped (a HEAD segment too), so a namespace (user/feat)
+// survives and every segment is a name git takes. "" when nothing is left.
 export function branchName(text) {
   if (typeof text !== "string") return "";
   return text.split("/").map(slug).filter(Boolean).join("/");
 }
 
-// The rename the typed text asks of a branch: { name, unchanged }. Text
-// equal to the old branch (spaces around it aside) is unchanged before any
-// slugging, so an untouched prefill is never slugged into a rename; a text
-// that slugs to the old branch, or differs from it only in case, is
-// unchanged too: on macOS git finds ax-1 already there when asked for AX-1.
+// The rename the typed text asks of a branch: { name, unchanged, caseOnly? }.
+// Text equal to the old branch (spaces around it aside) is unchanged before
+// any slugging, so an untouched prefill is never slugged into a rename; a
+// text that slugs to the old branch is unchanged too, and so is one that
+// differs from it only in case, with caseOnly: true: on macOS git finds
+// ax-1 already there when asked for AX-1.
 export function renameTarget(text, oldBranch) {
   const typed = typeof text === "string" ? text.trim() : "";
   if (oldBranch && typed === oldBranch) return { name: oldBranch, unchanged: true };
   const name = branchName(typed);
-  return { name, unchanged: Boolean(name) && Boolean(oldBranch) && name.toLowerCase() === oldBranch.toLowerCase() };
+  if (!name || !oldBranch || !sameBranch(name, oldBranch)) return { name, unchanged: false };
+  return name === oldBranch ? { name, unchanged: true } : { name, unchanged: true, caseOnly: true };
 }
 
 // Where a renamed workspace's folder goes: a sibling of the one it is in,
@@ -47,18 +49,21 @@ export function folderFor(path, name) {
 // its target "already there".
 const sameFolder = (a, b) => a.toLowerCase() === b.toLowerCase();
 
-// The branches a name sits under: a/b/c → a, a/b.
-const parentsOf = (name) => {
-  const segs = String(name).split("/");
-  return segs.slice(0, -1).map((_, i) => segs.slice(0, i + 1).join("/"));
-};
-
 // Whether branch `b` is in the way of a new branch `name`: git can't have a
 // branch that is another's folder (with feat, no feat/x; with feat/x, no
 // feat), and `branch -m` would only find it after origin got the new name.
-// The branch being renamed isn't: git moves it into or out of its own path
-// (feat → feat/x).
-const inTheWay = (b, name, old) => b !== old && (name.startsWith(`${b}/`) || b.startsWith(`${name}/`));
+// Compared ignoring case, as a Mac's disk does (feat is Feat's folder). The
+// branch being renamed moves out of its own path in any case (Feat/x →
+// feat), but into it only in its own case: git takes feat → feat/x and, on
+// a Mac's disk, refuses feat → Feat/x while feat is a loose ref ("'refs/
+// heads/Feat' exists"). A packed feat would pass; refusing both is safe.
+const inTheWay = (b, name, old) => {
+  const [low, to] = [b.toLowerCase(), name.toLowerCase()];
+  const into = to.startsWith(`${low}/`);
+  if (!into && !low.startsWith(`${to}/`)) return false;
+  if (b !== old) return true;
+  return into && !name.startsWith(`${b}/`);
+};
 
 // ── git and gh ─────────────────────────────────────────────────────────────
 
@@ -72,13 +77,11 @@ export const GIT = {
   // with two, the first by name needn't be origin's. `*` stops at a slash,
   // so origin/x/b doesn't count.
   remoteRefs: (b) => ["for-each-ref", "--format=%(refname)", `refs/remotes/*/${b}`],
-  // The local branches that could be in the way of <b>: its parents and
-  // what is under it. A plain pattern also lists what is under it (refs/
-  // heads/feat lists feat/y), so inTheWay picks.
-  branchesNear: (b) => ["for-each-ref", "--format=%(refname)", ...parentsOf(b).map((p) => `refs/heads/${p}`), `refs/heads/${b}/`],
-  // The same on every remote's copies, as the last fetch saw them: `*` is
-  // one segment (the remote), a trailing `/**` crosses them.
-  remotesNear: (b) => ["for-each-ref", "--format=%(refname)", ...parentsOf(b).map((p) => `refs/remotes/*/${p}`), `refs/remotes/*/${b}/**`],
+  // Every local branch and every remote's copy as the last fetch saw it,
+  // loose or packed: the check compares the new name with them ignoring
+  // case (sameBranch, inTheWay), as a Mac's disk does, which git's patterns
+  // can't.
+  refs: ["for-each-ref", "--format=%(refname)", "refs/heads/", "refs/remotes/"],
   merge: (b) => ["config", "--get-all", `branch.${b}.merge`],
   remote: (b) => ["config", "--get", `branch.${b}.remote`],
   rename: (from, to) => ["branch", "-m", "--", from, to],
@@ -87,10 +90,11 @@ export const GIT = {
   // D28. What origin has now, in one call that names each ref in full: a
   // pattern (`--heads <name>`) would also match someone/<name>.
   lsRemote: (old, name) => ["ls-remote", "origin", `refs/heads/${old}`, ...(name ? [`refs/heads/${name}`] : [])],
-  // The check's look, the same one call: also origin's branches that could
-  // be in the way of <new> (ls-remote matches a pattern against a ref's
-  // end, `*` across slashes; inTheWay picks).
-  lsRemoteNear: (old, name) => [...GIT.lsRemote(old, name), ...(name ? [...parentsOf(name).map((p) => `refs/heads/${p}`), `refs/heads/${name}/*`] : [])],
+  // The check's look, one call. With a new name, every branch of origin:
+  // <new> and what would be in the way of it are compared ignoring case
+  // (ls-remote's patterns are exact-case), and <old> read by its exact
+  // refname. With none yet, only <old>.
+  lsRemoteNear: (old, name) => (name ? ["ls-remote", "--heads", "origin"] : GIT.lsRemote(old, null)),
   // The URL git really contacts, insteadOf applied.
   url: ["remote", "get-url", "origin"],
   // One ref, never the whole remote (D13: a big fetch can pass exec's 30 s).
@@ -330,11 +334,14 @@ async function readOrigin(project, old, name, pub, io, git) {
   const refusal = (reason, err) => ({ refusal: { reason, err } });
   const ls = await git(project, GIT.lsRemoteNear(old, name));
   if (!ls.ok) return refusal("unreachable", `Couldn't reach origin: ${redact(firstLine(ls.err)) || "git didn't answer"}.`);
-  const { from, to } = remoteHeads(ls.out, old, name);
-  if (to) return refusal("remote-exists", `origin already has ${name}.`);
-  const near = name && lines(ls.out).map((l) => l.split(/\s+/)[1] ?? "")
-    .filter((ref) => ref.startsWith("refs/heads/")).map((ref) => ref.slice("refs/heads/".length))
-    .find((b) => inTheWay(b, name, old));
+  const { from } = remoteHeads(ls.out, old, name);
+  // origin's branches, each compared with <new> ignoring case: a fetch
+  // would make ax-1 and AX-1 one file here.
+  const heads = lines(ls.out).map((l) => l.split(/\s+/)[1] ?? "")
+    .filter((ref) => ref.startsWith("refs/heads/")).map((ref) => ref.slice("refs/heads/".length));
+  const twin = name && findBranch(heads, name);
+  if (twin) return refusal("remote-exists", `origin already has ${twin}.`);
+  const near = name && heads.find((b) => inTheWay(b, name, old));
   if (near) return refusal("remote-exists", `origin already has ${near}: git can't also have ${name}.`);
   const elsewhere = [...pub.remotes, pub.upstream].find((r) => r && r !== "origin");
   if (elsewhere) return refusal("pushed-elsewhere", `Also pushed as ${elsewhere}/${old}: renaming would split it.`);
@@ -397,23 +404,24 @@ export async function renameCheck({ project, path, name, moveFolder }, io) {
   if (!old) return refused("detached", `${baseName(here)} is detached or in the middle of a rebase.`, null, list);
   const target = renameTarget(name, old);
   const named = Boolean(target.name) && !target.unchanged;
+  // The local branches, read once with the remote copies below; the new
+  // name is compared with each ignoring case (sameBranch, inTheWay).
+  let locals = [];
   if (named) {
+    const refs = lines((await git(project, GIT.refs)).out);
+    locals = refs.filter((r) => r.startsWith("refs/heads/")).map((r) => r.slice("refs/heads/".length));
+    const copies = refs.filter((r) => r.startsWith("refs/remotes/"))
+      .map((r) => r.split("/")).map(([, , remote, ...rest]) => ({ remote, b: rest.join("/") })).filter(({ b }) => b);
     // A remote copy of the new name as the last fetch saw it: a cheap first
     // filter, offline.
-    const ref = lines((await git(project, GIT.remoteRefs(target.name))).out)[0];
-    if (ref) {
-      const remote = ref.slice("refs/remotes/".length, -(target.name.length + 1));
-      return refused("remote-exists", `${remote} already has ${target.name}.`, old, list);
-    }
+    const same = copies.find(({ b }) => sameBranch(b, target.name));
+    if (same) return refused("remote-exists", `${same.remote} already has ${same.b}.`, old, list);
     // A remote branch in the way of the new name, the same way.
-    const copy = lines((await git(project, GIT.remotesNear(target.name))).out)
-      .map((r) => r.split("/")).map(([, , remote, ...rest]) => ({ remote, b: rest.join("/") }))
-      .find(({ b }) => inTheWay(b, target.name, old));
+    const copy = copies.find(({ b }) => inTheWay(b, target.name, old));
     if (copy) return refused("remote-exists", `${copy.remote} already has ${copy.b}: git can't also have ${target.name}.`, old, list);
     // A local branch in the way: decided here, before origin is asked, so
     // nothing remote runs for a name `branch -m` would refuse.
-    const blocker = lines((await git(project, GIT.branchesNear(target.name))).out)
-      .map((r) => r.slice("refs/heads/".length)).find((b) => inTheWay(b, target.name, old));
+    const blocker = locals.find((b) => inTheWay(b, target.name, old));
     if (blocker) return refused("branch-exists", `Branch ${blocker} already exists: git can't also have ${target.name}.`, old, list);
   }
   const pub = await publishedAs(project, old, git);
@@ -422,7 +430,10 @@ export async function renameCheck({ project, path, name, moveFolder }, io) {
   const { origin } = read;
   if (!target.name) return refused("empty", "Type a name for the branch.", old, list, origin);
   if (target.unchanged) return refused("unchanged", `The branch is already ${old}.`, old, list, origin);
-  if ((await git(project, GIT.branch(target.name))).ok) return refused("branch-exists", `Branch ${target.name} already exists.`, old, list, origin);
+  // The new branch in any case, loose or packed: git's own lookup misses a
+  // packed ax-1 when asked for AX-1, and `branch -m` would make a twin.
+  const taken = findBranch(locals, target.name);
+  if (taken) return refused("branch-exists", `Branch ${taken} already exists.`, old, list, origin);
   const newPath = folderFor(here, target.name);
   const same = sameFolder(newPath, here);
   const folderTaken = !same && (await io.exists(newPath));

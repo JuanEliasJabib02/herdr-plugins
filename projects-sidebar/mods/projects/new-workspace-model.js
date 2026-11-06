@@ -17,17 +17,32 @@ export const NAME_MAX = 48;
 const trimEnds = (s) => s.replace(/^[-.]+|[-.]+$/g, "");
 
 // What a typed name becomes, as the branch and the folder: the case typed
-// (AX-3735 stays AX-3735, as in Orca), accents dropped, every run of other characters one dash, no dashes or dots
-// at the ends, no "..", no ".lock" ending, at most NAME_MAX characters.
-// Always a name git takes as a branch, or "".
+// (AX-3735 stays AX-3735, as in Orca), accents dropped, every run of other
+// characters one dash, no dashes or dots at the ends, no "..", no ".lock"
+// ending in any case (on a Mac's disk x.LOCK is x's lock file), never HEAD
+// in any case (git refuses HEAD, and on a Mac's disk origin/head is
+// origin/HEAD), at most NAME_MAX characters. Always a name git takes as a
+// branch, or "".
 export function slug(text) {
   if (typeof text !== "string") return "";
   let s = text.normalize("NFD").replace(/[̀-ͯ]/g, "")
     .replace(/[^A-Za-z0-9._-]+/g, "-")
     .replace(/\.{2,}/g, ".");
   s = trimEnds(trimEnds(s).slice(0, NAME_MAX));
-  while (s.endsWith(".lock")) s = trimEnds(s.slice(0, -5));
-  return s;
+  while (/\.lock$/i.test(s)) s = trimEnds(s.slice(0, -5));
+  return s.toUpperCase() === "HEAD" ? "" : s;
+}
+
+// Whether two branch names are one on a Mac's disk, where a loose ref is a
+// file and file names ignore case: ax-1 and AX-1 are one.
+export const sameBranch = (a, b) => String(a).toLowerCase() === String(b).toLowerCase();
+
+// The branch of `branches` (short names) that `name` is on a Mac's disk
+// (sameBranch), or null. git alone finds a case variant only while it is a
+// loose file: once packed, `show-ref refs/heads/AX-1` misses ax-1, and git
+// would make AX-1 next to it, a twin that shadows it.
+export function findBranch(branches, name) {
+  return (branches ?? []).find((b) => sameBranch(b, name)) ?? null;
 }
 
 const GITHUB = /^https?:\/\/(?:www\.)?github\.com\/[^/]+\/[^/]+\/(pull|issues)\/(\d+)(?:[/?#]|$)/i;
@@ -123,7 +138,9 @@ export const GIT = {
   originHead: ["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"],
   refs: (refs) => ["for-each-ref", "--format=%(refname)", ...refs],
   recent: ["for-each-ref", "--sort=-committerdate", "--count=31", "--format=%(refname)", "refs/remotes/origin"],
-  branch: (name) => ["show-ref", "--verify", "--quiet", `refs/heads/${name}`],
+  // Every local branch, loose or packed: findBranch compares them ignoring
+  // case, which git's own lookups don't.
+  branches: ["for-each-ref", "--format=%(refname)", "refs/heads/"],
   add: (name, path, base) => ["worktree", "add", "--no-track", "-b", name, "--", path, base],
 };
 
@@ -165,8 +182,11 @@ export async function baseExistsIn(repo, base, git) {
   return r.ok && lines(r.out).includes(ref);
 }
 
+// Whether the repo has the branch `name` in any case (findBranch), loose or
+// packed: one listing of refs/heads.
 export async function branchExistsIn(repo, name, git) {
-  return (await git(repo, GIT.branch(name))).ok;
+  const r = await git(repo, GIT.branches);
+  return r.ok && findBranch(lines(r.out).map(shortRef), name) !== null;
 }
 
 // `git worktree add --no-track -b <name> -- <path> <base>` in the repo; git
@@ -187,8 +207,9 @@ export function gitOps(git) {
   };
 }
 
-// taken(project, name) for freeName: the branch exists in that repo, or the
-// workspace's folder is already there. `io`: { branchExists, exists }.
+// taken(project, name) for freeName: the branch exists in that repo in any
+// case, or the workspace's folder is already there (a Mac's disk ignores
+// case there too). `io`: { branchExists, exists }.
 export function nameTaken(io, root, home) {
   return async (project, name) =>
     (await io.branchExists(project.path, name)) || (await io.exists(worktreePath(root, repoName(project), name, home)));
