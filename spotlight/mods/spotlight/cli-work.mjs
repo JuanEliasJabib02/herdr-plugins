@@ -397,9 +397,29 @@ export async function deactivateRepo(cx, root, { force = false } = {}) {
       delete s.queue.lighting[`direct/${root}`];
       addNote(s, { repo: root, text: "Spotlight off — root restaurado", toast: true }, now);
       if (res.warning) addNote(s, { repo: root, text: `${name}: ${res.warning.message}`, toast: true }, now);
+      for (const text of rescuedNotes(res.rescued)) addNote(s, { repo: root, text: `${name}: ${text}`, toast: true }, now);
     });
-    return { ok: true, warning: res.warning, stopped };
+    return { ok: true, warning: res.warning, stopped, rescued: res.rescued };
   });
+}
+
+// What a turn-off did with untracked root files in its way (sync.js
+// deactivate's `rescued`), one line each, in Spanish like the other toasts.
+export function rescuedNotes(rescued) {
+  if (!rescued) return [];
+  const names = (ps) => ps.slice(0, 3).join(", ") + (ps.length > 3 ? ` (+${ps.length - 3} más)` : "");
+  const lines = [];
+  if (rescued.restored.length > 0) {
+    const verb = rescued.restored.length === 1 ? "quedó" : "quedaron";
+    lines.push(`${names(rescued.restored)} ${verb} como cambio sin commit (tu versión). Copia en ${rescued.ref}.`);
+  }
+  if (rescued.kept.length > 0) {
+    const verb = rescued.kept.length === 1 ? "volvió" : "volvieron";
+    lines.push(
+      `${names(rescued.kept)} ${verb} con tus cambios sin commit de antes de Spotlight; tu versión está en ${rescued.ref} (git checkout ${rescued.ref} -- <archivo>).`,
+    );
+  }
+  return lines;
 }
 
 // ── Waiting for the servers (port of waitForTurnServers) ───────────────────

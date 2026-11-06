@@ -11,10 +11,13 @@
 //   under refs/herdr-spotlight/* BEFORE anything destructive runs: a crash at
 //   any point leaves the root recoverable with plain git.
 // - Who holds the root lives in state.json (D7), not in these refs.
+// - A turn-off never destroys an untracked root file at a path it writes: the
+//   file is saved in a commit under refs/herdr-spotlight/rescued/* first (kept
+//   after the turn-off) and written back on top when nothing else claims it.
 //
 // Node-only: the CLI imports it, the mod never does.
 import { execFile } from "node:child_process";
-import { access, realpath } from "node:fs/promises";
+import { access, realpath, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { isGeneratedFile } from "./sync-generated.js";
 
@@ -24,6 +27,9 @@ export const REFS = Object.freeze({
   originalHead: "refs/herdr-spotlight/original-head",
   originalBranch: "refs/herdr-spotlight/original-branch",
 });
+
+/** Where a turn-off saves untracked root files in its way, one ref per turn-off. */
+export const RESCUED_PREFIX = "refs/herdr-spotlight/rescued/";
 
 /** Orca Pro Max's own Spotlight refs: a root holding any is Orca's, not ours. */
 export const ORCA_REFS_PREFIX = "refs/orca/spotlight/";
@@ -113,6 +119,12 @@ export function gitContext(overrides = {}) {
 const IDENTITY_ARGS = ["-c", "user.name=Herdr Spotlight", "-c", "user.email=spotlight@herdr.local"];
 const SNAPSHOT_MESSAGE = "Herdr Spotlight snapshot";
 const TEMP_INDEX = "herdr-spotlight-index";
+const RESCUE_INDEX = "herdr-spotlight-rescue-index";
+const RESCUE_MESSAGE = "Herdr Spotlight: untracked root files a turn-off would have overwritten";
+// Paths taken as they are: a Next.js route like app/[id]/page.tsx is no glob.
+const LITERAL = { GIT_LITERAL_PATHSPECS: "1" };
+// Paths per git argv, well under any command-line limit.
+const PATHS_PER_CALL = 100;
 
 // The subcommand an argv runs, past any leading `-c key=value` pairs.
 function subcommandOf(args) {
@@ -596,11 +608,19 @@ export async function assertDeactivatable(ctx, rootPath, opts = {}) {
 /** Restores the root: its original commit, its branch, and its uncommitted
  *  changes (staged and unstaged), then deletes the refs. `force` discards a
  *  diverged root (Orca's "Turn off anyway"). Returns {originalBranch,
- *  branchMissing, branchInUse, warning}: when the branch can't be re-attached
- *  (deleted, or checked out in another worktree) the root is left detached at
- *  its original commit and `warning` is a `branch-missing` {code, message}. */
+ *  branchMissing, branchInUse, warning, rescued}: when the branch can't be
+ *  re-attached (deleted, or checked out in another worktree) the root is left
+ *  detached at its original commit and `warning` is a `branch-missing`
+ *  {code, message}. `rescued` is null, or {ref, restored, kept} when untracked
+ *  root files were in the way: all saved in `ref`, `restored` written back on
+ *  top, `kept` only in `ref` (the root's own changes brought those paths). */
 export async function deactivate(ctx, rootPath, opts = {}) {
   const refs = await assertDeactivatable(ctx, rootPath, opts);
+  // Saved before anything is written, then cleared out of the reset's and the
+  // backup's way (a backup bringing a path that's there untracked can't apply).
+  const inTheWay = await untrackedInTheWay(ctx, rootPath, refs);
+  const rescuedRef = inTheWay.length > 0 ? await rescueFiles(ctx, rootPath, inTheWay) : null;
+  for (const p of inTheWay) await rm(join(rootPath, p), { force: true });
   await git(ctx, rootPath, ["reset", "--hard", refs.originalHeadSha]);
 
   let branchMissing = false;
@@ -629,12 +649,15 @@ export async function deactivate(ctx, rootPath, opts = {}) {
     } catch (error) {
       // The refs stay: the backup is still reachable, to retry or apply by
       // hand (`git stash apply --index refs/herdr-spotlight/backup`).
+      const saved = rescuedRef ? ` The untracked root files in the turn-off's way are in ${rescuedRef}.` : "";
       throw new SpotlightError(
         "restore-conflict",
-        `Restoring the root's original uncommitted changes conflicted: ${error instanceof Error ? error.message : String(error)}`,
+        `Restoring the root's original uncommitted changes conflicted: ${error instanceof Error ? error.message : String(error)}.${saved}`,
       );
     }
   }
+
+  const rescued = rescuedRef ? await writeBack(ctx, rootPath, refs, rescuedRef, inTheWay) : null;
 
   await git(ctx, rootPath, ["update-ref", "-d", REFS.snapshot]);
   await git(ctx, rootPath, ["update-ref", "-d", REFS.backup]);
@@ -649,7 +672,65 @@ export async function deactivate(ctx, rootPath, opts = {}) {
         : `The root is back on its original commit but left detached: branch "${refs.originalBranch}" no longer exists.`,
     }
     : null;
-  return { originalBranch: refs.originalBranch, branchMissing, branchInUse, warning };
+  return { originalBranch: refs.originalBranch, branchMissing, branchInUse, warning, rescued };
+}
+
+const chunksOf = (list) => {
+  const out = [];
+  for (let i = 0; i < list.length; i += PATHS_PER_CALL) out.push(list.slice(i, i + PATHS_PER_CALL));
+  return out;
+};
+
+/** Untracked root files (non-ignored, beyond generated files) at paths a
+ *  turn-off writes: the original commit's files and the backup's. The reset
+ *  would overwrite them, the backup refuses to apply over them, and their
+ *  content was never in any git object. Sorted. */
+async function untrackedInTheWay(ctx, rootPath, refs) {
+  const { untrackedPaths } = await readRootStatus(ctx, rootPath);
+  if (untrackedPaths.size === 0) return [];
+  const shas = [refs.originalHeadSha];
+  if (refs.backupSha && refs.backupSha !== refs.originalHeadSha) shas.push(refs.backupSha);
+  const hit = new Set();
+  for (const sha of shas) {
+    const raw = await gitRaw(ctx, rootPath, ["ls-tree", "-r", "-z", "--name-only", sha]);
+    for (const p of raw.split("\0")) if (p && untrackedPaths.has(p)) hit.add(p);
+  }
+  return [...hit].sort();
+}
+
+/** Commits `paths` as they are on disk, through a temp index, to a new ref
+ *  under RESCUED_PREFIX (no parent, on no branch). Returns the ref. */
+async function rescueFiles(ctx, rootPath, paths) {
+  const indexPath = resolve(rootPath, await git(ctx, rootPath, ["rev-parse", "--git-path", RESCUE_INDEX]));
+  const env = { GIT_INDEX_FILE: indexPath, ...LITERAL };
+  await rm(indexPath, { force: true });
+  try {
+    for (const chunk of chunksOf(paths)) await git(ctx, rootPath, ["add", "-f", "--", ...chunk], { env });
+    const treeSha = await git(ctx, rootPath, ["write-tree"], { env });
+    const sha = await git(ctx, rootPath, [...IDENTITY_ARGS, "commit-tree", treeSha, "-m", RESCUE_MESSAGE]);
+    const ref = `${RESCUED_PREFIX}${new Date().toISOString().replace(/[:.]/g, "-")}-${sha.slice(0, 7)}`;
+    await git(ctx, rootPath, ["update-ref", ref, sha]);
+    return ref;
+  } finally {
+    await rm(indexPath, { force: true });
+  }
+}
+
+/** Puts the rescued files back on top of the restored root, unstaged, except
+ *  where the root's own uncommitted changes brought a version of their own:
+ *  those win, and the rescued file stays only in the ref. */
+async function writeBack(ctx, rootPath, refs, ref, paths) {
+  let claimed = new Set();
+  if (refs.backupSha && refs.backupSha !== refs.originalHeadSha) {
+    const raw = await gitRaw(ctx, rootPath, ["diff", "--name-only", "-z", "--no-renames", "--diff-filter=d", refs.originalHeadSha, refs.backupSha]);
+    claimed = new Set(raw.split("\0").filter(Boolean));
+  }
+  const restored = paths.filter((p) => !claimed.has(p));
+  const kept = paths.filter((p) => claimed.has(p));
+  for (const chunk of chunksOf(restored)) {
+    await git(ctx, rootPath, ["restore", `--source=${ref}`, "--worktree", "--", ...chunk], { env: LITERAL });
+  }
+  return { ref, restored, kept };
 }
 
 /** Teardown when a normal turn-off can't finish (the repo is going away):

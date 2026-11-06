@@ -38,7 +38,7 @@ import {
 } from "./cli-format.mjs";
 import {
   markGranted, spawnLights, dropStaleMarkers, lightTask, syncRepo, deactivateRepo, ensureServer, waitForTurnServers,
-  recordServers, reap,
+  recordServers, reap, rescuedNotes,
 } from "./cli-work.mjs";
 import { settleResumes, autoResume, continueTask, classifyTerminal } from "./cli-resume.mjs";
 
@@ -312,6 +312,7 @@ async function verbToggle(cx, opts) {
         return 1;
       }
       out(`Spotlight off in ${name}: root restored.${r.warning ? ` ${r.warning.message}` : ""}`);
+      for (const line of rescuedNotes(r.rescued)) out(line);
       return 0;
     }
     try {

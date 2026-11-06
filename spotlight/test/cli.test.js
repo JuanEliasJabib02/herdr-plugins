@@ -530,6 +530,30 @@ test("toggle off on a root-diverged root refuses; `toggle --force` off restores 
   assert.ok(w.state().notes.some((n) => n.toast && /Spotlight off — root restaurado/.test(n.text)));
 });
 
+test("toggle off with a file made by hand in the root where the original commit has one: off goes ahead, the file keeps its content, and the toast says so", async () => {
+  const w = makeWorld();
+  const app = makeRepo(w, "app", { pkg: DEV, tasks: ["AX-7"], files: { "page.txt": "v1\n" } });
+  w.register([{ id: "g1", repos: [app] }]);
+  const ws = app.ws["AX-7"];
+  git(ws, "rm", "-q", "page.txt");
+  git(ws, "commit", "-q", "-m", "drop page");
+  assert.equal((await w.cli(["toggle", "--workspace", ws])).code, 0);
+  await w.until((s) => s.queue.lighting[`direct/${app.root}`]?.phase === "done", { what: "lit" });
+  assert.equal(existsSync(join(app.root, "page.txt")), false);
+  write(app.root, "page.txt", "mine\n");
+
+  const off = await w.cli(["toggle", "--workspace", ws]);
+  assert.equal(off.code, 0, off.stderr + off.stdout);
+  await w.until(() => !w.state().repos[app.root] && !refsOf(app.root).includes("refs/herdr-spotlight/snapshot"), { what: "restored" });
+  assert.equal(git(app.root, "symbolic-ref", "--short", "HEAD"), "main");
+  assert.equal(readFileSync(join(app.root, "page.txt"), "utf8"), "mine\n");
+  const [rescued] = refsOf(app.root);
+  assert.match(rescued, /^refs\/herdr-spotlight\/rescued\//);
+  const note = w.state().notes.find((n) => n.toast && /page\.txt/.test(n.text));
+  assert.ok(note, JSON.stringify(w.state().notes));
+  assert.match(note.text, /^app: page\.txt quedó como cambio sin commit \(tu versión\)\. Copia en refs\/herdr-spotlight\/rescued\/\S+\.$/);
+});
+
 test("a repo that isn't enabled: `on` takes a slot-only turn and lights nothing; `toggle` on refuses not-enabled; `toggle` off still works", async () => {
   const w = makeWorld();
   const docs = makeRepo(w, "docs", { tasks: ["AX-8"] });

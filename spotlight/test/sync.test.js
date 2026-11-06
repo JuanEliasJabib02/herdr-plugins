@@ -520,16 +520,101 @@ describe("sync engine (D8)", () => {
     write(root, "new.txt", "staged in root\n");
     run(root, "add", "new.txt");
     await activate(ctx, root, wt);
-    // While the root holds the snapshot, something creates new.txt there
-    // untracked: the backup's staged new.txt can't land on it.
-    write(root, "new.txt", "created while active\n");
+    // An untracked file in the way, so the failure also names where it went.
+    run(wt, "rm", "-q", "to-delete.txt");
+    run(wt, "commit", "-qm", "drop to-delete");
+    await sync(ctx, root, wt);
+    write(root, "to-delete.txt", "mine\n");
+    const failing = spying([], (args) => sub(args) === "stash" && args.includes("apply"));
 
-    await rejectsCode(deactivate(ctx, root), "restore-conflict", /Restoring the root's original uncommitted changes conflicted/);
+    await rejectsCode(
+      deactivate(failing, root),
+      "restore-conflict",
+      /Restoring the root's original uncommitted changes conflicted.*refs\/herdr-spotlight\/rescued\//s,
+    );
 
     const refs = await inspectRefs(ctx, root);
     assert.ok(refs.backupSha && refs.originalHeadSha && refs.snapshotSha);
     assert.equal(run(root, "show", `${refs.backupSha}:new.txt`), "staged in root");
-    assert.equal(read(root, "new.txt"), "created while active\n");
+    const [rescued] = run(root, "for-each-ref", "--format=%(refname)", "refs/herdr-spotlight/rescued/").split("\n");
+    assert.equal(run(root, "show", `${rescued}:to-delete.txt`), "mine");
+  });
+
+  // ── Untracked root files in the turn-off's way ──────────────────────────
+
+  test("turn-off never overwrites an untracked root file at a path the original commit has: saved in a rescued ref, written back as an uncommitted change", async () => {
+    // A Next.js-style name: as a pathspec glob, [id] would match app/i.txt too.
+    write(root, "app/[id].txt", "id-original\n");
+    run(root, "add", "-A");
+    run(root, "commit", "-qm", "route");
+    const originalHead = run(root, "rev-parse", "HEAD");
+    run(wt, "rm", "-q", "to-delete.txt");
+    run(wt, "commit", "-qm", "drop to-delete");
+    await activate(ctx, root, wt);
+    assert.equal(existsSync(join(root, "to-delete.txt")), false);
+    assert.equal(existsSync(join(root, "app/[id].txt")), false);
+
+    // Made by hand in the root while Spotlight holds it.
+    write(root, "to-delete.txt", "mine\n");
+    write(root, "app/[id].txt", "my route\n");
+    write(root, "app/i.txt", "unrelated\n");
+    write(root, "notes.txt", "unrelated too\n");
+
+    const out = await deactivate(ctx, root);
+
+    assert.equal(branchOf(root), "main");
+    assert.equal(run(root, "rev-parse", "HEAD"), originalHead);
+    assert.equal(read(root, "to-delete.txt"), "mine\n");
+    assert.equal(read(root, "app/[id].txt"), "my route\n");
+    assert.equal(read(root, "app/i.txt"), "unrelated\n");
+    assert.equal(read(root, "notes.txt"), "unrelated too\n");
+    // Edits of the original files (unstaged: nothing in the index), the others still untracked.
+    assert.deepEqual(run(root, "status", "--porcelain", "-uall").split("\n").map((l) => l.trim()).sort(), [
+      "M app/[id].txt", "M to-delete.txt", "?? app/i.txt", "?? notes.txt",
+    ].sort());
+    assert.equal(run(root, "diff", "--cached"), "");
+
+    assert.deepEqual(out.rescued.restored, ["app/[id].txt", "to-delete.txt"]);
+    assert.deepEqual(out.rescued.kept, []);
+    assert.match(out.rescued.ref, /^refs\/herdr-spotlight\/rescued\/\S+$/);
+    assert.equal(run(root, "show", `${out.rescued.ref}:to-delete.txt`), "mine");
+    assert.equal(run(root, "show", `${out.rescued.ref}:app/[id].txt`), "my route");
+    assert.deepEqual(run(root, "ls-tree", "-r", "--name-only", out.rescued.ref).split("\n").sort(), ["app/[id].txt", "to-delete.txt"]);
+
+    // The anchor refs go; the rescued one stays.
+    const refs = await inspectRefs(ctx, root);
+    assert.deepEqual([refs.snapshotSha, refs.backupSha, refs.originalHeadSha], [null, null, null]);
+    assert.deepEqual(run(root, "for-each-ref", "--format=%(refname)", "refs/herdr-spotlight/").split("\n"), [out.rescued.ref]);
+  });
+
+  test("turn-off with an untracked root file where the root's own uncommitted changes bring a version: theirs comes back, the untracked one stays in the rescued ref", async () => {
+    write(root, "new.txt", "staged in root\n");
+    run(root, "add", "new.txt");
+    write(root, "a.txt", "root-uncommitted\n");
+    await activate(ctx, root, wt);
+    // While the root holds the snapshot, something creates new.txt there
+    // untracked: before, the backup's staged new.txt couldn't land on it.
+    write(root, "new.txt", "created while active\n");
+
+    const out = await deactivate(ctx, root);
+
+    assert.equal(branchOf(root), "main");
+    assert.equal(read(root, "new.txt"), "staged in root\n");
+    assert.equal(run(root, "show", ":new.txt"), "staged in root");
+    assert.equal(read(root, "a.txt"), "root-uncommitted\n");
+    assert.deepEqual(out.rescued.restored, []);
+    assert.deepEqual(out.rescued.kept, ["new.txt"]);
+    assert.equal(run(root, "show", `${out.rescued.ref}:new.txt`), "created while active");
+    assert.equal((await inspectRefs(ctx, root)).backupSha, null);
+  });
+
+  test("turn-off with no untracked file in the way rescues nothing and leaves no rescued ref", async () => {
+    await activate(ctx, root, wt);
+    write(root, "scratch.txt", "untracked, nowhere near the original\n");
+    const out = await deactivate(ctx, root);
+    assert.equal(out.rescued, null);
+    assert.equal(read(root, "scratch.txt"), "untracked, nowhere near the original\n");
+    assert.equal(run(root, "for-each-ref", "refs/herdr-spotlight/"), "");
   });
 
   test("branch-missing: a deleted original branch leaves the root detached at its original commit, with a warning", async () => {
