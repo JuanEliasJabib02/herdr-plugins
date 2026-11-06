@@ -1,0 +1,74 @@
+#!/bin/sh
+# open: macOS's open, except for a link clicked in Herdr, which opens in the Arc
+# space of its group (the arc-spaces plugin). Herdr runs `open <url>` by name,
+# and /usr/local/bin comes before /usr/bin on its PATH, so a link there gets here.
+# Everything else on this Mac that runs `open`, and anything that goes wrong,
+# ends in the real one.
+#
+# ARC_SPACES_OPEN, _OSASCRIPT, _HERDR, _APP and _TIMEOUT are for the tests.
+
+real=${ARC_SPACES_OPEN:-/usr/bin/open}
+
+# Only Herdr's own clicks. Terminals run under herdr-core, so a shell's or an
+# agent's `open` has another parent and goes through, as it does in Orca.
+parent=$(ps -o comm= -p "$PPID" 2>/dev/null)
+case $parent in
+  */Herdr.app/Contents/MacOS/Herdr | */herdr-app) ;;
+  *) exec "$real" "$@" ;;
+esac
+[ $# -eq 1 ] || exec "$real" "$@"
+case $1 in
+  http://* | https://*) ;;
+  *) exec "$real" "$@" ;;
+esac
+
+# The Arc space, or nothing when it's off, the group has no name, or anything
+# here fails. Asked at the click, so it can't be stale: the shown space's folder
+# gives the project (the longest checkout holding it, as projects-sidebar's
+# matchSpaces), the project gives the group. A space outside every group, or on
+# another machine, uses the active group, as Orca does.
+home=${HERDR_APP_HOME:-"$HOME/.config/herdr-app"}
+space=$("${ARC_SPACES_HERDR:-$parent}" ls 2>/dev/null | jq -r --slurpfile shared "$home/shared.json" '
+  def norm: if type == "string" and . != "" then (sub("/+$"; "") | if . == "" then "/" else . end) else "" end;
+  def inside($dir): . == $dir or startswith(if $dir == "/" then "/" else $dir + "/" end);
+  $shared[0] as $s
+  | ($s["arc-spaces.v1"] // {}) as $config
+  | select($config.enabled == true)
+  | $s["projects.v1"] as $registry
+  | ([.spaces[] | select(.active == true)][0]) as $shown
+  | (if ($shown.machine // null) == null then ($shown.folder | norm) else "" end) as $at
+  | ([($s["projects.cache.v1"] // {}) | to_entries[] | (.key | norm) as $project | .value[]?
+      | {project: $project, path: (.path | norm)}
+      | select(.path as $path | $path != "" and ($at | inside($path)))]
+     | max_by(.path | length) | .project?) as $project
+  | ([$registry.groups[] | select(any(.projects[]?; (.path | norm) == $project))][0].id) as $own
+  | ($own // (if any($registry.groups[]; .id == $registry.activeGroup) then $registry.activeGroup else $registry.groups[0].id end)) as $group
+  | ($config.names[$group] // "") | gsub("^\\s+|\\s+$"; "")
+' 2>/dev/null)
+[ -n "$space" ] || exec "$real" "$@"
+
+# A missing app can stop AppleScript on a "Where is Arc?" dialog.
+if [ ! -d "${ARC_SPACES_APP:-/Applications/Arc.app}" ] && [ ! -d "$HOME/Applications/Arc.app" ]; then
+  exec "$real" "$@"
+fi
+
+# Orca's script (src/main/arc-space-url-open.ts). The URL and the name go as
+# arguments, so neither can become script text. The limit: the first use waits
+# on macOS's Automation prompt, and a hung Arc must not eat the click.
+/usr/bin/perl -e 'alarm shift; exec @ARGV' "${ARC_SPACES_TIMEOUT:-10}" "${ARC_SPACES_OSASCRIPT:-/usr/bin/osascript}" \
+  -e 'on run argv' \
+  -e 'set targetUrl to item 1 of argv' \
+  -e 'set spaceName to item 2 of argv' \
+  -e 'tell application id "company.thebrowser.Browser"' \
+  -e 'activate' \
+  -e 'tell front window' \
+  -e 'tell space spaceName' \
+  -e 'focus' \
+  -e 'make new tab with properties {URL:targetUrl}' \
+  -e 'end tell' \
+  -e 'end tell' \
+  -e 'end tell' \
+  -e 'end run' \
+  "$1" "$space" >/dev/null 2>&1 && exit 0
+
+exec "$real" "$@"
