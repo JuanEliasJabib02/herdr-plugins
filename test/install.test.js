@@ -259,3 +259,29 @@ test("a run that fails partway prunes nothing; the next good run does", { skip: 
   assert.equal(existsSync(join(home, "mods/old")), false);
   assert.deepEqual(manifest(home, "demo"), ["layouts/demo.json", "mods/a"]);
 });
+
+test("the real agent-sleep plugin: its mod is copied, its keys merged, projects-sidebar's files left alone", () => {
+  const home = fakeHome({ "layouts/projects.json": "the sidebar's\n", "mods/projects/main.js": "the sidebar's\n", "keys.json": "{}\n" });
+  const r = run(INSTALL, home, "agent-sleep");
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(manifest(home, "agent-sleep"), ["mods/agent-sleep"]);
+  for (const file of ["main.js", "mod.json", "coordinator.js", "panel-model.js", "views/status.js", "views/panel.js", "icons/moon.svg"]) {
+    assert.ok(existsSync(join(home, "mods/agent-sleep", file)), file);
+  }
+  assert.deepEqual(JSON.parse(readFileSync(join(home, "keys.json"), "utf8"))["layout:projects"], {
+    "cmd-alt-s": "agent-sleep.sleep-now",
+    "cmd-alt-w": "agent-sleep.wake-all",
+  });
+  assert.equal(readFileSync(join(home, "layouts/projects.json"), "utf8"), "the sidebar's\n");
+  assert.equal(readFileSync(join(home, "mods/projects/main.js"), "utf8"), "the sidebar's\n");
+});
+
+test("the real projects-sidebar install brings agent-sleep through requires, and nothing turns it on", () => {
+  const home = fakeHome();
+  const r = run(INSTALL, home, "--no-keys", "projects-sidebar");
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(manifest(home, "agent-sleep"), ["mods/agent-sleep"]);
+  assert.ok(existsSync(join(home, "mods/agent-sleep/main.js")));
+  assert.match(readFileSync(join(home, "layouts/projects.json"), "utf8"), /"mod": "agent-sleep"/);
+  assert.ok(!existsSync(join(home, "agent-sleep/settings.json")), "no settings file: off");
+});
