@@ -286,7 +286,12 @@ across repos.
      (`…/app/feat-login` → `…/app/signup`). A new listing decides; if git
      kept the folder, a toast says why. Otherwise the folder stays, and the
      row shows the new branch anyway.
-  6. The fresh list is stored, so the row changes at once.
+  6. Once the branch is renamed here, the workspace's spaces still named
+     after the old branch (its last segment, the name a click gave them)
+     take the new one with `space.rename`, so the agents list, which shows
+     space names, says what the tree says. A space you named otherwise
+     keeps its name, and so does one nobody named.
+  7. The fresh list is stored, so the row changes at once.
   - While it runs, Esc, Cancel and clicks do nothing. It runs in a task no
     view owns, so it finishes even if the dialog closes; the outcome is then
     a toast.

@@ -84,6 +84,7 @@ test("the rename dialog is a view of the mod, and its rename outlives it (D25)",
   assert.match(dialog, /removalCheck\(/, "it asks git on open whether the folder can move");
   assert.match(src("workspace-menu.js"), /openRenameWorkspace\(/, "the menu's Rename… opens it");
   assert.match(src("git.js"), /export const renameWorkspace\b/);
+  assert.match(dialog, /spaceRenames\(\{ path, before: r\.check\?\.branch, after: r\.branch,[\s\S]{0,120}run\("space\.rename", s\)/, "S39: the spaces named after the old branch take the new name");
 });
 
 test("the group menu toggles Task mode, and the tree draws it (D31, D32)", () => {

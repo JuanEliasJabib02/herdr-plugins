@@ -490,6 +490,23 @@ export function renameOutcome(r, { label, path, open }) {
   return { close: false, toast: null, error: err, live: null };
 }
 
+// S39: after a branch rename, the spaces on that workspace still named after
+// its old label (the name openAction gave them) take the new label, so the
+// agents list, which shows space names, says what the tree says. A space
+// named otherwise keeps it, and so does one nobody named (Herdr calls it
+// after its repo). path: the workspace's folder before any move (a moved
+// folder had no space in it). [{ id, name }] for run("space.rename").
+export function spaceRenames({ path, before, after, spaces, matches }) {
+  const at = normPath(path);
+  if (!at || !before || !after || !Array.isArray(spaces) || !matches) return [];
+  const from = workspaceLabel({ branch: before, path: at });
+  const to = workspaceLabel({ branch: after, path: at });
+  if (from === to) return [];
+  return spaces
+    .filter((s) => s?.named && s.name === from && matches[s.id]?.path === at)
+    .map((s) => ({ id: s.id, name: to }));
+}
+
 // ── Project menu (D11) ─────────────────────────────────────────────────────
 
 // D33 (S28): drag a project row to reorder its group. Moves `path` right
