@@ -17,6 +17,9 @@ import {
   agentChoices, defaultAgent, takesDirs, projectChoices, companionChoices, initialProject, clashError, createWorkspace,
 } from "./new-workspace-model.js";
 
+// The most rows an open select shows before it scrolls.
+const LIST_ROWS = 7;
+
 // Herdr's own glyphs (shipped with every install).
 const CHEVRON = "mods/workspace-chrome/chevron-down.svg";
 const CHECK = "mods/workspace-chrome/check.svg";
@@ -295,7 +298,11 @@ export default class NewWorkspace {
         .child(div().flex_1().min_w(0).truncate().child(current.label))
         .when(Boolean(current.hint), (el) => el.child(div().flex_none().text_size(11.5).text_color(t.dim).child(current.hint)))
         .child(svg(CHEVRON).size(14).flex_none().text_color(t.dim)))
-      .when(open, (el) => el.child(v_flex().id(`nw-${id}-list`).mt(4).max_h(196).p(4).rounded(7).border_1().border_color(t.border).bg(t.raised).overflow_y_scrollbar()
+      // Whole rows only (LIST_ROWS of them, 28 px each, plus the 4 px padding
+      // and the border), so the last one is never cut in half; with more,
+      // the scrollbar always shows that the list goes on.
+      .when(open, (el) => el.child(v_flex().id(`nw-${id}-list`).mt(4).max_h(LIST_ROWS * 28 + 10).p(4).rounded(7).border_1().border_color(t.border).bg(t.raised).overflow_y_scrollbar()
+        .when(options.length > LIST_ROWS, (l) => l.mode("always"))
         .children(options.map((o, i) => (o.header
           ? div().flex_none().px(8).pt(8).pb(4).text_size(11).text_color(t.dim).child(o.header)
           : h_flex().id(`nw-${id}-${i}`).h(28).flex_none().px(8).gap(8).items_center().rounded(6).cursor_pointer()
