@@ -13,7 +13,8 @@ across repos.
 **What you see**
 
 - **Sidebar column** (layout `projects`, a clone of Herdr's `main`): the
-  brand block, then the projects tree where Spaces was, Herdr's agents list,
+  brand block, then the projects tree where Spaces was, the agents list
+  (Herdr's, with the tree's working mark),
   the groups bar (44 px), then the footer. Background `chrome`, text 13 px
   in the person's UI font.
 - **Projects tree:**
@@ -180,7 +181,8 @@ across repos.
   place, in Claude's orange (`working`; Herdr's `spin()` turns at about 30 fps, which stutters),
   "!" (`blocked`), or a dot (`done`).
   Idle and unknown show the home or branch icon. A project row that is
-  collapsed shows the most urgent status among its workspaces.
+  collapsed shows the most urgent status among its workspaces. The agents
+  list's working agents show the same glyphs in the same orange.
 - **Click a workspace:** selects its space (when two spaces share it, the
   shown one, else the first). If it has none, opens a space there named
   after its label. Click an agent row: focuses that agent's pane. Click a
@@ -328,8 +330,15 @@ across repos.
   `sidebar-lists` and `sidebar-footer`. The status bar (`status`, px 28)
   is a row: `workspace-status`, then `{ "mod": "claude-accounts", "props":
   { "view": "footer" } }`, Claude's usage at its right as in Orca, both
-  weight 1 (the claude-accounts plugin draws it). Preview
-  `layouts/projects.svg`.
+  weight 1 (the claude-accounts plugin draws it). Block `agents` →
+  `{ "mod": "projects-agents" }`. Preview `layouts/projects.svg`.
+- **Mod `mods/projects-agents/`:** a copy of Herdr 0.1.13's shipped
+  `agents` mod, made the way `mod.clone` makes one (`mod.json` records
+  `cloned_from: { name: "agents", version: "0.1.13" }`, and the sort menu
+  opens `projects-agents`'s own overlay). The only change: a working agent's
+  mark is the projects tree's glyphs in Claude's orange instead of Herdr's
+  spinner. Herdr never updates this copy, so a newer Herdr's changes to its
+  agents list don't reach it. Herdr's Apache 2.0 license is in the folder.
 - **Mod `mods/projects/`** (`mod.json` `{ "place": "none" }`), one mod in
   views picked by `props.view`:
   - none = `tree.js` (the tree; the only copy that reads key commands);
