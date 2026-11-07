@@ -1,0 +1,12 @@
+{
+  "from": "1b9d6bcd-bbfd-4b2d-9b5d-ab8dfbbd4bed",
+  "to": "7c9e6679-7425-40de-944b-e07fc1f90ae7",
+  "at": 1794000000000,
+  "mode": "ask",
+  "sessions": [
+    { "terminal": "t12", "title": "claude · herdr-plugins", "account": "1b9d6bcd-bbfd-4b2d-9b5d-ab8dfbbd4bed", "group": "onAccount", "reason": null },
+    { "terminal": "t14", "title": "claude · orca", "account": "1b9d6bcd-bbfd-4b2d-9b5d-ab8dfbbd4bed", "group": "onAccount", "reason": null },
+    { "terminal": "t21", "title": "claude · notes", "account": "default", "group": "elsewhere", "reason": null },
+    { "terminal": "t30", "title": "claude", "account": null, "group": "cantMove", "reason": "own-program" }
+  ]
+}

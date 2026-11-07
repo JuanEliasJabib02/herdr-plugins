@@ -1,0 +1,57 @@
+{
+  "version": 1,
+  "generatedAt": 1794000000000,
+  "range": { "from": "2026-10-31", "to": "2026-11-06" },
+  "cacheSince": "2026-11-03",
+  "turnFiguresSince": "2026-11-04",
+  "totals": {
+    "tokens": 18450000,
+    "responses": 2310,
+    "seconds": 151200,
+    "cacheRead": 15200000,
+    "cacheWrite": 1900000,
+    "input": 1450000,
+    "reuseRate": 0.9129,
+    "cacheCoverage": 0.7182,
+    "output": 9900000,
+    "sessions": 26,
+    "zeroCacheReadResponses": 61,
+    "turnResponses": 1480,
+    "estimatedCostUsd": 412.37,
+    "unpricedModels": [],
+    "turnFiguresCoverage": 0.6504
+  },
+  "byAccount": [
+    { "account": "ana@example.com", "tokens": 12300000, "responses": 1540 },
+    { "account": "ben@example.org", "tokens": 6150000, "responses": 770 }
+  ],
+  "byModel": [
+    { "model": "opus", "tokens": 14100000, "responses": 1620, "sessions": 19 },
+    { "model": "sonnet", "tokens": 4350000, "responses": 690, "sessions": 7 }
+  ],
+  "byProject": [
+    { "project": "herdr-plugins", "path": "/Users/ana/src/herdr-plugins", "tokens": 9800000, "sessions": 14, "responses": 1240 },
+    { "project": "orca", "path": "/Users/ana/src/orca", "tokens": 6550000, "sessions": 9, "responses": 830 },
+    { "project": "-Users-ana-src-old-app", "path": null, "tokens": 2100000, "sessions": 3, "responses": 240 }
+  ],
+  "daily": [
+    { "date": "2026-10-31", "tokens": 1200000 },
+    { "date": "2026-11-01", "tokens": 2450000 },
+    { "date": "2026-11-02", "tokens": 900000 },
+    { "date": "2026-11-03", "tokens": 3800000 },
+    { "date": "2026-11-04", "tokens": 4100000 },
+    { "date": "2026-11-05", "tokens": 3300000 },
+    { "date": "2026-11-06", "tokens": 2700000 }
+  ],
+  "recentSessions": [
+    { "id": "3f1c2b7e-8a4d-4e55-9a51-0c2d6f1b7a10", "project": "herdr-plugins", "account": "ana@example.com", "model": "opus", "startedAt": 1793988000000, "endedAt": 1793999820000, "tokens": 1450000, "responses": 212, "input": 64000, "output": 1200000, "cacheRead": 6400000, "cacheWrite": 186000 },
+    { "id": "b6a0e3d1-27c4-4f0e-8d3b-5e9f1a2c4d6e", "project": "orca", "account": "ben@example.org", "model": "sonnet", "startedAt": 1793970000000, "endedAt": 1793976000000, "tokens": 380000, "responses": 58, "input": 21000, "output": 312000, "cacheRead": 2150000, "cacheWrite": 47000 },
+    { "id": "e2d4c6b8-1a3f-4e5d-9c7b-8a6f4e2d0c1b", "project": "-Users-ana-src-old-app", "account": "ana@example.com", "model": "opus", "startedAt": 1793631600000, "endedAt": 1793638800000, "tokens": 210000, "responses": 31, "input": null, "output": null, "cacheRead": null, "cacheWrite": null }
+  ],
+  "limits": [
+    { "account": "ana@example.com", "window": "5h", "hits": 5, "avgSecondsToLimit": 11880 },
+    { "account": "ana@example.com", "window": "weekly", "hits": 0, "avgSecondsToLimit": null },
+    { "account": "ben@example.org", "window": "5h", "hits": 0, "avgSecondsToLimit": null },
+    { "account": "ben@example.org", "window": "weekly", "hits": 2, "avgSecondsToLimit": 302400 }
+  ]
+}

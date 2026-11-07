@@ -1,0 +1,8 @@
+{
+  "configDir": "/Users/ana/Library/Application Support/Orca Dev/claude-profiles/1b9d6bcd-bbfd-4b2d-9b5d-ab8dfbbd4bed/home",
+  "at": 1793999980000,
+  "rate_limits": {
+    "five_hour": { "used_percentage": 43, "resets_at": 1794010920 },
+    "seven_day": { "used_percentage": 66, "resets_at": 1794367200 }
+  }
+}
