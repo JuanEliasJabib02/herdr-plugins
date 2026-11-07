@@ -1,0 +1,12 @@
+{
+  "name": "keep-awake",
+  "private": true,
+  "type": "module",
+  "description": "Herdr plugin: keeps the Mac awake (On, Agent or Off), Orca's \"Keep computer awake\" status segment ported.",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "node --test 'test/*.test.js'"
+  }
+}
