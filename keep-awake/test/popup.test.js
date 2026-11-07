@@ -65,7 +65,7 @@ test("popupHeight: frame, title row, separator and three mode rows, fixed (an op
   assert.equal(MODES.length, 3);
   const expected = POPUP.frame + 2 * POPUP.padY + POPUP.header + POPUP.separator + 2 * POPUP.separatorGap + 3 * POPUP.row;
   assert.equal(popupHeight(), expected);
-  assert.equal(popupHeight(), 171);
+  assert.equal(popupHeight(), 183);
   assert.equal(POPUP.width, 264);
 });
 
@@ -75,8 +75,8 @@ test("popupSpec: a popup of this mod, 264 wide, above the cell, its copy told it
     mod: MOD,
     kind: "popup",
     width: 264,
-    height: 171,
-    at: overlayAt(anchor, { width: 264, height: 171 }, 1),
+    height: 183,
+    at: overlayAt(anchor, { width: 264, height: 183 }, 1),
     props: { view: "popup" },
   });
   assert.equal(MOD, "keep-awake");
@@ -527,7 +527,7 @@ test("S4, D9: a click on the cup opens the popup above it, from the press's boun
   find(cell, "keep-awake-button").handlers.click({}, w.cx);
   const anchor = { x: 500, y: 600, limit: 564 };
   assert.deepEqual(w.opened(), [popupSpec({ anchor, zoom: 1 })]);
-  assert.deepEqual(w.opened()[0].at, { x: 564 - 272, y: 600 - 179 });
+  assert.deepEqual(w.opened()[0].at, { x: 564 - 272, y: 600 - 191 });
   assert.equal(w.opened()[0].kind, "popup");
 });
 
@@ -536,7 +536,7 @@ test("D9: a press with no bounds opens it above the cell where the layout puts i
   const cell = view.render(w.cx);
   find(cell, "keep-awake-cell").handlers.mouse_down({});
   find(cell, "keep-awake-button").handlers.click({}, w.cx);
-  assert.deepEqual(w.opened()[0].at, overlayAt(anchorFrom(CELL_BOUNDS), { width: 264, height: 171 }, 1));
+  assert.deepEqual(w.opened()[0].at, overlayAt(anchorFrom(CELL_BOUNDS), { width: 264, height: 183 }, 1));
 });
 
 test("D9: the press that closed the popup doesn't reopen it; a later click does", async () => {

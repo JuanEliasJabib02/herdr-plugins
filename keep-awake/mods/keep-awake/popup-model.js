@@ -172,7 +172,10 @@ export function cellBounds(viewport, zoom = 1) {
 // views/popup.js draws each part this tall, so the popup opens exactly so; it
 // has three rows whatever the mode, so its height never changes (an open
 // popup can't resize).
-export const POPUP = Object.freeze({ width: 264, frame: 4, padY: 4, header: 30, separator: 1, separatorGap: 4, row: 40 });
+// A row is 44: the label's 16 px line, 1 px, the description's 14 px line, and
+// the rest as space around them. Without set lines the two texts took Herdr's
+// default line height and filled the row, touching the next one.
+export const POPUP = Object.freeze({ width: 264, frame: 4, padY: 4, header: 30, separator: 1, separatorGap: 4, row: 44, labelLine: 16, descriptionLine: 14 });
 
 export function popupHeight() {
   return POPUP.frame + 2 * POPUP.padY + POPUP.header + POPUP.separator + 2 * POPUP.separatorGap + MODES.length * POPUP.row;

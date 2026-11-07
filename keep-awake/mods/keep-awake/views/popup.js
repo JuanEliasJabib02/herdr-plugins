@@ -29,9 +29,9 @@ function row(t, r, onPick) {
     .on_click(() => onPick(r.value))
     .child(h_flex().flex_none().w(12).items_center().justify_center()
       .when(r.chosen, (el) => el.child(div().id(`keep-awake-dot-${r.value}`).size(8).rounded_full().bg(t.foreground))))
-    .child(v_flex().flex_1().min_w(0).gap(2)
-      .child(div().truncate().text_size(12.5).child(r.label))
-      .child(div().truncate().text_size(11).text_color(t.muted).child(r.description)));
+    .child(v_flex().flex_1().min_w(0).gap(1)
+      .child(div().truncate().text_size(12.5).line_height(`${POPUP.labelLine}px`).child(r.label))
+      .child(div().truncate().text_size(11).line_height(`${POPUP.descriptionLine}px`).text_color(t.muted).child(r.description)));
 }
 
 // { t: theme(), model: popupModel(), onPick(value): a row's click }
