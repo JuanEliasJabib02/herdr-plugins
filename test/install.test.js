@@ -2,8 +2,10 @@
 // name it didn't install (it stops before touching anything), it drops what
 // the plugin stopped shipping, --uninstall removes only what it installed,
 // and a copy that fails partway leaves no half-written item and nothing it
-// can't claim on the next run. Every run targets a fake Herdr home in a temp
-// folder (HERDR_APP_HOME), never the person's.
+// can't claim on the next run. The same holds for the commands a plugin's
+// `bin` file puts on PATH (links in ~/.local/bin). Every run targets a fake
+// Herdr home in a temp folder (HERDR_APP_HOME) and a fake HOME beside it,
+// never the person's.
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
@@ -19,6 +21,7 @@ import {
   readlinkSync,
   realpathSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -85,12 +88,37 @@ function fakeRepo(files) {
   return { script: join(dir, "scripts/install.sh"), plugin: join(dir, "demo") };
 }
 
+// Each fake Herdr home has its own fake HOME, its parent folder, so the
+// command links of one test (HOME/.local/bin) never meet another's.
+const userHome = (home) => dirname(home);
+const binDir = (home) => join(userHome(home), ".local/bin");
+
 function run(script, home, ...args) {
   assert.ok(home.startsWith(`${root}/`), `a fake home, never the person's: ${home}`);
-  return spawnSync("sh", [script, ...args], { encoding: "utf8", env: { ...process.env, HOME: root, HERDR_APP_HOME: home } });
+  return spawnSync("sh", [script, ...args], { encoding: "utf8", env: { ...process.env, HOME: userHome(home), HERDR_APP_HOME: home } });
 }
 
 const manifest = (home, plugin) => readFileSync(join(home, ".herdr-plugins", `${plugin}.txt`), "utf8").split("\n").filter(Boolean).sort();
+
+// Whether anything is at path, a dangling link included.
+const present = (path) => {
+  try {
+    lstatSync(path);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+// The node with id in a layout tree.
+function find(node, id) {
+  if (node?.id === id) return node;
+  for (const child of node?.children ?? []) {
+    const found = find(child, id);
+    if (found) return found;
+  }
+  return null;
+}
 
 // A file cp can't read, so the copy of its folder fails partway.
 function unreadable(path) {
@@ -218,6 +246,173 @@ test("requires that loop back (demo needs dep, dep needs demo) install each once
   assert.equal((r.stdout.match(/^installed .*\/mods\/dep$/gm) ?? []).length, 1);
 });
 
+// ── Commands on PATH (a plugin's `bin` file) ───────────────────────────────
+
+// A plugin `demo` whose mod `a` ships the command `a` and lists it in its
+// `bin` file, as spotlight lists its CLI.
+function commandRepo(extra = {}) {
+  const r = fakeRepo({
+    "mods/a/main.js": "a\n",
+    "mods/a/bin/a": '#!/bin/sh\necho "a ran $*"\n',
+    bin: "# commands on PATH\nmods/a/bin/a\n",
+    ...extra,
+  });
+  chmodSync(join(r.plugin, "mods/a/bin/a"), 0o755);
+  return r;
+}
+
+test("a plugin's bin file: each command is linked into ~/.local/bin, owned in the manifest, and runs the installed copy; a re-install keeps it", () => {
+  const { script } = commandRepo();
+  const home = fakeHome();
+  const link = join(binDir(home), "a");
+
+  const r = run(script, home, "demo");
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(readlinkSync(link), join(home, "mods/a/bin/a"), "it points at the installed copy, never the checkout");
+  assert.match(r.stdout, new RegExp(`linked ${link} -> ${home}/mods/a/bin/a`));
+  assert.deepEqual(manifest(home, "demo"), [link, "mods/a"]);
+  assert.equal(spawnSync(link, ["x"], { encoding: "utf8" }).stdout, "a ran x\n");
+
+  const again = run(script, home, "demo");
+  assert.equal(again.status, 0, again.stderr);
+  assert.equal(readlinkSync(link), join(home, "mods/a/bin/a"));
+  assert.deepEqual(manifest(home, "demo"), [link, "mods/a"]);
+  assert.deepEqual(leftovers(home), []);
+});
+
+test("--uninstall removes the command's link and nothing else in ~/.local/bin", () => {
+  const { script } = commandRepo();
+  const home = fakeHome();
+  const link = join(binDir(home), "a");
+  writeTree(binDir(home), { other: "theirs\n" });
+  assert.equal(run(script, home, "demo").status, 0);
+
+  const r = run(script, home, "--uninstall", "demo");
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, new RegExp(`removed ${link}`));
+  assert.equal(present(link), false);
+  assert.equal(existsSync(join(home, "mods/a")), false);
+  assert.equal(existsSync(join(home, ".herdr-plugins/demo.txt")), false, "manifest removed");
+  assert.deepEqual(snapshot(binDir(home)), { other: "theirs\n" });
+});
+
+for (const [what, plant] of [
+  ["a file", (link) => writeFileSync(link, "theirs\n")],
+  ["a link to another program", (link) => symlinkSync("/usr/bin/true", link)],
+]) {
+  test(`${what} where a command's link goes stops the install: exit 1, named, nothing changed`, () => {
+    const { script, plugin } = commandRepo({ requires: "dep\n" });
+    writeTree(join(dirname(plugin), "dep"), { "mods/dep/main.js": "dep\n" });
+    const home = fakeHome();
+    const link = join(binDir(home), "a");
+    mkdirSync(binDir(home), { recursive: true });
+    plant(link);
+    const before = snapshot(userHome(home));
+
+    const r = run(script, home, "demo");
+    assert.equal(r.status, 1, r.stdout);
+    assert.match(r.stderr, new RegExp(`${link} exists and wasn't installed from demo; nothing changed`));
+    assert.deepEqual(snapshot(userHome(home)), before, "neither Herdr's home nor ~/.local/bin changed, and nothing it requires was installed");
+  });
+}
+
+test("the plugin stops shipping a command: the next install removes its link", () => {
+  const { script, plugin } = commandRepo();
+  const home = fakeHome();
+  const link = join(binDir(home), "a");
+  assert.equal(run(script, home, "demo").status, 0);
+
+  writeFileSync(join(plugin, "bin"), "# nothing on PATH now\n");
+  const r = run(script, home, "demo");
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, new RegExp(`removed ${link}`));
+  assert.equal(present(link), false);
+  assert.deepEqual(manifest(home, "demo"), ["mods/a"]);
+});
+
+test("a bin line that isn't an executable of the plugin's mods, or a name already taken, is named and skipped; the rest install", () => {
+  const { script, plugin } = commandRepo({
+    "mods/b/bin/a": "#!/bin/sh\necho b\n",
+    bin: "../a\n/usr/bin/true\nlayouts/x\nmods/a/main.js\nmods/a/missing\nmods/a/../a/bin/a\nmods/a/bin/a\nmods/b/bin/a\n",
+  });
+  chmodSync(join(plugin, "mods/b/bin/a"), 0o755);
+  const home = fakeHome();
+  const link = join(binDir(home), "a");
+
+  const r = run(script, home, "demo");
+  assert.equal(r.status, 0, r.stderr);
+  for (const bad of ["\\.\\./a", "/usr/bin/true", "layouts/x", "mods/a/\\.\\./a/bin/a"]) {
+    assert.match(r.stderr, new RegExp(`bin: ${bad} isn't a file of the plugin's mods; skipped`));
+  }
+  for (const bad of ["mods/a/main.js", "mods/a/missing"]) {
+    assert.match(r.stderr, new RegExp(`bin: ${bad} isn't an executable file of the plugin; skipped`));
+  }
+  assert.match(r.stderr, /bin: mods\/b\/bin\/a: a command named a is already listed; skipped/);
+  assert.equal(readlinkSync(link), join(home, "mods/a/bin/a"), "the first one listed wins");
+  assert.deepEqual(manifest(home, "demo"), [link, "mods/a", "mods/b"]);
+  assert.deepEqual(readdirSync(binDir(home)), ["a"]);
+});
+
+// ── This repo's plugins: spotlight and projects-sidebar ────────────────────
+
+test("spotlight puts its CLI on PATH as ~/.local/bin/spotlight: it runs through that link and a relative link to it, finds node off PATH, and --uninstall removes it", () => {
+  const home = fakeHome();
+  const link = join(binDir(home), "spotlight");
+  const r = run(INSTALL, home, "spotlight");
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(readlinkSync(link), join(home, "mods/spotlight/bin/spotlight"));
+  assert.deepEqual(manifest(home, "spotlight"), [link, "mods/spotlight"]);
+
+  const help = spawnSync(link, ["--help"], { encoding: "utf8" });
+  assert.equal(help.status, 0, help.stderr);
+  assert.match(help.stdout, /^spotlight: /);
+
+  const hop = join(userHome(home), "tools/sl");
+  mkdirSync(dirname(hop));
+  symlinkSync("../.local/bin/spotlight", hop);
+  const viaHop = spawnSync(hop, ["--help"], { encoding: "utf8" });
+  assert.equal(viaHop.status, 0, viaHop.stderr);
+  assert.match(viaHop.stdout, /^spotlight: /);
+
+  // A PATH with no node: bin/spotlight falls back to Homebrew's (or /usr/local's).
+  const offPath = spawnSync(link, ["--help"], { encoding: "utf8", env: { ...process.env, PATH: "/usr/bin:/bin" } });
+  if (["/usr/bin/node", "/bin/node", "/opt/homebrew/bin/node", "/usr/local/bin/node"].some(existsSync)) {
+    assert.equal(offPath.status, 0, offPath.stderr);
+    assert.match(offPath.stdout, /^spotlight: /);
+  } else {
+    assert.equal(offPath.status, 127);
+    assert.match(offPath.stderr, /spotlight: node not found/);
+  }
+
+  const gone = run(INSTALL, home, "--uninstall", "spotlight");
+  assert.equal(gone.status, 0, gone.stderr);
+  assert.equal(present(link), false);
+  assert.equal(existsSync(join(home, "mods/spotlight")), false);
+});
+
+test("projects-sidebar requires spotlight: it lands first, with its command, and the installed layout draws its footer between workspace-status and claude-accounts (D20)", () => {
+  const home = fakeHome();
+  const r = run(INSTALL, home, "--no-keys");
+  assert.equal(r.status, 0, r.stderr);
+  const spot = r.stdout.indexOf(`installed ${home}/mods/spotlight\n`);
+  assert.ok(spot !== -1, r.stdout);
+  assert.ok(spot < r.stdout.indexOf(`installed ${home}/mods/projects\n`), "spotlight lands before projects-sidebar");
+  assert.equal(readlinkSync(join(binDir(home), "spotlight")), join(home, "mods/spotlight/bin/spotlight"));
+  assert.deepEqual(manifest(home, "spotlight"), [join(binDir(home), "spotlight"), "mods/spotlight"]);
+
+  const status = find(JSON.parse(readFileSync(join(home, "layouts/projects.json"), "utf8")), "status");
+  assert.deepEqual(
+    status.children.map((c) => c.id),
+    ["status-workspace", "status-spotlight", "status-usage", "status-agent-sleep"],
+  );
+  assert.deepEqual(status.children[1], {
+    id: "status-spotlight",
+    type: "block",
+    size: { px: 40 },
+    content: { mod: "spotlight", props: { view: "footer" } },
+  });
+});
+
 // ── A copy that fails partway ──────────────────────────────────────────────
 
 test("a copy that fails partway: what landed stays owned, no .installing is left, the next run succeeds", { skip: asRoot }, () => {
@@ -258,4 +453,30 @@ test("a run that fails partway prunes nothing; the next good run does", { skip: 
   assert.equal(r.status, 0, r.stderr);
   assert.equal(existsSync(join(home, "mods/old")), false);
   assert.deepEqual(manifest(home, "demo"), ["layouts/demo.json", "mods/a"]);
+});
+
+test("the real agent-sleep plugin: its mod is copied, its keys merged, projects-sidebar's files left alone", () => {
+  const home = fakeHome({ "layouts/projects.json": "the sidebar's\n", "mods/projects/main.js": "the sidebar's\n", "keys.json": "{}\n" });
+  const r = run(INSTALL, home, "agent-sleep");
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(manifest(home, "agent-sleep"), ["mods/agent-sleep"]);
+  for (const file of ["main.js", "mod.json", "coordinator.js", "panel-model.js", "views/status.js", "views/panel.js", "icons/moon.svg"]) {
+    assert.ok(existsSync(join(home, "mods/agent-sleep", file)), file);
+  }
+  assert.deepEqual(JSON.parse(readFileSync(join(home, "keys.json"), "utf8"))["layout:projects"], {
+    "cmd-alt-s": "agent-sleep.sleep-now",
+    "cmd-alt-w": "agent-sleep.wake-all",
+  });
+  assert.equal(readFileSync(join(home, "layouts/projects.json"), "utf8"), "the sidebar's\n");
+  assert.equal(readFileSync(join(home, "mods/projects/main.js"), "utf8"), "the sidebar's\n");
+});
+
+test("the real projects-sidebar install brings agent-sleep through requires, and nothing turns it on", () => {
+  const home = fakeHome();
+  const r = run(INSTALL, home, "--no-keys", "projects-sidebar");
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(manifest(home, "agent-sleep"), ["mods/agent-sleep"]);
+  assert.ok(existsSync(join(home, "mods/agent-sleep/main.js")));
+  assert.match(readFileSync(join(home, "layouts/projects.json"), "utf8"), /"mod": "agent-sleep"/);
+  assert.ok(!existsSync(join(home, "agent-sleep/settings.json")), "no settings file: off");
 });

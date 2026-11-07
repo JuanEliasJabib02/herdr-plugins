@@ -1,0 +1,12 @@
+{
+  "name": "herdr-spotlight",
+  "private": true,
+  "type": "module",
+  "description": "Spotlight for Herdr: one dev server per repo root with the workspace's code projected there, plus the test queue (Orca Pro Max's Spotlight, ported).",
+  "scripts": {
+    "test": "node --test 'test/*.test.js'"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

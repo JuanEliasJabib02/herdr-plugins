@@ -1,0 +1,12 @@
+{
+  "name": "agent-sleep",
+  "private": true,
+  "type": "module",
+  "description": "Herdr plugin: puts idle Claude Code agents to sleep and resumes them when their tab is shown again.",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "node --test 'test/*.test.js'"
+  }
+}
