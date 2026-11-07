@@ -1281,8 +1281,8 @@ export default class CodeExplorer extends View {
     const t = theme();
     this.rowsNow = this.rows();
     const open = this.menu && Boolean(this.state);
-    return v_flex().id("code-explorer").relative().size_full().min_h(0).rounded(10).overflow_hidden()
-      .bg(t.chrome).border_1().border_color(t.border).text_color(t.foreground).text_size(13)
+    return v_flex().id("code-explorer").relative().size_full().min_h(0).overflow_hidden()
+      .bg(t.chrome).text_color(t.foreground).text_size(13)
       .child(this.header(t))
       .child(this.segments(t))
       .when(this.view === "names" && Boolean(this.state), (el) => el.child(this.filterBar(t)))

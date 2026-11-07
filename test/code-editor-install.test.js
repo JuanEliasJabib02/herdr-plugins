@@ -61,7 +61,7 @@ test("S2: what cmd-l toggles is the projects layout's right panel, closed until 
   const panel = find(layout(), "panel");
   assert.equal(readJson(plugin("keys.json"))["layout:projects"]["cmd-l"], `layout.toggle:${panel.id}`);
   assert.equal(panel.hidden, true);
-  assert.equal(find(layout(), "work-body").children.at(-1).id, "panel", "on the right of the terminals");
+  assert.equal(find(layout(), "work-row").children.at(-1).id, "panel", "on the right of the tabs and terminals");
 });
 
 test("S2: installing merges cmd-l into the person's keys, in that layout's section; global and terminal stay as they were", () => {

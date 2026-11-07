@@ -96,55 +96,68 @@
       ]
     },
     {
-      "id": "work",
+      "id": "content",
       "type": "column",
       "resizable": false,
       "children": [
         {
-          "id": "tabs",
-          "type": "block",
-          "size": {
-            "px": 42
-          },
-          "window_drag": true,
-          "content": {
-            "mod": "code-tabs"
-          }
-        },
-        {
-          "id": "work-body",
+          "id": "work-row",
           "type": "row",
-          "padding": 8,
-          "gap": 8,
           "children": [
             {
-              "id": "main",
-              "type": "block",
-              "content": {
-                "tab": "active",
-                "pane": {
-                  "gap": 8,
-                  "radius": 10,
-                  "background": "background",
-                  "lone": true,
-                  "border": {
-                    "width": 1,
-                    "color": "border"
+              "id": "work",
+              "type": "column",
+              "resizable": false,
+              "children": [
+                {
+                  "id": "tabs",
+                  "type": "block",
+                  "size": {
+                    "px": 42
                   },
-                  "focus": {
-                    "width": 1,
-                    "color": "accent"
-                  },
-                  "header": {
-                    "content": {
-                      "mod": "pane"
-                    },
-                    "height": 30,
-                    "position": "top",
-                    "reveal": "always"
+                  "window_drag": true,
+                  "content": {
+                    "mod": "code-tabs"
                   }
+                },
+                {
+                  "id": "work-body",
+                  "type": "row",
+                  "padding": 8,
+                  "gap": 8,
+                  "children": [
+                    {
+                      "id": "main",
+                      "type": "block",
+                      "content": {
+                        "tab": "active",
+                        "pane": {
+                          "gap": 8,
+                          "radius": 10,
+                          "background": "background",
+                          "lone": true,
+                          "border": {
+                            "width": 1,
+                            "color": "border"
+                          },
+                          "focus": {
+                            "width": 1,
+                            "color": "accent"
+                          },
+                          "header": {
+                            "content": {
+                              "mod": "pane"
+                            },
+                            "height": 30,
+                            "position": "top",
+                            "reveal": "always"
+                          }
+                        }
+                      }
+                    }
+                  ]
                 }
-              }
+              ]
             },
             {
               "id": "panel",
@@ -156,6 +169,19 @@
               "min": 280,
               "max": 900,
               "children": [
+                {
+                  "id": "panel-header",
+                  "type": "block",
+                  "size": {
+                    "px": 42
+                  },
+                  "content": {
+                    "mod": "code-tabs",
+                    "props": {
+                      "view": "panel"
+                    }
+                  }
+                },
                 {
                   "id": "panel-body",
                   "type": "stack",
@@ -177,9 +203,14 @@
                     }
                   ]
                 }
-              ]
+              ],
+              "background": "chrome"
             }
-          ]
+          ],
+          "divider": {
+            "width": 1,
+            "color": "border"
+          }
         },
         {
           "id": "status",

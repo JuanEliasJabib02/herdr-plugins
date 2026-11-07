@@ -99,24 +99,37 @@ export function enabledPanels(chosen) {
   return offersChanges ? ["explorer", "changes"] : ["explorer"];
 }
 
-// The toggle goes last, at the bar's right end.
-const PANEL_BUTTONS = Object.freeze([
+// The panel's own header, as in Orca: an icon per child of its stack, the
+// Explorer first, and Changes when picked.
+const PANEL_TABS = Object.freeze([
+  { id: "explorer", label: "Explorer", icon: "mods/code-tabs/files.svg" },
   { id: "changes", label: "Changes", icon: "mods/changes/changes.svg" },
-  { id: "explorer", label: "Explorer", icon: "mods/code-tabs/panel.svg", hint: "⌘L" },
 ]);
 
-export function panelButtons(enabled) {
-  return PANEL_BUTTONS.filter((b) => enabled.includes(b.id));
+export function panelTabs(enabled) {
+  return PANEL_TABS.filter((b) => enabled.includes(b.id));
 }
 
 const showPanel = (id) => [
   ["layout.select", { stack: "panel-body", child: id }],
   ["layout.show", { id: "panel" }],
 ];
-const hidePanel = () => [["layout.hide", { id: "panel" }]];
 
-export function panelClick(id, on) {
-  return on ? hidePanel() : showPanel(id);
+export const closePanel = () => [["layout.hide", { id: "panel" }]];
+
+export function panelTabClick(id) {
+  return [["layout.select", { stack: "panel-body", child: id }]];
+}
+
+// The bar's right end has the toggle only while the panel is closed: open, the
+// toggle is in the panel's header.
+export function barToggle(panel) {
+  return panel?.hidden ? { id: "panel-open", icon: "mods/code-tabs/panel.svg" } : null;
+}
+
+// Opening goes back to the child the panel had, if it's still on offer.
+export function openPanel(body, enabled) {
+  return showPanel(enabled.includes(body?.active) ? body.active : "explorer");
 }
 
 // The side panel is remembered per space: switching shows that space's choice
@@ -136,7 +149,7 @@ export function syncPanel(memory, { space, panel, body, enabled, at }) {
       const want = enabled.includes(stored) ? stored : null;
       if (want !== now) {
         memory.pending = { want, until: at + 1000 };
-        return { commands: want ? showPanel(want) : hidePanel(), save: false };
+        return { commands: want ? showPanel(want) : closePanel(), save: false };
       }
     }
   }

@@ -340,9 +340,12 @@ across repos.
   `status-agent-sleep` → `{ "mod": "agent-sleep" }` (px 40): the agent-sleep
   plugin's moon, which must be in the shown layout for its loop to run. Block
   `agents` → `{ "mod": "projects-agents" }`. The root sets `"theme":
-  "one-dark-pro"`, and in the right panel's stack `panel-body` the child
-  `explorer` → `{ "mod": "code-explorer" }` is active where Herdr has `files`:
-  all from the code-editor plugin, whose keys.json brings `cmd-l` →
+  "one-dark-pro"`. The right panel runs the window's height beside the tab bar
+  and the terminals, as in Orca: the row `work-row` holds the column `work` and
+  the column `panel`, whose block `panel-header` → `{ "mod": "code-tabs",
+  "props": { "view": "panel" } }` sits above the stack `panel-body`, where the
+  child `explorer` → `{ "mod": "code-explorer" }` is active where Herdr has
+  `files`: all from the code-editor plugin, whose keys.json brings `cmd-l` →
   `layout.toggle:panel`. Preview `layouts/projects.svg`.
 - **Mod `mods/projects-agents/`:** a copy of Herdr 0.1.13's shipped
   `agents` mod, made the way `mod.clone` makes one (`mod.json` records

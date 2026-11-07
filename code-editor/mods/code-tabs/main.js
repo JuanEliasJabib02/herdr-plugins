@@ -2,14 +2,15 @@
 // this folder), made the way `mod.clone` makes one: its window icons are its own.
 // Changed from Herdr's version: a file's tab draws its Material icon, its name in
 // italics while it's a preview, and a dot for unsaved changes; its X and a double
-// click go to the file; the "Files" button is "Explorer" with ⌘L, and the panel's
+// click go to the file; the panels' buttons left the bar for the panel's own header,
+// drawn by a second copy (`props.view: "panel"`), as in Orca, and the panel's
 // per-space memory knows `explorer`; the look follows the code editor's design.
 // The decisions moved to tabs-model.js so they can be tested. Herdr never updates
 // this copy.
 
 import { View, div, svg, image } from "gpui-kit";
-import { h_flex } from "gpui-base";
-import { spaces, panes, run, openOverlay, theme, window, shared, layout, settings, readTextFile, appHome } from "herdr";
+import { h_flex, v_flex } from "gpui-base";
+import { spaces, panes, run, openOverlay, theme, window, shared, layout, settings, readTextFile, appHome, props } from "herdr";
 import {
   DOCS_KEY,
   LIVE_KEY,
@@ -20,8 +21,11 @@ import {
   closeCommand,
   doubleClickCommand,
   enabledPanels,
-  panelButtons,
-  panelClick,
+  panelTabs,
+  panelTabClick,
+  barToggle,
+  openPanel,
+  closePanel,
   syncPanel,
 } from "./tabs-model.js";
 
@@ -38,6 +42,10 @@ const runAll = (commands) => { for (const [name, args] of commands) run(name, ar
 
 export default class Tabs extends View {
   init(_props, cx) {
+    // The panel's header copy only draws its icons: the memory and the file icons
+    // belong to the bar's copy.
+    this.header = props()?.view === "panel";
+    if (this.header) return;
     this.pressed = null;
     this.memory = { panels: JSON.parse(localStorage.getItem("panels") ?? "{}"), space: undefined, pending: null };
     this.icons = null;
@@ -57,8 +65,29 @@ export default class Tabs extends View {
     runAll(commands);
   }
 
+  // The panel's header: an icon per panel with a bar under the shown one, and the
+  // toggle that closes the panel at the right end.
+  renderHeader(t) {
+    const body = find(layout(), "panel-body");
+    const stop = (_e, cx) => cx.stop_propagation();
+    const tab = ({ id, icon }) => {
+      const on = body?.active === id;
+      return v_flex().id(`panel-tab-${id}`).w(34).h_full().flex_none().items_center().text_color(on ? t.foreground : t.muted)
+        .hover(s => s.text_color(t.foreground)).on_mouse_down("left", stop).on_click(() => runAll(panelTabClick(id)))
+        .child(div().flex_1().flex().items_center().child(svg(icon).size(16)))
+        .child(div().w(18).h(2).rounded(1).when(on, el => el.bg(t.foreground)));
+    };
+    return h_flex().size_full().px(6).gap(2).items_center().border_b(1).border_color(t.border)
+      .children(panelTabs(enabledPanels(shared("workspace.panels"))).map(tab))
+      .child(div().flex_1())
+      .child(div().id("panel-close").size(26).flex_none().flex().items_center().justify_center().rounded(6).text_color(t.muted)
+        .hover(s => s.bg(t.hover).text_color(t.foreground)).on_mouse_down("left", stop).on_click(() => runAll(closePanel()))
+        .child(svg("mods/code-tabs/panel.svg").size(16)));
+  }
+
   render() {
     const t = theme();
+    if (this.header) return this.renderHeader(t);
     const space = spaces().find(p => p.active);
     const shown = space?.tabs ?? [];
     const docs = shared(DOCS_KEY), live = shared(LIVE_KEY), allPanes = panes();
@@ -103,20 +132,13 @@ export default class Tabs extends View {
     const panel = find(root, "panel"), body = find(root, "panel-body");
     const enabled = enabledPanels(shared("workspace.panels"));
     this.syncPanel(space, panel, body, enabled);
-    const panelButton = ({ id, label, icon, hint }) => {
-      const on = panel && !panel.hidden && body?.active === id;
-      return h_flex().id(`panel-${id}`).h(26).px(8).gap(6).flex_none().items_center().rounded(6)
-        .text_size(12).bg(on ? t.selected : t.chrome).text_color(on ? t.foreground : t.muted)
-        .hover(s => s.bg(t.hover)).on_mouse_down("left", stop)
-        .on_click(() => runAll(panelClick(id, on)))
-        .child(svg(icon).size(14)).child(label).when(Boolean(hint), el => el.child(hint));
-    };
+    const toggle = barToggle(panel);
     return h_flex().size_full().min_w(0).px(10).pl(lightsPadding).gap(3).items_center().bg(t.chrome).border_b(1).border_color(t.border)
       .on_mouse_up("left", () => { this.pressed = null; })
       .on_scroll_wheel(e => { if (Math.abs(e.delta.y) >= 1) run(e.delta.y > 0 ? "tab.prev" : "tab.next"); })
       .child(h_flex().id("tab-scroll").flex_1().min_w(0).h_full().items_center().gap(3).overflow_x_scrollbar().children(shown.map(item)))
       .child(button("tab-new", svg("mods/code-tabs/plus.svg").size(14), () => openOverlay({ mod: "new-menu", kind: "popup", width: 250, height: 512 })))
-      .child(h_flex().flex_none().ml(4).gap(3).items_center().children(panelButtons(enabled).map(panelButton)))
+      .when(Boolean(toggle), el => el.child(div().ml(4).flex_none().child(button(toggle?.id, svg(toggle?.icon ?? "").size(14), () => runAll(openPanel(body, enabled))))))
       .when(w?.buttons, el => el.child(button("minimize", w.platform === "windows" ? svg("mods/code-tabs/win-min.svg").size(16) : "−", () => run("window.minimize")))
         .child(button("maximize", w.platform === "windows" ? svg(`mods/code-tabs/${w.maximized ? "win-restore" : "win-max"}.svg`).size(16) : "□", () => run("window.maximize")))
         .child(button("close-window", w.platform === "windows" ? svg("mods/code-tabs/win-close.svg").size(16) : svg("mods/pane/close.svg").size(13), () => run("window.close"))));

@@ -18,8 +18,11 @@ import {
   closeCommand,
   doubleClickCommand,
   enabledPanels,
-  panelButtons,
-  panelClick,
+  panelTabs,
+  panelTabClick,
+  barToggle,
+  openPanel,
+  closePanel,
   syncPanel,
 } from "../code-editor/mods/code-tabs/tabs-model.js";
 
@@ -131,32 +134,55 @@ test("stock behavior kept: a stored panel that is no longer on offer closes, and
   assert.equal(none.space, undefined);
 });
 
-test("S2: the toggle reads Explorer and ⌘L and sits rightmost, there is no Files button, and Changes shows when picked", () => {
-  const both = panelButtons(["explorer", "changes"]);
-  assert.deepEqual(both.map((b) => b.id), ["changes", "explorer"]);
-  const explorer = both.at(-1);
-  assert.equal(explorer.label, "Explorer");
-  assert.equal(explorer.hint, "⌘L");
-  assert.equal(explorer.icon, "mods/code-tabs/panel.svg");
+test("S2: the panel's own header offers Explorer, then Changes when picked, as icons like Orca's", () => {
+  const both = panelTabs(["explorer", "changes"]);
+  assert.deepEqual(both.map((b) => b.id), ["explorer", "changes"]);
+  assert.deepEqual(both.map((b) => b.label), ["Explorer", "Changes"]);
+  assert.equal(both[0].icon, "mods/code-tabs/files.svg");
+  assert.ok(existsSync(plugin(both[0].icon)));
+  assert.equal(both[1].icon, "mods/changes/changes.svg", "Herdr's own");
+  assert.deepEqual(panelTabs(["explorer"]).map((b) => b.id), ["explorer"]);
+});
+
+test("S2: a header icon selects its child, and the header's toggle closes the panel", () => {
+  assert.deepEqual(panelTabClick("changes"), [["layout.select", { stack: "panel-body", child: "changes" }]]);
+  assert.deepEqual(panelTabClick("explorer"), [["layout.select", { stack: "panel-body", child: "explorer" }]]);
+  assert.deepEqual(closePanel(), [["layout.hide", { id: "panel" }]]);
+});
+
+test("S2: the bar's toggle shows only while the panel is closed, and opens it on the child it had", () => {
+  assert.equal(barToggle({ hidden: false }), null, "open: the toggle is in the panel's header");
+  assert.equal(barToggle(null), null, "a layout with no panel");
+  assert.deepEqual(barToggle({ hidden: true }), { id: "panel-open", icon: "mods/code-tabs/panel.svg" });
   assert.ok(existsSync(plugin("mods/code-tabs/panel.svg")));
-  assert.equal(both[0].label, "Changes");
-  assert.equal(both[0].hint, undefined);
-  assert.deepEqual(panelButtons(["explorer"]).map((b) => b.id), ["explorer"]);
+  const showChanges = [["layout.select", { stack: "panel-body", child: "changes" }], ["layout.show", { id: "panel" }]];
+  assert.deepEqual(openPanel({ active: "changes" }, ["explorer", "changes"]), showChanges);
+  assert.deepEqual(openPanel({ active: "changes" }, ["explorer"]), SHOW_EXPLORER, "Changes not on offer");
+  assert.deepEqual(openPanel(null, ["explorer"]), SHOW_EXPLORER);
 });
 
-test("S2: the button selects explorer and opens the panel, and closes that same panel when it shows", () => {
-  assert.deepEqual(panelClick("explorer", false), SHOW_EXPLORER);
-  assert.deepEqual(panelClick("explorer", true), [["layout.hide", { id: "panel" }]]);
-  assert.deepEqual(panelClick("changes", false), [["layout.select", { stack: "panel-body", child: "changes" }], ["layout.show", { id: "panel" }]]);
-});
-
-test("S2: button and cmd-l act on the same panel of the projects layout, and every panel the bar offers is a child of its stack", () => {
+test("S2: the bar, the header and cmd-l act on the same panel, and every icon the header offers is a child of its stack", () => {
   const panel = find(layout(), "panel");
   const keys = readJson(plugin("keys.json"));
   assert.equal(keys["layout:projects"]["cmd-l"], `layout.toggle:${panel.id}`);
-  assert.deepEqual(panelClick("explorer", true), [["layout.hide", { id: panel.id }]]);
+  assert.deepEqual(closePanel(), [["layout.hide", { id: panel.id }]]);
+  assert.deepEqual(openPanel(null, ["explorer"]).at(-1), ["layout.show", { id: panel.id }]);
   const children = find(layout(), "panel-body").children.map((c) => c.id);
   for (const id of enabledPanels(undefined)) assert.ok(children.includes(id), id);
+});
+
+test("S2: the panel runs the window's full height beside the tabs and terminals, as in Orca, its header drawn by code-tabs in line with the tab bar", () => {
+  const row = find(layout(), "work-row");
+  assert.deepEqual(row.children.map((c) => c.id), ["work", "panel"], "the tab bar ends where the terminals do");
+  assert.deepEqual(row.divider, { width: 1, color: "border" });
+  const panel = find(layout(), "panel");
+  assert.deepEqual(panel.children.map((c) => c.id), ["panel-header", "panel-body"]);
+  assert.equal(panel.background, "chrome");
+  assert.equal(panel.radius, undefined, "flush with the window's edges: no card of its own");
+  assert.equal(panel.padding, undefined);
+  const header = find(layout(), "panel-header");
+  assert.deepEqual(header.content, { mod: "code-tabs", props: { view: "panel" } });
+  assert.equal(header.size.px, find(layout(), "tabs").size.px, "its bottom line continues the tab bar's");
 });
 
 test("S2: the projects layout's tab bar is code-tabs, in the block it always had", () => {

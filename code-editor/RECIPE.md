@@ -18,14 +18,20 @@ icons.
   dot in `ansi3` on any tab with unsaved changes; an inactive tab with nothing
   unsaved has no slot. A terminal's tab draws its program's icon and, as in Herdr,
   a spinner in `working` or a 6 px dot in `blocked` or `done`.
-- **The bar's right end:** `+` (26 px, radius 6, `muted`), then 4 px further on,
-  buttons 26 px high with radius 6, 12 px text and a 14 px icon: "Changes" if
-  picked in Herdr's welcome, and last the toggle "Explorer" with `⌘L`. A button
-  whose panel shows is `selected` with `foreground` text; otherwise `muted` on
-  `chrome`.
-- **Right panel** (`panel`, in projects-sidebar's layout): 368 px wide, 280 to
-  900, to the right of the terminals, closed until you open it. It shows one
-  block at a time: the Explorer, or Herdr's `changes`.
+- **The bar's right end:** `+` (26 px, radius 6, `muted`), level with the
+  terminals' right edge: the bar ends where they do. While the panel is closed,
+  4 px further on, the toggle that opens it: the same 26 px button with a 14 px
+  panel icon.
+- **Right panel** (`panel`, in projects-sidebar's layout), as in Orca: the
+  window's whole height beside the tab bar and the terminals, down to the status
+  bar, on `chrome`, flush with the window's edge, a 1 px `border` divider on its
+  left. 368 px wide, 280 to 900, closed until you open it. It shows one block at a
+  time: the Explorer, or Herdr's `changes`, which draws its own card.
+- **The panel's header** (42 px, like the tab bar, so their bottom lines run on
+  as one): an icon per panel, 34 px wide with a 16 px icon, the Explorer's files
+  and then Changes' branch if picked in Herdr's welcome. The shown one is
+  `foreground` with an 18 by 2 px bar under it; the others `muted`. At the right
+  end, the panel icon closes the panel.
 - **Explorer block:** described under **The Explorer**.
 - **Theme:** One Dark Pro on the whole window, terminals and panels alike:
   background `#282c34`, foreground `#abb2bf`, accent `#528bff`, `chrome` and
@@ -36,8 +42,9 @@ icons.
 - **`cmd-l`** in the projects layout opens the panel, and closes it again, with
   a terminal focused too. The terminal's program doesn't get the key, and its
   `ctrl-l` still clears the screen.
-- **The Explorer button** does the same for the Explorer: it opens the panel on
-  it, and closes the panel when it shows. "Changes" does so for Changes.
+- **The bar's toggle** opens the panel on the panel it last showed, the Explorer
+  if that one isn't on offer. **A header icon** shows its panel; the header's
+  panel icon closes the panel.
 - The panel's width is kept with the layout's other clicks, by Herdr.
 - **Each space remembers its panel:** which one was open, or closed. Switching
   away and back brings it back; a space that never had one shows it closed.
@@ -87,8 +94,10 @@ icons.
   (Material Icon Theme 5.39.0, MIT) are beside them. Draw them with `image()`:
   `svg()` tints an icon to one color.
 - **Layout `projects-sidebar/layouts/projects.json`:** the root sets `"theme":
-  "one-dark-pro"`, the block `tabs` draws `{ "mod": "code-tabs" }`, and the stack
-  `panel-body` has `active: "explorer"` with the
+  "one-dark-pro"`, the block `tabs` draws `{ "mod": "code-tabs" }`, the row
+  `work-row` holds the column `work` (tab bar and terminals) and the column
+  `panel`, whose block `panel-header` draws `{ "mod": "code-tabs", "props": {
+  "view": "panel" } }` above the stack `panel-body`, which has `active: "explorer"` with the
   children `explorer` → `{ "mod": "code-explorer" }` and `changes` →
   `{ "mod": "changes" }`. projects-sidebar's `requires` installs this plugin
   first.
@@ -106,8 +115,9 @@ icons.
 - **A `<mod>.<command>` reaches only the copy in the shown tab,** so only the active
   tab can be closed from the bar, and an inactive tab's dot doesn't close it.
 - **Close in the tab's right-click menu is Herdr's:** it doesn't ask the file.
-- **`⌘L` is a fixed label:** with your own `cmd-l` in `layout:projects` the button
-  still works, and the label is wrong.
+- **The header is a second copy of `code-tabs`:** it only draws, and the bar's
+  copy keeps the per-space memory, so a layout with the header and no bar forgets
+  the panel per space.
 - **The active tab's text is `foreground`** (`#abb2bf`). The design's `#d7dae0` has
   no theme name of its own, and the dot's `ansi3` (`#d18f52`) stands in for its
   `#e5c07b`: both follow the theme picker this way.
@@ -129,7 +139,7 @@ icons.
 - In the projects layout, the terminals' cards are `#282c34` and the canvas
   around them `#1d1f23`.
 - With the Explorer open in a space, switching to another space and back shows it
-  open again, and the button reads "Explorer" and `⌘L`, `selected` while it shows.
+  open again, with its header's files icon in `foreground` and the bar under it.
 - A tab whose `code-editor.docs` entry has `preview: true`, with a `code-file` pane
   in it, shows its name in italics and its Material icon; with `dirty: true` in
   `code-editor.live` it shows the dot, active or not.
