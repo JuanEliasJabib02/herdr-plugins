@@ -41,6 +41,9 @@ function machine({ shPpid = HERDR, files = {}, procs = {} } = {}) {
     writeFails: false, // a write that fails for another reason than a stale snapshot
     afterSpawn: null, // runs between the spawn and its pid-file write (a race)
     spawnGate: null, // a promise the spawn waits on
+    ppidGate: null, // a promise `echo $PPID` waits on (a start before its spawn)
+    writeGate: null, // a promise the next write waits on once its text has landed
+    reads: 0, // how many times the pid file was read
   };
   m.caffeinates = () => [...m.procs].filter(([, p]) => p.comm === "/usr/bin/caffeinate").map(([pid]) => pid);
   m.spawns = () => m.calls.filter((c) => c[0] === "/bin/sh" && c[2] === D1_SCRIPT);
@@ -49,7 +52,10 @@ function machine({ shPpid = HERDR, files = {}, procs = {} } = {}) {
     const call = [cmd, ...args];
     m.calls.push(call);
     await Promise.resolve();
-    if (cmd === "/bin/sh" && args[0] === "-c" && args[1] === "echo $PPID") return ok(`${m.shPpid}\n`);
+    if (cmd === "/bin/sh" && args[0] === "-c" && args[1] === "echo $PPID") {
+      if (m.ppidGate) await m.ppidGate;
+      return ok(`${m.shPpid}\n`);
+    }
     if (cmd === "/bin/sh" && args[0] === "-c" && args[1] === D1_SCRIPT) {
       if (m.spawnGate) await m.spawnGate;
       if (m.spawnRejects) throw new Error("spawn /bin/sh ENOENT");
@@ -80,6 +86,7 @@ function machine({ shPpid = HERDR, files = {}, procs = {} } = {}) {
     throw new Error(`unexpected exec: ${call.join(" ")}`);
   };
   m.read = async (path) => {
+    m.reads++;
     await Promise.resolve();
     return Object.hasOwn(m.files, path) ? m.files[path] : null;
   };
@@ -89,6 +96,10 @@ function machine({ shPpid = HERDR, files = {}, procs = {} } = {}) {
     const current = Object.hasOwn(m.files, path) ? m.files[path] : null;
     if (current !== expected) throw new Error(`stale snapshot for ${path}`);
     m.files[path] = text;
+    // Landed, but the promise resolves later (Herdr's writeTextFile).
+    const gate = m.writeGate;
+    m.writeGate = null;
+    if (gate) await gate;
     return null;
   };
   m.mkdirp = async (dir) => {
@@ -262,6 +273,75 @@ test("not wanted with an adopted one: killed too; the file is cleared once (D3)"
   assert.deepEqual(m.caffeinates(), []);
   assert.equal(m.files[PID_FILE], "");
   assert.equal(m.spawns().length, 1);
+});
+
+test("not wanted, none held: the file is looked at every 15 s, never every second, and a caffeinate of ours it lists goes (R1)", async () => {
+  // Left by a close() that didn't finish, or before a reload.
+  const m = machine({ files: { [PID_FILE]: "4242\n" }, procs: { 4242: ours() } });
+  const h = m.holder();
+  for (let t = 0; t < LIVENESS_MS; t += 1_000) assert.equal(await h.tick(false, NOW + t), false);
+  assert.equal(m.reads, 0, "not read every second");
+  assert.deepEqual(m.calls, []);
+  assert.equal(await h.tick(false, NOW + LIVENESS_MS), false);
+  assert.deepEqual(m.kills(), [4242]);
+  assert.deepEqual(m.caffeinates(), []);
+  assert.equal(m.files[PID_FILE], "");
+  assert.equal(h.holding, false);
+  const reads = m.reads;
+  const calls = m.calls.length;
+  for (let t = LIVENESS_MS + 1_000; t < 2 * LIVENESS_MS; t += 1_000) await h.tick(false, NOW + t);
+  assert.equal(m.reads, reads, "the next look is 15 s later");
+  await h.tick(false, NOW + 2 * LIVENESS_MS);
+  assert.equal(m.reads, reads + 1);
+  assert.equal(m.calls.length, calls, "an empty file runs nothing");
+});
+
+test("not wanted, none held: what the file lists and isn't ours, or can't be looked at, is never killed (R1, D3)", async () => {
+  for (const command of ["/usr/bin/vim notes.txt", "/usr/bin/caffeinate -i -s -w 777", "/usr/bin/caffeinate -d", null]) {
+    const m = machine({ files: { [PID_FILE]: "4242\n" }, procs: command ? { 4242: command } : {} });
+    const h = m.holder();
+    await h.tick(false, NOW + LIVENESS_MS);
+    assert.deepEqual(m.kills(), [], String(command));
+    assert.equal(m.files[PID_FILE], "4242\n", String(command));
+  }
+  const blind = machine({ files: { [PID_FILE]: "4242\n" }, procs: { 4242: ours() } });
+  blind.psRejects = true;
+  await blind.holder().tick(false, NOW + LIVENESS_MS);
+  assert.deepEqual(blind.kills(), [], "ps can't run");
+  assert.equal(blind.files[PID_FILE], "4242\n");
+  const lost = machine({ shPpid: ORPHAN_CORE, files: { [PID_FILE]: "4242\n" }, procs: { 4242: ours() } });
+  await lost.holder().tick(false, NOW + LIVENESS_MS);
+  assert.deepEqual(lost.kills(), [], "the Herdr app's pid unknown");
+  assert.equal(lost.files[PID_FILE], "4242\n");
+});
+
+test("not wanted while ps can't run: the held one and the file are kept, and dropped at a later tick (R2)", async () => {
+  const m = machine();
+  const h = m.holder();
+  await h.tick(true, NOW);
+  m.psRejects = true;
+  assert.equal(await h.tick(false, NOW + 1_000), true, "still held: there's no telling whether it's ours");
+  assert.equal(h.pid, 9000);
+  assert.equal(m.files[PID_FILE], "9000\n");
+  assert.deepEqual(m.kills(), []);
+  m.psRejects = false;
+  assert.equal(await h.tick(false, NOW + 2_000), false);
+  assert.deepEqual(m.kills(), [9000]);
+  assert.deepEqual(m.caffeinates(), []);
+  assert.equal(m.files[PID_FILE], "");
+  assert.equal(h.holding, false);
+});
+
+test("a failed start's 30 s wait ends when nothing is wanted: the next wish starts at once (R4, Orca's stop())", async () => {
+  const m = machine();
+  m.spawnFails = true;
+  const h = m.holder();
+  assert.equal(await h.tick(true, NOW), false);
+  m.spawnFails = false;
+  assert.equal(await h.tick(false, NOW + 1_000), false);
+  assert.equal(await h.tick(true, NOW + 2_000), true);
+  assert.equal(m.spawns().length, 2);
+  assert.equal(m.files[PID_FILE], "9000\n");
 });
 
 test("liveness: checked at 15 s; a caffeinate that died is respawned (D6)", async () => {
@@ -444,6 +524,69 @@ test("release() during a start in flight: the one it starts is released too (D7)
   assert.deepEqual(m.caffeinates(), []);
   assert.deepEqual(m.kills(), [9000]);
   assert.equal(m.files[PID_FILE], "");
+});
+
+// Every fake call settles in microtasks: one macrotask turn lets them all run.
+const settle = () => new Promise((resolve) => setImmediate(resolve));
+
+test("release() doesn't wait for a start in flight; that start, once it ends, kills what it spawned and clears the file (R3, D7)", async () => {
+  const m = machine();
+  let open;
+  m.spawnGate = new Promise((resolve) => (open = resolve));
+  const h = m.holder();
+  const ticking = h.tick(true, NOW);
+  await settle();
+  let released = false;
+  h.release().then(() => (released = true));
+  await settle();
+  assert.equal(released, true, "close() isn't held by the exec in flight");
+  assert.deepEqual(m.kills(), []);
+  open();
+  assert.equal(await ticking, false);
+  assert.deepEqual(m.caffeinates(), []);
+  assert.deepEqual(m.kills(), [9000]);
+  assert.equal(m.files[PID_FILE], "");
+  assert.equal(h.holding, false);
+});
+
+test("release() while the start's pid-file write is landing: the one the file lists is killed now, and not twice (R3, D3)", async () => {
+  const m = machine();
+  let open;
+  m.writeGate = new Promise((resolve) => (open = resolve));
+  const h = m.holder();
+  const ticking = h.tick(true, NOW);
+  await settle();
+  assert.equal(m.files[PID_FILE], "9000\n", "written, its promise not resolved yet");
+  assert.equal(h.holding, false);
+  let released = false;
+  h.release().then(() => (released = true));
+  await settle();
+  assert.equal(released, true);
+  assert.deepEqual(m.kills(), [9000]);
+  assert.deepEqual(m.caffeinates(), []);
+  assert.equal(m.files[PID_FILE], "");
+  open();
+  assert.equal(await ticking, false);
+  assert.deepEqual(m.kills(), [9000], "the start's own look finds it gone");
+  assert.equal(h.holding, false);
+});
+
+test("released before its start spawned: the start runs nothing more (R3)", async () => {
+  const m = machine();
+  let open;
+  m.ppidGate = new Promise((resolve) => (open = resolve));
+  const h = m.holder();
+  const ticking = h.tick(true, NOW);
+  await settle();
+  let released = false;
+  h.release().then(() => (released = true));
+  await settle();
+  assert.equal(released, true);
+  open();
+  assert.equal(await ticking, false);
+  assert.deepEqual(m.spawns(), []);
+  assert.deepEqual(m.caffeinates(), []);
+  assert.equal(m.files[PID_FILE], undefined);
 });
 
 test("overlapping ticks: one start, not two", async () => {

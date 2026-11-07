@@ -29,10 +29,18 @@
 //     own caffeinate) is forgotten, never killed.
 // D6  A change of `wanted` is acted on at that tick; a held one is looked at
 //     every LIVENESS_MS and started again if it died; a failed start waits
-//     RETRY_MS. Mode off runs nothing at all.
+//     RETRY_MS, a wait that ends once nothing is wanted. While nothing is
+//     wanted and none held, only the pid file is looked at, every
+//     LIVENESS_MS: a caffeinate of ours it still lists (a close() that didn't
+//     finish, a reload) goes. When ps can't run, a held one isn't let go
+//     blindly: it's kept, file and all, and looked at again next tick.
 // D7  release() kills the one this copy holds (started or adopted) and
 //     clears the file; another window's copy starts a new one at its next
-//     liveness check.
+//     liveness check. It doesn't wait for a tick in flight (each exec may
+//     take up to 30 s, close() is bounded): holding none while a tick runs,
+//     it kills the one the file lists, which that tick may have just written
+//     or be adopting, and the tick, ending later, starts nothing more and
+//     lets go of whatever it started or adopted.
 
 export const CAFFEINATE = "/usr/bin/caffeinate";
 // D1 verbatim: "$1" is the Herdr pid, passed as a positional argument.
@@ -73,6 +81,7 @@ export class Holder {
     this.herdrPid = null; // the Herdr app's, once found (it doesn't change)
     this.checkedAt = 0; // when the held one was last seen alive
     this.retryAt = 0; // no start before this (a failed one, D6)
+    this.sweptAt = now(); // the file last looked at with nothing wanted (D6)
     this.busy = null; // the tick in flight
     this.closed = false; // released: holds nothing from now on
   }
@@ -83,7 +92,8 @@ export class Holder {
 
   // Resolves to whether this copy holds a caffeinate after the tick. A tick
   // asked for while one is in flight gets that one's result: never two
-  // starts at once from one copy.
+  // starts at once from one copy. One that ends after release() lets go of
+  // what it holds by then (D7).
   tick(wanted, now = this.now()) {
     if (this.closed) return Promise.resolve(false);
     if (this.busy) return this.busy;
@@ -92,27 +102,47 @@ export class Holder {
         this.log(`tick: ${reason(e)}`);
         return this.holding;
       })
+      .then((held) => (this.closed ? this.letGo() : held))
       .finally(() => {
         this.busy = null;
       });
     return this.busy;
   }
 
-  // For close(): a tick in flight ends first, so what it started goes too.
+  // For close(), without waiting for a tick in flight (D7): the held one
+  // goes; holding none while a tick runs, the one the file lists.
   async release() {
     this.closed = true;
-    if (this.busy) await this.busy;
     try {
-      await this.drop();
+      if (this.holding) await this.drop();
+      else if (this.busy) await this.dropListed(false);
     } catch (e) {
       this.log(`release: ${reason(e)}`);
     }
   }
 
+  // A tick that ended after release(): what it holds goes too.
+  async letGo() {
+    try {
+      await this.drop();
+    } catch (e) {
+      this.log(`release: ${reason(e)}`);
+    }
+    return false;
+  }
+
   async step(wanted, now) {
     if (!wanted) {
-      if (this.holding) await this.drop();
-      return false;
+      // Orca's stop(): the next wish doesn't wait for a failed start's RETRY_MS.
+      this.retryAt = 0;
+      if (this.holding) {
+        await this.drop();
+        this.sweptAt = now;
+      } else if (now - this.sweptAt >= LIVENESS_MS) {
+        this.sweptAt = now;
+        await this.dropListed(true);
+      }
+      return this.holding;
     }
     if (this.holding) {
       if (now - this.checkedAt < LIVENESS_MS) return true;
@@ -144,6 +174,8 @@ export class Holder {
       // Without ps there's no telling whether it's alive: start no second one.
       if (ours === null) return this.fail(now, `can't look at caffeinate ${listed}`);
     }
+    // Released meanwhile (D7): a closing copy starts nothing.
+    if (this.closed) return false;
     const started = await this.spawn(herdr);
     if (started === null) return this.fail(now, "caffeinate didn't start");
     try {
@@ -169,12 +201,19 @@ export class Holder {
   }
 
   // Kills the held one if it's still ours, and clears the file if it still
-  // names it (a file naming another copy's caffeinate is left alone).
+  // names it (a file naming another copy's caffeinate is left alone). When
+  // ps can't run there's no telling: it stays held and listed, and the next
+  // tick looks again.
   async drop() {
     const pid = this.pid;
     if (pid === null) return;
-    this.pid = null;
-    if ((await this.isOurs(pid)) === true) await this.kill(pid);
+    const ours = await this.isOurs(pid);
+    if (ours === null) {
+      this.log(`can't look at caffeinate ${pid}: kept`);
+      return;
+    }
+    if (this.pid === pid) this.pid = null;
+    if (ours) await this.kill(pid);
     let text;
     try {
       text = await this.io.read(this.paths.pid);
@@ -182,6 +221,26 @@ export class Holder {
       return;
     }
     if (parsePid(text) !== pid) return;
+    await this.clear(text);
+  }
+
+  // Kills the caffeinate the file lists if it's ours, and clears the file.
+  // One that isn't ours, or that ps can't look at, is left alone. `find`:
+  // look for the Herdr app's pid if not known yet (with nothing wanted, a
+  // copy may never have); release() doesn't, since its tick in flight can't
+  // have started or adopted one before knowing it.
+  async dropListed(find) {
+    const text = await this.io.read(this.paths.pid);
+    const listed = parsePid(text);
+    if (listed === null) return;
+    const herdr = find ? await this.findHerdr() : this.herdrPid;
+    if (herdr === null || (await this.isOurs(listed)) !== true) return;
+    await this.kill(listed);
+    await this.clear(text);
+  }
+
+  // Empties the pid file while it still holds `text`.
+  async clear(text) {
     try {
       await this.io.write(this.paths.pid, "", text);
     } catch {

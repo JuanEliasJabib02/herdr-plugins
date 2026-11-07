@@ -339,6 +339,7 @@ function newWorld({ props = {}, mode, platform = "macos", hasWindow = true, term
     platform,
     hasWindow,
     viewport: { width: 1000, height: 700 },
+    spawnGate: null, // a promise caffeinate's sh waits on (an exec in flight)
   };
   w.opened = () => w.log.filter((x) => x.open).map((x) => x.open);
   w.closed = () => w.log.filter((x) => x.close).map((x) => x.close);
@@ -376,6 +377,7 @@ function newWorld({ props = {}, mode, platform = "macos", hasWindow = true, term
       await Promise.resolve();
       if (cmd === "/bin/sh" && args[1] === "echo $PPID") return ok(`${HERDR_PID}\n`);
       if (cmd === "/bin/sh" && args[1] === SPAWN_SCRIPT) {
+        if (w.spawnGate) await w.spawnGate;
         const pid = w.nextPid++;
         w.procs.set(pid, { ppid: 1, comm: "/usr/bin/caffeinate", command: `/usr/bin/caffeinate -i -s -w ${args[3]}` });
         return ok(`${pid}\n`);
@@ -489,6 +491,24 @@ test("D7: the cell's close() releases the caffeinate it holds", async () => {
   await w.fire(TICK_MS);
   assert.equal(w.spawns().length, 1, "a closed copy starts nothing again");
   assert.equal(w.published().length, published);
+});
+
+test("D7, R3: the cell's close() doesn't wait for the tick in flight; that tick, once it ends, lets go of what it started", async () => {
+  const { w, view } = await copy({ mode: "on" });
+  let open;
+  w.spawnGate = new Promise((resolve) => (open = resolve));
+  await w.fire(TICK_MS);
+  assert.equal(w.spawns().length, 1, "the start is in flight");
+  let closed = false;
+  view.close(w.cx).then(() => (closed = true));
+  await flush();
+  assert.equal(closed, true, "Herdr's close() isn't held by the exec in flight");
+  open();
+  await flush();
+  assert.deepEqual(w.kills(), [9000]);
+  assert.equal(w.procs.has(9000), false);
+  assert.equal(w.files[PID_FILE], "");
+  assert.deepEqual(w.published(), [], "a tick that ended after close() shares nothing");
 });
 
 test("D6: not macOS, the cell starts nothing and reads Inactive", async () => {

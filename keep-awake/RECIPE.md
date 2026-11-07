@@ -32,6 +32,9 @@ and it does nothing until you choose On or Agent in the popup the cup opens.
   `caffeinate`, whose pid is in `~/.config/herdr-app/keep-awake/caffeinate.pid`.
   Closing a window lets it go and another window's cup starts it again within
   15 seconds; the same if it dies. If it can't start, it tries again after 30.
+- **Only while the cup is shown.** The cup is what runs it: switch to a layout
+  without it and the `caffeinate` is let go, so the Mac sleeps as usual
+  whatever the mode, until the projects layout is back.
 - **The cup.** The mode's name, and a dot that is bright while it holds the
   Mac awake and dim while it doesn't. Its tooltip says the same, and that the
   lid still sleeps the Mac.
