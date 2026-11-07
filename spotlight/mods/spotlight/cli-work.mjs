@@ -398,18 +398,25 @@ export async function deactivateRepo(cx, root, { force = false } = {}) {
       delete s.queue.lighting[`direct/${root}`];
       addNote(s, { repo: root, text: "Spotlight off — root restaurado", toast: true }, now);
       if (res.warning) addNote(s, { repo: root, text: `${name}: ${res.warning.message}`, toast: true }, now);
-      for (const text of rescuedNotes(res.rescued)) addNote(s, { repo: root, text: `${name}: ${text}`, toast: true }, now);
+      for (const text of rescuedNotes(res.rescued, res.discardedRepos)) addNote(s, { repo: root, text: `${name}: ${text}`, toast: true }, now);
     });
-    return { ok: true, warning: res.warning, stopped, rescued: res.rescued };
+    return { ok: true, warning: res.warning, stopped, rescued: res.rescued, discardedRepos: res.discardedRepos };
   });
 }
 
 // What a turn-off did with untracked root files in its way (sync.js
 // deactivate's `rescued`), one line each, in Spanish like the other toasts.
-export function rescuedNotes(rescued) {
-  if (!rescued) return [];
+export function rescuedNotes(rescued, discardedRepos = []) {
   const names = (ps) => ps.slice(0, 3).join(", ") + (ps.length > 3 ? ` (+${ps.length - 3} más)` : "");
   const lines = [];
+  if (discardedRepos.length > 0) {
+    lines.push(
+      discardedRepos.length === 1
+        ? `Había un repo de git en ${names(discardedRepos)}, en una ruta que Apagar igual escribió: no se guardó.`
+        : `Había repos de git en ${names(discardedRepos)}, en rutas que Apagar igual escribió: no se guardaron.`,
+    );
+  }
+  if (!rescued) return lines;
   if (rescued.restored.length > 0) {
     const verb = rescued.restored.length === 1 ? "quedó" : "quedaron";
     lines.push(`${names(rescued.restored)} ${verb} como cambio sin commit (tu versión). Copia en ${rescued.ref}.`);

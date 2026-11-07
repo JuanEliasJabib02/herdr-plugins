@@ -966,6 +966,107 @@ describe("sync engine (D8)", () => {
     assert.equal(run(root, "for-each-ref", "refs/herdr-spotlight/"), "");
   });
 
+  test("untracked-collision: a nested git repo above a file in the turn-off's way refuses it; Apagar igual writes over the file, keeps the repo and names it", async () => {
+    commitOnBoth({ "vendor/lib/x.js": "original\n" });
+    run(wt, "rm", "-q", "-r", "vendor");
+    run(wt, "commit", "-qm", "drop vendor");
+    const on = await activate(ctx, root, wt);
+    run(root, "init", "-q", "-b", "main", "vendor");
+    write(root, "vendor/lib/x.js", "mine\n");
+    run(join(root, "vendor"), "add", "-A");
+    run(join(root, "vendor"), "commit", "-qm", "nested");
+    write(root, "vendor/lib/x.js", "mine, uncommitted\n");
+
+    const refusal = /^Hay un repo de git dentro de vendor, en una ruta que apagar Spotlight escribiría\./;
+    await rejectsCode(deactivate(ctx, root), "untracked-collision", refusal);
+    await rejectsCode(assertDeactivatable(ctx, root), "untracked-collision", refusal);
+    await assertTurnOffUntouched(on.snapshotSha);
+    assert.equal(read(root, "vendor/lib/x.js"), "mine, uncommitted\n");
+
+    const out = await deactivate(ctx, root, { force: true });
+
+    assert.deepEqual(out.discardedRepos, ["vendor"]);
+    assert.equal(out.rescued, null);
+    assert.equal(read(root, "vendor/lib/x.js"), "original\n");
+    assert.equal(existsSync(join(root, "vendor/.git")), true);
+  });
+
+  test("untracked-collision: a nested git repo above a folder where the original commit has a file refuses it", async () => {
+    commitOnBoth({ "vendor/lib": "original\n" });
+    run(wt, "rm", "-q", "-r", "vendor");
+    run(wt, "commit", "-qm", "drop vendor");
+    const on = await activate(ctx, root, wt);
+    run(root, "init", "-q", "-b", "main", "vendor");
+    write(root, "vendor/lib/y.txt", "mine\n");
+
+    await rejectsCode(deactivate(ctx, root), "untracked-collision", /^Hay un repo de git dentro de vendor, /);
+    await assertTurnOffUntouched(on.snapshotSha);
+    assert.equal(read(root, "vendor/lib/y.txt"), "mine\n");
+  });
+
+  test("root-diverged with a nested git repo in the way names both; Apagar igual discards them and says which repo went", async () => {
+    commitOnBoth({ docs: "original docs\n" });
+    run(wt, "rm", "-q", "docs");
+    run(wt, "commit", "-qm", "drop docs");
+    await activate(ctx, root, wt);
+    run(root, "init", "-q", "-b", "main", "docs/n");
+    write(root, "docs/n/keep.txt", "nested\n");
+    run(join(root, "docs/n"), "add", "-A");
+    run(join(root, "docs/n"), "commit", "-qm", "nested");
+    write(root, "a.txt", "edited at the root\n");
+
+    const refusal =
+      /^El root tiene cambios hechos fuera del workspace de Spotlight\. Apagar Spotlight los descartaría\. También hay un repo de git dentro de docs\/n, en una ruta que apagar Spotlight escribiría: Apagar igual también lo descarta\.$/;
+    await rejectsCode(deactivate(ctx, root), "root-diverged", refusal);
+    await rejectsCode(assertDeactivatable(ctx, root), "root-diverged", refusal);
+    assert.equal(read(root, "docs/n/keep.txt"), "nested\n");
+    assert.equal(read(root, "a.txt"), "edited at the root\n");
+
+    const out = await deactivate(ctx, root, { force: true });
+
+    assert.deepEqual(out.discardedRepos, ["docs/n"]);
+    assert.equal(read(root, "docs"), "original docs\n");
+    assert.equal(read(root, "a.txt"), "a-original\n");
+  });
+
+  test("a submodule of the original commit that the workspace removed, populated in the root, doesn't refuse the turn-off and stays as it was", async () => {
+    run(root, "init", "-q", "-b", "main", "sub");
+    write(root, "sub/s.txt", "sub file\n");
+    run(join(root, "sub"), "add", "-A");
+    run(join(root, "sub"), "commit", "-qm", "sub");
+    commitOnBoth({ "b.txt": "b\n" }); // add -A records sub as a gitlink
+    assert.match(run(root, "ls-tree", "HEAD", "sub"), /^160000 /);
+    run(wt, "rm", "-q", "sub");
+    run(wt, "commit", "-qm", "drop the submodule");
+    await activate(ctx, root, wt);
+    assert.equal(read(root, "sub/s.txt"), "sub file\n");
+
+    await assertDeactivatable(ctx, root);
+    const out = await deactivate(ctx, root);
+
+    assert.equal(out.rescued, null);
+    assert.deepEqual(out.discardedRepos, []);
+    assert.equal(branchOf(root), "main");
+    assert.equal(read(root, "sub/s.txt"), "sub file\n");
+    assert.equal(existsSync(join(root, "sub/.git")), true);
+    assert.equal(run(root, "status", "--porcelain"), "");
+  });
+
+  test("a submodule only in the root's saved changes still refuses the turn-off: applying them would delete it", async () => {
+    run(root, "init", "-q", "-b", "main", "newsub");
+    write(root, "newsub/s.txt", "sub file\n");
+    run(join(root, "newsub"), "add", "-A");
+    run(join(root, "newsub"), "commit", "-qm", "sub");
+    write(root, "a.txt", "staged\n"); // alone, a staged gitlink makes no backup
+    run(root, "add", "newsub", "a.txt");
+    await activate(ctx, root, wt);
+    const { backupSha } = await inspectRefs(ctx, root);
+    assert.match(run(root, "ls-tree", backupSha, "newsub"), /^160000 /);
+
+    await rejectsCode(deactivate(ctx, root), "untracked-collision", /^Hay un repo de git dentro de newsub, /);
+    assert.equal(read(root, "newsub/s.txt"), "sub file\n");
+  });
+
   test("branch-missing: a deleted original branch leaves the root detached at its original commit, with a warning", async () => {
     await activate(ctx, root, wt);
     const originalHead = (await inspectRefs(ctx, root)).originalHeadSha;

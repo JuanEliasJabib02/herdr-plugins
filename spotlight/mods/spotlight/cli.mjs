@@ -312,7 +312,7 @@ async function verbToggle(cx, opts) {
         return 1;
       }
       out(`Spotlight off in ${name}: root restored.${r.warning ? ` ${r.warning.message}` : ""}`);
-      for (const line of rescuedNotes(r.rescued)) out(line);
+      for (const line of rescuedNotes(r.rescued, r.discardedRepos)) out(line);
       return 0;
     }
     try {
@@ -320,9 +320,17 @@ async function verbToggle(cx, opts) {
       await assertDeactivatable(cx.gitCtx, root, { force });
     } catch (e) {
       const error = toSpotlightError(e);
-      const hint = !force && (error.code === "root-diverged" || error.code === "untracked-collision")
+      const forceable = !force && (error.code === "root-diverged" || error.code === "untracked-collision");
+      const hint = forceable
         ? ` Para apagarlo igual: \`spotlight toggle --workspace ${workspace} --force\` (Apagar igual).`
         : "";
+      // The popup offers Apagar igual from the record's error.
+      if (forceable) {
+        const now = cx.now();
+        await cx.store.updateState((s) => {
+          if (s.repos[root]) s.repos[root].lastError = { ...error, at: now };
+        });
+      }
       err(`${error.code}: ${error.message}${hint}`);
       return 1;
     }

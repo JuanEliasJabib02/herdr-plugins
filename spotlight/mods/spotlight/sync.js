@@ -614,22 +614,25 @@ export async function assertDeactivatable(ctx, rootPath, opts = {}) {
 }
 
 /** assertDeactivatable, returning also what it read for the turn-off: the
- *  original commit's files, core.ignorecase, the items in the way and the
- *  untracked entries under them. */
+ *  original commit's files, core.ignorecase, the items in the way, the
+ *  untracked entries under them and the nested repos it would go through. */
 async function checkTurnOff(ctx, rootPath, opts) {
   await assertRoot(ctx, rootPath);
   await assertNoConflictOperation(ctx, rootPath);
   const refs = await inspectRefs(ctx, rootPath);
   if (!refs.originalHeadSha) throw new SpotlightError("not-active", "Spotlight is not active for this repository.");
-  // The reset --hard of a turn-off would silently destroy work committed or
-  // edited in the root after activation: the backup predates it.
-  if (!opts.force && refs.snapshotSha) assertRootOnSnapshot(refs, await readRootStatus(ctx, rootPath), true);
   const original = await treeFiles(ctx, rootPath, refs.originalHeadSha);
   const ignoreCase = (await gitTry(ctx, rootPath, ["config", "--bool", "core.ignorecase"])) === "true";
   const inTheWay = await itemsInTheWay(ctx, rootPath, refs, original, ignoreCase);
   const untracked = await untrackedUnder(ctx, rootPath, inTheWay);
-  if (!opts.force) await assertNoNestedRepos(rootPath, inTheWay, untracked);
-  return { refs, original, ignoreCase, inTheWay, untracked };
+  const nestedRepos = await nestedReposInTheWay(ctx, rootPath, refs, inTheWay, untracked, ignoreCase);
+  if (!opts.force) {
+    // The reset --hard of a turn-off would silently destroy work committed or
+    // edited in the root after activation: the backup predates it.
+    if (refs.snapshotSha) assertRootOnSnapshotNaming(nestedRepos, refs, await readRootStatus(ctx, rootPath));
+    assertNoNestedRepos(nestedRepos);
+  }
+  return { refs, original, ignoreCase, inTheWay, untracked, nestedRepos };
 }
 
 /** Restores the root: its original commit, its branch, and its uncommitted
@@ -637,15 +640,16 @@ async function checkTurnOff(ctx, rootPath, opts) {
  *  diverged root (Orca's "Turn off anyway") and a nested git repo in the
  *  way, which is never saved: a gitlink would keep none of its commits or
  *  files. Returns {originalBranch, branchMissing, branchInUse, warning,
- *  rescued}: when the branch can't be re-attached (deleted, or checked out in
+ *  rescued, discardedRepos}: when the branch can't be re-attached (deleted, or checked out in
  *  another worktree) the root is left detached at its original commit and
  *  `warning` is a `branch-missing` {code, message}. `rescued` is null, or {ref, restored, kept} when untracked
  *  root files were in the way (or a turn-off that failed half-way had saved
  *  some): all saved in `ref`, `restored` written back on top, `kept` only in
  *  `ref` (the original commit has no file at that exact path, or the root's
- *  own changes brought it). Any failure after that save names `ref`. */
+ *  own changes brought it). `discardedRepos` lists the nested repos a forced
+ *  turn-off went through. Any failure after that save names `ref`. */
 export async function deactivate(ctx, rootPath, opts = {}) {
-  const { refs, original, ignoreCase, inTheWay, untracked } = await checkTurnOff(ctx, rootPath, opts);
+  const { refs, original, ignoreCase, inTheWay, untracked, nestedRepos } = await checkTurnOff(ctx, rootPath, opts);
   // Saved before anything is written. Nothing is removed before the reset:
   // until it lands, a failure leaves every file where it was.
   const rescue = await rescueItems(ctx, rootPath, untracked, refs.originalHeadSha);
@@ -707,7 +711,7 @@ export async function deactivate(ctx, rootPath, opts = {}) {
           : `The root is back on its original commit but left detached: branch "${refs.originalBranch}" no longer exists.`,
       }
       : null;
-    return { originalBranch: refs.originalBranch, branchMissing, branchInUse, warning, rescued };
+    return { originalBranch: refs.originalBranch, branchMissing, branchInUse, warning, rescued, discardedRepos: nestedRepos };
   } catch (error) {
     if (!rescue) throw error;
     // RESCUED_PENDING stays: the next turn-off writes these files back.
@@ -823,27 +827,62 @@ async function untrackedUnder(ctx, rootPath, items) {
 
 const isNestedRepoEntry = (p) => p.endsWith("/");
 
-/** A nested git repo in the way could be saved only as a gitlink, a pointer to
- *  commits the rescue doesn't hold (none at all in an unborn one, which `git
- *  add` refuses), and the turn-off would then delete it with its .git. Found
- *  by git's marker, or an item that is itself a folder with a .git entry. */
-async function assertNoNestedRepos(rootPath, items, untracked) {
+/** The nested git repos a turn-off would go through. One in the way could be
+ *  saved only as a gitlink, a pointer to commits the rescue doesn't hold (none
+ *  at all in an unborn one, which `git add` refuses), and the turn-off would
+ *  then delete it with its .git; one above an item isn't listed by git at all,
+ *  and the reset writes over its files. Found by git's marker, or a .git entry
+ *  in an item or any folder above it. A submodule of the original commit
+ *  doesn't count: the reset leaves a populated one alone and it's that
+ *  commit's own, so nothing removes it. One only in the backup does: its
+ *  folder is removed to apply the backup. Sorted. */
+async function nestedReposInTheWay(ctx, rootPath, refs, items, untracked, ignoreCase) {
   const found = new Set(untracked.filter(isNestedRepoEntry).map((p) => p.slice(0, -1)));
+  const seen = new Set();
   for (const item of items) {
-    const isDir = await lstat(join(rootPath, item)).then((st) => st.isDirectory(), () => false);
-    if (isDir && (await lstat(join(rootPath, item, ".git")).then(() => true, () => false))) found.add(item);
+    const parts = item.split("/");
+    for (let i = parts.length; i >= 1; i -= 1) {
+      const dir = parts.slice(0, i).join("/");
+      if (seen.has(dir)) break; // so were the folders above it
+      seen.add(dir);
+      if (await lstat(join(rootPath, dir, ".git")).then(() => true, () => false)) found.add(dir);
+    }
   }
-  if (found.size === 0) return;
-  const paths = [...found].sort();
-  const shown = paths.slice(0, 5).join(", ");
-  const more = paths.length > 5 ? ` (+${paths.length - 5} más)` : "";
+  if (found.size === 0) return [];
+  const key = ignoreCase ? foldName : (p) => p;
+  const raw = await gitRaw(ctx, rootPath, ["ls-tree", "-r", "-z", refs.originalHeadSha]);
+  const gitlinks = new Set(
+    splitZ(raw).filter((e) => e.startsWith("160000 ")).map((e) => key(e.slice(e.indexOf("\t") + 1))),
+  );
+  return [...found].filter((p) => !gitlinks.has(key(p))).sort();
+}
+
+const shownPaths = (paths) =>
+  paths.slice(0, 5).join(", ") + (paths.length > 5 ? ` (+${paths.length - 5} más)` : "");
+
+function assertNoNestedRepos(paths) {
+  if (paths.length === 0) return;
   throw new SpotlightError(
     "untracked-collision",
     paths.length === 1
-      ? `Hay un repo de git dentro de ${shown}, en una ruta que apagar Spotlight escribiría. Muévelo y vuelve a apagar, o usa Apagar igual para descartarlo.`
-      : `Hay repos de git dentro de ${shown}${more}, en rutas que apagar Spotlight escribiría. Muévelos y vuelve a apagar, o usa Apagar igual para descartarlos.`,
+      ? `Hay un repo de git dentro de ${shownPaths(paths)}, en una ruta que apagar Spotlight escribiría. Muévelo y vuelve a apagar, o usa Apagar igual para descartarlo.`
+      : `Hay repos de git dentro de ${shownPaths(paths)}, en rutas que apagar Spotlight escribiría. Muévelos y vuelve a apagar, o usa Apagar igual para descartarlos.`,
     { paths },
   );
+}
+
+/** A diverged root's refusal, naming also the nested repos: Apagar igual, the
+ *  way out it offers, discards both. */
+function assertRootOnSnapshotNaming(paths, refs, rootStatus) {
+  try {
+    assertRootOnSnapshot(refs, rootStatus, true);
+  } catch (error) {
+    if (paths.length === 0) throw error;
+    const also = paths.length === 1
+      ? `También hay un repo de git dentro de ${shownPaths(paths)}, en una ruta que apagar Spotlight escribiría: Apagar igual también lo descarta.`
+      : `También hay repos de git dentro de ${shownPaths(paths)}, en rutas que apagar Spotlight escribiría: Apagar igual también los descarta.`;
+    throw new SpotlightError(error.code, `${error.message} ${also}`, { paths });
+  }
 }
 
 /** `files` minus each regular file whose content is the original commit's

@@ -551,12 +551,18 @@ test("toggle off with a nested git repo where the original commit has a file ref
   );
   assert.ok(refsOf(app.root).includes("refs/herdr-spotlight/snapshot"));
   assert.equal(readFileSync(join(app.root, "tool/x.txt"), "utf8"), "x\n");
+  // What makes the popup offer Apagar igual right after its Apagar is refused.
+  assert.equal(w.state().repos[app.root].lastError.code, "untracked-collision");
+  assert.match(w.state().repos[app.root].lastError.message, /^Hay un repo de git dentro de tool, /);
 
   const forced = await w.cli(["toggle", "--workspace", ws, "--force"]);
   assert.equal(forced.code, 0, forced.stderr + forced.stdout);
   await w.until(() => refsOf(app.root).length === 0 && !w.state().repos[app.root], { what: "restored" });
   assert.equal(git(app.root, "symbolic-ref", "--short", "HEAD"), "main");
   assert.equal(readFileSync(join(app.root, "tool"), "utf8"), "v1\n");
+  const note = w.state().notes.find((n) => n.toast && /repo de git/.test(n.text));
+  assert.ok(note, JSON.stringify(w.state().notes));
+  assert.equal(note.text, "app: Había un repo de git en tool, en una ruta que Apagar igual escribió: no se guardó.");
 });
 
 test("toggle off with a file made by hand in the root where the original commit has one: off goes ahead, the file keeps its content, and the toast says so", async () => {
