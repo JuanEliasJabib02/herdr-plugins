@@ -328,7 +328,7 @@ export default class CodeExplorer extends View {
 
   watch(state, cx) {
     // The timer covers what it doesn't watch.
-    if (state.watching || holdsHome(state.root, home())) return;
+    if (state.watching || holdsHome(state.root, home()) || holdsHome(state.real, home())) return;
     state.watching = true;
     cx.spawn(async (cx) => {
       try {

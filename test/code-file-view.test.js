@@ -1146,6 +1146,20 @@ test("D20: a draft of a doc alive in another tab is left alone", async () => {
   assert.equal(other.editor().text, "one\n");
 });
 
+test("D20: a draft left by a pane closed beside a terminal comes back on reopening, though its tab lives on", async () => {
+  const w = await open();
+  await w.type("mine");
+  await w.fire(DRAFT_DELAY);
+  const docs = { t1: { doc: "d1", file: FILE }, t2: { doc: "d2", file: FILE } };
+  const other = newWorld({ props: { doc: "d2", file: FILE }, disk: w.disk, fsFiles: w.fsFiles, docs });
+  other.spaceList[0].tabs.push({ id: "t2", active: true, panes: 1 });
+  other.paneList = [{ pane: "p9", tab: "t1", terminal: "w1" }, { pane: "p2", tab: "t2", mod: "code-file" }];
+  const view = new CodeFile();
+  view.init({}, other.cx);
+  await flush();
+  assert.equal(other.editor().text, "mine");
+});
+
 test("D20: realpath failing on a missing file still restores by doc, as deleted, and save creates it", async () => {
   const seeded = await open();
   await seeded.type("mine");

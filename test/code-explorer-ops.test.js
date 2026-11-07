@@ -1242,7 +1242,7 @@ const until = async (what, ok) => {
 
 const THEME = new Proxy({}, { get: (_t, k) => String(k) });
 
-async function newWorld(root, { tabs = [], machine = null, trash = trashWorks, intercept = () => null, app = join(base, "no-app-home") } = {}) {
+async function newWorld(root, { tabs = [], machine = null, trash = trashWorks, intercept = () => null, app = join(base, "no-app-home"), homeDir = "/no/home" } = {}) {
   const world = tabsWorld([{ id: "s1", active: true, tabs: [{ id: "t1", active: true, cwd: root }, ...tabs] }]);
   const w = {
     root, world, execs: [], clipboard: [], overlays: [], closed: [], writes: [], waiters: [], watches: [], everys: [], queued: [], focus: 0, inputs: [], logged: [],
@@ -1302,7 +1302,7 @@ async function newWorld(root, { tabs = [], machine = null, trash = trashWorks, i
     }),
     layout: () => null,
     appHome: () => app,
-    home: () => "/no/home",
+    home: () => homeDir,
     props: () => null,
     openOverlay: (spec) => { w.overlays.push(spec); return `overlay-${w.overlays.length}`; },
     closeOverlay: (id) => { w.closed.push(id); return null; },
@@ -2077,6 +2077,17 @@ test("A menu or a dialog is a copy that reads no tree and starts no timer or wat
   assert.equal(w.everys.length, everys);
   assert.equal(w.watches.length, watches);
   assert.equal(w.execs.length, execs);
+});
+
+test("D22: a root that links to the home isn't watched, and one that links elsewhere is", async () => {
+  const real = folderWith({ "a.js": "A" }), link = `${real}-link`;
+  symlinkSync(real, link);
+  const atHome = await newWorld(link, { homeDir: real });
+  await until("the tree", () => atHome.paths().includes("a.js"));
+  assert.equal(atHome.watches.length, 0);
+  const elsewhere = await newWorld(link);
+  await until("the tree", () => elsewhere.paths().includes("a.js"));
+  await until("the watch", () => elsewhere.watches.length === 1);
 });
 
 test("close() reaches the overlay's view, and is nothing on the panel", async () => {

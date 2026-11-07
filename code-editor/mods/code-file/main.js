@@ -11,7 +11,7 @@ import { appHome, exec, home, nextCommand, notify, panes, props, readTextFile, r
 import * as fs from "fs/promises";
 import {
   DOCS_KEY, LIVE_KEY, TEXT, activeFileTab, batchNamesFile, bannerView, closeAction, closeBody, commandFor, createDoc,
-  fileMeta, holdsHome, isDirty, languageFor, needsRedraw, reduce, tabInfo, tabOfDoc, toDisk,
+  docIsOpen, fileMeta, holdsHome, isDirty, languageFor, needsRedraw, reduce, tabInfo, tabOfDoc, toDisk,
 } from "./document-model.js";
 import { createDraftStore, draftsDir, findDraft, hashPath, resolveFile } from "./draft-model.js";
 import { SYNTAX, colorOf, lineIndex, splitLines, tokenizeLine } from "./line-view-model.js";
@@ -121,7 +121,7 @@ export default class CodeFile extends View {
       this.where = await resolveFile(IO, this.file);
       const hash = hashPath(this.where.key);
       const dir = draftsDir(appHome());
-      const isLive = (doc) => tabOfDoc(shared(DOCS_KEY), doc, spaces()) !== null;
+      const isLive = (doc) => docIsOpen(shared(DOCS_KEY), doc, spaces(), panes());
       const found = await findDraft(IO, { dir, doc: this.doc, hash, isLive });
       this.store = createDraftStore(IO, {
         dir,

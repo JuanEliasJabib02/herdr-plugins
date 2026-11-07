@@ -496,6 +496,13 @@ export function tabOfDoc(docs, doc, spaces) {
   return null;
 }
 
+// Whether a doc is still on screen. A file closed beside a terminal leaves its tab, and
+// the table naming it, behind: only a tab still holding this mod keeps the doc's draft.
+export function docIsOpen(docs, doc, spaces, panes) {
+  const tab = tabOfDoc(docs, doc, spaces);
+  return tab !== null && panes.some((p) => p.tab === tab && p.mod === MOD);
+}
+
 // A tab nobody listed in `docs`. Only a command or a click may ask: they reach the
 // copy in the shown tab and no other.
 export function activeFileTab(spaces, panes) {
