@@ -117,7 +117,7 @@ test("D20: restoreDraft deleted: the file is gone", () => {
 test("D20: no drafts folder yet is no draft", async () => {
   const io = fakeIo();
   io.noDir = true;
-  assert.deepEqual(await findDraft(io, { dir: DIR, doc: "doc1", hash: "abc" }), { draft: null, names: [], seq: 0 });
+  assert.deepEqual(await findDraft(io, { dir: DIR, doc: "doc1", hash: "abc" }), { draft: null, names: [], seq: 0, unread: [] });
 });
 
 test("D20: the highest sequence whose body has its length wins; a truncated one is skipped", async () => {
@@ -132,12 +132,50 @@ test("D20: the highest sequence whose body has its length wins; a truncated one 
   assert.deepEqual(found.names.sort(), ["abc-doc1-1", "abc-doc1-2", "abc-doc1-3"]);
 });
 
-test("D20: a rejected read counts as broken and goes on to the next", async () => {
+test("D20: a rejected read isn't broken: it goes on to the next, stays out of names, and seq still counts it", async () => {
   const io = fakeIo();
   put(io, "abc-doc1-1", "good");
   put(io, "abc-doc1-2", "unreadable");
   io.badReads.add("abc-doc1-2");
-  assert.equal((await findDraft(io, { dir: DIR, doc: "doc1", hash: "abc" })).draft.text, "good");
+  const found = await findDraft(io, { dir: DIR, doc: "doc1", hash: "abc" });
+  assert.equal(found.draft.text, "good");
+  assert.deepEqual(found.names, ["abc-doc1-1"]);
+  assert.deepEqual(found.unread, ["abc-doc1-2"]);
+  assert.equal(found.seq, 2);
+});
+
+test("D20: nothing but rejected reads: no draft, no names, and the next open tries again", async () => {
+  const io = fakeIo();
+  put(io, "abc-doc1-4", "still there");
+  io.badReads.add("abc-doc1-4");
+  const found = await findDraft(io, { dir: DIR, doc: "doc1", hash: "abc" });
+  assert.deepEqual({ draft: found.draft, names: found.names, seq: found.seq }, { draft: null, names: [], seq: 4 });
+  io.badReads.clear();
+  assert.equal((await findDraft(io, { dir: DIR, doc: "doc1", hash: "abc" })).draft.text, "still there");
+});
+
+test("D20: a broken sibling still goes with the names, a rejected one doesn't", async () => {
+  const io = fakeIo();
+  io.files[`${DIR}/abc-doc1-1`] = "garbage";
+  io.files[`${DIR}/abc-doc1-2`] = serializeDraft({ path: "/a", baseSig: "s", length: 99, at: 1 }, "cut");
+  put(io, "abc-doc1-3", "unreadable");
+  io.badReads.add("abc-doc1-3");
+  const found = await findDraft(io, { dir: DIR, doc: "doc1", hash: "abc" });
+  assert.equal(found.draft, null);
+  assert.deepEqual(found.names.sort(), ["abc-doc1-1", "abc-doc1-2"]);
+});
+
+test("D20: a reopen adopts what it read, and leaves a closed tab's draft it couldn't read", async () => {
+  const io = fakeIo();
+  put(io, "abc-gone-1", "older", "s", 100);
+  put(io, "abc-gone-2", "unreadable", "s", 300);
+  put(io, "abc-gone2-1", "latest", "s", 200);
+  io.badReads.add("abc-gone-2");
+  const found = await findDraft(io, { dir: DIR, doc: "new", hash: "abc" });
+  assert.equal(found.draft.text, "latest");
+  assert.equal(found.seq, 0);
+  assert.deepEqual(found.names.sort(), ["abc-gone-1", "abc-gone2-1"]);
+  assert.deepEqual(found.unread, ["abc-gone-2"]);
 });
 
 test("D20: every draft broken: no draft, and the names so they get cleared", async () => {
@@ -256,6 +294,21 @@ test("D20: clear removes the superseded names of a reopen too", async () => {
   await store(io, { names: ["abc-gone-9"] }).clear();
   assert.deepEqual(names(io), []);
 });
+
+for (const [name, act] of [
+  ["clear", (s) => s.clear()],
+  ["clearNow", (s) => s.clearNow()],
+  ["write", (s) => s.write("new", "x")],
+  ["writeNow", (s) => s.writeNow("new", "x")],
+]) {
+  test(`D20: ${name} leaves a draft that couldn't be read at open, though it lists the folder`, async () => {
+    const io = fakeIo();
+    put(io, "abc-doc1-1", "known");
+    put(io, "abc-doc1-2", "unreadable");
+    await act(store(io, { names: ["abc-doc1-1"], seq: 2, unread: ["abc-doc1-2"] }));
+    assert.ok(names(io).includes("abc-doc1-2"));
+  });
+}
 
 test("D20: after a reopen, the first write replaces the adopted draft", async () => {
   const io = fakeIo();

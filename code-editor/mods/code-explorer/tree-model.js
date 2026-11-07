@@ -282,6 +282,10 @@ const entryOf = (docs, id) => {
   return entry && typeof entry === "object" && typeof entry.file === "string" ? entry : null;
 };
 
+// watchFolder is recursive on macOS, and AGENTS.md says to watch what you show, not a
+// whole home folder: neither the home nor anything above it.
+export const holdsHome = (dir, home) => dir === "/" || dir === home || home.startsWith(`${dir}/`);
+
 // Letters and digits only: it goes in a draft's file name and a mod command.
 export const newDoc = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 8).padEnd(6, "0");
 

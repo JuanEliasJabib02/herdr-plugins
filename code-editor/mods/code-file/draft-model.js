@@ -83,48 +83,55 @@ export function restoreDraft(meta, draftText, diskText) {
 
 const bySeqDown = (a, b) => b.seq - a.seq;
 
-// The highest sequence that reads whole. A read that rejects counts as broken.
+// The highest sequence that reads whole, and the names whose read rejected on the
+// way. A rejected read (EMFILE, EIO) says nothing about the draft; one that reads and
+// doesn't parse, or hasn't its length, is broken.
 async function newestWhole(io, dir, entries) {
+  const unread = [];
   for (const entry of [...entries].sort(bySeqDown)) {
     let raw;
     try {
       raw = await io.readFile(`${dir}/${entry.name}`);
     } catch {
+      unread.push(entry.name);
       continue;
     }
     const whole = parseDraft(raw);
-    if (whole) return whole;
+    if (whole) return { whole, unread };
   }
-  return null;
+  return { whole: null, unread };
 }
 
 // Its own doc first: a restored tab keeps props().doc, and realpath fails on a
 // missing file. The hash only with a new doc, which is reopening the file, and
 // never a doc alive in another tab. `names`: what the caller's store now answers
-// for, so a whole group goes when its newest does. `seq`: the highest of its own.
+// for, so a whole group goes when its newest does. `unread`: what no store may
+// delete, so the next open tries it again. `seq`: the highest of its own, those too.
 export async function findDraft(io, { dir, doc, hash, isLive = () => false }) {
   let listed;
   try {
     listed = await io.readdir(dir);
   } catch {
-    return { draft: null, names: [], seq: 0 };
+    return { draft: null, names: [], seq: 0, unread: [] };
   }
   const entries = listed.map(parseDraftName).filter(Boolean);
   const mine = entries.filter((e) => e.doc === doc);
   const seq = mine.reduce((high, e) => Math.max(high, e.seq), 0);
-  const mineNames = mine.map((e) => e.name);
   const own = await newestWhole(io, dir, mine);
-  if (own) return { draft: { ...own, doc }, names: mineNames, seq };
-  if (!hash) return { draft: null, names: mineNames, seq };
+  const unread = [...own.unread];
+  const namesOf = (list) => list.map((e) => e.name).filter((name) => !unread.includes(name));
+  if (own.whole) return { draft: { ...own.whole, doc }, names: namesOf(mine), seq, unread };
+  if (!hash) return { draft: null, names: namesOf(mine), seq, unread };
 
   const others = entries.filter((e) => e.hash === hash && e.doc !== doc && !isLive(e.doc));
   let best = null;
   for (const other of new Set(others.map((e) => e.doc))) {
-    const whole = await newestWhole(io, dir, others.filter((e) => e.doc === other));
-    if (whole && (!best || whole.meta.at > best.meta.at)) best = { ...whole, doc: other };
+    const found = await newestWhole(io, dir, others.filter((e) => e.doc === other));
+    unread.push(...found.unread);
+    if (found.whole && (!best || found.whole.meta.at > best.meta.at)) best = { ...found.whole, doc: other };
   }
-  if (!best) return { draft: null, names: mineNames, seq };
-  return { draft: best, names: [...mineNames, ...others.map((e) => e.name)], seq };
+  if (!best) return { draft: null, names: namesOf(mine), seq, unread };
+  return { draft: best, names: namesOf([...mine, ...others]), seq, unread };
 }
 
 // ── Where a file is ──────────────────────────────────────────────────────────
@@ -159,9 +166,10 @@ export async function resolveFile(io, file) {
 // cancelled task never finishes, so they skip the queue. A write that lands late
 // under a lower sequence loses at recovery. The caller keeps the returned promise
 // inside a cx.spawn.
-export function createDraftStore(io, { dir, doc, hash, path, seq = 0, names = [], onError = () => {} }) {
+export function createDraftStore(io, { dir, doc, hash, path, seq = 0, names = [], unread = [], onError = () => {} }) {
   let last = seq;
   const known = new Set(names);
+  const spared = new Set(unread);
   const queue = [];
   let pumping = null;
 
@@ -186,12 +194,12 @@ export function createDraftStore(io, { dir, doc, hash, path, seq = 0, names = []
   }
 
   // Every file of this doc, those a previous copy wrote too, and what it took
-  // over from a reopen.
+  // over from a reopen; never one that couldn't be read at open.
   async function ownNames() {
     const all = new Set(known);
     try {
       for (const name of await io.readdir(dir)) {
-        if (parseDraftName(name)?.doc === doc) all.add(name);
+        if (parseDraftName(name)?.doc === doc && !spared.has(name)) all.add(name);
       }
     } catch {
       // No folder: only what it already knew about.

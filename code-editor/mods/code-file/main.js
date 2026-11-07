@@ -11,7 +11,7 @@ import { appHome, exec, home, nextCommand, notify, panes, props, readTextFile, r
 import * as fs from "fs/promises";
 import {
   DOCS_KEY, LIVE_KEY, TEXT, activeFileTab, batchNamesFile, bannerView, closeAction, closeBody, commandFor, createDoc,
-  fileMeta, isDirty, languageFor, needsRedraw, reduce, tabInfo, tabOfDoc, toDisk,
+  fileMeta, holdsHome, isDirty, languageFor, needsRedraw, reduce, tabInfo, tabOfDoc, toDisk,
 } from "./document-model.js";
 import { createDraftStore, draftsDir, findDraft, hashPath, resolveFile } from "./draft-model.js";
 import { SYNTAX, colorOf, lineIndex, splitLines, tokenizeLine } from "./line-view-model.js";
@@ -19,7 +19,7 @@ import { BLAME_TEXT, blameArgs, blameDir, blameFailure, blameLabel, blameTarget,
 
 const DRAFT_DELAY = 300; // after the last keystroke
 const GONE_WAIT = 250; // a file missing this long is gone, not mid-replace (D22)
-const POLL = 10000; // when watchFolder rejects, as Herdr's `files` mod
+const POLL = 10000; // when watchFolder rejects or would take the whole home, as Herdr's `files` mod
 const FOCUS_DELAY = 50; // the frame that draws what takes the keyboard goes first
 const HIDDEN_POLL = 150; // a hidden copy never renders, so only a timer sees its tab leave
 const CLEAR_WAIT = 1000; // Don't Save doesn't sit behind a stuck draft write
@@ -38,8 +38,26 @@ const realpath = async (path) => {
   return r.code === 0 ? r.stdout.replace(/\n$/, "") : null;
 };
 
+// Drafts and Blame's copy are the buffer's plain text, which a 0600 file keeps from
+// other users, and Herdr's mkdir takes no `mode` (MakeDirectoryOptions in
+// gpui-kit.d.ts). Once per folder: close() shares 250 ms on quit (D20) and shouldn't
+// wait on a process at every draft. A failure loses no draft: the next one tries again.
+const privateDirs = new Set();
+
+const privateDir = async (dir) => {
+  await fs.mkdir(dir, { recursive: true });
+  if (privateDirs.has(dir)) return;
+  try {
+    const r = await exec("/bin/chmod", ["700", dir]);
+    if (r.code === 0) privateDirs.add(dir);
+    else console.log(`code-file: chmod ${dir}: ${r.stderr}`);
+  } catch (e) {
+    console.log(`code-file: chmod ${dir}: ${e}`);
+  }
+};
+
 const IO = {
-  mkdir: (dir) => fs.mkdir(dir, { recursive: true }),
+  mkdir: privateDir,
   readdir: (dir) => fs.readdir(dir),
   readFile: (path) => fs.readFile(path, "utf8"),
   writeFile: (path, text) => fs.writeFile(path, text),
@@ -112,6 +130,7 @@ export default class CodeFile extends View {
         path: this.where.key,
         seq: found.seq,
         names: found.names,
+        unread: found.unread,
         onError: (e) => console.log(`code-file: draft: ${e}`),
       });
       const read = await this.readDisk();
@@ -152,6 +171,11 @@ export default class CodeFile extends View {
   // ── The disk changing ──────────────────────────────────────────────────────
 
   watch(cx) {
+    // AGENTS.md: watch what you show, not a whole home folder. The timer of D22 covers it.
+    if (holdsHome(this.where.dir, home()) || holdsHome(this.where.realDir, home())) {
+      cx.timer.every(POLL, (cx) => this.rereadDisk(cx));
+      return;
+    }
     cx.spawn(async (cx) => {
       for (;;) {
         let batch;
@@ -519,15 +543,18 @@ export default class CodeFile extends View {
   }
 
   // Herdr's last call. It can't wait for work already started, so a dirty buffer
-  // goes straight to its next sequence. No `cx`: nothing here redraws.
+  // goes straight to its next sequence. No `cx`: nothing here redraws. Only a copy
+  // that finished loading has decided about its drafts: a loading one hasn't brought
+  // them back yet, and a limit view holds none it means to end, so both leave them.
   async close() {
     if (!this.file) return;
+    const ready = this.model.phase === "ready";
     const value = this.editor ? this.editor.value() : this.model.value;
-    const dirty = this.model.phase === "ready" && value !== this.model.baseline;
+    const dirty = ready && value !== this.model.baseline;
     let work = null;
     if (this.store && !this.discard) {
       if (dirty) work = this.store.writeNow(value, this.model.baseSig);
-      else if (this.store.hasDrafts()) work = this.store.clearNow();
+      else if (ready && this.store.hasDrafts()) work = this.store.clearNow();
     }
     // A closing copy's tasks get cut, and that one would have taken its copy of the text.
     const copy = this.blaming ? IO.unlink(this.blameCopy()).catch(() => {}) : null;

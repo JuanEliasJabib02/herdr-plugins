@@ -516,6 +516,10 @@ export function closeAction(id, spaces, panes) {
   return pane ? ["pane.close", { pane: pane.pane }] : null;
 }
 
+// watchFolder is recursive on macOS, and AGENTS.md says to watch what you show, not a
+// whole home folder: neither the home nor anything above it.
+export const holdsHome = (dir, home) => dir === "/" || dir === home || home.startsWith(`${dir}/`);
+
 // ── Watch batches (D19, D22) ─────────────────────────────────────────────────
 
 const trimSlash = (p) => (p.length > 1 ? p.replace(/\/+$/, "") : p);

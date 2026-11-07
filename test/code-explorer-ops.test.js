@@ -18,6 +18,7 @@ import {
 } from "../code-editor/mods/code-explorer/ops-model.js";
 import { gitGrepArgs } from "../code-editor/mods/code-explorer/search-model.js";
 import { DOCS_KEY, LIVE_KEY } from "../code-editor/mods/code-explorer/tree-model.js";
+import { draftName, hashPath, serializeDraft } from "../code-editor/mods/code-file/draft-model.js";
 
 // Before any test(): with a test registered ahead of this await, the root's after() can
 // run, and take the temp folder, before the tests below it start.
@@ -291,6 +292,31 @@ test("D23: the same text does nothing, and starts nothing", async () => {
   assert.deepEqual(await renamePath(on(root, { rel: "a", raw: "a" }), io), { status: "cancel" });
   assert.deepEqual(await renamePath(on(root, { rel: "a", raw: "  " }), io), { status: "cancel" });
   assert.deepEqual(io.log, []);
+});
+
+test("D23: the same text does nothing on a name with spaces at its ends, compared before trimming", async () => {
+  assert.deepEqual(renameTarget("src/ a.js ", " a.js "), { cancel: true });
+  const root = folderWith({ " a ": "A" }), io = diskIo();
+  assert.deepEqual(await renamePath(on(root, { rel: " a ", raw: " a " }), io), { status: "cancel" });
+  assert.deepEqual(io.log, []);
+  assert.deepEqual(namesIn(root), [" a "]);
+});
+
+test("D23: the same text on such a name does nothing even with the trimmed name taken, rather than saying it's taken", async () => {
+  const root = folderWith({ " a ": "A", a: "B" }), io = diskIo();
+  assert.deepEqual(await renamePath(on(root, { rel: " a ", raw: " a " }), io), { status: "cancel" });
+  assert.deepEqual(io.log, []);
+  assert.deepEqual(namesIn(root), [" a ", "a"]);
+});
+
+test("D23: any other text on such a name is still trimmed, and moves it or finds the name taken", async () => {
+  assert.deepEqual(renameTarget(" a ", "a"), { name: "a", rel: "a", caseOnly: false });
+  const free = folderWith({ " a ": "A" });
+  assert.equal((await renamePath(on(free, { rel: " a ", raw: "  a  " }), diskIo())).rel, "a");
+  assert.deepEqual(namesIn(free), ["a"]);
+  const held = folderWith({ " a ": "A", a: "B" });
+  assert.deepEqual(await renamePath(on(held, { rel: " a ", raw: "a" }), diskIo()), { status: "error", error: nameTaken("a") });
+  assert.deepEqual(namesIn(held), [" a ", "a"]);
 });
 
 test("D23: a change of capitals only renames, and its success is read from the folder's listing", async () => {
@@ -755,12 +781,14 @@ test("D21: a tab on a link isn't a tab on what it points to", async () => {
   assert.equal((await findTabs(join(root, "a"), opened(root, world))).length, 1);
 });
 
-for (const [what, run] of [
+const ON_A_PATH = [
   ["rename", (req, io) => renamePath({ ...req, raw: "zz" }, io)],
   ["duplicate", (req, io) => duplicateFile(req, io)],
   ["Trash", (req, io) => trashPath(req, io)],
   ["Delete Permanently", (req, io) => deleteForever(req, io)],
-]) {
+];
+
+for (const [what, run] of ON_A_PATH) {
   test(`D21: unsaved changes stop ${what} before it touches the disk, in S12's words`, async () => {
     const root = folderWith({ a: "A" });
     const world = tabsWorld([{ id: "s1", active: true, tabs: [{ id: "t1", file: join(root, "a"), dirty: true, active: true }] }]);
@@ -769,6 +797,65 @@ for (const [what, run] of [
     assertUntouched(io);
     assert.equal(readFileSync(join(root, "a"), "utf8"), "A");
     assert.deepEqual(world.state.calls, []);
+  });
+}
+
+// A tab opened through a link to a folder in the root: it resolves to the folder, and
+// what it hangs from is still the link.
+function throughFolderLink(tab = {}) {
+  const root = folderWith({ "real/x.txt": "X" });
+  symlinkSync("real", join(root, "link"));
+  const world = tabsWorld([{ id: "s1", active: true, tabs: [{ id: "t1", file: join(root, "link/x.txt"), active: true, ...tab }] }]);
+  return { root, world, io: opened(root, world) };
+}
+
+test("D21: a tab through a link to a folder is on that link, as written, and still on the folder", async () => {
+  const { root, io } = throughFolderLink();
+  assert.deepEqual((await findTabs(join(root, "link"), io)).map((t) => [t.id, t.rest]), [["t1", "/x.txt"]]);
+  assert.deepEqual((await findTabs(join(root, "real"), io)).map((t) => [t.id, t.rest]), [["t1", "/x.txt"]]);
+  assert.deepEqual((await findTabs(join(root, "link/x.txt"), io)).map((t) => [t.id, t.rest]), [["t1", ""]]);
+});
+
+test("D21: a tab on what the folder link points to isn't on the link, nor is one whose path only starts like it", async () => {
+  const root = folderWith({ "real/x.txt": "X", "linked/y.txt": "Y" });
+  symlinkSync("real", join(root, "link"));
+  const world = tabsWorld([{ id: "s1", active: true, tabs: [{ id: "t1", file: join(root, "real/x.txt"), dirty: true, active: true }, { id: "t2", file: join(root, "linked/y.txt"), dirty: true }] }]);
+  assert.deepEqual(await findTabs(join(root, "link"), opened(root, world)), []);
+  assert.equal((await renamePath(on(root, { rel: "link", raw: "other" }), opened(root, world))).status, "ok");
+  assert.equal(readlinkSync(join(root, "other")), "real");
+});
+
+for (const [what, run] of ON_A_PATH) {
+  test(`D21: a dirty tab through a folder link stops ${what} on that link`, async () => {
+    const { root, world, io } = throughFolderLink({ dirty: true });
+    assert.deepEqual(await run(on(root, { rel: "link" }), io), { status: "error", error: unsavedChanges("x.txt") });
+    assertUntouched(io);
+    assert.equal(readlinkSync(join(root, "link")), "real");
+    assert.deepEqual(world.state.calls, []);
+  });
+}
+
+test("D21: renaming a folder link with a clean tab through it reopens that tab under the new name", async () => {
+  const { root, world, io } = throughFolderLink();
+  const result = await renamePath(on(root, { rel: "link", raw: "other" }), io);
+  assert.equal(result.status, "ok");
+  assert.deepEqual(result.tabs.map((t) => [t.id, t.rest]), [["t1", "/x.txt"]]);
+  await reopenTabs({ tabs: result.tabs, to: result.abs }, io);
+  const [, args] = world.state.calls.find(([name]) => name === "tab.new");
+  assert.equal(args.props.file, join(root, "other/x.txt"));
+  assert.ok(world.state.calls.some(([name, a]) => name === "tab.close" && a.id === "t1"));
+});
+
+for (const [what, run] of [["Trash", trashPath], ["Delete Permanently", deleteForever]]) {
+  test(`D21: ${what} on a folder link with a clean tab through it closes that tab, and what it points to stays`, async () => {
+    const { root, world, io } = throughFolderLink();
+    const result = await run(on(root, { rel: "link" }), io);
+    assert.equal(result.status, "ok");
+    assert.deepEqual(result.tabs.map((t) => t.id), ["t1"]);
+    closeTabs(result.tabs, io);
+    assert.ok(world.state.calls.some(([name, a]) => name === "tab.close" && a.id === "t1"));
+    assert.ok(!isThere(join(root, "link")));
+    assert.equal(readFileSync(join(root, "real/x.txt"), "utf8"), "X");
   });
 }
 
@@ -809,10 +896,115 @@ test("D21: no drafts folder yet is no drafts; a folder that can't be read stops 
   assertUntouched(stopped);
 });
 
-test("D21: with no tab on the path, the drafts folder isn't even read", async () => {
-  const root = folderWith({ a: "A" });
-  const io = diskIo({ readdir: async () => assert.fail("read the drafts") });
-  assert.equal((await renamePath(on(root, { rel: "a", raw: "b" }), io)).status, "ok");
+// What a close that doesn't ask leaves: code-file's own draft, of a doc no tab has now.
+const closedDraft = (path, doc = "closed-doc", seq = 3) => ({
+  [`code-editor/drafts/${draftName(hashPath(path), doc, seq)}`]: serializeDraft({ path, baseSig: "a-b-1", length: 5, at: 1 }, "typed"),
+});
+const draftLeft = (name) => `"${name}" has unsaved changes. Open it to save or discard them.`;
+
+test("D21: with no tab on the path, the drafts folder is still read, and one that can't be listed stops the operation", async () => {
+  const root = folderWith({ a: "A" }), app = folderWith({ "code-editor/drafts/x": "" }), asked = [];
+  const io = diskIo({ appHome: () => app, readdir: async (dir) => { asked.push(dir); throw new Error("EACCES"); } });
+  assert.deepEqual(await renamePath(on(root, { rel: "a", raw: "b" }), io), { status: "error", error: "Couldn't check for unsaved changes, so nothing changed" });
+  assert.deepEqual(asked, [join(app, "code-editor/drafts")]);
+  assertUntouched(io);
+  assert.deepEqual(namesIn(root), ["a"]);
+});
+
+for (const [what, run] of ON_A_PATH) {
+  test(`D21: a closed tab's draft stops ${what}, with no tab needed, and stays where it is`, async () => {
+    const root = folderWith({ a: "A" }), app = folderWith(closedDraft(join(root, "a")));
+    const io = diskIo({ appHome: () => app });
+    assert.deepEqual(await run(on(root, { rel: "a" }), io), { status: "error", error: draftLeft("a") });
+    assertUntouched(io);
+    assert.equal(readFileSync(join(root, "a"), "utf8"), "A");
+    assert.equal(readdirSync(join(app, "code-editor/drafts")).length, 1);
+  });
+}
+
+test("D21: a closed tab's draft under a folder stops the folder, naming the file, and only that folder", async () => {
+  const root = folderWith({ "d/x/deep.js": "A", "dd/c": "C" }), app = folderWith(closedDraft(join(root, "d/x/deep.js")));
+  const io = diskIo({ appHome: () => app });
+  assert.deepEqual(await renamePath(on(root, { rel: "d", raw: "e" }), io), { status: "error", error: draftLeft("deep.js") });
+  assert.deepEqual(await trashPath(on(root, { rel: "d" }), io), { status: "error", error: draftLeft("deep.js") });
+  assert.deepEqual(await deleteForever(on(root, { rel: "d" }), io), { status: "error", error: draftLeft("deep.js") });
+  assertUntouched(io);
+  assert.equal((await renamePath(on(root, { rel: "dd", raw: "e" }), io)).status, "ok");
+});
+
+test("D21: a draft on another file doesn't stop this one, whatever its name starts with", async () => {
+  const root = folderWith({ a: "A", ab: "B" }), app = folderWith(closedDraft(join(root, "ab")));
+  const result = await renamePath(on(root, { rel: "a", raw: "c" }), diskIo({ appHome: () => app }));
+  assert.equal(result.status, "ok");
+  assert.deepEqual(namesIn(root), ["ab", "c"]);
+});
+
+test("D21: a draft holds a real path, so a root reached through a link and a link to a folder both find it", async () => {
+  const real = folderWith({ "d/x": "X" }), alias = join(base, `alias${++serial}`);
+  symlinkSync(real, alias);
+  symlinkSync("d", join(real, "link"));
+  const app = folderWith(closedDraft(join(real, "d/x")));
+  const io = diskIo({ appHome: () => app });
+  assert.deepEqual(await renamePath({ root: alias, real, rel: "d/x", raw: "y" }, io), { status: "error", error: draftLeft("x") });
+  assert.deepEqual(await trashPath(on(real, { rel: "link" }), io), { status: "error", error: draftLeft("x") });
+  assertUntouched(io);
+});
+
+test("D21: a draft whose file is gone stops nothing: there'd be nothing to open to settle it", async () => {
+  const root = folderWith({ "d/keep.js": "K" }), real = realpathSync(root);
+  const gone = join(real, "d/gone.js");
+  const app = folderWith(closedDraft(gone));
+  const result = await renamePath(on(root, { rel: "d", raw: "e" }), diskIo({ appHome: () => app }));
+  assert.equal(result.status, "ok");
+  assert.deepEqual(namesIn(root), ["e"]);
+});
+
+test("D21: a tab with changes keeps its own words, with a closed tab's draft there too", async () => {
+  const root = folderWith({ a: "A" }), app = folderWith(closedDraft(join(root, "a")));
+  const world = tabsWorld([{ id: "s1", active: true, tabs: [{ id: "t1", file: join(root, "a"), dirty: true, active: true }] }]);
+  assert.deepEqual(await renamePath(on(root, { rel: "a", raw: "b" }), opened(root, world, { appHome: () => app })), { status: "error", error: unsavedChanges("a") });
+});
+
+test("D21: a clean tab on the path doesn't hide another doc's draft of it", async () => {
+  const root = folderWith({ a: "A" }), app = folderWith(closedDraft(join(root, "a")));
+  const world = tabsWorld([{ id: "s1", active: true, tabs: [{ id: "t1", file: join(root, "a"), active: true }] }]);
+  assert.deepEqual(await renamePath(on(root, { rel: "a", raw: "b" }), opened(root, world, { appHome: () => app })), { status: "error", error: draftLeft("a") });
+});
+
+test("D21: only a draft's first line is read, through a program, one absolute path", async () => {
+  const root = folderWith({ a: "A" }), draft = closedDraft(join(root, "a")), app = folderWith(draft);
+  const io = diskIo({ appHome: () => app });
+  await renamePath(on(root, { rel: "a", raw: "b" }), io);
+  assert.deepEqual(io.ran("/usr/bin/head"), [["/usr/bin/head", "-n", "1", join(app, Object.keys(draft)[0])]]);
+});
+
+test("D21: a draft that can't be read or parsed is skipped, not a refusal", async () => {
+  const root = folderWith({ a: "A" }), [whole] = Object.values(closedDraft(join(root, "a")));
+  const app = folderWith({
+    "code-editor/drafts/aa-garbage-1": "not json\n",
+    "code-editor/drafts/aa-null-1": "null\n",
+    "code-editor/drafts/aa-nopath-1": "{\"baseSig\":\"a-b-1\"}\n",
+    "code-editor/drafts/aa-numberpath-1": "{\"path\":7}\n",
+    "code-editor/drafts/aa-empty-1": "",
+    "code-editor/drafts/aa-cut-1": whole.slice(0, whole.indexOf("\n")),
+    "code-editor/drafts/aa-folder-1": null,
+    "code-editor/drafts/aa-locked-1": whole,
+  });
+  chmodSync(join(app, "code-editor/drafts/aa-locked-1"), 0o000);
+  const result = await renamePath(on(root, { rel: "a", raw: "b" }), diskIo({ appHome: () => app }));
+  assert.equal(result.status, "ok");
+  assert.deepEqual(namesIn(root), ["b"]);
+});
+
+test("D21: a read that rejects is skipped too, one past it still counts, and what isn't named as a draft is no draft", async () => {
+  const root = folderWith({ a: "A", n: "N" }), [whole] = Object.values(closedDraft(join(root, "a")));
+  const rejected = diskIo({ appHome: () => folderWith(closedDraft(join(root, "a"))), intercept: (command) => (command === "/usr/bin/head" ? Promise.reject(new Error("stopped")) : null) });
+  assert.equal((await clearPath(on(root, { rel: "a" }), rejected)).error, undefined);
+  const past = diskIo({ appHome: () => folderWith({ "code-editor/drafts/aa-garbage-1": "not json\n", "code-editor/drafts/zz-closed-1": whole }) });
+  assert.equal((await clearPath(on(root, { rel: "a" }), past)).error, draftLeft("a"));
+  const named = diskIo({ appHome: () => folderWith({ "code-editor/drafts/notes.txt": whole }) });
+  assert.equal((await clearPath(on(root, { rel: "a" }), named)).error, undefined);
+  assert.deepEqual(named.ran("/usr/bin/head"), []);
 });
 
 test("D21: clearPath names what it found, and what's clean goes through", async () => {
@@ -1493,6 +1685,34 @@ test("D21: rename with a dirty tab open is refused, the toast says so, the entry
   assert.deepEqual(namesIn(root), ["a.js"]);
   assert.ok(!w.world.state.calls.some(([name]) => name === "tab.new" || name === "tab.close"));
   assert.ok(w.ops().entry);
+});
+
+test("D21: from the panel, a closed tab's draft refuses a rename and never gets to Delete's dialog", async () => {
+  const root = folderWith({ "a.js": "A" }), app = folderWith(closedDraft(join(root, "a.js")));
+  const w = await newWorld(root, { app });
+  await w.send("rename:a.js//b.js");
+  await w.lastIs("rename", "error");
+  assert.deepEqual(w.toasts(), [draftLeft("a.js")]);
+  assert.deepEqual(namesIn(root), ["a.js"]);
+  assert.ok(w.ops().entry);
+  await w.send("entry-cancel");
+  await w.send("delete:a.js");
+  await w.lastIs("delete", "error");
+  assert.deepEqual(w.toasts(), [draftLeft("a.js"), draftLeft("a.js")]);
+  assert.deepEqual(w.overlays, []);
+  assert.deepEqual(w.ran("/usr/bin/trash"), []);
+  assert.deepEqual(w.ran("/bin/mv"), []);
+});
+
+test("S13: Enter on an entry left as it was, on a name with spaces at its ends, does nothing", async () => {
+  const w = await newWorld(folderWith({ " a ": "A", a: "B" }));
+  await w.send("rename: a ");
+  assert.equal(w.ops().entry.text, " a ");
+  await w.send("entry-submit");
+  await w.lastIs("rename", "cancel");
+  assert.equal(w.ops().entry, null);
+  assert.deepEqual(w.toasts(), []);
+  assert.deepEqual(namesIn(w.root), [" a ", "a"]);
 });
 
 test("D21: the entry goes when the tree moves to another root, and so does nothing else", async () => {

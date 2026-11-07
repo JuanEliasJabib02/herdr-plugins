@@ -11,8 +11,7 @@ import { join } from "node:path";
 import {
   ALL, TEXT, LIST_LIMIT, LIST_SCRIPT, batchPlan, compareEntries, compareNames, contentsMessage, indentOf, isDotfile,
   isDoubleClick, isHiddenName, isShown, listingLimited, locate, mergePlans, parseCommand, parseListing, pruneExpanded,
-  toggleExpanded, treeMessage, visibleRows,
-} from "../code-editor/mods/code-explorer/tree-model.js";
+  toggleExpanded, treeMessage, visibleRows, holdsHome } from "../code-editor/mods/code-explorer/tree-model.js";
 import { buildFolderStatus } from "../code-editor/mods/code-explorer/git-model.js";
 
 const root = realpathSync(mkdtempSync(join(tmpdir(), "code-explorer-tree-")));
@@ -366,4 +365,10 @@ test("S6: the mod opens files only through the model's tab.new, never a split, n
   assert.doesNotMatch(MAIN, /pane\.split/);
   assert.doesNotMatch(MAIN, /confirmed/);
   assert.match(MAIN, /openFile\(/);
+});
+
+test("D22: the Explorer watches neither the home nor anything above it", () => {
+  const home = "/Users/juan";
+  for (const dir of ["/", "/Users", home]) assert.equal(holdsHome(dir, home), true, dir);
+  for (const dir of [`${home}/repo`, "/Users/juana", "/tmp"]) assert.equal(holdsHome(dir, home), false, dir);
 });

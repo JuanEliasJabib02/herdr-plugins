@@ -23,7 +23,7 @@ import { ICON_THEME, fileIcon, folderIcon, parseIconTheme } from "./icon-model.j
 import { GIT_COLORS, IGNORED_ARGS, ROOT_ARGS, STATUS_ARGS, buildFolderStatus, parseIgnored, parseRepo, parseStatus } from "./git-model.js";
 import {
   ALL, DOCS_KEY, LIST_LIMIT, LIST_SCRIPT, ROW_HEIGHT, TEXT, batchPlan, contentsMessage, indentOf, isDoubleClick, isShown, listingLimited, locate,
-  mergePlans, newDoc, openFile, parseCommand, parseListing, pruneExpanded, table, toggleExpanded, treeMessage, visibleRows,
+  holdsHome, mergePlans, newDoc, openFile, parseCommand, parseListing, pruneExpanded, table, toggleExpanded, treeMessage, visibleRows,
 } from "./tree-model.js";
 import { LIST_CAP, buildNameIndex, dressRow, filterMessage, filteredRows, lastResult, pacer, parseFilter, parseLists, readFileList, sameLists } from "./names-model.js";
 import {
@@ -327,8 +327,8 @@ export default class CodeExplorer extends View {
   // ── Keeping up with the disk ─────────────────────────────────────────────
 
   watch(state, cx) {
-    // AGENTS.md: watch what you show, not a whole home folder. The timer covers it.
-    if (state.watching || state.root === home()) return;
+    // The timer covers what it doesn't watch.
+    if (state.watching || holdsHome(state.root, home())) return;
     state.watching = true;
     cx.spawn(async (cx) => {
       try {

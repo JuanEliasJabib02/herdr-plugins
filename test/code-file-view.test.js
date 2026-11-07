@@ -8,11 +8,11 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { registerHooks } from "node:module";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { parseDraft, serializeDraft, signature } from "../code-editor/mods/code-file/draft-model.js";
+import { hashPath, parseDraft, serializeDraft, signature } from "../code-editor/mods/code-file/draft-model.js";
 
 const HERDR = ["theme", "props", "run", "notify", "exec", "readTextFile", "writeTextFile", "watchFolder", "shared", "setShared", "settings", "spaces", "panes", "appHome", "home", "nextCommand"];
 const FS = ["readFile", "writeFile", "readdir", "unlink", "mkdir"];
@@ -102,13 +102,15 @@ const PORCELAIN = [
   `${ANA} 3 3 1`, "\tthree", "",
 ].join("\n");
 
-function newWorld({ disk = { [FILE]: "one\n" }, props = { doc: "d1", file: FILE }, tabId = "t1", tabPanes = 1, active = true, docs, fsFiles = {}, realpath = true, writable = true } = {}) {
+function newWorld({ disk = { [FILE]: "one\n" }, props = { doc: "d1", file: FILE }, tabId = "t1", tabPanes = 1, active = true, docs, fsFiles = {}, realpath = true, writable = true, app = APP, unreadable = [] } = {}) {
   const w = {
     disk: { ...disk },
     props,
     shared: new Map(Object.entries({ "code-editor.docs": docs ?? { [tabId]: { doc: props?.doc, file: props?.file, preview: true } } })),
     fsFiles: { ...fsFiles },
     fsLog: [],
+    unreadable: new Set(unreadable), // drafts whose read rejects, as EMFILE or EIO would
+    holdUnlink: false,
     runs: [],
     toasts: [],
     execs: [],
@@ -230,7 +232,7 @@ function newWorld({ disk = { [FILE]: "one\n" }, props = { doc: "d1", file: FILE 
     settings: () => ({ font_family: "Mono" }),
     spaces: () => w.spaceList,
     panes: () => w.paneList,
-    appHome: () => APP,
+    appHome: () => app,
     home: () => HOME,
     nextCommand: () => new Promise((resolve) => { w.commandWaiters.push(resolve); }),
     fs: {
@@ -240,14 +242,22 @@ function newWorld({ disk = { [FILE]: "one\n" }, props = { doc: "d1", file: FILE 
         if (names.length === 0 && !w.draftDirExists) throw new Error("ENOENT");
         return names;
       },
-      readFile: async (p) => { if (!(p in w.fsFiles)) throw new Error("ENOENT"); return w.fsFiles[p]; },
+      readFile: async (p) => {
+        if (w.unreadable.has(p)) throw new Error("EMFILE: too many open files");
+        if (!(p in w.fsFiles)) throw new Error("ENOENT");
+        return w.fsFiles[p];
+      },
       writeFile: async (p, t) => {
         w.draftDirExists = true;
         w.fsLog.push(`write ${p.slice(p.lastIndexOf("/") + 1)}`);
         if (w.holdDraft) await new Promise((resolve) => w.heldDrafts.push(resolve));
         w.fsFiles[p] = t;
       },
-      unlink: async (p) => { w.fsLog.push(`unlink ${p.slice(p.lastIndexOf("/") + 1)}`); delete w.fsFiles[p]; },
+      unlink: async (p) => {
+        w.fsLog.push(`unlink ${p.slice(p.lastIndexOf("/") + 1)}`);
+        if (w.holdUnlink) await new Promise(() => {});
+        delete w.fsFiles[p];
+      },
     },
   };
   globalThis.__cf = fake;
@@ -866,6 +876,42 @@ test("D22: a watch that rejects falls back to a 10 s timer", async () => {
   assert.equal(view.model.banner, "changed");
 });
 
+const NOTES = `${HOME}/notes.md`;
+
+test("D22: a file directly in the home folder starts no watch of the whole home: the 10 s timer covers it", async () => {
+  const w = await open({ props: { doc: "d1", file: NOTES }, disk: { [NOTES]: "one\n" } });
+  assert.deepEqual(w.watches, []);
+  assert.ok(w.timers.some((t) => t.ms === 10000 && t.repeat));
+  w.disk[NOTES] = "theirs";
+  await w.fire(10000);
+  assert.equal(w.view.model.banner, "changed");
+});
+
+test("D22: a file in a folder above the home starts no watch either: it would hold the home", async () => {
+  const w = await open({ disk: { "/home/note.txt": "one\n" }, props: { doc: "d1", file: "/home/note.txt" } });
+  assert.deepEqual(w.watches, []);
+  assert.ok(w.timers.some((t) => t.ms === 10000 && t.repeat));
+});
+
+test("D22: a folder that resolves to the home counts as the home", async () => {
+  const file = "/links/me/notes.md";
+  const w = newWorld({ props: { doc: "d1", file }, disk: { [file]: "one\n" } });
+  const realExec = globalThis.__cf.exec;
+  globalThis.__cf.exec = (cmd, args, options) => (cmd === "/bin/realpath" && args[0] === "/links/me" ? Promise.resolve({ code: 0, stdout: `${HOME}\n`, stderr: "" }) : realExec(cmd, args, options));
+  const view = new CodeFile();
+  view.init({}, w.cx);
+  await flush();
+  assert.deepEqual(w.watches, []);
+  assert.ok(w.timers.some((t) => t.ms === 10000 && t.repeat));
+});
+
+test("D22: a folder inside the home is still watched", async () => {
+  const file = `${HOME}/src/a.js`;
+  const w = await open({ props: { doc: "d1", file }, disk: { [file]: "one\n" } });
+  assert.equal(w.watches[0].dir, `${HOME}/src`);
+  assert.ok(!w.timers.some((t) => t.ms === 10000));
+});
+
 test("D22: a vanished file waits 250 ms before it counts, and the buffer is never touched", async () => {
   const w = await open();
   await w.type("mine");
@@ -975,6 +1021,67 @@ test("D20: close() on a clean file writes nothing; one with a leftover draft cle
   assert.deepEqual(v.draftFiles(), []);
 });
 
+// A copy still loading: the file's read, or the check after it, hasn't answered. By
+// then open() has made the store, with the names of the drafts it found.
+async function openStuck(at, options) {
+  const w = newWorld(options);
+  if (at === "read") {
+    globalThis.__cf.readTextFile = () => new Promise(() => {});
+  } else {
+    const realExec = globalThis.__cf.exec;
+    globalThis.__cf.exec = (cmd, ...rest) => (cmd === "/bin/sh" ? new Promise(() => {}) : realExec(cmd, ...rest));
+  }
+  const view = new CodeFile();
+  view.init({}, w.cx);
+  await flush();
+  w.view = view;
+  assert.equal(view.model.phase, "loading");
+  assert.ok(view.store.hasDrafts(), "the store already answers for what it found");
+  return w;
+}
+
+for (const at of ["read", "access"]) {
+  test(`D20: a tab closed while its file loads (at the ${at}) keeps its own draft, and reopening brings it back`, async () => {
+    const name = `${DRAFTS}/abc-d1-1`;
+    const fsFiles = { [name]: serializeDraft({ path: REAL, baseSig: signature("one\n"), length: 4, at: 1 }, "mine") };
+    const w = await openStuck(at, { fsFiles });
+    await w.view.close();
+    assert.deepEqual(w.fsLog, []);
+    assert.deepEqual(Object.keys(w.fsFiles), [name]);
+    const again = await open({ fsFiles: w.fsFiles });
+    assert.equal(again.editor().text, "mine");
+    assert.equal(again.view.model.banner, "restored");
+  });
+
+  test(`D20: a tab closed while its file loads (at the ${at}) keeps the closed tab's draft it adopted by path`, async () => {
+    const name = `${DRAFTS}/${hashPath(REAL)}-gone-3`;
+    const fsFiles = { [name]: serializeDraft({ path: REAL, baseSig: signature("one\n"), length: 4, at: 1 }, "mine") };
+    const reopened = { props: { doc: "d2", file: FILE }, docs: { t1: { doc: "d2", file: FILE } } };
+    const w = await openStuck(at, { ...reopened, fsFiles });
+    await w.view.close();
+    assert.deepEqual(w.fsLog, []);
+    assert.deepEqual(Object.keys(w.fsFiles), [name]);
+    const again = await open({ ...reopened, fsFiles: w.fsFiles });
+    assert.equal(again.editor().text, "mine");
+  });
+}
+
+test("D20: a copy on a limit view leaves drafts alone at close, a write of the copy before it that landed late too", async () => {
+  const broken = `${DRAFTS}/abc-d1-1`;
+  const late = `${DRAFTS}/abc-d1-5`;
+  const w = newWorld({ disk: {}, fsFiles: { [broken]: "garbage" } });
+  w.holdUnlink = true; // keeps the broken one's clear running, so the store still has work
+  const view = new CodeFile();
+  view.init({}, w.cx);
+  await flush();
+  assert.equal(view.model.phase, "limit");
+  assert.ok(view.store.hasDrafts());
+  w.holdUnlink = false;
+  w.fsFiles[late] = serializeDraft({ path: REAL, baseSig: "s", length: 4, at: 1 }, "mine");
+  await view.close();
+  assert.ok(late in w.fsFiles);
+});
+
 test("D10: entries of tabs that are gone go when the next file opens; those with a tab, and its own, stay", async () => {
   const w = newWorld({ docs: { t1: { doc: "d1", file: FILE }, t0: { doc: "other", file: "/x" }, gone: { doc: "stale", file: "/y" } } });
   w.shared.set("code-editor.live", { other: { dirty: true, pinned: true }, stale: { dirty: true, pinned: false }, nobody: { dirty: false, pinned: false }, d1: { dirty: false, pinned: true } });
@@ -1061,6 +1168,147 @@ test("D20: nothing but broken drafts: opens from disk and clears them", async ()
   const w = await open({ fsFiles: { [`${DRAFTS}/abc-d1-1`]: "garbage" } });
   assert.equal(w.editor().text, "one\n");
   assert.deepEqual(w.draftFiles(), []);
+});
+
+test("D20: a draft that can't be read right now survives the open, its broken sibling doesn't, and the next open brings it back", async () => {
+  const held = `${DRAFTS}/abc-d1-2`;
+  const broken = `${DRAFTS}/abc-d1-1`;
+  const fsFiles = {
+    [held]: serializeDraft({ path: REAL, baseSig: signature("one\n"), length: 4, at: 1 }, "mine"),
+    [broken]: "garbage",
+  };
+  const w = await open({ fsFiles, unreadable: [held] });
+  assert.equal(w.editor().text, "one\n");
+  assert.equal(w.view.model.banner, null);
+  assert.deepEqual(Object.keys(w.fsFiles), [held]);
+  await w.view.close();
+  assert.deepEqual(Object.keys(w.fsFiles), [held]);
+  const again = await open({ fsFiles: w.fsFiles });
+  assert.equal(again.editor().text, "mine");
+  assert.equal(again.view.model.banner, "restored");
+});
+
+test("D20: saving doesn't take with it a draft that couldn't be read at open, and new writes go above it", async () => {
+  const held = `${DRAFTS}/abc-d1-2`;
+  const fsFiles = { [held]: serializeDraft({ path: REAL, baseSig: signature("one\n"), length: 4, at: 1 }, "mine") };
+  const w = await open({ fsFiles, unreadable: [held] });
+  await w.type("typed");
+  await w.fire(DRAFT_DELAY);
+  assert.ok(w.draftFiles().includes("abc-d1-2"));
+  assert.ok(w.draftFiles().some((n) => n.endsWith("-d1-3")), "above the one it couldn't read");
+  await w.command("save");
+  assert.deepEqual(Object.keys(w.fsFiles), [held]);
+});
+
+// ── The folders that hold the buffer's text ──────────────────────────────────
+
+// chmod runs once per folder, for as long as the module lives: each test its own home.
+let apps = 0;
+const newApp = () => `${HOME}/app-${++apps}`;
+const chmods = (w) => w.execs.filter(([cmd]) => cmd === "/bin/chmod");
+const newestDraft = (w, app) => parseDraft(w.fsFiles[`${app}/code-editor/drafts/${w.draftFiles().at(-1)}`]).text;
+const answerChmod = (answer) => {
+  const realExec = globalThis.__cf.exec;
+  globalThis.__cf.exec = (cmd, args, options) => {
+    if (cmd !== "/bin/chmod") return realExec(cmd, args, options);
+    return realExec(cmd, args, options).then(() => answer());
+  };
+};
+
+test("D20: the drafts folder is private before the first draft lands in it", async () => {
+  const app = newApp();
+  const w = await open({ app });
+  const realExec = globalThis.__cf.exec;
+  globalThis.__cf.exec = (cmd, args, options) => {
+    if (cmd === "/bin/chmod") w.fsLog.push(["chmod", ...args].join(" "));
+    return realExec(cmd, args, options);
+  };
+  await w.type("mine");
+  await w.fire(DRAFT_DELAY);
+  assert.equal(w.fsLog[0], `chmod 700 ${app}/code-editor/drafts`);
+  assert.match(w.fsLog[1], /^write /);
+});
+
+test("D20: Blame's folder is private before the copy of the buffer lands in it", async () => {
+  const app = newApp();
+  const w = await blameWorld({ app });
+  const realExec = globalThis.__cf.exec;
+  globalThis.__cf.exec = (cmd, args, options) => {
+    if (cmd === "/bin/chmod") w.fsLog.push(["chmod", ...args].join(" "));
+    return realExec(cmd, args, options);
+  };
+  await w.click("header-blame");
+  assert.equal(w.fsLog[0], `chmod 700 ${app}/code-editor/blame`);
+  assert.equal(w.fsLog[1], "write d1");
+});
+
+test("D20: real folders: drafts and blame end up 0700, also one left 0755 by an older version", async () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "code-file-view-")));
+  try {
+    mkdirSync(`${root}/code-editor/drafts`, { recursive: true, mode: 0o755 });
+    const w = await blameWorld({ app: root });
+    globalThis.__cf.fs.mkdir = async (dir, options) => { mkdirSync(dir, options); };
+    const realExec = globalThis.__cf.exec;
+    globalThis.__cf.exec = (cmd, args, options) => {
+      if (cmd !== "/bin/chmod") return realExec(cmd, args, options);
+      const r = spawnSync(cmd, args);
+      return Promise.resolve({ code: r.status, stdout: "", stderr: String(r.stderr) });
+    };
+    await w.type("mine");
+    await w.fire(DRAFT_DELAY);
+    await w.click("header-blame");
+    assert.equal(statSync(`${root}/code-editor/drafts`).mode & 0o777, 0o700);
+    assert.equal(statSync(`${root}/code-editor/blame`).mode & 0o777, 0o700);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+for (const [name, answer] of [
+  ["says no", () => ({ code: 1, stdout: "", stderr: "Operation not permitted" })],
+  ["can't start", () => { throw new Error("spawn failed"); }],
+]) {
+  test(`D20: a chmod that ${name} doesn't stop the draft, and the next write tries again`, async () => {
+    const app = newApp();
+    const w = await open({ app });
+    answerChmod(answer);
+    await w.type("mine");
+    await w.fire(DRAFT_DELAY);
+    assert.equal(chmods(w).length, 1);
+    assert.equal(newestDraft(w, app), "mine");
+    await w.type("more");
+    await w.fire(DRAFT_DELAY);
+    assert.equal(chmods(w).length, 2);
+    assert.equal(newestDraft(w, app), "more");
+  });
+
+  test(`D20: a chmod that ${name} doesn't stop the draft close() writes, nor Blame`, async () => {
+    const app = newApp();
+    const w = await blameWorld({ app });
+    answerChmod(answer);
+    await w.type("last words");
+    await w.view.close();
+    assert.equal(chmods(w).length, 1);
+    assert.equal(newestDraft(w, app), "last words");
+    const blame = await blameWorld({ app: newApp() });
+    answerChmod(answer);
+    await blame.click("header-blame");
+    assert.equal(chmods(blame).length, 1);
+    assert.equal(blame.blames.length, 1);
+  });
+}
+
+test("D20: once private, a folder runs no more processes: close() doesn't wait on one", async () => {
+  const app = newApp();
+  const w = await open({ app });
+  await w.type("mine");
+  await w.fire(DRAFT_DELAY);
+  await w.type("more");
+  await w.fire(DRAFT_DELAY);
+  await w.type("last words");
+  await w.view.close();
+  assert.equal(chmods(w).length, 1);
+  assert.equal(newestDraft(w, app), "last words");
 });
 
 // ── Limits (D22, S12) ────────────────────────────────────────────────────────

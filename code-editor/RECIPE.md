@@ -227,7 +227,8 @@ its own, under **The editor**.
   that folder first. Enter creates, a blank name cancels, and Esc and the X cancel. A new
   file opens pinned; a new folder opens nothing.
 - **Rename** fills the entry and selects the name before its extension. The same text does
-  nothing. An open folder stays open under its new name.
+  nothing, on a name with spaces at its ends too; any other text is trimmed. An open folder
+  stays open under its new name.
 - **An invalid or used name:** a toast, in Orca's words when it's taken ("A file or folder
   named 'a.js' already exists in this location"), and the entry stays with its text to fix.
   A file, a folder and a broken link all hold a name, and nothing is ever overwritten.
@@ -239,7 +240,13 @@ its own, under **The editor**.
   what's left. Closing the dialog mid-run doesn't stop it: a failure becomes a toast.
 - **Unsaved changes stop it:** Rename, Duplicate and Delete refuse with `"a.js" has unsaved
   changes` before touching the disk, for any file at that path or under it, in any space. A
-  draft on disk counts too, because `code-editor.live` can lag after a hang.
+  tab opened through a link to a folder is on that link as well as on the folder. A draft of
+  that tab's on disk counts too, because `code-editor.live` can lag after a hang.
+- **A draft with no tab stops it too:** a close that doesn't ask leaves one, and moving the
+  file would leave it keyed to the old path, where reopening wouldn't offer it. Any draft for
+  that real path or under it refuses with `"a.js" has unsaved changes. Open it to save or
+  discard them.` A draft that can't be read is passed over, and a drafts folder that can't be
+  listed stops the operation.
 - **Tabs follow:** a clean file's tab reopens at the new name in its old place, keeping
   preview or pin, one at a time and each in its own space, and the tab that was active comes
   back. With a terminal beside it, only the file's pane is replaced. Delete closes the tabs,
@@ -290,13 +297,13 @@ and `open-in-terminal`, an empty `<rel>` is the root; `rename`, `duplicate` and 
   mod's own icons. It also draws `mods/workspace-chrome/` chevrons, `x`, `check` and `spinner`,
   Herdr's own.
 - **Programs:** `git`, `sh`, `find` and `grep` to read, `pkill -f` to stop a search, `/bin/realpath`,
-  `/bin/ls`, `/bin/mkdir`, `/bin/mv`, `/bin/cp`, `/usr/bin/cmp`, `/usr/bin/trash -s`, `/bin/rm -rf`
-  and `/usr/bin/open -R`. Every path goes as one absolute argument, so `-rf` and `$(x)` are
+  `/bin/ls`, `/usr/bin/head -n 1`, `/bin/mkdir`, `/bin/mv`, `/bin/cp`, `/usr/bin/cmp`,
+  `/usr/bin/trash -s`, `/bin/rm -rf` and `/usr/bin/open -R`. Every path goes as one absolute argument, so `-rf` and `$(x)` are
   names like any other.
 - **Herdr's shared state:** writes `code-editor.docs` (`{ [tabId]: { doc, file, preview } }`, nobody
   else does) and `code-editor.op` (the Delete dialog's `{ rel, name, folder, step, busy, error }`),
   and reads `code-editor.live`. An entry counts only while a `code-file` pane is in that tab. It
-  reads `<home>/code-editor/drafts/`.
+  reads the names in `<home>/code-editor/drafts/` and each draft's first line.
 
 **Watch out**
 
@@ -397,7 +404,10 @@ someone else changes it.
   ask: a draft is written 300 ms after the last change. Reopening brings it back with
   "Restored unsaved changes" and "Discard" if the disk is as it was, with the conflict
   banner if it isn't (`cmd-s` writes nothing until Keep My Edits or Overwrite), and
-  says nothing if the disk already holds that text.
+  says nothing if the disk already holds that text. A tab closed while its file is
+  still loading, or on one of the views instead of the editor, leaves its drafts for
+  the next open. So does a draft that can't be read right now; one that reads but is
+  cut short goes.
 - **Closing,** by `cmd-w` or the tab's X: clean closes at once, unsaved changes bring
   the card, which takes the keyboard. Esc is Cancel, Enter does nothing, and `cmd-s`
   is its Save. Save closes only once the write landed; if it fails the card goes and
@@ -419,16 +429,20 @@ reaches only the copy in the shown tab, and one naming another doc is ignored.
 **Built from**
 
 - **`main.js`:** reads and writes with Herdr's `readTextFile` and `writeTextFile`,
-  watches the file's folder with `watchFolder` (every 10 s if that rejects), runs
-  `/bin/realpath`, and `test -w` to open a file without write permission read-only.
+  watches the file's folder with `watchFolder` (every 10 s if that rejects, or if the
+  folder is the home folder, which is too much to watch), runs `/bin/realpath`, and
+  `test -w` to open a file without write permission read-only.
 - **`document-model.js`:** one file as a pure reducer: `diskText` is the next
   `expected`, `baseline` the editor's text at the last load or save, and `dirty` is
   always `value !== baseline`. A rejected save reads the disk and decides by that text,
   never by the error's words.
 - **`draft-model.js`:** drafts in `<home>/code-editor/drafts/`, outside `mods/`, which
-  the installer replaces. A file named `<hash of realpath>-<doc>-<seq>`, its first line
-  JSON `{ path, baseSig, length, at }`, then the text. Writes and deletes share one
-  queue; a write goes to a new sequence and only then are older ones removed.
+  the installer replaces, and mode 0700 like `blame/`, since both hold the buffer's
+  plain text (`main.js` runs `/bin/chmod`: Herdr's `mkdir` takes no mode, and a chmod
+  that fails doesn't stop the write). A file named `<hash of realpath>-<doc>-<seq>`,
+  its first line JSON `{ path, baseSig, length, at }`, then the text. Writes and
+  deletes share one queue; a write goes to a new sequence and only then are older ones
+  removed.
 - **`line-view-model.js`:** the line view's rows, a tokenizer per line (comments,
   strings, numbers, keywords), and the syntax colors: comment `#7f848e`, keyword
   `#c678dd`, string `#98c379`, string.escape and operator `#56b6c2`, number, constant
