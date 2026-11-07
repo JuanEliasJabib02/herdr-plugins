@@ -9,3 +9,6 @@ agent-sleep
 # The right panel draws code-editor's Explorer, the layout wears its One Dark
 # Pro theme, and its keys.json brings cmd-l, which opens and closes the panel.
 code-editor
+# The status bar's cup, right before the moon, runs keep-awake's loop: it keeps
+# the Mac awake (always, or while an agent works). It starts off.
+keep-awake

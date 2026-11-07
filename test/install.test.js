@@ -461,7 +461,7 @@ test("projects-sidebar requires spotlight: it lands first, with its command, and
   const status = find(JSON.parse(readFileSync(join(home, "layouts/projects.json"), "utf8")), "status");
   assert.deepEqual(
     status.children.map((c) => c.id),
-    ["status-workspace", "status-spotlight", "status-usage", "status-agent-sleep"],
+    ["status-workspace", "status-spotlight", "status-usage", "status-keep-awake", "status-agent-sleep"],
   );
   assert.deepEqual(status.children[1], {
     id: "status-spotlight",
@@ -527,6 +527,18 @@ test("the real agent-sleep plugin: its mod is copied, its keys merged, projects-
   });
   assert.equal(readFileSync(join(home, "layouts/projects.json"), "utf8"), "the sidebar's\n");
   assert.equal(readFileSync(join(home, "mods/projects/main.js"), "utf8"), "the sidebar's\n");
+});
+
+test("the real projects-sidebar install brings keep-awake through requires, and nothing turns it on (keep-awake D4, D10)", () => {
+  const home = fakeHome();
+  const r = run(INSTALL, home, "--no-keys", "projects-sidebar");
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(manifest(home, "keep-awake"), ["mods/keep-awake"]);
+  for (const file of ["main.js", "mod.json", "icons/coffee.svg"]) {
+    assert.ok(existsSync(join(home, "mods/keep-awake", file)), file);
+  }
+  assert.match(readFileSync(join(home, "layouts/projects.json"), "utf8"), /"mod": "keep-awake"/);
+  assert.ok(!existsSync(join(home, "keep-awake")), "no state of its own until it runs: the mode starts off");
 });
 
 test("the real projects-sidebar install brings agent-sleep through requires, and nothing turns it on", () => {
