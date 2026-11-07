@@ -1,6 +1,6 @@
 #!/bin/sh
-# Installs one plugin folder of this repo into Herdr: copies its mods and
-# layouts into Herdr's home. Herdr doesn't load a mod folder that is a
+# Installs one plugin folder of this repo into Herdr: copies its mods, layouts
+# and themes into Herdr's home. Herdr doesn't load a mod folder that is a
 # symlink, so these are copies: after editing the repo, run this again and
 # Herdr hot-reloads what changed.
 #
@@ -41,10 +41,13 @@ manifest="$home/.herdr-plugins/$plugin.txt"
 [ -d "$src" ] || { echo "install: no plugin folder $src" >&2; exit 1; }
 [ -d "$home" ] || { echo "install: no Herdr home at $home (set HERDR_APP_HOME)" >&2; exit 1; }
 
-# What the plugin brings: each mod folder and each layout file (json, svg, png).
+# What the plugin brings: each mod folder, each layout file (json, svg, png) and
+# each theme file (only *.json: Herdr reads no other file there, and a LICENSE
+# beside it would be one name for every plugin).
 items() {
   for d in "$src"/mods/*/; do [ -d "$d" ] && echo "mods/$(basename "$d")"; done
   for f in "$src"/layouts/*; do [ -f "$f" ] && echo "layouts/$(basename "$f")"; done
+  for f in "$src"/themes/*.json; do [ -f "$f" ] && echo "themes/$(basename "$f")"; done
   return 0
 }
 
@@ -173,6 +176,7 @@ if [ "$alone" = no ] && [ -f "$src/requires" ]; then
 fi
 
 mkdir -p "$home/.herdr-plugins" "$home/mods" "$home/layouts"
+if items | grep -q '^themes/'; then mkdir -p "$home/themes"; fi
 # A run that stops partway leaves nothing half-written: the item being copied
 # and an unswapped manifest go on any exit, and those a killed run left
 # behind go before copying.

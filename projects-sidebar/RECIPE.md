@@ -339,7 +339,11 @@ across repos.
   (weight 1), Claude's usage at its right as in Orca, and last
   `status-agent-sleep` → `{ "mod": "agent-sleep" }` (px 40): the agent-sleep
   plugin's moon, which must be in the shown layout for its loop to run. Block
-  `agents` → `{ "mod": "projects-agents" }`. Preview `layouts/projects.svg`.
+  `agents` → `{ "mod": "projects-agents" }`. The root sets `"theme":
+  "one-dark-pro"`, and in the right panel's stack `panel-body` the child
+  `explorer` → `{ "mod": "code-explorer" }` is active where Herdr has `files`:
+  all from the code-editor plugin, whose keys.json brings `ctrl-l` →
+  `layout.toggle:panel`. Preview `layouts/projects.svg`.
 - **Mod `mods/projects-agents/`:** a copy of Herdr 0.1.13's shipped
   `agents` mod, made the way `mod.clone` makes one (`mod.json` records
   `cloned_from: { name: "agents", version: "0.1.13" }`, and the sort menu

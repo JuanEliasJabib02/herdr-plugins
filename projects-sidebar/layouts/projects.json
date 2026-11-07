@@ -1,6 +1,7 @@
 {
   "id": "root",
   "type": "row",
+  "theme": "one-dark-pro",
   "titlebar": "none",
   "traffic_lights": [
     12,
@@ -158,13 +159,13 @@
                 {
                   "id": "panel-body",
                   "type": "stack",
-                  "active": "files",
+                  "active": "explorer",
                   "children": [
                     {
-                      "id": "files",
+                      "id": "explorer",
                       "type": "block",
                       "content": {
-                        "mod": "files"
+                        "mod": "code-explorer"
                       }
                     },
                     {

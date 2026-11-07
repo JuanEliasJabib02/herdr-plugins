@@ -13,6 +13,7 @@ like Herdr's home, with a `RECIPE.md` and a `preview.png`).
 | [`spotlight/`](spotlight/) | Orca Pro Max's Spotlight and test queue: one dev server per repo at its root with the workspace's code projected there, the `spotlight` CLI agents use (`on`/`off`/`status`/`logs`), the test-turn queue with its flask, board and settings, and the sidebar badges. [Recipe](spotlight/RECIPE.md) |
 | [`agent-sleep/`](agent-sleep/) | Puts idle Claude Code terminals you aren't looking at to sleep to free memory, and resumes each one when you show its tab, the way Orca's agent hibernation works. Off until you turn it on. |
 | [`arc-spaces/`](arc-spaces/) | Cmd-click a link in a terminal and it opens in the Arc space of that workspace's group, with Arc still your default browser. macOS; needs projects-sidebar's groups and one `sudo ln -s`. [Recipe](arc-spaces/RECIPE.md) |
+| [`code-editor/`](code-editor/) | A code editor and Explorer built from how Orca does them. So far: `ctrl-l` opens and closes the right panel on an Explorer block (a placeholder for now), One Dark Pro on the whole window, and Material's icons. [Recipe](code-editor/RECIPE.md) |
 
 ![Projects sidebar](projects-sidebar/preview.png)
 
@@ -25,8 +26,9 @@ scripts/install.sh                                # copies projects-sidebar into
 herdr-app do layout.switch '{"name":"projects"}'  # ctrl-shift-l switches back
 ```
 
-- `scripts/install.sh` copies the mod and the layout, and never overwrites a
-  name it didn't install. It lists what it installed in
+- `scripts/install.sh` copies the mods, the layouts and the themes
+  (`themes/*.json`), and never overwrites a name it didn't install. It lists
+  what it installed in
   `~/.config/herdr-app/.herdr-plugins/projects-sidebar.txt`. Set
   `HERDR_APP_HOME` for another Herdr home.
 - **Requires claude-accounts and spotlight:** the projects layout's status
@@ -39,6 +41,9 @@ herdr-app do layout.switch '{"name":"projects"}'  # ctrl-shift-l switches back
 - **Requires agent-sleep too:** the layout's status bar draws its moon, so it
   is installed the same way. Automatic sleep stays off until you turn it on in
   the popup the moon opens.
+- **Requires code-editor too:** the layout's right panel draws its Explorer and
+  the layout wears its One Dark Pro theme, so it is installed the same way. A
+  `themes/one-dark-pro.json` it didn't install stops the install.
 - **Commands on PATH:** a plugin's `bin` file lists executables of its mods
   that the installer links as `~/.local/bin/<name>` to the installed copy
   (spotlight's `spotlight` CLI). The link is recorded in the plugin's
@@ -48,8 +53,9 @@ herdr-app do layout.switch '{"name":"projects"}'  # ctrl-shift-l switches back
   merges into yours. It adds only keys you don't use and backs the file up
   first (`keys.json.bak-<time>`). Once your keys.json is edited, Herdr stops
   adding its new default shortcuts to it. In the projects layout, F2 selects
-  group 2 instead of renaming the tab. `scripts/install.sh --no-keys` skips
-  the merge; then switch groups by clicking, or with
+  group 2 instead of renaming the tab, and `ctrl-l` opens and closes the right
+  panel instead of clearing a terminal's screen. `scripts/install.sh --no-keys`
+  skips the merge; then switch groups by clicking, or with
   `herdr-app do projects.group1`.
 - **Uninstall:** `scripts/install.sh --uninstall` removes only what the
   install copied. Your keys.json keeps the F1–F3 lines.
