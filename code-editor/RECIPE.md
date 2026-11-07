@@ -4,8 +4,8 @@ A code editor and Explorer for Herdr, built from how Orca does them. So far:
 in the projects layout, `ctrl-l` opens and closes the right panel, the panel
 opens on an Explorer block, the whole window wears One Dark Pro, Material's file
 and folder icons are in place for the Explorer to draw, and the tab bar knows the
-Explorer and draws a file's tab. The Explorer is still a placeholder, and there is
-no editor yet.
+Explorer and draws a file's tab. The Explorer is still a placeholder. A file opens
+in its own tab, in the editor described under **The editor**, at the end.
 
 **What you see**
 
@@ -99,9 +99,6 @@ no editor yet.
 - **`ctrl-l` is taken from terminals** in the projects layout, on purpose. A
   `ctrl-l` you already bind in `layout:projects` stays yours, the install says
   so, and then the key doesn't toggle the panel.
-- **`cmd-s` and `cmd-w` do nothing yet:** they are bound for a `code-file` mod
-  this plugin doesn't ship so far. So do a file tab's X and double click, which go
-  to that same mod.
 - **Don't put Herdr's `tabs` mod back in this layout.** Its "Files" button selects
   a stack child `files`, which is gone, and its per-space memory of the panel only
   knows `files` and `changes`, so switching spaces closes an open Explorer.
@@ -138,3 +135,135 @@ no editor yet.
 - A tab whose `code-editor.docs` entry has `preview: true`, with a `code-file` pane
   in it, shows its name in italics and its Material icon; with `dirty: true` in
   `code-editor.live` it shows the dot, active or not.
+
+## The editor
+
+Mod `mods/code-file/`, one copy per file tab, with props `{ doc, file, line? }`:
+write a file and save it with `cmd-s`, with Orca's behavior and Orca's words when
+someone else changes it.
+
+**What you see**
+
+- **Header:** 30 px, a 1 px `border` below, 12 px text in `dim`: the path with `~`
+  in the code font, truncated, then at the right `JavaScript · UTF-8 · LF` (`CRLF`
+  for a file that is all CRLF). Before it, when they apply: "Línea N", "Deleted on
+  disk", "Read-only", "Sin colores: archivo grande".
+- **Editor:** Herdr's, 13 px in the terminal's font, line numbers, no wrap, and the
+  colors of One Dark Pro's syntax (see Built from).
+- **Banner:** under the header, `#38342a` with `#e5c07b` text at 12.5 px, padding 8
+  by 12, its buttons 26 px high with a 1 px `input` border and radius 6, wrapping
+  when narrow.
+  - "This file changed on disk while you have unsaved edits. Overwrite replaces the
+    newer disk content." with "Reload from Disk", "Overwrite", "Keep My Edits"
+    (tooltip "Keeps your version. Your next save replaces the version on disk.").
+  - "Cambió en disco" with "Recargar".
+  - "Restored unsaved changes" with "Discard".
+  - "Failed to save the file. Please try again.", or "This file isn't UTF-8 text, so
+    it wasn't saved.", or "File too large: exceeds the 1 MiB limit", no button.
+  - A read that failed under a live buffer: its message with "Retry".
+- **Card when closing with changes:** inside the tab, over a dimmed tab (`#00000073`,
+  which covers the editor): 440 px, `popover`, 1 px `border`, radius 10, padding 20.
+  "Unsaved Changes" at 15 px, `"a.js" has unsaved changes. Do you want to save before
+  closing?`, and "Cancel", "Don't Save", "Save" at the right, 30 px high, radius 7,
+  "Save" on `raised`.
+- **Instead of the editor,** centered: "Binary file — cannot display", "File too
+  large: exceeds the 1 MiB limit", "This file isn't UTF-8 text", or "Unable to load
+  file" with its message and "Retry".
+- **Opening at a line** (`props.line`): a read-only view with 20 px rows, a 60 px
+  gutter, the line in the middle of the view on `hover`, a scrollbar, and "Editar" in
+  the header.
+
+**How it behaves**
+
+- **`cmd-s`** writes the text only if the disk still holds what was read. A second
+  `cmd-s` during a write waits behind it. Text typed during a write stays unsaved.
+- **A file that is all CRLF** stays that way: Enter's `\n` is saved as `\r\n`. Any
+  other file is saved as it is. A BOM stays.
+- **The file changed on disk,** and it isn't the save's own write:
+  - With unsaved changes: the buffer is never touched, and the conflict banner
+    shows. `cmd-s` then writes nothing and says to use the banner.
+  - Clean and on screen: "Cambió en disco", so the page doesn't jump while you read.
+  - Clean and hidden, or in the line view: it reloads quietly.
+- **Reload from Disk** drops your changes and says "Reloaded from disk". **Overwrite**
+  replaces what's on disk now. **Keep My Edits** only takes the banner away: your next
+  `cmd-s` replaces the disk's text.
+- **The file disappeared:** after 250 ms the header says "Deleted on disk", the
+  buffer stays, and `cmd-s` creates the file again.
+- **Unsaved changes survive** a hot reload, a crash, a quit and a close that doesn't
+  ask: a draft is written 300 ms after the last change. Reopening brings it back with
+  "Restored unsaved changes" and "Discard" if the disk is as it was, with the conflict
+  banner if it isn't (`cmd-s` writes nothing until Keep My Edits or Overwrite), and
+  says nothing if the disk already holds that text.
+- **Closing,** by `cmd-w` or the tab's X: clean closes at once, unsaved changes bring
+  the card, which takes the keyboard. Esc is Cancel, Enter does nothing, and `cmd-s`
+  is its Save. Save closes only once the write landed; if it fails the card goes and
+  the banner stays. Don't Save deletes the draft, then closes.
+- **Which close:** the last pane closes the tab, and a space's last tab still asks.
+  With a terminal beside the file, only the file's pane closes.
+- **A preview becomes permanent** on the first edit, on a double click on its tab, and
+  when a pane splits in beside it.
+- **The keyboard:** the editor takes it when the file opens and when its tab comes back.
+- **Editar** in the line view opens the editor at the top, and the header keeps
+  "Línea N", because this editor can't jump to a line.
+
+**Commands,** `herdr-app do code-file.<command>`, each the same path as its button:
+`save`, `close`, `ask-close-<doc>`, `pin-<doc>`, `reload`, `overwrite`, `keep-mine`,
+`discard`, `retry`, `cancel`, `dont-save`, `card-save`, `edit`, `focus`. A command
+reaches only the copy in the shown tab, and one naming another doc is ignored.
+
+**Built from**
+
+- **`main.js`:** reads and writes with Herdr's `readTextFile` and `writeTextFile`,
+  watches the file's folder with `watchFolder` (every 10 s if that rejects), runs
+  `/bin/realpath`, and `test -w` to open a file without write permission read-only.
+- **`document-model.js`:** one file as a pure reducer: `diskText` is the next
+  `expected`, `baseline` the editor's text at the last load or save, and `dirty` is
+  always `value !== baseline`. A rejected save reads the disk and decides by that text,
+  never by the error's words.
+- **`draft-model.js`:** drafts in `<home>/code-editor/drafts/`, outside `mods/`, which
+  the installer replaces. A file named `<hash of realpath>-<doc>-<seq>`, its first line
+  JSON `{ path, baseSig, length, at }`, then the text. Writes and deletes share one
+  queue; a write goes to a new sequence and only then are older ones removed.
+- **`line-view-model.js`:** the line view's rows, a tokenizer per line (comments,
+  strings, numbers, keywords), and the syntax colors: comment `#7f848e`, keyword
+  `#c678dd`, string `#98c379`, string.escape and operator `#56b6c2`, number, constant
+  and boolean `#d19a66`, function `#61afef`, type `#e5c07b`, variable `#e06c75`,
+  punctuation `#abb2bf`. They differ from the theme's ANSI colors, so they're hex.
+- **`code-editor.live`** in Herdr's shared state: `{ [doc]: { dirty, pinned } }`, written
+  only by this mod and only when it changes. Entries of tabs that are gone go when the
+  next file opens. It finds its tab through `code-editor.docs`, written by the Explorer.
+
+**Watch out**
+
+- **Closes that don't ask,** on purpose: `cmd-w` with the keyboard outside the mod, and
+  Close in the tab's menu. The draft covers them.
+- **Over 256 KB opens without colors,** because coloring blocks the window. Herdr's
+  editor colors `js`, `json`, `py`, `rs`, `go`, `sh`, `css`, `yaml`, `sql`, `java`, `c`,
+  `rb`, `php`, `lua` and `makefile`, and TS, JSX and such go as `js`. Markdown, HTML and
+  a few others come out plain.
+- **Over 1 MiB doesn't open,** and a buffer grown past it can't be saved: the failure
+  shows and the draft stays.
+- **Reloading sends the cursor to line 1,** which is why a file on screen asks first.
+- **No find, no go-to-line, and the line view's block comments color only their first
+  line:** Herdr's editor exposes neither to mods.
+- **A symlinked file** is watched in the link's folder: a change through its target
+  shows at the next read, or as a conflict when saving. The save itself is still safe.
+- **Long lines in the line view are clipped;** Editar to see them.
+- **Don't Save on a space's last tab:** Herdr asks whether to close the space. If you
+  take more than 1.5 s to say yes, a draft comes back and reopening shows "Restored
+  unsaved changes" with its "Discard".
+- **Local files only:** `writeTextFile` and `watchFolder` don't reach other machines.
+
+**Done when**
+
+- `node --test 'test/*.test.js'` reports `fail 0`, and `herdr-app check
+  "$PWD/code-editor/mods/code-file"` passes.
+- In a tab with props `{ doc, file }`, typing and `cmd-s` leaves exactly that text in
+  the file.
+- With unsaved changes and the mod's `main.js` touched, the tab comes back with them and
+  "Restored unsaved changes".
+- With unsaved changes, the tab closed by Close in its menu and the file changed
+  elsewhere, reopening shows the conflict banner.
+- Don't Save, then reopening, shows the file with no banner.
+- `cmd-w` with a terminal beside the file leaves the terminal running.
+- `code-file.ask-close-<another doc>` does nothing.
