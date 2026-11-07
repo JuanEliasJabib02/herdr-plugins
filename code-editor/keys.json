@@ -1,0 +1,9 @@
+{
+  "layout:projects": {
+    "cmd-l": "layout.toggle:panel"
+  },
+  "mod:code-file": {
+    "cmd-s": "code-file.save",
+    "cmd-w": "code-file.close"
+  }
+}

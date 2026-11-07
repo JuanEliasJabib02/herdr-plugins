@@ -353,6 +353,64 @@ test("a bin line that isn't an executable of the plugin's mods, or a name alread
   assert.deepEqual(readdirSync(binDir(home)), ["a"]);
 });
 
+// ── A plugin's themes ──────────────────────────────────────────────────────
+
+test("a plugin's themes/*.json land in the home's themes folder, owned in the manifest, and a re-install keeps them; what isn't a theme stays in the repo", () => {
+  const { script } = fakeRepo({ "mods/a/main.js": "a\n", "themes/demo.json": "{}\n", "themes/LICENSE": "MIT\n" });
+  const home = fakeHome();
+  for (const attempt of ["first", "again"]) {
+    const r = run(script, home, "--no-keys", "demo");
+    assert.equal(r.status, 0, `${attempt}: ${r.stderr}`);
+    assert.equal(readFileSync(join(home, "themes/demo.json"), "utf8"), "{}\n", attempt);
+    assert.equal(existsSync(join(home, "themes/LICENSE")), false, "Herdr reads themes/*.json; a license there would clash with another plugin's");
+    assert.deepEqual(manifest(home, "demo"), ["mods/a", "themes/demo.json"], attempt);
+    assert.deepEqual(leftovers(home), [], attempt);
+  }
+});
+
+test("a theme that isn't in the manifest stops the install: exit 1, named, nothing changed", () => {
+  const { script } = fakeRepo({ "mods/a/main.js": "a\n", "themes/demo.json": "{}\n" });
+  const home = fakeHome({ "themes/demo.json": "// theirs\n" });
+  const before = snapshot(home);
+  const r = run(script, home, "--no-keys", "demo");
+  assert.equal(r.status, 1, r.stdout);
+  assert.match(r.stderr, new RegExp(`${home}/themes/demo.json exists and wasn't installed from demo; nothing changed`));
+  assert.deepEqual(snapshot(home), before, "nothing in the home changed");
+});
+
+test("--uninstall removes the plugin's themes; a foreign theme stays", () => {
+  const { script } = fakeRepo({ "themes/demo.json": "{}\n" });
+  const home = fakeHome({ "themes/other.json": "// theirs\n" });
+  assert.equal(run(script, home, "--no-keys", "demo").status, 0);
+  assert.ok(existsSync(join(home, "themes/demo.json")));
+
+  const r = run(script, home, "--uninstall", "demo");
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, new RegExp(`removed ${home}/themes/demo.json`));
+  assert.equal(existsSync(join(home, "themes/demo.json")), false);
+  assert.equal(readFileSync(join(home, "themes/other.json"), "utf8"), "// theirs\n");
+});
+
+test("the plugin stops shipping a theme: the next install removes it", () => {
+  const { script, plugin } = fakeRepo({ "mods/a/main.js": "a\n", "themes/demo.json": "{}\n" });
+  const home = fakeHome();
+  assert.equal(run(script, home, "--no-keys", "demo").status, 0);
+  assert.ok(existsSync(join(home, "themes/demo.json")));
+
+  rmSync(join(plugin, "themes/demo.json"));
+  const r = run(script, home, "--no-keys", "demo");
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(existsSync(join(home, "themes/demo.json")), false);
+  assert.deepEqual(manifest(home, "demo"), ["mods/a"]);
+});
+
+test("a plugin with no themes leaves the home without a themes folder", () => {
+  const { script } = fakeRepo({ "mods/a/main.js": "a\n" });
+  const home = fakeHome();
+  assert.equal(run(script, home, "--no-keys", "demo").status, 0);
+  assert.equal(existsSync(join(home, "themes")), false);
+});
+
 // ── This repo's plugins: spotlight and projects-sidebar ────────────────────
 
 test("spotlight puts its CLI on PATH as ~/.local/bin/spotlight: it runs through that link and a relative link to it, finds node off PATH, and --uninstall removes it", () => {
