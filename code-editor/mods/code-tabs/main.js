@@ -90,7 +90,7 @@ export default class Tabs extends View {
         .child(h_flex().h_full().items_center().gap(7).pl(10).pr(mark ? 4 : 10)
           .when(Boolean(view.icon), el => el.child(image(view.icon).size(14).flex_none()))
           .when(!view.icon && Boolean(program?.icon), el => el.child(program.tint ? svg(program.icon).size(14).text_color(t.muted) : image(program.icon).size(14)))
-          .child(div().max_w(170).truncate().when(view.preview, el => el.italic()).child(c.zoomed ? `${view.name} Z` : view.name))
+          .child(div().max_w(170).truncate().when(view.preview, el => el.font_family(".SystemUIFont").italic()).child(c.zoomed ? `${view.name} Z` : view.name))
           .when(c.status === "working", el => el.child(svg("mods/workspace-chrome/spinner.svg").size(12).flex_none().text_color(t.working).spin(900)))
           .when(c.status === "blocked" || c.status === "done", el => el.child(div().size(6).rounded(3).bg(t[c.status]))))
         .when(Boolean(mark), el => el.child(slot(c, view, mark)));
