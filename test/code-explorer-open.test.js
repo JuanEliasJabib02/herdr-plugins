@@ -28,7 +28,20 @@ test("D10: a doc id is safe in a file name and in a mod command", () => {
 
 // ── planOpen: the pure decision ────────────────────────────────────────────
 
-const plan = (over = {}) => planOpen({ file: FILE, pin: false, tabs: [], docs: {}, live: {}, ...over });
+const plan = (over = {}) => planOpen({
+  file: FILE, pin: false, tabs: [], docs: {}, live: {},
+  panes: (over.tabs ?? []).map((t) => ({ tab: t.id, mod: "code-file" })),
+  ...over,
+});
+
+test("D18: a tab that kept its docs entry but lost the file's pane isn't the file: it opens anew", () => {
+  const tabs = [{ id: "tb1", panes: 1 }];
+  const docs = { tb1: { doc: "d1", file: FILE, preview: true } };
+  const panes = [{ tab: "tb1", mod: null, program: { name: "sh" } }];
+  assert.deepEqual(plan({ tabs, docs, panes }), { kind: "new" });
+  // And a terminal left behind is never a preview to replace, or it would go with it.
+  assert.deepEqual(plan({ file: "/elsewhere.js", tabs, docs, panes }), { kind: "new" });
+});
 
 test("S6: nothing open and no preview: a new tab", () => {
   assert.deepEqual(plan(), { kind: "new" });
@@ -236,7 +249,7 @@ test("a tab.new that throws is a toast too, and writes nothing", async () => {
 });
 
 test("D11: already open: only selected; no new tab, no write", async () => {
-  const { state, io } = fakeHerdr({ tabs: [tab("t1", { active: true }), tab("t2", { index: 2 })], docs: { t2: docOf("d2", FILE, true) } });
+  const { state, io } = fakeHerdr({ tabs: [tab("t1", { active: true }), tab("t2", { index: 2 })], docs: { t2: docOf("d2", FILE, true) }, panes: [pane("p2", "t2", "code-file")] });
   const result = await openFile({ file: FILE, space: "s1" }, io);
   assert.deepEqual(state.calls, [["tab.select", { id: "t2" }]]);
   assert.deepEqual(state.writes, []);
@@ -245,7 +258,7 @@ test("D11: already open: only selected; no new tab, no write", async () => {
 
 test("D11: pinning what's open as a preview flips only that entry and keeps the rest", async () => {
   const docs = { t2: docOf("d2", FILE, true), t3: docOf("d3", "/r/b.js", false) };
-  const { state, io } = fakeHerdr({ tabs: [tab("t2", { active: true }), tab("t3", { index: 2 })], docs });
+  const { state, io } = fakeHerdr({ tabs: [tab("t2", { active: true }), tab("t3", { index: 2 })], docs, panes: [pane("p2", "t2", "code-file")] });
   await openFile({ file: FILE, pin: true, space: "s1" }, io);
   assert.deepEqual(state.calls, [["tab.select", { id: "t2" }]]);
   assert.deepEqual(state.shared[DOCS_KEY], { t2: docOf("d2", FILE, false), t3: docOf("d3", "/r/b.js", false) });

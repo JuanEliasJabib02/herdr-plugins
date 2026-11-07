@@ -4,8 +4,7 @@
 import { fileIcon, folderIcon } from "./icon-model.js";
 import { isIgnored } from "./git-model.js";
 
-// S10, and D21's and S11's texts the tree shows. "Find files", "Clear file filter"
-// and "No files match this filter" wait for T6's filter.
+// S10, and D21's and S11's texts the tree shows.
 export const TEXT = {
   collapseAll: "Collapse All",
   refresh: "Refresh Explorer",
@@ -123,7 +122,7 @@ const MAX_DEPTH = 40;
 // Orca's definition: any segment longer than one character starting with a dot.
 export const isDotfile = (path) => path.split("/").some((part) => part.length > 1 && part !== ".." && part.startsWith("."));
 
-// The rows on screen, flat. T6's filter gives the same shape.
+// The rows on screen, flat. The filter gives the same shape.
 export function visibleRows({ entries, expanded, git, icons, showDotfiles, showIgnored, errors }) {
   const rows = [];
   const walk = (folder, depth) => {
@@ -297,13 +296,16 @@ function replaceable(tab, entry, live) {
 // The decision, for the tabs of one space: { kind: "select", id, pin }, select what's
 // open and maybe pin it; { kind: "replace", id }, a new tab in that preview's place;
 // or { kind: "new" }. Opening pinned leaves a preview where it is.
-export function planOpen({ file, pin, tabs, docs, live }) {
+export function planOpen({ file, pin, tabs, docs, live, panes }) {
   const known = table(docs);
+  // An entry alone isn't enough: closing a file with a terminal beside it leaves the
+  // tab and the entry, and that tab no longer holds the file.
+  const entryHere = (tab) => (panes.some((p) => p.tab === tab.id && p.mod === FILE_MOD) ? entryOf(known, tab.id) : null);
   for (const tab of tabs) {
-    const entry = entryOf(known, tab.id);
+    const entry = entryHere(tab);
     if (entry?.file === file) return { kind: "select", id: tab.id, pin: Boolean(pin && entry.preview) };
   }
-  if (!pin) for (const tab of tabs) if (replaceable(tab, entryOf(known, tab.id), live)) return { kind: "replace", id: tab.id };
+  if (!pin) for (const tab of tabs) if (replaceable(tab, entryHere(tab), live)) return { kind: "replace", id: tab.id };
   return { kind: "new" };
 }
 
@@ -349,7 +351,7 @@ export async function openFile({ file, pin = false, space }, io) {
   const target = spaceNow();
   if (!target) return failed();
 
-  const plan = planOpen({ file, pin, tabs: target.tabs, docs: io.shared(DOCS_KEY), live: io.shared(LIVE_KEY) });
+  const plan = planOpen({ file, pin, tabs: target.tabs, docs: io.shared(DOCS_KEY), live: io.shared(LIVE_KEY), panes: io.panes() });
   if (plan.kind === "select") {
     io.run("tab.select", { id: plan.id });
     if (plan.pin) {
