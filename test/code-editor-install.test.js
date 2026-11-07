@@ -1,6 +1,7 @@
 // The code-editor plugin as Herdr gets it, on a fake Herdr home and a fake HOME,
 // never the person's: cmd-l opens and closes the right panel (S2), the window
-// wears One Dark Pro (S4), Material's icons travel with the Explorer (S5), and
+// wears One Dark Pro (S4), Material's icons travel with the Explorer (S5), the
+// Markdown preview and the PDF reader travel with the file mod (lector-md), and
 // the projects layout draws that Explorer in its panel.
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
@@ -133,6 +134,26 @@ test("S4: install leaves the theme in Herdr's themes folder, byte for byte and l
   assert.equal(existsSync(join(home, "mods/code-explorer")), false);
   assert.equal(existsSync(join(home, ".herdr-plugins/code-editor.txt")), false);
   assert.equal(readFileSync(join(home, "themes/theirs.json"), "utf8"), "{}\n");
+});
+
+// ── lector-md: the Markdown preview and the PDF reader travel with the file mod ──
+
+test("lector-md T4: install ships the readers whole, byte for byte: the PDF helper's Swift source, the toolbar's icons with their license, and every model", () => {
+  const home = fakeHome();
+  const r = install(home, "code-editor");
+  assert.equal(r.status, 0, r.stderr);
+  const shipped = [
+    "pdfpages.swift", "pdf-model.js", "pdf-view.js", "markdown-model.js", "image-cache.js", "open-model.js",
+    "preview-view.js", "reader-model.js", "ui/LICENSE",
+    ...["code", "eye", "copy", "check", "zoom-in", "zoom-out", "rotate-ccw", "search", "chevron-up", "chevron-down", "x", "image"].map((i) => `ui/${i}.svg`),
+  ];
+  for (const file of shipped) {
+    const from = plugin(`mods/code-file/${file}`);
+    const to = join(home, "mods/code-file", file);
+    assert.ok(existsSync(to), `${file} installed`);
+    assert.equal(readFileSync(to, "utf8"), readFileSync(from, "utf8"), file);
+  }
+  assert.match(readFileSync(plugin("mods/code-file/ui/LICENSE"), "utf8"), /ISC/, "Lucide's license");
 });
 
 // ── S5: Material icons ─────────────────────────────────────────────────────
