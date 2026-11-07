@@ -1,4 +1,4 @@
-// The PDF reader's arithmetic (plan lector-md T3: S7, S8, S9; D3–D6, D10): zoom,
+// The PDF reader's arithmetic (plan lector-md T3, T5: S7, S8, S9; D3–D6, D10): zoom,
 // the pages as the list's rows, what to render and how sharp, the helper's answers,
 // find's navigation. No herdr or gpui-kit imports.
 
@@ -115,6 +115,26 @@ export function anchorOf(layout, range) {
 }
 
 export const rowOfAnchor = (layout, anchor) => rowAt(layout, anchor.page, anchor.fraction * layout.pages[anchor.page].height);
+
+// VirtualListScrollHandle's "top" brings a row below the view only to its bottom
+// edge (the near one): a jump goes first to the nearest row after `row` whose bottom
+// is more than `view` px below row's top, which leaves `row` above the view, and
+// "top" then brings it down to the top edge (L1). None that far, or no height yet:
+// the last row, from where the end of the list is as high as `row` can go.
+export function rowPast(layout, row, view) {
+  const last = layout.heights.length - 1;
+  if (!(view > 0)) return last;
+  let below = layout.heights[row];
+  for (let r = row + 1; r <= last; r++) {
+    below += layout.heights[r];
+    if (below > view) return r;
+  }
+  return last;
+}
+
+// At fit the widest page is rounded to whole pixels, half a pixel past a fractional
+// pane (960.6) at most: only a whole pixel more is a sideways scroll (R12).
+export const scrollsSideways = (layout, width) => layout.contentWidth - width >= 1;
 
 // ── Rendering (D6) ───────────────────────────────────────────────────────────
 
@@ -244,10 +264,15 @@ export function matchRow(layout, match) {
 
 const trimSlash = (p) => (p.length > 1 ? p.replace(/\/+$/, "") : p);
 
-// `<hash of the path>-<hash of path, mtime and size>` from `stat -f "%m %z"`: a
-// changed file gets new names, and the path's older keys can be found.
+// What `/usr/bin/stat` is asked: through a symlink to the file it names (-L), the
+// mtime with its fraction (%Fm, nanoseconds on APFS) and the size (R3).
+export const statArgs = (path) => ["-L", "-f", "%Fm %z", path];
+
+// `<hash of the path>-<hash of path, mtime and size>` from statArgs' answer
+// ("1794072942.163216795 6661678"): a changed file gets new names, and the path's
+// older keys can be found.
 export function contentKey(path, statOut) {
-  const m = /^(\d+) (\d+)\s*$/.exec(String(statOut ?? ""));
+  const m = /^(\d+(?:\.\d+)?) (\d+)\s*$/.exec(String(statOut ?? ""));
   if (!m) return null;
   return `${hashPath(path)}-${hashPath(`${path}\n${m[1]}\n${m[2]}`)}`;
 }

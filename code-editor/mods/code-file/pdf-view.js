@@ -1,4 +1,4 @@
-// The PDF reader (plan lector-md T3: S2, S7, S8, S9; D3–D7, D10, D13): what
+// The PDF reader (plan lector-md T3, T5: S2, S7, S8, S9; D3–D7, D10, D13): what
 // code-file's body shows for a `.pdf`. Interface fixed by T1: new PdfViewer(host, cx),
 // render(t, cx), command(name, arg, cx) → whether it was this reader's, release().
 // host: { file, doc, text(), visible() } — text() is unused here: a PDF has no text model.
@@ -18,8 +18,8 @@ import { READER_TEXT } from "./reader-model.js";
 import {
   PAGE_GAP, PDF_TEXT, anchorOf, binDir, binName, cacheRoot, canZoomIn, canZoomOut, contentKey, currentPage,
   firstMatchFrom, fitZoom, helperSource, matchLabel, matchRow, matchesByPage, pageDir, pageImage, pageLayout,
-  pagesToRender, parseInfo, parseMatches, parseRendered, renderScale, rowOfAnchor, staleKeys, stepMatch, stepZoom,
-  stripRects, zoomLabel,
+  pagesToRender, parseInfo, parseMatches, parseRendered, renderScale, rowOfAnchor, rowPast, scrollsSideways, staleKeys,
+  statArgs, stepMatch, stepZoom, stripRects, zoomLabel,
 } from "./pdf-model.js";
 
 const LIST = "pdf-pages";
@@ -112,6 +112,7 @@ export class PdfViewer {
     this.triedKey = null; // of the last info asked, failed or not
     this.sizes = null; // per page, points
     this.width = null; // the pane's, logical px (D5)
+    this.height = null; // the same, for jumps (L1)
     this.fit = true; // S7: fit to width until a zoom step
     this.zoomValue = 1;
     this.memo = null;
@@ -119,13 +120,16 @@ export class PdfViewer {
     this.place = null; // the reading place across scale changes before a frame
     this.goal = null; // a page to go to once the list can
     this.tried = new Map(); // render tag → pages asked at it (done or failed)
+    this.landed = new Map(); // render tag → pages on disk at it
     this.latest = new Map(); // page → the tag of its last render that landed
     this.rendering = false;
     this.loading = false;
     this.loadAgain = false;
     this.released = false;
-    this.finder = { open: false, searched: null, matches: [], byPage: new Map(), capped: false, current: -1, seq: 0 };
+    // searched: the text the matches are of; pending: the text a running search is of.
+    this.finder = { open: false, searched: null, pending: null, matches: [], byPage: new Map(), capped: false, current: -1, seq: 0 };
     this.bin = null;
+    this.buildError = null; // the helper's failed build, kept (R5)
     this.scroll = VirtualListScrollHandle.new();
     this.handle = cx.focus_handle();
     this.input = InputState.new({ placeholder: PDF_TEXT.findPlaceholder });
@@ -137,21 +141,33 @@ export class PdfViewer {
 
   // ── Loading and the disk (D4, D10) ─────────────────────────────────────────
 
+  // A build that failed fails again at once: every reload, poll or change would run
+  // swiftc again (R5). Reopening the tab makes a new reader, which tries again.
+  async build() {
+    if (this.buildError) throw this.buildError;
+    try {
+      return await helperPath();
+    } catch (e) {
+      this.buildError = e;
+      throw e;
+    }
+  }
+
   async helper(args) {
-    this.bin ??= await helperPath();
+    this.bin ??= await this.build();
     try {
       return await exec(this.bin, args);
     } catch (e) {
       // The build went away (its folder was cleared): built again, once.
       if (await isBuilt(this.bin)) throw e;
-      this.bin = await helperPath();
+      this.bin = await this.build();
       return exec(this.bin, args);
     }
   }
 
   async statKey() {
     try {
-      const r = await exec("/usr/bin/stat", ["-f", "%m %z", this.file]);
+      const r = await exec("/usr/bin/stat", statArgs(this.file));
       return r.code === 0 ? contentKey(this.file, r.stdout) : null;
     } catch {
       return null;
@@ -228,6 +244,7 @@ export class PdfViewer {
     this.place = null;
     this.goal = keep ?? null;
     this.tried = new Map();
+    this.landed = new Map();
     this.latest = new Map();
     this.ticker ??= cx.timer.every(RENDER_TICK, (cx) => this.tick(cx));
     this.forget();
@@ -306,12 +323,15 @@ export class PdfViewer {
     if (after && after !== before) {
       this.range = null;
       this.place = place;
-      if (place) this.jump(rowOfAnchor(after, place), "top", cx);
+      if (place) this.jump(after, rowOfAnchor(after, place), "top", cx);
     }
     cx.notify();
   }
 
+  // The root's size: its height is the bar's more than the list's, which only puts
+  // a jump's first row a little further down (L1).
   resize(size, cx) {
+    if (size?.height > 0) this.height = size.height;
     const width = size?.width;
     if (!(width > 0) || width === this.width) return;
     this.rescale(() => {
@@ -338,13 +358,21 @@ export class PdfViewer {
   }
 
   // Once now and once after the frame that lays the list out with its new rows.
-  jump(row, how, cx) {
+  // "center" lands as asked. "top" only brings a row below the view to its bottom
+  // edge (the near one): for it a row past the target goes now, which leaves the
+  // target above the view, and the target after the frame comes to the top (L1).
+  // Each asks for the frame it lands in.
+  jump(layout, row, how, cx) {
     if (this.released) return;
-    this.scroll.scroll_to_item(row, how);
+    this.scroll.scroll_to_item(how === "top" ? rowPast(layout, row, this.height) : row, how);
     this.jumpTimer?.cancel();
-    this.jumpTimer = cx.timer.after(FOCUS_DELAY, () => {
-      if (!this.released) this.scroll.scroll_to_item(row, how);
+    this.jumpTimer = cx.timer.after(FOCUS_DELAY, (cx) => {
+      this.jumpTimer = null;
+      if (this.released) return;
+      this.scroll.scroll_to_item(row, how);
+      cx.notify();
     });
+    cx.notify();
   }
 
   goToPage(arg, cx) {
@@ -359,7 +387,7 @@ export class PdfViewer {
     if (this.goal === null || !layout) return;
     const page = Math.min(this.goal, layout.pages.length - 1);
     this.goal = null;
-    this.jump(layout.pages[page].firstRow, "top", cx);
+    this.jump(layout, layout.pages[page].firstRow, "top", cx);
   }
 
   // ── Lazy pages (D6) ────────────────────────────────────────────────────────
@@ -385,7 +413,11 @@ export class PdfViewer {
       try {
         const answer = await this.helper(["render", this.file, pageDir(appHome(), key, tag), String(scale), want.map((p) => p + 1).join(",")]);
         if (this.released || key !== this.key) return;
-        for (const page of parseRendered(answer.stdout, count)) this.latest.set(page, tag);
+        if (!this.landed.has(tag)) this.landed.set(tag, new Set());
+        for (const page of parseRendered(answer.stdout, count)) {
+          this.landed.get(tag).add(page);
+          this.latest.set(page, tag);
+        }
         cx.notify();
       } catch (e) {
         console.log(`code-file: pdf render ${this.file}: ${message(e)}`);
@@ -401,6 +433,7 @@ export class PdfViewer {
     const f = this.finder;
     f.seq++;
     f.searched = null;
+    f.pending = null;
     f.matches = [];
     f.byPage = new Map();
     f.capped = false;
@@ -415,11 +448,17 @@ export class PdfViewer {
     });
   }
 
+  // Neither what the matches are of nor what a running search is of: one search
+  // at a time per text, however many Enters come meanwhile (R14).
+  unsearched(query) {
+    return query !== this.finder.searched && query !== this.finder.pending;
+  }
+
   // `find:<text>` types it and searches at once (the live cases drive it).
   openFind(text, cx) {
     this.finder.open = true;
     if (text) this.input.set_value(text);
-    if (this.input.value() !== this.finder.searched) this.runSearch(cx);
+    if (this.unsearched(this.input.value())) this.runSearch(cx);
     this.focusLater(() => this.input.focus(), cx);
     cx.notify();
   }
@@ -437,14 +476,17 @@ export class PdfViewer {
     this.findTimer?.cancel();
     this.findTimer = cx.timer.after(FIND_DELAY, (cx) => {
       this.findTimer = null;
-      if (this.input.value() !== this.finder.searched) this.runSearch(cx);
+      if (this.unsearched(this.input.value())) this.runSearch(cx);
     });
     cx.notify();
   }
 
-  // Enter: next, Shift+Enter: previous; on text not searched yet, the search.
+  // Enter: next, Shift+Enter: previous; on text not searched yet, the search; on
+  // text being searched, nothing: its answer comes.
   submit(event, cx) {
-    if (this.input.value() !== this.finder.searched) {
+    const query = this.input.value();
+    if (query === this.finder.pending) return;
+    if (query !== this.finder.searched) {
       this.runSearch(cx);
       return;
     }
@@ -452,6 +494,8 @@ export class PdfViewer {
   }
 
   // Only the last search counts. One asked before the pages are there runs in show().
+  // One that fails or runs out of time shows no count, not "No matches": it found
+  // nothing either way, and its text stays unsearched, so Enter asks again (R14).
   runSearch(cx) {
     const f = this.finder;
     const query = this.input.value();
@@ -467,17 +511,25 @@ export class PdfViewer {
     const seq = f.seq;
     const key = this.key;
     const count = this.sizes.length;
+    f.pending = query;
     cx.spawn(async (cx) => {
       let found = null;
       try {
-        found = parseMatches((await this.helper(["find", this.file, query])).stdout, count);
+        const answer = await this.helper(["find", this.file, query]);
+        found = answer.code === 0 ? parseMatches(answer.stdout, count) : null;
+        if (!found) console.log(`code-file: pdf find ${this.file}: exit ${answer.code}: ${answer.stderr || answer.stdout}`);
       } catch (e) {
         console.log(`code-file: pdf find ${this.file}: ${message(e)}`);
       }
       if (this.released || seq !== f.seq || key !== this.key) return;
+      f.pending = null;
+      if (!found) {
+        cx.notify();
+        return;
+      }
       f.searched = query;
-      f.matches = found?.matches ?? [];
-      f.capped = found?.capped ?? false;
+      f.matches = found.matches;
+      f.capped = found.capped;
       f.byPage = matchesByPage(f.matches);
       const layout = this.layout();
       f.current = firstMatchFrom(f.matches, layout ? currentPage(layout, this.range) : 0);
@@ -489,7 +541,7 @@ export class PdfViewer {
   stepFind(direction, cx) {
     const f = this.finder;
     if (f.matches.length === 0) {
-      if (f.open && this.input.value() !== f.searched) this.runSearch(cx);
+      if (f.open && this.unsearched(this.input.value())) this.runSearch(cx);
       return;
     }
     f.current = stepMatch(f.current, f.matches.length, direction);
@@ -506,7 +558,7 @@ export class PdfViewer {
       this.goal = f.matches[f.current].page;
       return;
     }
-    this.jump(matchRow(layout, f.matches[f.current]), "center", cx);
+    this.jump(layout, matchRow(layout, f.matches[f.current]), "center", cx);
   }
 
   findKey(event, cx) {
@@ -586,9 +638,9 @@ export class PdfViewer {
       .when(Boolean(this.detail), (el) => el.child(div().max_w(448).text_center().text_size(12).text_color(t.dim).child(this.detail)));
   }
 
-  // Wider than the pane (zoomed in), the pages scroll sideways too.
+  // Wider than the pane (zoomed in), the pages scroll sideways too; at fit never (R12).
   pages(layout) {
-    const wide = layout.contentWidth > this.width;
+    const wide = scrollsSideways(layout, this.width);
     const list = v_virtual_list(LIST, layout.rows.length, layout.heights, (r) => `${layout.rows[r].page}-${layout.rows[r].top}`, (range) => this.rows(range, layout))
       .track_scroll(this.scroll)
       .h_full();
@@ -599,17 +651,20 @@ export class PdfViewer {
   // Called from the list's layout: records the range and draws, nothing else (D6).
   rows(range, layout) {
     this.range = { start: range.start, end: range.end };
+    const sharp = renderScale(layout.scale, this.sizes, DENSITY).tag;
     const out = [];
     const end = Math.min(range.end, layout.rows.length);
-    for (let r = range.start; r < end; r++) out.push(this.row(r, layout));
+    for (let r = range.start; r < end; r++) out.push(this.row(r, layout, sharp));
     return out;
   }
 
   // A strip: its slice of the page's image (white until rendered), and the matches on it.
-  row(r, layout) {
+  // The page's file at this scale when it's on disk, else the last one that landed,
+  // until this scale's does: back at a scale already drawn, its files again (R2).
+  row(r, layout, sharp) {
     const { page, top, height } = layout.rows[r];
     const { width, height: full } = layout.pages[page];
-    const tag = this.latest.get(page);
+    const tag = this.landed.get(sharp)?.has(page) ? sharp : this.latest.get(page);
     return div().w_full().h(layout.heights[r]).flex().flex_col().items_center().when(top === 0, (el) => el.pt(PAGE_GAP))
       .child(div().relative().flex_none().w(width).h(height).overflow_hidden().bg(PAGE_BG)
         .when(Boolean(tag), (el) => el.child(image(pageImage(this.key, tag, page)).absolute().left(0).top(top === 0 ? 0 : -top).w(width).h(full)))

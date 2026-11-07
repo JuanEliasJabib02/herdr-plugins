@@ -9,7 +9,8 @@
 //     {"pages":N,"sizes":[[w,h],...]}            page sizes in points, as shown:
 //                                                 the crop box, the page's rotation applied
 //   pdfpages render <pdf> <outdir> <scale> <n,n,...>
-//     {"done":[n,...],"failed":[n,...]}          <outdir>/p<n>.png at <scale> px per point
+//     {"done":[n,...],"failed":[n,...]}          <outdir>/p<n>.png at <scale> px per point;
+//                                                 one already there is done as it is
 //   pdfpages find <pdf> <query>
 //     {"matches":[{"page":n,"rects":[[x,y,w,h],...]}],"capped":false}
 //                                                 case and diacritics ignored; rects in points
@@ -107,7 +108,15 @@ func render() -> Never {
       failed.append(String(n))
       continue
     }
-    if autoreleasepool(invoking: { renderPage(page, scale: CGFloat(scale), to: out.appendingPathComponent("p\(n).png")) }) {
+    // The folder names the file's content and the scale (D3), and a PNG is only ever
+    // written atomically, so one already there is this page, whole, drawn before by
+    // this reader or another.
+    let url = out.appendingPathComponent("p\(n).png")
+    if FileManager.default.fileExists(atPath: url.path) {
+      done.append(String(n))
+      continue
+    }
+    if autoreleasepool(invoking: { renderPage(page, scale: CGFloat(scale), to: url) }) {
       done.append(String(n))
     } else {
       failed.append(String(n))

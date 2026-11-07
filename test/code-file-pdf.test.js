@@ -5,13 +5,17 @@
 // live cases; pdfpages.swift itself is proven against a real PDF by hand (D4).
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import { existsSync, mkdtempSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { registerHooks } from "node:module";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { hashPath } from "../code-editor/mods/code-file/draft-model.js";
 import {
   FIT_PADDING, MAX_ZOOM, MIN_ZOOM, PAGE_GAP, PDF_TEXT, PX_PER_PT, STRIP, ZOOM_STEP,
   anchorOf, binName, canZoomIn, canZoomOut, contentKey, currentPage, firstMatchFrom, fitZoom, matchLabel, matchRow,
   matchesByPage, pageImage, pageLayout, pagesToRender, parseInfo, parseMatches, parseRendered, renderScale, rowAt,
-  rowOfAnchor, staleKeys, stepMatch, stepZoom, stripRects, zoomLabel,
+  rowOfAnchor, rowPast, scrollsSideways, staleKeys, statArgs, stepMatch, stepZoom, stripRects, zoomLabel,
 } from "../code-editor/mods/code-file/pdf-model.js";
 
 const close = (a, b, msg) => assert.ok(Math.abs(a - b) < 1e-6, `${msg ?? ""} ${a} ≉ ${b}`);
@@ -99,6 +103,29 @@ test("D5: a strip by a point on its page, and the reading place kept across a zo
   const b = pageLayout(SIZES, 2);
   assert.equal(rowOfAnchor(b, anchor), b.pages[1].firstRow + Math.floor((512 / 960) * b.pages[1].height / STRIP));
   assert.equal(anchorOf(a, null), null);
+});
+
+// L1: "top" only brings a row below the view to its bottom edge, so a jump goes to a
+// row past the target first: from there the target is above the view.
+test("L1: the row past a target is the nearest whose bottom is more than a view height below the target's top, else the last", () => {
+  const l = pageLayout(SIZES, 960 / 1056); // heights 266 256 256 192 | 266 256 256 192 | 266 256 230 | 266 256 256 202
+  assert.equal(rowPast(l, 8, 800), 11, "266 + 256 + 230 = 752 isn't more than 800; + 266 is");
+  assert.equal(rowPast(l, 0, 777), 2, "266 + 256 + 256 = 778");
+  assert.equal(rowPast(l, 0, 778), 3, "more than, not as much as");
+  assert.equal(rowPast(l, 3, 100), 4, "a row after the target even when the target alone fills the view");
+  assert.equal(rowPast(l, 12, 800), 14, "none that far: the last row");
+  assert.equal(rowPast(l, 14, 800), 14);
+  assert.equal(rowPast(l, 8, null), 14, "no view height yet: the last row");
+  assert.equal(rowPast(l, 8, 0), 14);
+});
+
+test("R12, S7: at fit the pages never scroll sideways, whatever fraction the pane's width has; zoomed past it they do", () => {
+  for (const width of [960.6, 960.4, 1000.5, 1000, 777.77]) {
+    const fit = pageLayout(SIZES, fitZoom(width, SIZES));
+    assert.equal(scrollsSideways(fit, width), false, `${width} px at fit`);
+    assert.equal(scrollsSideways(pageLayout(SIZES, stepZoom(fitZoom(width, SIZES), 1)), width), true, `${width} px a step in`);
+  }
+  assert.equal(scrollsSideways(pageLayout(SIZES, fitZoom(60, SIZES)), 60), true, "fit clamped at 25% in a narrow pane");
 });
 
 // ── D6: what to render, and how sharp ────────────────────────────────────────
@@ -227,6 +254,39 @@ test("D3, D10: a content key from the path, mtime and size; the path's older key
   assert.equal(binName("source"), `pdfpages-${hashPath("source")}`);
 });
 
+test("R3, D3: the key comes from stat -L -f '%Fm %z': a symlink by its target, the mtime to the nanosecond", () => {
+  assert.deepEqual(statArgs("/r/a.pdf"), ["-L", "-f", "%Fm %z", "/r/a.pdf"]);
+  const k = contentKey("/r/a.pdf", "1794072942.163216795 6661678\n");
+  assert.match(k ?? "", /^[0-9a-f]+-[0-9a-f]+$/, "what macOS's stat prints");
+  assert.ok(k.startsWith(`${hashPath("/r/a.pdf")}-`));
+  assert.notEqual(contentKey("/r/a.pdf", "1794072942.163216796 6661678\n"), k, "a same-size rewrite within the second");
+  assert.equal(contentKey("/r/a.pdf", "1794072942. 6661678\n"), null);
+  assert.equal(contentKey("/r/a.pdf", "1794072942.1.2 6661678\n"), null);
+});
+
+// What the reader runs, on the real stat: a rewrite through a symlink, and one of the
+// same size within the same second, are new keys.
+test("R3: macOS's stat with the reader's arguments follows a symlink and tells two rewrites in one second apart", { skip: process.platform !== "darwin" && "macOS's stat" }, (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "pdf-stat-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const target = join(dir, "real.pdf");
+  const link = join(dir, "link.pdf");
+  writeFileSync(target, "aa");
+  symlinkSync(target, link);
+  const key = () => contentKey(link, execFileSync("/usr/bin/stat", statArgs(link), { encoding: "utf8" }));
+  utimesSync(target, 1700000000.25, 1700000000.25);
+  const first = key();
+  assert.ok(first, "stat's answer makes a key");
+  writeFileSync(target, "bb");
+  utimesSync(target, 1700000000.75, 1700000000.75);
+  const second = key();
+  assert.ok(second);
+  assert.notEqual(second, first, "same size, same second");
+  writeFileSync(target, "ccc");
+  utimesSync(target, 1700000000.75, 1700000000.75);
+  assert.notEqual(key(), second, "the target's size, not the link's");
+});
+
 test("S7, S8, S9: Orca's strings", () => {
   assert.deepEqual({ ...PDF_TEXT }, {
     zoomOut: "Zoom out",
@@ -319,7 +379,7 @@ const FILE = "/repo/docs/book.pdf";
 const INFO = JSON.stringify({ pages: 4, sizes: SIZES });
 const T = new Proxy({}, { get: (_t, k) => `#${String(k)}` });
 
-function newWorld({ file = FILE, bin = true, stat = "1700000000 12345\n", info = INFO, swiftFails = false, holdInfo = false, realDir = null, watchError = null } = {}) {
+function newWorld({ file = FILE, bin = true, stat = "1700000000 12345\n", info = INFO, swiftFails = false, holdInfo = false, holdFind = false, realDir = null, watchError = null } = {}) {
   const w = {
     file,
     fs: { [SWIFT]: SOURCE, ...(bin ? { [BIN]: "binary" } : {}) },
@@ -329,6 +389,8 @@ function newWorld({ file = FILE, bin = true, stat = "1700000000 12345\n", info =
     swiftFails,
     holdInfo,
     held: [],
+    holdFind,
+    heldFinds: [],
     realDir,
     watchError,
     execs: [],
@@ -376,7 +438,11 @@ function newWorld({ file = FILE, bin = true, stat = "1700000000 12345\n", info =
     }
     if (sub === "find") {
       w.finds.push(args[2]);
-      return { code: 0, stdout: typeof w.findAnswer === "function" ? w.findAnswer(args[2]) : w.findAnswer, stderr: "" };
+      if (w.holdFind) await new Promise((resolve) => w.heldFinds.push(resolve));
+      // A string is stdout of a run that exited 0; a function may throw (exec rejected)
+      // or answer the whole result.
+      const answer = typeof w.findAnswer === "function" ? w.findAnswer(args[2]) : w.findAnswer;
+      return typeof answer === "string" ? { code: 0, stdout: answer, stderr: "" } : answer;
     }
     return { code: 64, stdout: '{"error":"usage"}', stderr: "" };
   };
@@ -553,6 +619,74 @@ test("D4: an existing build is used as is, and older builds go when a new one is
   viewer.release();
 });
 
+test("R5, D4: a build that failed isn't tried again by the same reader, on a reload or a change; reopening the tab tries again", async () => {
+  const w = await openPdf({ bin: false, swiftFails: true });
+  const compiles = () => w.execs.filter(([cmd]) => cmd === "/usr/bin/swiftc").length;
+  assert.equal(compiles(), 1);
+  await w.batch([FILE]);
+  w.stat = "1700000099 22222\n";
+  await w.batch([FILE]);
+  assert.equal(compiles(), 1, "swiftc ran once");
+  const body = textOf(find(w.draw(), "pdf-error"));
+  assert.match(body, /Failed to load PDF preview/);
+  assert.match(body, /xcode-select --install/, "and the reason stays");
+  const reopened = new PdfViewer({ file: FILE, doc: "d1", text: () => "", visible: () => true }, w.cx);
+  await flush();
+  assert.equal(compiles(), 2);
+  reopened.release();
+});
+
+// A real PDF, one page, "React hooks" in Helvetica: the offsets in its xref are counted.
+function tinyPdf() {
+  const content = "BT /F1 12 Tf 20 60 Td (React hooks) Tj ET";
+  const objects = [
+    "<< /Type /Catalog /Pages 2 0 R >>",
+    "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+    "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 100] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>",
+    `<< /Length ${content.length} >>\nstream\n${content}\nendstream`,
+    "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+  ];
+  let out = "%PDF-1.4\n";
+  const offsets = [];
+  objects.forEach((o, i) => {
+    offsets.push(out.length);
+    out += `${i + 1} 0 obj\n${o}\nendobj\n`;
+  });
+  const xref = out.length;
+  out += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n${offsets.map((o) => `${String(o).padStart(10, "0")} 00000 n \n`).join("")}`;
+  return `${out}trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF\n`;
+}
+
+const HELPER_SOURCE = new URL("../code-editor/mods/code-file/pdfpages.swift", import.meta.url).pathname;
+const SWIFTC = "/usr/bin/swiftc";
+
+// The real helper, built as the reader builds it.
+test("R15, D4: pdfpages render leaves a page whose PNG is already there, which it only ever writes atomically", { skip: !(process.platform === "darwin" && existsSync(SWIFTC)) && "needs macOS's swiftc" }, (t) => {
+  assert.match(readFileSync(HELPER_SOURCE, "utf8"), /data\.write\(to: url, options: \.atomic\)/, "a PNG on disk is a whole one");
+  const dir = mkdtempSync(join(tmpdir(), "pdfpages-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const bin = join(dir, "pdfpages");
+  try {
+    execFileSync(SWIFTC, ["-O", HELPER_SOURCE, "-o", bin], { stdio: "pipe" });
+  } catch (e) {
+    t.skip(`swiftc: ${String(e.stderr ?? e.message).trim()}`);
+    return;
+  }
+  const pdf = join(dir, "tiny.pdf");
+  writeFileSync(pdf, tinyPdf());
+  const out = join(dir, "s4");
+  const png = join(out, "p1.png");
+  const render = () => JSON.parse(execFileSync(bin, ["render", pdf, out, "2", "1"], { encoding: "utf8" }));
+  assert.deepEqual(render(), { done: [1], failed: [] });
+  assert.deepEqual([...readFileSync(png).subarray(0, 4)], [0x89, 0x50, 0x4e, 0x47], "a PNG");
+  writeFileSync(png, "already here");
+  assert.deepEqual(render(), { done: [1], failed: [] }, "still done");
+  assert.ok(readFileSync(png).equals(Buffer.from("already here")), "and not drawn again");
+  rmSync(png);
+  assert.deepEqual(render(), { done: [1], failed: [] });
+  assert.deepEqual([...readFileSync(png).subarray(0, 4)], [0x89, 0x50, 0x4e, 0x47], "a missing one is drawn");
+});
+
 // ── S7: the pages and the bottom bar ─────────────────────────────────────────
 
 test("S7, D5: a virtual list of strips, heights known, fit to the pane's width, on the canvas color", async () => {
@@ -623,13 +757,19 @@ test("D7: every zoom key and find is the reader's, and nothing else is", async (
   assert.equal(await loading.command("zoom-in"), true, "a PDF still loading never zooms the window");
 });
 
-test("S7: zoom keeps the page being read: the list goes to the same place on it", async () => {
+test("S7, L1: zoom keeps the page being read: the same place on it comes to the top edge, from a row past it", async () => {
   const w = await readyPdf();
   w.frame(6, 9);
   await w.command("zoom-in");
   const after = pageLayout(SIZES, stepZoom(960 / 1056, 1));
   const want = rowOfAnchor(after, { page: 1, fraction: 512 / 960 });
-  assert.deepEqual(w.scroll().calls.at(-1), [want, "top"]);
+  const past = rowPast(after, want, 800);
+  assert.ok(past > want);
+  assert.deepEqual(w.scroll().calls.at(-1), [past, "top"], "first a row whose bottom is more than the pane's 800 px below");
+  const before = w.notifies;
+  await w.fire(50);
+  assert.deepEqual(w.scroll().calls.at(-1), [want, "top"], "then the place, now above the view");
+  assert.ok(w.notifies > before, "with a frame to land in");
 });
 
 test("S7: wider than the pane, the pages scroll sideways; at fit they don't", async () => {
@@ -641,12 +781,34 @@ test("S7: wider than the pane, the pages scroll sideways; at fit they don't", as
   assert.equal(w.list().calls.w[0], pageLayout(SIZES, stepZoom(960 / 1056, 1)).contentWidth);
 });
 
-test("D5: page:<n> goes to that page's top", async () => {
+test("R12, S7: at fit a pane 960.6 px wide doesn't scroll sideways", async () => {
+  const w = await openPdf();
+  await w.resize(960.6);
+  assert.equal(find(w.draw(), "pdf-zoom").kids[0], "87%");
+  assert.equal(find(w.draw(), "pdf-scroll-x").calls.overflow_x_scrollbar, undefined);
+  assert.ok(w.list().calls.w_full);
+});
+
+test("D5, L1: page:<n> brings that page's top to the top edge: a row past it first, the page after the frame", async () => {
   const w = await readyPdf();
   await w.command("page", "3");
+  assert.deepEqual(w.scroll().calls.at(-1), [11, "top"], "the nearest row whose bottom is more than the pane's 800 px below the page's top");
+  await w.fire(50);
   assert.deepEqual(w.scroll().calls.at(-1), [8, "top"]);
   await w.command("page", "99");
+  assert.deepEqual(w.scroll().calls.at(-1), [14, "top"], "near the end: the last row");
+  await w.fire(50);
   assert.deepEqual(w.scroll().calls.at(-1), [11, "top"], "past the end: the last page");
+});
+
+test("L1: a pane whose height alone changes keeps its scale; the next jump measures the new height", async () => {
+  const w = await readyPdf();
+  const root = w.draw();
+  root.handlers.size_change({ width: 1000, height: 300 }, w.cx);
+  await flush();
+  assert.equal(find(w.draw(), "pdf-zoom").kids[0], "91%");
+  await w.command("page", "3");
+  assert.deepEqual(w.scroll().calls.at(-1), [9, "top"], "266 + 256 is more than 300");
 });
 
 // ── D6: lazy pages ───────────────────────────────────────────────────────────
@@ -687,6 +849,28 @@ test("D6: after a zoom the old images stay until the new ones land", async () =>
   await w.tick();
   assert.equal(w.renders.length, 2);
   assert.notEqual(w.renders[1].dir, w.renders[0].dir);
+});
+
+test("R2, D6: zoomed out and back in, the pages are drawn from the sharp files again, with nothing rendered again", async () => {
+  const w = await readyPdf();
+  const imagesOf = (rows) => findAll({ kids: rows, calls: {}, handlers: {} }, (e) => e.kind === "image");
+  w.frame(0, 5);
+  await w.tick();
+  const sharp = renderScale(960 / 1056 * 4 / 3, SIZES).tag;
+  await w.command("zoom-out");
+  const low = renderScale(stepZoom(960 / 1056, -1) * 4 / 3, SIZES).tag;
+  assert.notEqual(low, sharp);
+  w.frame(0, 5);
+  await w.tick();
+  assert.equal(w.renders.length, 2);
+  assert.ok(w.renders[1].dir.endsWith(`/${low}`));
+  assert.ok(imagesOf(w.frame(0, 5)).every((e) => e.arg.includes(`/${low}/`)));
+  await w.command("zoom-in");
+  const images = imagesOf(w.frame(0, 5));
+  assert.equal(images.length, 5);
+  assert.ok(images.every((e) => e.arg.includes(`/${sharp}/`)), images.map((e) => e.arg).join(" "));
+  await w.tick();
+  assert.equal(w.renders.length, 2, "they're on disk and known: no exec");
 });
 
 // ── S8: find ─────────────────────────────────────────────────────────────────
@@ -785,6 +969,68 @@ test("S8: \"No matches\"; an empty field searches nothing", async () => {
   assert.equal(find(w.draw(), "pdf-find-count"), null);
 });
 
+test("R14, S8: while a search runs, Enter, Next and the pause wait for it: one find, then Enter steps", async () => {
+  const w = await readyPdf({ holdFind: true });
+  const count = () => textOf(find(w.draw(), "pdf-find-count"));
+  await w.command("find");
+  w.input().text = "React";
+  w.input().handlers.change({}, w.cx);
+  w.input().handlers.submit({}, w.cx);
+  await flush();
+  assert.deepEqual(w.finds, ["React"]);
+  w.input().handlers.submit({}, w.cx);
+  w.input().handlers.submit({ shift: true }, w.cx);
+  await w.click("pdf-find-next");
+  await w.fire(250);
+  await w.command("find", "React");
+  assert.deepEqual(w.finds, ["React"], "the running search is the one");
+  assert.equal(find(w.draw(), "pdf-find-count"), null, "no count until it answers");
+  w.heldFinds.shift()();
+  await flush();
+  assert.equal(count(), "1 of 3");
+  w.input().handlers.submit({}, w.cx);
+  await flush();
+  assert.equal(count(), "2 of 3");
+  assert.deepEqual(w.finds, ["React"]);
+});
+
+test("R14, S8: new text while a search runs searches the new text; the old answer is dropped", async () => {
+  const w = await readyPdf({ holdFind: true });
+  await w.command("find", "React");
+  w.input().text = "zebra";
+  w.input().handlers.submit({}, w.cx);
+  await flush();
+  assert.deepEqual(w.finds, ["React", "zebra"]);
+  w.heldFinds.shift()();
+  await flush();
+  assert.equal(find(w.draw(), "pdf-find-count"), null, "React's answer isn't zebra's");
+  w.findAnswer = '{"matches":[],"capped":false}';
+  w.heldFinds.shift()();
+  await flush();
+  assert.equal(textOf(find(w.draw(), "pdf-find-count")), "No matches");
+});
+
+for (const [name, answer] of [
+  ["a helper that can't run or ran out of time (exec rejects)", () => { throw new Error("timed out"); }],
+  ["a helper cut off", () => ({ code: 137, stdout: "", stderr: "killed" })],
+  ["a helper's error", () => ({ code: 2, stdout: '{"error":"unreadable"}\n', stderr: "" })],
+  ["an answer that isn't one", () => "garbage"],
+]) {
+  test(`R14, S8: ${name}: no count, never "No matches", and Enter searches again`, async () => {
+    const w = await readyPdf();
+    w.findAnswer = answer;
+    await w.command("find", "React");
+    assert.deepEqual(w.finds, ["React"]);
+    assert.equal(find(w.draw(), "pdf-find-count"), null);
+    assert.doesNotMatch(textOf(w.draw()), /No matches/);
+    w.findAnswer = FOUND;
+    w.input().handlers.submit({}, w.cx);
+    await flush();
+    assert.deepEqual(w.finds, ["React", "React"]);
+    assert.equal(textOf(find(w.draw(), "pdf-find-count")), "1 of 3");
+  });
+}
+
 for (const [name, closeIt] of [
   ["Esc", async (w) => {
     const bar = find(w.draw(), "pdf-find-bar");
@@ -841,6 +1087,7 @@ test("D10: the file's folder is watched; a change re-reads it under a new key an
   assert.equal(w.helperCalls("info").length, 2);
   const key2 = contentKey(FILE, w.stat);
   await w.tick();
+  await w.fire(50);
   assert.deepEqual(w.scroll().calls.at(-1), [4, "top"], "the page it was on");
   w.frame(4, 7);
   await w.tick();
@@ -856,6 +1103,15 @@ test("D10: a change elsewhere in the folder, or one that leaves the key, reads n
   await w.batch(["/repo/docs/book.pdf"]);
   assert.equal(w.execs.filter(([cmd]) => cmd === "/usr/bin/stat").length, 2);
   assert.equal(w.helperCalls("info").length, 1, "same mtime and size: same pages");
+});
+
+test("R3, D10: the reader stats the file with -L and a fractional mtime; a same-size rewrite within the second is read again", async () => {
+  const w = await readyPdf({ stat: "1794072942.163216795 6661678\n" });
+  assert.deepEqual(w.execs.find(([cmd]) => cmd === "/usr/bin/stat"), ["/usr/bin/stat", "-L", "-f", "%Fm %z", FILE]);
+  assert.ok(w.list(), "stat's answer loads");
+  w.stat = "1794072942.163216796 6661678\n";
+  await w.batch([FILE]);
+  assert.equal(w.helperCalls("info").length, 2);
 });
 
 test("D10: the folder's real path counts too (watchFolder hands out resolved paths)", async () => {

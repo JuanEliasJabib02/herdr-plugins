@@ -683,9 +683,13 @@ with zoom and find. It has no text model: nothing to edit or save.
   again. The page being read stays in view.
 - **`cmd-f`** opens find. Enter goes to the next match, Shift-Enter to the previous,
   Esc closes. It searches 250 ms after the last key, ignoring case and accents, and
-  stops counting at 5000 ("1 of 5000+").
+  stops counting at 5000 ("1 of 5000+"). While a search runs, Enter and the arrows wait
+  for it; a search that fails shows no count, and Enter tries again.
 - **Pages render as they scroll into view,** a few around them, sharp for a Retina
-  screen. A file that changes on disk shows its new pages at the same place.
+  screen, and a page already rendered at that size is reused, in this tab or another.
+  A file that changes on disk shows its new pages at the same place; a symlink is
+  followed to its file.
+- **Going to a page** puts its top at the top of the view.
 
 **Commands:** `code-file.zoom-in`, `zoom-out`, `zoom-fit`, `find[:text]`, `find-next`,
 `find-prev`, `find-close`, `page:<n>`. In a file that isn't a PDF, the zoom keys zoom
@@ -707,7 +711,7 @@ the whole window, as before.
 **Watch out**
 
 - **The first PDF compiles the helper,** which takes a moment, and needs the Xcode
-  command line tools.
+  command line tools. A build that fails isn't tried again until the tab opens again.
 - **The text can't be selected and links don't open:** the pages are images.
 - **A PDF with a password** says so; there's no field to type it.
 - **Zoom keeps the page being read to within a strip** (256 px): the list says which row
