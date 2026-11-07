@@ -78,6 +78,7 @@ export class Holder {
     this.now = now;
     this.log = log;
     this.pid = null; // the caffeinate this copy holds, started or adopted
+    this.dropping = new Map(); // pid → its check-and-kill in flight (one at a time)
     this.herdrPid = null; // the Herdr app's, once found (it doesn't change)
     this.checkedAt = 0; // when the held one was last seen alive
     this.retryAt = 0; // no start before this (a failed one, D6)
@@ -200,43 +201,56 @@ export class Holder {
     }
   }
 
-  // Kills the held one if it's still ours, and clears the file if it still
-  // names it (a file naming another copy's caffeinate is left alone). When
-  // ps can't run there's no telling: it stays held and listed, and the next
-  // tick looks again.
+  // Lets go of the held one (dropPid). When ps can't run there's no telling:
+  // it stays held and listed, and the next tick looks again.
   async drop() {
     const pid = this.pid;
     if (pid === null) return;
-    const ours = await this.isOurs(pid);
-    if (ours === null) {
-      this.log(`can't look at caffeinate ${pid}: kept`);
-      return;
-    }
-    if (this.pid === pid) this.pid = null;
-    if (ours) await this.kill(pid);
-    let text;
-    try {
-      text = await this.io.read(this.paths.pid);
-    } catch {
-      return;
-    }
-    if (parsePid(text) !== pid) return;
-    await this.clear(text);
+    const ours = await this.dropPid(pid);
+    if (ours !== null && this.pid === pid) this.pid = null;
   }
 
-  // Kills the caffeinate the file lists if it's ours, and clears the file.
-  // One that isn't ours, or that ps can't look at, is left alone. `find`:
-  // look for the Herdr app's pid if not known yet (with nothing wanted, a
-  // copy may never have); release() doesn't, since its tick in flight can't
-  // have started or adopted one before knowing it.
+  // The caffeinate the file lists goes the same way (dropPid). `find`: look
+  // for the Herdr app's pid if not known yet (with nothing wanted, a copy may
+  // never have); release() doesn't, since its tick in flight can't have
+  // started or adopted one before knowing it. Without Herdr's pid nothing can
+  // be told ours, so the file is left as it is.
   async dropListed(find) {
     const text = await this.io.read(this.paths.pid);
     const listed = parsePid(text);
     if (listed === null) return;
     const herdr = find ? await this.findHerdr() : this.herdrPid;
-    if (herdr === null || (await this.isOurs(listed)) !== true) return;
-    await this.kill(listed);
-    await this.clear(text);
+    if (herdr === null) return;
+    await this.dropPid(listed);
+  }
+
+  // Kills `pid` if it is our caffeinate, and strikes it from the file if the
+  // file still names it: a dead pid or someone else's process (pid reuse) is
+  // struck without a kill, so later looks run no ps (r2 #4). ps unable to run:
+  // nothing is touched. One check-and-kill per pid at a time, so a tick's drop
+  // and release()'s, or release() and an idle look, never both kill it
+  // (r2 #1). → isOurs()'s answer.
+  dropPid(pid) {
+    const running = this.dropping.get(pid);
+    if (running) return running;
+    const done = (async () => {
+      const ours = await this.isOurs(pid);
+      if (ours === null) {
+        this.log(`can't look at caffeinate ${pid}: kept`);
+        return null;
+      }
+      if (ours) await this.kill(pid);
+      let text;
+      try {
+        text = await this.io.read(this.paths.pid);
+      } catch {
+        return ours;
+      }
+      if (parsePid(text) === pid) await this.clear(text);
+      return ours;
+    })().finally(() => this.dropping.delete(pid));
+    this.dropping.set(pid, done);
+    return done;
   }
 
   // Empties the pid file while it still holds `text`.

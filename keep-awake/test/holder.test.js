@@ -43,6 +43,7 @@ function machine({ shPpid = HERDR, files = {}, procs = {} } = {}) {
     spawnGate: null, // a promise the spawn waits on
     ppidGate: null, // a promise `echo $PPID` waits on (a start before its spawn)
     writeGate: null, // a promise the next write waits on once its text has landed
+    psGate: null, // a promise every ps waits on (a drop caught mid-check)
     reads: 0, // how many times the pid file was read
   };
   m.caffeinates = () => [...m.procs].filter(([, p]) => p.comm === "/usr/bin/caffeinate").map(([pid]) => pid);
@@ -68,6 +69,7 @@ function machine({ shPpid = HERDR, files = {}, procs = {} } = {}) {
       return ok(`${pid}\n`);
     }
     if (cmd === "ps") {
+      if (m.psGate) await m.psGate;
       if (m.psRejects) throw new Error("spawn ps ENOENT");
       const [flag, pid, o, fields] = args;
       assert.equal(flag, "-p");
@@ -296,13 +298,14 @@ test("not wanted, none held: the file is looked at every 15 s, never every secon
   assert.equal(m.calls.length, calls, "an empty file runs nothing");
 });
 
-test("not wanted, none held: what the file lists and isn't ours, or can't be looked at, is never killed (R1, D3)", async () => {
+test("not wanted, none held: what the file lists and isn't ours, or can't be looked at, is never killed; one that isn't ours is struck from the file (R1, D3, r2 #4)", async () => {
   for (const command of ["/usr/bin/vim notes.txt", "/usr/bin/caffeinate -i -s -w 777", "/usr/bin/caffeinate -d", null]) {
     const m = machine({ files: { [PID_FILE]: "4242\n" }, procs: command ? { 4242: command } : {} });
     const h = m.holder();
     await h.tick(false, NOW + LIVENESS_MS);
     assert.deepEqual(m.kills(), [], String(command));
-    assert.equal(m.files[PID_FILE], "4242\n", String(command));
+    assert.equal(m.files[PID_FILE], "", String(command));
+    if (command) assert.ok(m.procs.has(4242), "left running");
   }
   const blind = machine({ files: { [PID_FILE]: "4242\n" }, procs: { 4242: ours() } });
   blind.psRejects = true;
@@ -313,6 +316,52 @@ test("not wanted, none held: what the file lists and isn't ours, or can't be loo
   await lost.holder().tick(false, NOW + LIVENESS_MS);
   assert.deepEqual(lost.kills(), [], "the Herdr app's pid unknown");
   assert.equal(lost.files[PID_FILE], "4242\n");
+});
+
+test("a dead pid left in the file (a crash) is struck at the first look, so later looks run no ps (r2 #4)", async () => {
+  const m = machine({ files: { [PID_FILE]: "15273\n" } });
+  const h = m.holder();
+  await h.tick(false, NOW + LIVENESS_MS);
+  assert.equal(m.files[PID_FILE], "");
+  const calls = m.calls.length;
+  await h.tick(false, NOW + 2 * LIVENESS_MS);
+  assert.equal(m.calls.length, calls, "an empty file: no ps every 15 s");
+  assert.deepEqual(m.kills(), []);
+});
+
+test("a tick's drop and release() caught at the same ps kill the caffeinate once (r2 #1)", async () => {
+  const m = machine();
+  const h = m.holder();
+  await h.tick(true, NOW);
+  let open;
+  m.psGate = new Promise((r) => (open = r));
+  const off = h.tick(false, NOW + 1_000);
+  await new Promise((r) => setImmediate(r));
+  const released = h.release();
+  await new Promise((r) => setImmediate(r));
+  m.psGate = null;
+  open();
+  await Promise.all([off, released]);
+  assert.deepEqual(m.kills(), [9000]);
+  assert.equal(m.files[PID_FILE], "");
+  assert.equal(h.holding, false);
+});
+
+test("release() and an idle look caught at the same ps kill the listed caffeinate once (r2 #1)", async () => {
+  const m = machine({ files: { [PID_FILE]: "4242\n" }, procs: { 4242: ours() } });
+  const h = m.holder();
+  h.herdrPid = HERDR; // found at an earlier start, so release() can look at the file too
+  let open;
+  m.psGate = new Promise((r) => (open = r));
+  const sweep = h.tick(false, NOW + LIVENESS_MS);
+  await new Promise((r) => setImmediate(r));
+  const released = h.release();
+  await new Promise((r) => setImmediate(r));
+  m.psGate = null;
+  open();
+  await Promise.all([sweep, released]);
+  assert.deepEqual(m.kills(), [4242]);
+  assert.equal(m.files[PID_FILE], "");
 });
 
 test("not wanted while ps can't run: the held one and the file are kept, and dropped at a later tick (R2)", async () => {
