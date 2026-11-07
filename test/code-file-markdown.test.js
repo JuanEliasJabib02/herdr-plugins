@@ -12,7 +12,7 @@ import { registerHooks } from "node:module";
 import {
   PREVIEW_TEXT, cannotOpenDir, codeLanguage, highlight, imageSource, linkTarget, notFound, pathKind, shownPath, splitBlocks, titleCallouts,
 } from "../code-editor/mods/code-file/markdown-model.js";
-import { IMG_DIR, createImageCache, curlArgs, fitWidth, parseSips, parseStat, svgSize } from "../code-editor/mods/code-file/image-cache.js";
+import { IMG_DIR, MAX_IMAGE, createImageCache, curlArgs, fitWidth, isSvg, parseSips, parseStat, svgSize } from "../code-editor/mods/code-file/image-cache.js";
 import * as mine from "../code-editor/mods/code-file/open-model.js";
 import * as explorer from "../code-editor/mods/code-explorer/tree-model.js";
 import { SYNTAX } from "../code-editor/mods/code-file/line-view-model.js";
@@ -117,6 +117,29 @@ test("D1: a paragraph mixing images and anything else stays text", () => {
   }
 });
 
+test("R9: a fence or an image paragraph indented under an open list item stays in the list's run, so the list isn't cut in two", () => {
+  const steps = "1. Step one:\n   ```bash\n   npm i\n   ```\n2. Step two";
+  assert.deepEqual(splitBlocks(steps), [{ kind: "markdown", text: steps }]);
+  const shot = "- item\n\n  ![shot](a.png)\n\n- next";
+  assert.deepEqual(splitBlocks(shot), [{ kind: "markdown", text: shot }]);
+  const inside = "- a\n\n  ```\n  ![x](y.png)\n  # not a heading\n  ```\n- b";
+  assert.deepEqual(splitBlocks(inside), [{ kind: "markdown", text: inside }], "the fence's lines go through untouched");
+});
+
+test("R9: the list ends at an unindented line after a blank one, or at a fence at column 0; what follows is ours again", () => {
+  assert.deepEqual(splitBlocks("- a\n\nText\n\n  ```js\n  x\n  ```"), [
+    { kind: "markdown", text: "- a\n\nText" },
+    { kind: "code", lang: "js", text: "x" },
+  ]);
+  assert.deepEqual(splitBlocks("- a\n```js\nx\n```\n  ![p](p.png)"), [
+    { kind: "markdown", text: "- a" },
+    { kind: "code", lang: "js", text: "x" },
+    { kind: "images", images: [{ alt: "p", src: "p.png", title: "", href: null }] },
+  ]);
+  assert.deepEqual(splitBlocks("- a\n\n# Title\n\n ![p](p.png)").at(-1).kind, "images", "a heading ends it too");
+  assert.deepEqual(splitBlocks("- a\nlazy line\n\n  ```\n  in list\n  ```"), [{ kind: "markdown", text: "- a\nlazy line\n\n  ```\n  in list\n  ```" }], "a lazy line keeps it open");
+});
+
 test("D1: link definitions reach every run, so a reference split from its definition still links", () => {
   const blocks = splitBlocks("See [docs][d].\n\n```\nx\n```\n\nAnd [docs][d] again.\n\n[d]: https://d.io\n");
   assert.deepEqual(blocks.map((b) => b.kind), ["markdown", "code", "markdown"]);
@@ -204,9 +227,9 @@ test("D3: a remote image is its URL; anything else is a file from the Markdown's
 
 // ── D3, D12: the image cache ─────────────────────────────────────────────────
 
-test("D12: curl's arguments, as an array: http(s) only, 15 s, 10 MiB, into the given file", () => {
+test("D12, R4: curl's arguments, as an array: no ~/.curlrc, no [a-b] or {x,y} expansion, http(s) only, 15 s, 10 MiB, into the given file", () => {
   assert.deepEqual(curlArgs("https://x.io/a.png", "/h/data/code-file/img/u1.part"), [
-    "-fsSL", "--proto", "=http,https", "--proto-redir", "=http,https", "--max-time", "15", "--max-filesize", "10485760", "-o", "/h/data/code-file/img/u1.part", "https://x.io/a.png",
+    "-q", "--globoff", "-fsSL", "--proto", "=http,https", "--proto-redir", "=http,https", "--max-time", "15", "--max-filesize", "10485760", "-o", "/h/data/code-file/img/u1.part", "https://x.io/a.png",
   ]);
 });
 
@@ -223,9 +246,20 @@ test("D12: sizes: sips for rasters, the SVG's own width/height/viewBox, capped t
   assert.deepEqual(fitWidth({ width: 1000, height: 500 }, 400), { width: 400, height: 200 });
   assert.deepEqual(fitWidth({ width: 90, height: 20 }, 400), { width: 90, height: 20 });
   assert.deepEqual(fitWidth({ width: 90, height: 20 }, Infinity), { width: 90, height: 20 });
-  assert.deepEqual(parseStat("1794074635 110 Regular File\n"), { mtime: "1794074635", size: 110, dir: false });
-  assert.deepEqual(parseStat("1794074635 160 Directory\n"), { mtime: "1794074635", size: 160, dir: true });
+  assert.deepEqual(parseStat("1794074635 110 Regular File\n"), { mtime: "1794074635", size: 110, dir: false, file: true });
+  assert.deepEqual(parseStat("1794074635 160 Directory\n"), { mtime: "1794074635", size: 160, dir: true, file: false });
+  assert.deepEqual(parseStat("1794074635 0 Character Device\n"), { mtime: "1794074635", size: 0, dir: false, file: false }, "R1: /dev/zero");
   assert.equal(parseStat(""), null);
+});
+
+test("R7: an SVG is a document that starts with <svg, after a BOM, an XML prolog, comments or a doctype; an HTML page holding icons is not one", () => {
+  assert.equal(isSvg('<svg width="9" height="9"></svg>'), true);
+  assert.equal(isSvg("\uFEFF  <?xml version='1.0' encoding='UTF-8'?>\n<!-- by hand -->\n<!DOCTYPE svg PUBLIC \"-//W3C//DTD SVG 1.1//EN\" \"x.dtd\">\n<SVG viewBox='0 0 1 1'>"), true);
+  assert.equal(isSvg('<!DOCTYPE html><html><body><svg class="octicon" width="16" height="16"></svg></body></html>'), false);
+  assert.equal(isSvg('<html><svg width="16"></svg>'), false);
+  assert.equal(isSvg("plain text <svg>"), false);
+  assert.equal(isSvg("<svgx>"), false);
+  assert.equal(isSvg(""), false);
 });
 
 const APP = "/home/juan/.config/herdr-app";
@@ -235,7 +269,7 @@ const CACHE = `${APP}/${IMG_DIR}`;
 function cacheWorld({ files = {}, urls = {}, listing = [], md5 = "0123456789abcdef0123456789abcdef", texts = {}, hold = false } = {}) {
   const w = { execs: [], unlinked: [], made: [], parts: new Map(), held: [], texts: { ...texts } };
   const answer = (code, stdout = "") => ({ code, stdout, stderr: code ? "failed" : "" });
-  const sizeOf = (f) => `${f.mtime ?? "100"} ${f.size ?? 10} ${f.dir ? "Directory" : "Regular File"}`;
+  const sizeOf = (f) => `${f.mtime ?? "100"} ${f.size ?? 10} ${f.type ?? (f.dir ? "Directory" : "Regular File")}`;
   const sips = (f) => (f ? `x\n  format: ${f.format}\n  pixelWidth: ${f.width}\n  pixelHeight: ${f.height}\n` : "");
   w.io = {
     exec: async (cmd, args) => {
@@ -283,6 +317,31 @@ test("D3: a local image is copied under the cache, named by its path, mtime and 
   // The same file again: only asked whether it changed.
   assert.deepEqual(await w.cache.load(src), got);
   assert.deepEqual(w.names().slice(4), ["/usr/bin/stat"]);
+});
+
+test("R1: only a regular file up to 10 MiB is copied: a device, a pipe, a folder or a huge file shows its alt and nothing is copied", async () => {
+  const files = {
+    "/dev/zero": { size: 0, type: "Character Device" },
+    "/tmp/fifo": { size: 0, type: "Fifo File" },
+    "/repo/img": { size: 96, dir: true },
+    "/repo/huge.png": { size: MAX_IMAGE + 1, format: "png", width: 1, height: 1 },
+    "/repo/max.png": { size: MAX_IMAGE, format: "png", width: 2, height: 2 },
+  };
+  const w = cacheWorld({ files });
+  for (const path of ["/dev/zero", "/tmp/fifo", "/repo/img", "/repo/huge.png", "/missing.png"]) {
+    assert.deepEqual(await w.cache.load({ kind: "file", path, key: `file:${path}` }), { ok: false }, path);
+  }
+  assert.deepEqual([...new Set(w.names())], ["/usr/bin/stat"], "only asked what each one is");
+  const ok = await w.cache.load({ kind: "file", path: "/repo/max.png", key: "file:/repo/max.png" });
+  assert.equal(ok.ok, true, "exactly 10 MiB still draws");
+});
+
+test("R7: what came back as an HTML page holding <svg> icons is dropped, not drawn as a blank SVG", async () => {
+  const url = "https://github.com/o/r/blob/main/shot.png";
+  const w = cacheWorld({ urls: { [url]: { format: "", width: 0, height: 0, svg: '<!DOCTYPE html><html><svg class="octicon" width="16" height="16"></svg></html>' } } });
+  assert.deepEqual(await w.cache.load({ kind: "url", url, key: `url:${url}` }), { ok: false });
+  assert.deepEqual(w.made, [], "nothing named as an image");
+  assert.equal(w.unlinked.length, 1, "the part file goes");
 });
 
 test("D3: a changed file gets a new name, so the loader can't show the old one", async () => {
@@ -800,6 +859,35 @@ test("D3: an edit re-checks local images; a file that didn't change keeps its co
   await w.fire(0);
   assert.deepEqual(w.execs.map(([cmd]) => cmd), ["/usr/bin/stat", "/bin/cp", "/usr/bin/sips", "/bin/mv", "/usr/bin/stat"]);
   assert.equal(kinds(w.draw(), "image").length, 1, "drawn all along");
+});
+
+test("R8: shown again, the preview asks its local images again and retries the URLs that failed", async () => {
+  const path = `${HOME}/repo/docs/a.png`;
+  const late = "https://x.io/late.png";
+  const urls = {};
+  const w = await preview({ text: `![a](a.png) ![late](${late})`, files: { [path]: { format: "png", width: 1, height: 1 } }, urls });
+  w.draw();
+  await w.fire(0);
+  assert.equal(kinds(w.draw(), "image").length, 1, "the URL failed: offline");
+  urls[late] = { format: "png", width: 4, height: 2 };
+  w.draw();
+  await w.fire(0);
+  assert.equal(w.execs.filter(([cmd]) => cmd === "/usr/bin/curl").length, 1, "not retried on every frame");
+  w.view.refresh();
+  w.draw();
+  await w.fire(0);
+  assert.equal(w.execs.filter(([cmd]) => cmd === "/usr/bin/stat").length, 2, "the local file asked again");
+  assert.equal(w.execs.filter(([cmd]) => cmd === "/usr/bin/curl").length, 2, "the failed URL tried again");
+  assert.equal(kinds(w.draw(), "image").length, 2);
+});
+
+test("R8: the cache keeps no failure: the next load of a URL that failed tries again", async () => {
+  const url = "https://x.io/b.png";
+  const urls = {};
+  const w = cacheWorld({ urls });
+  assert.deepEqual(await w.cache.load({ kind: "url", url, key: `url:${url}` }), { ok: false });
+  urls[url] = { format: "png", width: 3, height: 3 };
+  assert.equal((await w.cache.load({ kind: "url", url, key: `url:${url}` })).ok, true);
 });
 
 test("D8: a linked badge opens its link by its click", async () => {

@@ -21,15 +21,22 @@ const AT_ONCE = 4;
 const RASTER = Object.freeze({ png: "png", jpeg: "jpg", gif: "gif", bmp: "bmp", tiff: "tiff", webp: "webp", ico: "ico" });
 
 // D12: http(s) only, redirects too, as an array: no shell ever sees the URL.
+// `-q` (first, or curl ignores it) leaves ~/.curlrc out; `--globoff` keeps a URL's
+// [1-9] and {a,b} as they are instead of fanning out into many requests (R4).
 export const curlArgs = (url, out) => [
-  "-fsSL", "--proto", "=http,https", "--proto-redir", "=http,https", "--max-time", "15", "--max-filesize", String(MAX_IMAGE), "-o", out, url,
+  "-q", "--globoff", "-fsSL", "--proto", "=http,https", "--proto-redir", "=http,https", "--max-time", "15", "--max-filesize", String(MAX_IMAGE), "-o", out, url,
 ];
 
 // `stat -L -f '%m %z %HT'`: mtime, size, and the file's type in words.
 export function parseStat(stdout) {
   const m = /^(\d+) (\d+) (.+)$/.exec(String(stdout ?? "").trim());
-  return m ? { mtime: m[1], size: Number(m[2]), dir: m[3] === "Directory" } : null;
+  return m ? { mtime: m[1], size: Number(m[2]), dir: m[3] === "Directory", file: m[3] === "Regular File" } : null;
 }
+
+// R7: the document itself is an SVG: `<svg` first, after a BOM, an XML prolog,
+// comments or a doctype. An HTML page full of inline icons is not one.
+const SVG_START = /^\uFEFF?\s*(?:<\?xml[\s\S]*?\?>\s*)?(?:(?:<!--[\s\S]*?-->|<!DOCTYPE\s+svg[^>]*>)\s*)*<svg[\s>]/i;
+export const isSvg = (text) => SVG_START.test(String(text ?? ""));
 
 // `sips -g format -g pixelWidth -g pixelHeight`.
 export function parseSips(stdout) {
@@ -95,8 +102,16 @@ export function createImageCache(io, { appHome }) {
     }
   }
 
+  // One load per key at a time, and a success is kept. A failure isn't: the next
+  // ask (the preview shown again) tries again, for a server back online (R8).
   const once = (key, work) => {
-    if (!known.has(key)) known.set(key, work());
+    if (!known.has(key)) {
+      const loading = work();
+      known.set(key, loading);
+      loading.then((got) => {
+        if (!got?.ok && known.get(key) === loading) known.delete(key);
+      }, () => known.delete(key));
+    }
     return known.get(key);
   };
 
@@ -111,7 +126,7 @@ export function createImageCache(io, { appHome }) {
     } catch {
       return null;
     }
-    return /<svg[\s>]/i.test(text) ? { ext: "svg", ...svgSize(text) } : null;
+    return isSvg(text) ? { ext: "svg", ...svgSize(text) } : null;
   }
 
   // The part file becomes <key>.<ext>, or goes.
@@ -131,7 +146,9 @@ export function createImageCache(io, { appHome }) {
 
   async function loadFile(path) {
     const stat = parseStat((await run("/usr/bin/stat", ["-L", "-f", "%m %z %HT", path])).stdout);
-    if (!stat || stat.dir) return FAILED;
+    // R1: a device, a pipe or a huge file would be copied (or waited on) until
+    // exec's 30 s run out: only a regular file within the limit is.
+    if (!stat?.file || stat.size > MAX_IMAGE) return FAILED;
     const key = `f${hashPath(`${path}\n${stat.mtime}\n${stat.size}`)}`;
     return once(key, async () => {
       await io.mkdir(dir);

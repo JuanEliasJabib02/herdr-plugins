@@ -606,8 +606,12 @@ the header to see its source.
   file (a preview tab, reused while it has no changes). A path that isn't there says
   "File not found: ~/…" and a folder "Cannot open directory: ~/…", both as toasts. A
   `#heading` does nothing.
-- **Images** come from the file's folder or the web (`http(s)` only, up to 10 MiB).
-  A changed file shows its new image.
+- **Images** come from the file's folder or the web (`http(s)` only), up to 10 MiB; a
+  device, a pipe or an HTML page shows its alt. A regenerated image, or one whose URL
+  failed, shows the next time the preview shows: the tab back in view, or Source →
+  Preview.
+- **Code and images inside a list item** stay in the list, drawn by `TextView`: code there
+  has no colors and no Copy, and an image isn't drawn.
 
 **Commands,** for the live cases, since clicks can't be posted: `code-file.source`,
 `code-file.preview`, `code-file.link:<url>`, `code-file.copy-code:<n>` (the n-th code
@@ -633,7 +637,10 @@ block, from 1).
 **Watch out**
 
 - **No outline and no find in the preview:** only a virtual list can scroll to a place,
-  and its rows can't hold the links and the copy buttons. Source has them.
+  and its rows can't hold the links and the copy buttons. Herdr's editor has no find
+  either, so `cmd-f` does nothing outside a PDF.
+- **A path from the root** (`/docs/guide.md`, `/assets/logo.png`) is read from the
+  disk's root, not the repository's as GitHub does: the link says "File not found".
 - **What `TextView` doesn't draw stays as text:** HTML (`<img>`, `<details>`),
   footnotes, math.
 - **The image cache is never pruned:** an image that changes leaves its old copy in
@@ -703,6 +710,8 @@ the whole window, as before.
   command line tools.
 - **The text can't be selected and links don't open:** the pages are images.
 - **A PDF with a password** says so; there's no field to type it.
+- **Zoom keeps the page being read to within a strip** (256 px): the list says which row
+  is first on screen, not where inside it.
 - **The cache of a PDF that's gone** stays in `<home>/data/code-file/pdf/`.
 
 **Done when**

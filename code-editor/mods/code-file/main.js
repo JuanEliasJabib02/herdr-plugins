@@ -392,6 +392,7 @@ export default class CodeFile extends View {
     if (this.kind !== "markdown" || this.mode === "preview" || this.model.phase !== "ready") return;
     this.syncEditor(cx);
     this.mode = "preview";
+    this.preview.refresh(); // R8
     // The editor leaves the screen and takes the keyboard with it (as Blame does).
     this.scheduleFocus(cx);
     cx.notify();
@@ -503,7 +504,10 @@ export default class CodeFile extends View {
   // preview with a pane beside it stays pinned (D18).
   followWindow(cx) {
     const visible = this.isVisible();
-    if (visible && !this.wasVisible) this.scheduleFocus(cx);
+    if (visible && !this.wasVisible) {
+      this.scheduleFocus(cx);
+      if (this.mode === "preview") this.preview?.refresh(); // R8
+    }
     this.wasVisible = visible;
     if (this.model.pinned || this.pinning) return;
     const id = this.tabId();

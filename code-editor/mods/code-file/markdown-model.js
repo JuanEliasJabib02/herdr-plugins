@@ -27,6 +27,7 @@ const SETEXT = /^ {0,3}(?:=+|-+)[ \t]*$/;
 const QUOTE = /^ {0,3}>/;
 const BULLET = /^ {0,3}[-+*][ \t]+\S/;
 const FIRST_ITEM = /^ {0,3}1[.)][ \t]+\S/;
+const LIST_ITEM = /^ {0,3}(?:[-+*]|\d{1,9}[.)])(?:[ \t]+\S|[ \t]*$)/;
 const DEFINITION = /^ {0,3}\[((?:[^\\\]]|\\.)+)\]:[ \t]*(<[^>\n]*>|\S+)(?:[ \t]+("[^"]*"|'[^']*'|\([^)]*\)))?[ \t]*$/;
 // A paragraph starts at column 0–3: four spaces or a tab are indented code.
 const PARAGRAPH_START = /^ {0,3}[^ \t]/;
@@ -196,9 +197,25 @@ export function splitBlocks(source) {
   };
 
   let boundary = true; // the line before ended a block, so this one may start one
+  // R9: inside a list item, an indented fence or image paragraph is the item's:
+  // pulled out, it would cut the list in two. Those stay in the run for TextView.
+  let inList = false;
+  let blankBefore = true;
   for (let i = 0; i < lines.length;) {
     const line = lines[i];
     const open = fenceOpen(line);
+    const indented = /^[ \t]/.test(line);
+    if (LIST_ITEM.test(line)) inList = true;
+    else if (inList && !isBlank(line) && !indented && (blankBefore || ATX.test(line) || RULE.test(line) || QUOTE.test(line) || open)) inList = false;
+    blankBefore = isBlank(line);
+    if (open && inList && indented) {
+      let j = i + 1;
+      while (j < lines.length && !closesFence(lines[j], open.mark)) j++;
+      for (const end = Math.min(j, lines.length - 1); i <= end; i++) run.push(lines[i]);
+      boundary = true;
+      blankBefore = false;
+      continue;
+    }
     if (open) {
       flush();
       const code = [];
@@ -209,7 +226,7 @@ export function splitBlocks(source) {
       boundary = true;
       continue;
     }
-    const first = boundary ? imagesOf(line, defs.map) : null;
+    const first = boundary && !(inList && indented) ? imagesOf(line, defs.map) : null;
     if (first) {
       const images = [...first];
       let j = i + 1;

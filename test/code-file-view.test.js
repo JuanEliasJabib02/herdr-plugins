@@ -1952,6 +1952,26 @@ for (const [name, source, preview] of [
   });
 }
 
+test("R8: Source → Preview, or the tab back in view on the preview, asks the preview to look at its images again", async () => {
+  const w = await mdWorld();
+  let asked = 0;
+  w.view.preview.refresh = () => { asked++; };
+  w.draw();
+  const before = asked;
+  await w.click("toggle-source");
+  await w.click("toggle-preview");
+  assert.equal(asked, before + 1, "Source → Preview");
+  const shown = w.spaceList;
+  w.spaceList = [{ id: "s0", active: true, tabs: [{ id: "x", active: true, panes: 1 }] }, { id: "s1", active: false, tabs: [{ id: "t1", active: true, panes: 1 }] }];
+  w.draw();
+  assert.equal(asked, before + 1, "hidden: nothing");
+  w.spaceList = shown;
+  w.draw();
+  assert.equal(asked, before + 2, "back in view");
+  w.draw();
+  assert.equal(asked, before + 2, "once, not every frame");
+});
+
 test("D9: a .md over 600 KiB opens in Source; Preview is still a click", async () => {
   const big = "x".repeat(600 * 1024 + 1);
   const w = await mdWorld({ disk: { [MD]: big } });

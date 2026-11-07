@@ -116,6 +116,14 @@ export class MarkdownPreview {
     this.wanted.clear();
   }
 
+  // R8: shown again (the tab back in view, or Source → Preview): local images are
+  // asked again, so a regenerated file shows (its new mtime is a new key), and the
+  // URLs that failed are tried again. Nothing watches the image files themselves.
+  refresh() {
+    this.gen++;
+    for (const [key, state] of this.images) if (state.status === "failed" && !state.asking) this.images.delete(key);
+  }
+
   hasImages() {
     return this.blocks.some((b) => b.kind === "images");
   }
