@@ -108,7 +108,7 @@
           },
           "window_drag": true,
           "content": {
-            "mod": "tabs"
+            "mod": "code-tabs"
           }
         },
         {

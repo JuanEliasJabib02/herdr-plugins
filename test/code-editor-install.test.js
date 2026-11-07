@@ -113,7 +113,7 @@ test("S4: install leaves the theme in Herdr's themes folder, byte for byte and l
   const r = install(home, "code-editor");
   assert.equal(r.status, 0, r.stderr);
   assert.equal(readFileSync(join(home, "themes/one-dark-pro.json"), "utf8"), readFileSync(plugin("themes/one-dark-pro.json"), "utf8"));
-  assert.deepEqual(manifest(home, "code-editor"), ["mods/code-explorer", "themes/one-dark-pro.json"]);
+  assert.deepEqual(manifest(home, "code-editor"), [...readdirSync(plugin("mods")).map((m) => `mods/${m}`), "themes/one-dark-pro.json"].sort());
   assert.ok(existsSync(join(home, "mods/code-explorer/main.js")));
 
   const gone = install(home, "--uninstall", "code-editor");
