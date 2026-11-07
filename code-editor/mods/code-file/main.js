@@ -11,10 +11,11 @@ import { appHome, exec, home, nextCommand, notify, panes, props, readTextFile, r
 import * as fs from "fs/promises";
 import {
   DOCS_KEY, LIVE_KEY, TEXT, activeFileTab, batchNamesFile, bannerView, closeAction, closeBody, commandFor, createDoc,
-  fileMeta, isDirty, languageFor, needsRedraw, reduce, tabInfo, tabOfDoc,
+  fileMeta, isDirty, languageFor, needsRedraw, reduce, tabInfo, tabOfDoc, toDisk,
 } from "./document-model.js";
 import { createDraftStore, draftsDir, findDraft, hashPath, resolveFile } from "./draft-model.js";
 import { SYNTAX, colorOf, lineIndex, splitLines, tokenizeLine } from "./line-view-model.js";
+import { BLAME_TEXT, blameArgs, blameDir, blameFailure, blameLabel, blameTarget, isBlameCommand, parseBlame } from "./blame-model.js";
 
 const DRAFT_DELAY = 300; // after the last keystroke
 const GONE_WAIT = 250; // a file missing this long is gone, not mid-replace (D22)
@@ -30,6 +31,7 @@ const BANNER_TEXT = "#e5c07b";
 const CARD_DIM = "#00000073";
 const LINE_LIST = "code-file-lines";
 const ROW_HEIGHT = 20;
+const BLAME_WIDTH = 210; // an author's name, truncated, and a date
 
 const realpath = async (path) => {
   const r = await exec("/bin/realpath", [path]);
@@ -56,7 +58,11 @@ export default class CodeFile extends View {
     if (!this.file) return;
     this.doc = typeof p.doc === "string" && p.doc !== "" ? p.doc : `f${hashPath(this.file)}`;
     this.line = Number.isInteger(p.line) && p.line >= 1 ? p.line : null;
-    this.mode = this.line ? "lines" : "editor"; // D16
+    this.mode = this.line ? "lines" : "editor"; // D16, or "blame" (D12)
+    this.blameFrom = null; // the mode Blame came from, for a failure to go back to
+    this.blameText = null; // the text the column is of
+    this.blameLines = null; // parseBlame's; null while git answers
+    this.blaming = false;
     const live = shared(LIVE_KEY);
     this.model = createDoc({ pinned: Boolean(live && Object.hasOwn(live, this.doc) && live[this.doc]?.pinned) });
     this.editor = null;
@@ -178,7 +184,7 @@ export default class CodeFile extends View {
             read = await this.readDisk();
           }
           if (this.model.phase !== "ready") await this.checkAccess(read, cx);
-          // The line view has no cursor to lose, so it's never "being read" (D15, D16).
+          // The read-only views have no cursor to lose, so they're never "being read" (D15, D16).
           const visible = this.mode === "editor" ? this.isVisible() : false;
           this.send({ type: "diskRead", ...read, gen, visible }, cx);
         } while (this.readAgain);
@@ -193,11 +199,14 @@ export default class CodeFile extends View {
   // The editor's text first, in case its change event hasn't come: everything is
   // decided against what's on screen now (D22).
   send(event, cx) {
-    if (this.editor) {
-      const value = this.editor.value();
-      if (value !== this.model.value) this.step({ type: "edit", value }, cx);
-    }
+    this.syncEditor(cx);
     this.step(event, cx);
+  }
+
+  syncEditor(cx) {
+    if (!this.editor) return;
+    const value = this.editor.value();
+    if (value !== this.model.value) this.step({ type: "edit", value }, cx);
   }
 
   step(event, cx) {
@@ -206,6 +215,8 @@ export default class CodeFile extends View {
     this.model = state;
     this.publish();
     for (const effect of effects) this.apply(effect, cx);
+    // The column says nothing about text it wasn't asked about.
+    if (this.mode === "blame" && this.model.phase === "ready" && this.model.value !== this.blameText) this.runBlame(cx);
     if (needsRedraw(before, this.model)) cx.notify();
   }
 
@@ -264,13 +275,20 @@ export default class CodeFile extends View {
 
   onLoaded(cx) {
     if (this.mode === "lines" && isDirty(this.model)) this.mode = "editor";
-    if (this.mode === "editor") this.showEditor(cx);
-    else this.scrollToLine(cx);
+    if (this.mode === "editor") {
+      this.showEditor(cx);
+    } else {
+      // An editor waiting behind Blame must not keep the old text: it would pass for an edit.
+      this.setEditorValue(this.model.value, cx);
+      this.scrollToLine(cx);
+    }
     this.scheduleFocus(cx);
   }
 
-  // Once more after the first frame: the list doesn't exist until then.
+  // Once more after the first frame: the list doesn't exist until then. Only a tab
+  // opened at a line has a handle: Blame can get here from one opened without.
   scrollToLine(cx) {
+    if (!this.scroll) return;
     const go = () => this.scroll.scroll_to_item(lineIndex(this.line, this.rows().length), "center");
     go();
     cx.timer.after(FOCUS_DELAY, go);
@@ -310,12 +328,82 @@ export default class CodeFile extends View {
     this.step({ type: "settled", value: this.editor.value() }, cx);
   }
 
-  // D16's Editar. The editor opens at the top: the header keeps "Línea N".
+  // D16's Editar. The editor opens at the top: the header keeps "Línea N". One that
+  // was waiting behind Blame keeps its cursor, which set_value would lose (D15).
   startEditing(cx) {
-    if (this.mode !== "lines" || this.model.phase !== "ready") return;
+    if (this.mode === "editor" || this.model.phase !== "ready") return;
     this.mode = "editor";
-    this.showEditor(cx);
+    if (!this.editor) this.showEditor(cx);
     this.scheduleFocus(cx);
+    cx.notify();
+  }
+
+  // ── Blame (S7, D12) ────────────────────────────────────────────────────────
+
+  showBlame(cx) {
+    if (this.mode === "blame" || this.model.phase !== "ready") return;
+    this.syncEditor(cx);
+    this.blameFrom = this.mode;
+    this.mode = "blame";
+    this.scrollToLine(cx);
+    // The editor leaves the screen and takes the keyboard with it: cmd-w would fall
+    // through to `global` and close the tab without asking (D18).
+    this.scheduleFocus(cx);
+    this.runBlame(cx);
+  }
+
+  // One run at a time, since the copy of the buffer has one name per tab. Text that
+  // moved during a run runs again behind it, and only the last answer counts.
+  runBlame(cx) {
+    this.blameText = this.model.value;
+    this.blameLines = null;
+    cx.notify();
+    if (this.blaming) return;
+    this.blaming = true;
+    cx.spawn(async (cx) => {
+      try {
+        let asked;
+        let answer;
+        do {
+          asked = this.blameText;
+          answer = await this.askGit(toDisk(this.model, asked));
+        } while (this.blameText !== asked);
+        if (this.mode === "blame") this.takeBlame(answer, cx);
+      } finally {
+        this.blaming = false;
+      }
+    });
+  }
+
+  blameCopy() {
+    return `${blameDir(appHome())}/${this.doc}`;
+  }
+
+  // Herdr's exec has no stdin, and an argument couldn't hold 1 MiB.
+  async askGit(text) {
+    const copy = this.blameCopy();
+    const { cwd, name } = blameTarget(this.where.key);
+    try {
+      await IO.mkdir(blameDir(appHome()));
+      await IO.writeFile(copy, text);
+      return await exec("git", blameArgs(name, copy), { cwd });
+    } catch (e) {
+      return { code: -1, stdout: "", stderr: String(e?.message ?? e) };
+    } finally {
+      await IO.unlink(copy).catch(() => {});
+    }
+  }
+
+  // An error with lines is output cut short, and those lines still hold.
+  takeBlame(answer, cx) {
+    const lines = parseBlame(answer.stdout);
+    if (answer.code !== 0 && lines.length === 0) {
+      notify({ title: BLAME_TEXT.failed, body: blameFailure(answer), level: "error" });
+      this.mode = this.blameFrom;
+      this.scheduleFocus(cx);
+    } else {
+      this.blameLines = lines;
+    }
     cx.notify();
   }
 
@@ -439,6 +527,8 @@ export default class CodeFile extends View {
       if (dirty) work = this.store.writeNow(value, this.model.baseSig);
       else if (this.store.hasDrafts()) work = this.store.clearNow();
     }
+    // A closing copy's tasks get cut, and that one would have taken its copy of the text.
+    const copy = this.blaming ? IO.unlink(this.blameCopy()).catch(() => {}) : null;
     this.editor?.release();
     this.scroll?.release();
     try {
@@ -446,6 +536,7 @@ export default class CodeFile extends View {
     } catch (e) {
       console.log(`code-file: draft at close: ${e}`);
     }
+    await copy;
   }
 
   // ── Commands and buttons ───────────────────────────────────────────────────
@@ -453,7 +544,8 @@ export default class CodeFile extends View {
   listen(cx) {
     cx.spawn(async (cx) => {
       for (;;) {
-        const command = commandFor(await nextCommand(), this.doc);
+        const raw = await nextCommand();
+        const command = isBlameCommand(raw) ? "blame" : commandFor(raw, this.doc);
         if (!command) continue;
         // One bad command must not take cmd-s with it.
         try {
@@ -492,6 +584,8 @@ export default class CodeFile extends View {
         return this.withDisk("keepMine", cx);
       case "edit":
         return this.startEditing(cx);
+      case "blame":
+        return this.showBlame(cx);
       case "focus":
         return this.focusNow();
       default:
@@ -541,12 +635,14 @@ export default class CodeFile extends View {
       m.deleted ? TEXT.deleted : null,
       m.readonly ? TEXT.readOnly : null,
       this.mode === "editor" && this.noColors ? TEXT.noColors : null,
+      this.mode === "blame" && m.phase === "ready" && !this.blameLines ? BLAME_TEXT.running : null,
     ].filter(Boolean);
     return h_flex().id("file-header").h(30).flex_none().pl(12).pr(8).gap(10).items_center().border_b_1().border_color(t.border).text_size(12)
       .child(div().flex_1().min_w(0).truncate().text_color(t.dim).when(Boolean(mono), (el) => el.font_family(mono)).child(shown))
       .children(notes.map((note) => div().flex_none().text_color(t.dim).child(note)))
       .child(div().flex_none().text_color(t.dim).child(fileMeta(m, this.file)))
-      .when(this.mode === "lines" && m.phase === "ready", (el) => el.child(this.button(t, "header-edit", TEXT.edit, "edit")));
+      .when(this.mode !== "blame" && m.phase === "ready", (el) => el.child(this.button(t, "header-blame", BLAME_TEXT.button, "blame")))
+      .when(this.mode !== "editor" && m.phase === "ready", (el) => el.child(this.button(t, "header-edit", TEXT.edit, "edit")));
   }
 
   banner(view, t) {
@@ -555,10 +651,19 @@ export default class CodeFile extends View {
       .children(view.buttons.map((b) => this.button(t, `banner-${b.id}`, b.label, b.id, b.tip)));
   }
 
-  lineRow(text, index, marked, language, mono, t) {
+  // `entry` is parseBlame's, undefined when git hasn't said.
+  blameCell(entry, t) {
+    const label = blameLabel(entry);
+    return h_flex().flex_none().w(BLAME_WIDTH).h_full().pl(12).pr(12).gap(10).items_center().border_r_1().border_color(t.border).text_size(12).text_color(t.dim)
+      .when(Boolean(label), (el) => el.child(div().flex_1().min_w(0).truncate().when(!label.date, (name) => name.italic()).child(label.author)))
+      .when(Boolean(label?.date), (el) => el.child(div().flex_none().child(label.date)));
+  }
+
+  lineRow(text, index, marked, language, mono, t, cell) {
     return h_flex().h(ROW_HEIGHT).w_full().flex_none().items_center().text_size(13).whitespace_nowrap()
       .when(Boolean(mono), (el) => el.font_family(mono))
       .when(marked, (el) => el.bg(t.hover))
+      .when(Boolean(cell), (el) => el.child(cell))
       .child(div().flex_none().w(60).pr(20).text_right().text_color(marked ? t.foreground : t.dim).child(String(index + 1)))
       .children(tokenizeLine(text, language).map((token) => {
         const color = colorOf(token.kind);
@@ -568,15 +673,18 @@ export default class CodeFile extends View {
 
   lineList(t) {
     const rows = this.rows();
-    const marked = lineIndex(this.line, rows.length);
+    const marked = this.line ? lineIndex(this.line, rows.length) : -1;
     const { language } = languageFor(this.file);
     const mono = settings().font_family;
+    const blame = this.mode === "blame" ? this.blameLines ?? [] : null;
     // Not uniform_list, which ignores track_scroll and so could never reach the line.
-    return v_virtual_list(LINE_LIST, rows.length, ROW_HEIGHT, (index) => String(index), (range) => {
+    const list = v_virtual_list(LINE_LIST, rows.length, ROW_HEIGHT, (index) => String(index), (range) => {
       const out = [];
-      for (let i = range.start; i < range.end; i++) out.push(this.lineRow(rows[i], i, i === marked, language, mono, t));
+      for (let i = range.start; i < range.end; i++) out.push(this.lineRow(rows[i], i, i === marked, language, mono, t, blame ? this.blameCell(blame[i], t) : null));
       return out;
-    }).track_scroll(this.scroll).flex_1().min_h(0);
+    });
+    // Without a handle it still scrolls, and its Scrollbar still drives it.
+    return (this.scroll ? list.track_scroll(this.scroll) : list).flex_1().min_h(0);
   }
 
   body(t) {
@@ -589,7 +697,7 @@ export default class CodeFile extends View {
         .when(m.limit.retry, (el) => el.child(this.button(t, "limit-retry", TEXT.retry, "retry")));
     }
     if (m.phase !== "ready") return wrap.p(12).text_color(t.dim).child("Loading");
-    if (this.mode === "lines") return wrap.relative().child(this.lineList(t)).child(Scrollbar.vertical(LINE_LIST).absolute().inset_0());
+    if (this.mode !== "editor") return wrap.relative().child(this.lineList(t)).child(Scrollbar.vertical(LINE_LIST).absolute().inset_0());
     return wrap.child(this.editor ? Editor.new(this.editor).flex_1().min_h(0) : div());
   }
 

@@ -85,6 +85,22 @@ const REAL_DIR = "/private/repo/src";
 const HOME = "/home/juan";
 const APP = `${HOME}/.config/herdr-app`;
 const DRAFTS = `${APP}/code-editor/drafts`;
+const BLAMES = `${APP}/code-editor/blame`;
+
+// What `git blame --porcelain --contents` prints: a commit, a line with no commit,
+// and that commit again, this time with no fields (plan D12).
+const ANA = "1fd78717f7dd9fcb1b5e67e9ff63a6d8799d5af4";
+const PORCELAIN = [
+  `${ANA} 1 1 1`,
+  "author Ana María", "author-mail <a@a>", "author-time 1709699400", "author-tz -0500",
+  "committer Ana María", "committer-mail <a@a>", "committer-time 1709699400", "committer-tz -0500",
+  "summary first", "boundary", "filename a.js", "\tone",
+  `${"0".repeat(40)} 2 2 1`,
+  "author External file (--contents)", "author-mail <external.file>", "author-time 1794027548", "author-tz -0500",
+  "committer External file (--contents)", "committer-mail <external.file>", "committer-time 1794027548", "committer-tz -0500",
+  "summary Version of a.js from /x", "filename a.js", "\ttwo",
+  `${ANA} 3 3 1`, "\tthree", "",
+].join("\n");
 
 function newWorld({ disk = { [FILE]: "one\n" }, props = { doc: "d1", file: FILE }, tabId = "t1", tabPanes = 1, active = true, docs, fsFiles = {}, realpath = true, writable = true } = {}) {
   const w = {
@@ -114,6 +130,11 @@ function newWorld({ disk = { [FILE]: "one\n" }, props = { doc: "d1", file: FILE 
     writeError: null,
     readError: null,
     watchError: null,
+    blames: [],
+    blameAnswer: { code: 0, stdout: PORCELAIN, stderr: "" },
+    blameError: null,
+    holdBlame: false,
+    heldBlames: [],
     changeOnSet: false,
     realpath,
     writable,
@@ -169,8 +190,15 @@ function newWorld({ disk = { [FILE]: "one\n" }, props = { doc: "d1", file: FILE 
     props: () => w.props,
     run: (name, args) => { w.runs.push([name, args]); return null; },
     notify: (n) => { w.toasts.push(n); return "id"; },
-    exec: async (cmd, args = []) => {
+    exec: async (cmd, args = [], options = {}) => {
       w.execs.push([cmd, ...args]);
+      if (cmd === "git") {
+        const temp = args[args.indexOf("--contents") + 1];
+        w.blames.push({ args, cwd: options.cwd, temp, text: w.fsFiles[temp] });
+        if (w.holdBlame) await new Promise((resolve) => w.heldBlames.push(resolve));
+        if (w.blameError) throw new Error(w.blameError);
+        return w.blameAnswer;
+      }
       if (cmd === "/bin/realpath") {
         if (!w.realpath) return { code: 1, stdout: "", stderr: "No such file" };
         const p = args[0];
@@ -1220,6 +1248,379 @@ test("D16: a line that isn't a positive whole number opens the editor", async ()
   }
 });
 
+// ── S7, D12: Blame ───────────────────────────────────────────────────────────
+
+const BLAME_TEXT = "one\ntwo\nthree\n";
+const blameWorld = (over = {}) => open({ disk: { [FILE]: BLAME_TEXT }, ...over });
+const blameLineWorld = (over = {}) => blameWorld({ props: { doc: "d1", file: FILE, line: 3 }, ...over });
+const rowsOf = (w) => {
+  const list = findKind(w.draw(), "line_list");
+  return list.arg.render({ start: 0, end: list.arg.count }, w.cx);
+};
+const headerOf = (w) => textOf(find(w.draw(), "file-header"));
+
+for (const [name, act] of [["its click", (w) => w.click("header-blame")], ["blame", (w) => w.command("blame")], ["code-file.blame", (w) => w.command("code-file.blame")]]) {
+  test(`S7: Blame, by ${name}: read-only rows with author and date per line, and "sin commit" where there's no commit`, async () => {
+    const w = await blameWorld();
+    assert.ok(headerOf(w).includes("Blame"));
+    await act(w);
+    const drawn = w.draw();
+    assert.equal(findKind(drawn, "Editor"), null);
+    assert.equal(findKind(drawn, "Scrollbar").arg, findKind(drawn, "line_list").arg.id, "the bar pairs with the list by name");
+    const rows = rowsOf(w);
+    assert.equal(rows.length, 4);
+    assert.ok(textOf(rows[0]).includes("Ana María") && textOf(rows[0]).includes("2024-03-05") && textOf(rows[0]).includes("one"));
+    assert.ok(textOf(rows[1]).includes("sin commit") && textOf(rows[1]).includes("two"));
+    assert.equal(textOf(rows[1]).includes("External file"), false, "git's words for it stay out");
+    assert.equal(/\d{4}-\d{2}-\d{2}/.test(textOf(rows[1])), false, "no date for a line with no commit");
+    assert.ok(textOf(rows[2]).includes("Ana María"), "the commit's second line, with no fields of its own");
+    assert.equal(textOf(rows[3]), "4", "the row after the last newline has nothing to blame");
+    assert.ok(headerOf(w).includes("Editar"));
+    assert.equal(headerOf(w).includes("Blame"), false, "already showing");
+  });
+}
+
+test("D12: git gets the real folder and name, and the text on screen as --contents; the copy doesn't stay behind", async () => {
+  const w = await blameWorld();
+  await w.click("header-blame");
+  assert.equal(w.blames.length, 1);
+  const [run] = w.blames;
+  assert.equal(run.cwd, REAL_DIR);
+  assert.deepEqual(run.args, ["blame", "--porcelain", "--contents", `${BLAMES}/d1`, "--", "a.js"]);
+  assert.equal(run.text, BLAME_TEXT);
+  assert.deepEqual(w.fsFiles, {});
+});
+
+test("S7: unsaved text is what's blamed, and it stays unsaved: the file isn't written and the draft goes on", async () => {
+  const w = await blameWorld();
+  await w.type("one\nnot saved\n");
+  await w.click("header-blame");
+  assert.equal(w.blames[0].text, "one\nnot saved\n");
+  assert.deepEqual(w.writes, []);
+  assert.equal(w.disk[FILE], BLAME_TEXT);
+  assert.equal(w.live().dirty, true);
+  await w.fire(DRAFT_DELAY);
+  assert.equal(w.draftFiles().length, 1);
+  assert.equal(parseDraft(Object.values(w.fsFiles)[0]).text, "one\nnot saved\n");
+});
+
+test("S7: text the editor hasn't reported yet is blamed too", async () => {
+  const w = await blameWorld();
+  w.editor().text = "typed before the change event\n";
+  await w.command("blame");
+  assert.equal(w.blames[0].text, "typed before the change event\n");
+});
+
+test("D19: in an all-CRLF file, git sees what a save would write, so Enter doesn't mark the lines around it", async () => {
+  const w = await open({ disk: { [FILE]: "a\r\nb\r\n" } });
+  await w.type("a\r\nb\r\nc\n");
+  await w.click("header-blame");
+  assert.equal(w.blames[0].text, "a\r\nb\r\nc\r\n");
+});
+
+test("S7: Editar goes back to the same editor, untouched: no set_value, which would send the cursor to line 1 (D15)", async () => {
+  const w = await blameWorld();
+  await w.type("one\nmine\n");
+  await w.click("header-blame");
+  await w.click("header-edit");
+  assert.equal(w.editors.length, 1);
+  assert.equal(w.editor().sets, undefined);
+  assert.equal(w.editor().text, "one\nmine\n");
+  assert.equal(w.live().dirty, true);
+  const drawn = w.draw();
+  assert.ok(findKind(drawn, "Editor"));
+  assert.equal(findKind(drawn, "line_list"), null);
+  assert.ok(headerOf(w).includes("Blame"));
+  assert.equal(headerOf(w).includes("Editar"), false);
+  w.focus.length = 0;
+  await w.fire(50);
+  assert.equal(w.focus.at(-1), "focus_next");
+});
+
+test("D18: with the editor gone the keyboard goes to the view, so cmd-s and cmd-w still reach the mod", async () => {
+  const w = await blameWorld();
+  await w.fire(50);
+  w.focus.length = 0;
+  w.timers.length = 0;
+  await w.type("mine");
+  await w.click("header-blame");
+  await w.fire(50);
+  const wrap = find(w.draw(), "file-body");
+  assert.deepEqual(w.focus, [`handle${wrap.calls.track_focus[0].n}`], "the view's wrapper, no focus_next");
+});
+
+test("D18: in the Blame view cmd-w still asks, and cmd-s still saves", async () => {
+  const w = await blameWorld();
+  await w.type("mine");
+  await w.click("header-blame");
+  await w.command("close");
+  assert.ok(find(w.draw(), "close-card"));
+  assert.deepEqual(w.closes(), []);
+  await w.command("cancel");
+  await w.command("save");
+  assert.equal(w.disk[FILE], "mine");
+  assert.equal(w.live().dirty, false);
+  assert.equal(w.blames.length, 1, "a save changes no line's commit");
+  assert.ok(findKind(w.draw(), "line_list"), "and stays in the view");
+});
+
+test("S7: while git answers: the rows are there with an empty column, and the header says so", async () => {
+  const w = await blameWorld();
+  w.holdBlame = true;
+  await w.click("header-blame");
+  assert.ok(headerOf(w).includes("Blame…"));
+  assert.equal(textOf(rowsOf(w)[0]).includes("Ana María"), false);
+  assert.ok(textOf(rowsOf(w)[0]).includes("one"));
+  const before = w.notifies;
+  w.holdBlame = false;
+  w.heldBlames.shift()();
+  await flush();
+  assert.ok(w.notifies > before, "the answer redraws");
+  assert.equal(headerOf(w).includes("Blame…"), false);
+  assert.ok(textOf(rowsOf(w)[0]).includes("Ana María"));
+});
+
+test("S7: output cut short: what arrived shows, the rest stay empty, no error", async () => {
+  const w = await blameWorld();
+  const cut = PORCELAIN.indexOf(`${"0".repeat(40)} 2 2 1`);
+  w.blameAnswer = { code: 1, stdout: PORCELAIN.slice(0, cut), stderr: "" };
+  await w.click("header-blame");
+  const rows = rowsOf(w);
+  assert.ok(textOf(rows[0]).includes("Ana María"));
+  assert.equal(textOf(rows[1]).includes("sin commit"), false, "not knowing isn't having no commit");
+  assert.deepEqual(w.toasts, []);
+});
+
+// ── When git can't ──
+
+for (const [name, set, body] of [
+  ["git refuses", (w) => { w.blameAnswer = { code: 128, stdout: "", stderr: "fatal: no such path 'a.js' in HEAD\n" }; }, "no such path 'a.js' in HEAD"],
+  ["git can't start", (w) => { w.blameError = "no such folder"; }, "no such folder"],
+]) {
+  test(`S7: ${name}: a toast with its words, and back to the editor with the keyboard`, async () => {
+    const w = await blameWorld();
+    set(w);
+    await w.type("mine");
+    await w.click("header-blame");
+    assert.deepEqual(w.toasts.map(({ title, body: b, level }) => [title, b, level]), [["Blame no disponible", body, "error"]]);
+    const drawn = w.draw();
+    assert.ok(findKind(drawn, "Editor"));
+    assert.equal(findKind(drawn, "line_list"), null);
+    assert.ok(headerOf(w).includes("Blame"));
+    assert.equal(w.editor().sets, undefined);
+    assert.equal(w.editor().text, "mine");
+    assert.deepEqual(Object.keys(w.fsFiles).filter((p) => p.startsWith(BLAMES)), [], "the copy doesn't stay behind");
+    w.focus.length = 0;
+    await w.fire(50);
+    assert.equal(w.focus.at(-1), "focus_next");
+  });
+}
+
+test("S7: the copy of the buffer can't be written: same toast, and git isn't run", async () => {
+  const w = await blameWorld();
+  globalThis.__cf.fs.writeFile = async () => { throw new Error("EACCES"); };
+  await w.click("header-blame");
+  assert.deepEqual(w.blames, []);
+  assert.equal(w.toasts.at(-1).title, "Blame no disponible");
+  assert.equal(w.toasts.at(-1).body, "EACCES");
+  assert.ok(findKind(w.draw(), "Editor"));
+});
+
+test("S7: from the line view a failure goes back to the line view, not to an editor nobody opened", async () => {
+  const w = await blameLineWorld();
+  w.blameAnswer = { code: 128, stdout: "", stderr: "fatal: not a git repository\n" };
+  await w.click("header-blame");
+  assert.equal(w.editors.length, 0);
+  assert.ok(findKind(w.draw(), "line_list"));
+  assert.equal(textOf(rowsOf(w)[2]), "3 three", "and no column");
+  assert.ok(headerOf(w).includes("Blame"));
+  assert.ok(headerOf(w).includes("Editar"));
+});
+
+// ── The text moves under the column ──
+
+test("D15, S7: the file changes while the view shows and is clean: reloads quietly and blames the new text", async () => {
+  const w = await blameWorld();
+  await w.click("header-blame");
+  w.disk[FILE] = "theirs\n";
+  await w.batch([REAL]);
+  assert.equal(w.view.model.banner, null);
+  assert.equal(w.editor().text, "theirs\n");
+  assert.equal(w.live(), undefined, "a reload is no edit");
+  assert.deepEqual(w.blames.map((b) => b.text), [BLAME_TEXT, "theirs\n"]);
+  assert.equal(findKind(w.draw(), "line_list").arg.count, 2);
+});
+
+test("D15: the file changes under unsaved text: the conflict banner over the view; Reload from Disk blames what it loaded", async () => {
+  const w = await blameWorld();
+  await w.type("mine\n");
+  await w.click("header-blame");
+  w.disk[FILE] = "theirs\n";
+  await w.batch([REAL]);
+  assert.equal(w.view.model.banner, "conflict");
+  assert.ok(findKind(w.draw(), "line_list"));
+  assert.equal(w.blames.length, 1);
+  await w.command("reload");
+  assert.equal(w.editor().text, "theirs\n");
+  assert.deepEqual(w.blames.map((b) => b.text), ["mine\n", "theirs\n"]);
+});
+
+test("D15: Cambió en disco up when Blame opens: the column is of the text on screen, and Recargar moves both", async () => {
+  const w = await blameWorld();
+  w.disk[FILE] = "theirs\n";
+  await w.batch([REAL]);
+  assert.equal(w.view.model.banner, "changed");
+  await w.click("header-blame");
+  assert.equal(w.blames[0].text, BLAME_TEXT);
+  await w.click("banner-reload");
+  assert.equal(w.blames.at(-1).text, "theirs\n");
+});
+
+test("S7: one run at a time: text that moved during a run runs again behind it, and only that answer draws", async () => {
+  const w = await blameWorld();
+  w.holdBlame = true;
+  await w.click("header-blame");
+  w.disk[FILE] = "theirs\n";
+  await w.batch([REAL]);
+  assert.equal(w.blames.length, 1, "the copy of the buffer has one name per tab");
+  w.heldBlames.shift()();
+  await flush();
+  assert.equal(w.blames.length, 2);
+  assert.equal(w.blames[1].text, "theirs\n");
+  assert.equal(textOf(rowsOf(w)[0]).includes("Ana María"), false, "the first answer was about other text");
+  w.holdBlame = false;
+  w.heldBlames.shift()();
+  await flush();
+  assert.ok(textOf(rowsOf(w)[0]).includes("Ana María"));
+});
+
+test("S7: an answer for a view that's gone does nothing: no toast and no way back", async () => {
+  const w = await blameWorld();
+  w.holdBlame = true;
+  w.blameAnswer = { code: 128, stdout: "", stderr: "fatal: x\n" };
+  await w.click("header-blame");
+  await w.click("header-edit");
+  w.heldBlames.shift()();
+  await flush();
+  assert.deepEqual(w.toasts, []);
+  assert.ok(findKind(w.draw(), "Editor"));
+});
+
+test("S7: opening Blame again asks git again: a commit since then changes the column, not the text", async () => {
+  const w = await blameWorld();
+  await w.click("header-blame");
+  await w.click("header-edit");
+  await w.click("header-blame");
+  assert.equal(w.blames.length, 2);
+  assert.equal(w.blames[1].text, BLAME_TEXT);
+});
+
+test("D20: the tab closes during a run: close() takes the copy of the buffer with it", async () => {
+  const w = await blameWorld();
+  w.holdBlame = true;
+  await w.click("header-blame");
+  assert.deepEqual(Object.keys(w.fsFiles), [`${BLAMES}/d1`]);
+  await w.view.close();
+  assert.deepEqual(Object.keys(w.fsFiles), []);
+});
+
+test("D20: a limit view reached from Blame: back from it the editor behind holds the disk's text, with no false edit", async () => {
+  const seeded = await open();
+  await seeded.type("draft");
+  await seeded.fire(DRAFT_DELAY);
+  const w = await open({ disk: {}, fsFiles: seeded.fsFiles });
+  assert.equal(w.editor().text, "draft");
+  await w.command("blame");
+  await w.command("discard");
+  assert.equal(w.view.model.phase, "limit");
+  assert.ok(textOf(w.draw()).includes("Unable to load file"));
+  assert.equal(headerOf(w).includes("Blame"), false);
+  assert.equal(headerOf(w).includes("Editar"), false);
+  w.disk[FILE] = "back\n";
+  await w.command("retry");
+  assert.equal(w.editor().text, "back\n");
+  assert.equal(w.view.model.value, "back\n");
+  assert.equal(w.live().dirty, false);
+  assert.ok(findKind(w.draw(), "line_list"), "it was showing Blame");
+  assert.equal(w.blames.at(-1).text, "back\n");
+});
+
+// ── With nothing to blame ──
+
+test("S7: nothing loaded: no button, and the command does nothing", async () => {
+  const w = await open({ disk: {} });
+  assert.equal(headerOf(w).includes("Blame"), false);
+  await w.command("blame");
+  assert.deepEqual(w.blames, []);
+  assert.equal(findKind(w.draw(), "line_list"), null);
+});
+
+test("S7: Blame while it shows doesn't ask again", async () => {
+  const w = await blameWorld();
+  await w.command("blame");
+  await w.command("blame");
+  assert.equal(w.blames.length, 1);
+});
+
+test("S7: a read-only file has its Blame too", async () => {
+  const w = await blameWorld({ writable: false });
+  await w.click("header-blame");
+  assert.ok(textOf(rowsOf(w)[0]).includes("Ana María"));
+  assert.ok(headerOf(w).includes("Read-only"));
+});
+
+// ── With the line view (D16) ──
+
+test("D16, S7: opened without a line: nothing marked, and the list needs no handle", async () => {
+  const w = await blameWorld();
+  await w.click("header-blame");
+  const list = findKind(w.draw(), "line_list");
+  assert.equal(list.calls.track_scroll, undefined);
+  assert.deepEqual(w.scrolls, []);
+  for (const row of rowsOf(w)) assert.equal(row.calls.bg, undefined);
+  await w.fire(50);
+  assert.equal(w.crash, undefined);
+});
+
+test("D16, S7: from the line view: Blame and Editar side by side, then the same line marked and scrolled to", async () => {
+  const w = await blameLineWorld();
+  assert.ok(headerOf(w).includes("Blame") && headerOf(w).includes("Editar"));
+  w.scrolls[0].calls.length = 0;
+  await w.click("header-blame");
+  assert.deepEqual(w.scrolls[0].calls[0], [2, "center"]);
+  await w.fire(50);
+  assert.deepEqual(w.scrolls[0].calls.at(-1), [2, "center"]);
+  const rows = rowsOf(w);
+  assert.notEqual(rows[2].calls.bg, undefined);
+  assert.equal(rows[1].calls.bg, undefined);
+  assert.ok(textOf(rows[2]).includes("Ana María"));
+  assert.ok(headerOf(w).includes("Línea 3"));
+  assert.equal(findKind(w.draw(), "line_list").calls.track_scroll[0], w.scrolls[0]);
+});
+
+test("D16: Editar from a Blame opened in the line view creates the editor, and the header keeps Línea N", async () => {
+  const w = await blameLineWorld();
+  await w.click("header-blame");
+  assert.equal(w.editors.length, 0);
+  await w.click("header-edit");
+  assert.equal(w.editors.length, 1);
+  assert.equal(w.editor().text, BLAME_TEXT);
+  assert.ok(findKind(w.draw(), "Editor"));
+  assert.ok(headerOf(w).includes("Línea 3"));
+});
+
+test("pin: the line view alone keeps its rows as they were, with no column and no git run", async () => {
+  const w = await blameLineWorld();
+  assert.deepEqual(rowsOf(w).map(textOf), ["1 one", "2 two", "3 three", "4"]);
+  assert.deepEqual(w.blames, []);
+});
+
+test("pin: the editor's header has no Editar, and nothing runs git until asked", async () => {
+  const w = await blameWorld();
+  assert.equal(headerOf(w).includes("Editar"), false);
+  assert.deepEqual(w.blames, []);
+});
+
 // ── The mod as Herdr gets it ─────────────────────────────────────────────────
 
 const repo = fileURLToPath(new URL("..", import.meta.url));
@@ -1237,7 +1638,7 @@ test("S6: installing code-editor installs code-file with its models, and uninsta
     const env = { ...process.env, HOME: root, HERDR_APP_HOME: home };
     const install = spawnSync("sh", [join(repo, "scripts/install.sh"), "--no-keys", "code-editor"], { encoding: "utf8", env });
     assert.equal(install.status, 0, install.stderr);
-    for (const f of ["main.js", "mod.json", "document-model.js", "draft-model.js", "line-view-model.js"]) {
+    for (const f of ["main.js", "mod.json", "document-model.js", "draft-model.js", "line-view-model.js", "blame-model.js"]) {
       assert.ok(existsSync(join(home, "mods/code-file", f)), f);
     }
     const gone = spawnSync("sh", [join(repo, "scripts/install.sh"), "--uninstall", "code-editor"], { encoding: "utf8", env });

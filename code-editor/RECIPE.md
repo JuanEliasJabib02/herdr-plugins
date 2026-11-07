@@ -267,3 +267,70 @@ reaches only the copy in the shown tab, and one naming another doc is ignored.
 - Don't Save, then reopening, shows the file with no banner.
 - `cmd-w` with a terminal beside the file leaves the terminal running.
 - `code-file.ask-close-<another doc>` does nothing.
+
+### Blame
+
+"Blame" in a file's header: who last changed each line, with its date, in the
+read-only line view. It doesn't follow the cursor, because Herdr's editor doesn't
+say where the cursor is.
+
+**What you see**
+
+- **The button:** "Blame" at the header's right end, with the look of the banner's
+  buttons. The line view shows it beside "Editar". The Blame view shows only "Editar".
+- **The view:** the line view of **Opening at a line**, with a column before the line
+  numbers: 210 px, padding 12 at each side, a 1 px `border` at its right, 12 px text
+  in `dim`. The author, truncated, then the date as `2024-03-05`, the day where the
+  author was.
+- **A line with no commit:** "sin commit" in italics and no date.
+- **While git answers:** the rows with an empty column, and "Blame…" in the header.
+
+**How it behaves**
+
+- **What's blamed is the text on screen,** not the file: a line not saved yet says
+  "sin commit", and so does one saved but not committed. Nothing is saved or changed,
+  and the draft goes on being written.
+- **Opening it asks git every time,** so a commit since the last time shows.
+- **`cmd-s` and `cmd-w`** work as in the editor, and closing with changes brings the
+  card.
+- **Editar** goes back to the same editor, with its cursor where it was. In a tab
+  opened at a line, Blame marks that line and scrolls to it, and an editor not yet
+  created opens at the top.
+- **The file changes on disk** while it shows, as in the line view: clean, it reloads
+  quietly; with unsaved changes, the conflict banner. Any new text asks git again.
+- **git says no** (no repo, a file that's in no commit, a repo with no commits): a
+  toast "Blame no disponible" with git's first line, without `fatal:`, and back to the
+  view it came from.
+
+**Commands,** as the others: `blame`, the same path as its button.
+
+**Built from**
+
+- **`blame-model.js`:** `parseBlame` reads `--porcelain` into one entry per line (a
+  commit's fields come only the first time it shows, and a line counts when its text
+  arrives), and `blameLabel` says what a row shows. A sha of all zeros is no commit.
+- **`main.js`:** writes the text to `<home>/code-editor/blame/<doc>`, beside `drafts/`
+  and not in it, runs `git blame --porcelain --contents <that file> -- <name>` in the
+  folder of the file's realpath, and deletes the copy. `exec` has no stdin, and an
+  argument couldn't hold 1 MiB. One run at a time per tab.
+
+**Watch out**
+
+- **A commit made while the view shows** doesn't reach it, since nothing watches
+  `.git`: Editar and Blame again.
+- **A symlink is blamed through its target:** by its own name, git finds no line in
+  any commit.
+- **`exec`'s limit is 8 MiB of output,** which a file of very many short lines can pass.
+  Whatever lines arrive show, and the rows past them have an empty column, which is not
+  "sin commit". If `exec` gives back no lines, it's the toast.
+- **A crash or a hot reload during a run** leaves that tab's copy in
+  `<home>/code-editor/blame/`. Nothing reads it.
+
+**Done when**
+
+- `node --test test/code-file-blame.test.js` reports `fail 0`: it parses what a real
+  git prints, a line with no commit included.
+- In a committed file, Blame shows an author and a date on each line, and a line typed
+  and not saved says "sin commit" while the rest keep theirs.
+- In a file git doesn't know, Blame shows the toast and leaves the editor as it was.
+- Editar after Blame shows the typed text with the cursor where it was.
