@@ -1,7 +1,7 @@
 # Code editor
 
 A code editor and Explorer for Herdr, built from how Orca does them. In the projects
-layout, `ctrl-l` opens and closes a right panel with the Explorer: a file tree with
+layout, `cmd-l` opens and closes a right panel with the Explorer: a file tree with
 git marks, `Names` to filter by path, `Contents` to search inside files, and file
 operations. Each file opens in its own tab, in Herdr's editor, with saving, conflicts,
 drafts and a Blame view. The whole window wears One Dark Pro, and files wear Material's
@@ -20,7 +20,7 @@ icons.
   a spinner in `working` or a 6 px dot in `blocked` or `done`.
 - **The bar's right end:** `+` (26 px, radius 6, `muted`), then 4 px further on,
   buttons 26 px high with radius 6, 12 px text and a 14 px icon: "Changes" if
-  picked in Herdr's welcome, and last the toggle "Explorer" with `⌃L`. A button
+  picked in Herdr's welcome, and last the toggle "Explorer" with `⌘L`. A button
   whose panel shows is `selected` with `foreground` text; otherwise `muted` on
   `chrome`.
 - **Right panel** (`panel`, in projects-sidebar's layout): 368 px wide, 280 to
@@ -33,9 +33,9 @@ icons.
 
 **How it behaves**
 
-- **`ctrl-l`** in the projects layout opens the panel, and closes it again, with
-  a terminal focused too. The terminal's program doesn't get the key, so in this
-  layout `ctrl-l` no longer clears the screen. Other layouts keep it.
+- **`cmd-l`** in the projects layout opens the panel, and closes it again, with
+  a terminal focused too. The terminal's program doesn't get the key, and its
+  `ctrl-l` still clears the screen.
 - **The Explorer button** does the same for the Explorer: it opens the panel on
   it, and closes the panel when it shows. "Changes" does so for Changes.
 - The panel's width is kept with the layout's other clicks, by Herdr.
@@ -54,7 +54,7 @@ icons.
 
 **Built from**
 
-- **`keys.json`:** `layout:projects` `ctrl-l` → `layout.toggle:panel`, and
+- **`keys.json`:** `layout:projects` `cmd-l` → `layout.toggle:panel`, and
   `mod:code-file` `cmd-s` → `code-file.save`, `cmd-w` → `code-file.close`. The
   installer merges them into the person's keys.
 - **`themes/one-dark-pro.json`:** a Herdr theme file made from Orca's One Dark
@@ -95,19 +95,18 @@ icons.
 
 **Watch out**
 
-- **`ctrl-l` is taken from terminals** in the projects layout, on purpose. A
-  `ctrl-l` you already bind in `layout:projects` stays yours, the install says
-  so, and then the key doesn't toggle the panel.
+- **A `cmd-l` you already bind in `layout:projects` stays yours:** the install
+  says so, and then the key doesn't toggle the panel.
 - **Don't put Herdr's `tabs` mod back in this layout.** Its "Files" button selects
   a stack child `files`, which is gone, and its per-space memory of the panel only
   knows `files` and `changes`, so switching spaces closes an open Explorer.
 - **The Explorer is always on offer,** whatever `workspace.panels` says: its first
-  look in Herdr's welcome leaves an empty list, and `ctrl-l` opens the Explorer
+  look in Herdr's welcome leaves an empty list, and `cmd-l` opens the Explorer
   anyway, so leaving it out would close it at the next change of space.
 - **A `<mod>.<command>` reaches only the copy in the shown tab,** so only the active
   tab can be closed from the bar, and an inactive tab's dot doesn't close it.
 - **Close in the tab's right-click menu is Herdr's:** it doesn't ask the file.
-- **`⌃L` is a fixed label:** with your own `ctrl-l` in `layout:projects` the button
+- **`⌘L` is a fixed label:** with your own `cmd-l` in `layout:projects` the button
   still works, and the label is wrong.
 - **The active tab's text is `foreground`** (`#abb2bf`). The design's `#d7dae0` has
   no theme name of its own, and the dot's `ansi3` (`#d18f52`) stands in for its
@@ -125,12 +124,12 @@ icons.
 - `scripts/install.sh code-editor` leaves `<home>/themes/one-dark-pro.json` and
   `<home>/mods/code-explorer/icons/theme.json`, and `scripts/install.sh
   --uninstall code-editor` removes both.
-- In the projects layout, `ctrl-l` with a terminal focused opens the panel on the
+- In the projects layout, `cmd-l` with a terminal focused opens the panel on the
   Explorer and closes it again, and the terminal's screen stays as it was.
 - In the projects layout, the terminals' cards are `#282c34` and the canvas
   around them `#1d1f23`.
 - With the Explorer open in a space, switching to another space and back shows it
-  open again, and the button reads "Explorer" and `⌃L`, `selected` while it shows.
+  open again, and the button reads "Explorer" and `⌘L`, `selected` while it shows.
 - A tab whose `code-editor.docs` entry has `preview: true`, with a `code-file` pane
   in it, shows its name in italics and its Material icon; with `dirty: true` in
   `code-editor.live` it shows the dot, active or not.

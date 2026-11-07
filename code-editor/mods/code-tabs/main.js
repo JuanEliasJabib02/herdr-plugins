@@ -2,7 +2,7 @@
 // this folder), made the way `mod.clone` makes one: its window icons are its own.
 // Changed from Herdr's version: a file's tab draws its Material icon, its name in
 // italics while it's a preview, and a dot for unsaved changes; its X and a double
-// click go to the file; the "Files" button is "Explorer" with ⌃L, and the panel's
+// click go to the file; the "Files" button is "Explorer" with ⌘L, and the panel's
 // per-space memory knows `explorer`; the look follows the code editor's design.
 // The decisions moved to tabs-model.js so they can be tested. Herdr never updates
 // this copy.

@@ -1,5 +1,5 @@
 // The code-editor plugin as Herdr gets it, on a fake Herdr home and a fake HOME,
-// never the person's: ctrl-l opens and closes the right panel (S2), the window
+// never the person's: cmd-l opens and closes the right panel (S2), the window
 // wears One Dark Pro (S4), Material's icons travel with the Explorer (S5), and
 // the projects layout draws that Explorer in its panel.
 import { test, after } from "node:test";
@@ -48,39 +48,39 @@ function mods(node, out = []) {
   return out;
 }
 
-// ── S2: ctrl-l ─────────────────────────────────────────────────────────────
+// ── S2: cmd-l ─────────────────────────────────────────────────────────────
 
-test("S2: ctrl-l toggles the panel in the projects layout only, so other layouts keep theirs; cmd-s and cmd-w go to the open file (D3, D18)", () => {
+test("S2: cmd-l toggles the panel in the projects layout only, so other layouts keep theirs; cmd-s and cmd-w go to the open file (D3, D18)", () => {
   assert.deepEqual(readJson(plugin("keys.json")), {
-    "layout:projects": { "ctrl-l": "layout.toggle:panel" },
+    "layout:projects": { "cmd-l": "layout.toggle:panel" },
     "mod:code-file": { "cmd-s": "code-file.save", "cmd-w": "code-file.close" },
   });
 });
 
-test("S2: what ctrl-l toggles is the projects layout's right panel, closed until it is asked for", () => {
+test("S2: what cmd-l toggles is the projects layout's right panel, closed until it is asked for", () => {
   const panel = find(layout(), "panel");
-  assert.equal(readJson(plugin("keys.json"))["layout:projects"]["ctrl-l"], `layout.toggle:${panel.id}`);
+  assert.equal(readJson(plugin("keys.json"))["layout:projects"]["cmd-l"], `layout.toggle:${panel.id}`);
   assert.equal(panel.hidden, true);
   assert.equal(find(layout(), "work-body").children.at(-1).id, "panel", "on the right of the terminals");
 });
 
-test("S2: installing merges ctrl-l into the person's keys, in that layout's section; global and terminal stay as they were", () => {
+test("S2: installing merges cmd-l into the person's keys, in that layout's section; global and terminal stay as they were", () => {
   const home = fakeHome();
   const r = install(home, "code-editor");
   assert.equal(r.status, 0, r.stderr);
   const keys = readJson(join(home, "keys.json"));
-  assert.deepEqual(keys["layout:projects"], { "ctrl-l": "layout.toggle:panel" });
+  assert.deepEqual(keys["layout:projects"], { "cmd-l": "layout.toggle:panel" });
   assert.deepEqual(keys["mod:code-file"], { "cmd-s": "code-file.save", "cmd-w": "code-file.close" });
   assert.deepEqual(keys.global, PERSON_KEYS.global);
   assert.deepEqual(keys.terminal, PERSON_KEYS.terminal);
 });
 
-test("S2: a ctrl-l the person already binds in that layout stays theirs, and the install says so", () => {
-  const home = fakeHome({ ...PERSON_KEYS, "layout:projects": { "ctrl-l": "terminal" } });
+test("S2: a cmd-l the person already binds in that layout stays theirs, and the install says so", () => {
+  const home = fakeHome({ ...PERSON_KEYS, "layout:projects": { "cmd-l": "terminal" } });
   const r = install(home, "code-editor");
   assert.equal(r.status, 0, r.stderr);
-  assert.equal(readJson(join(home, "keys.json"))["layout:projects"]["ctrl-l"], "terminal");
-  assert.match(r.stderr, /layout:projects ctrl-l is already terminal; kept yours/);
+  assert.equal(readJson(join(home, "keys.json"))["layout:projects"]["cmd-l"], "terminal");
+  assert.match(r.stderr, /layout:projects cmd-l is already terminal; kept yours/);
 });
 
 // ── S4: One Dark Pro ───────────────────────────────────────────────────────
@@ -183,7 +183,7 @@ test("projects-sidebar requires code-editor: it lands first, so the layout's the
   const shown = readJson(join(home, "layouts/projects.json"));
   assert.ok(existsSync(join(home, `themes/${shown.theme}.json`)));
   assert.ok(existsSync(join(home, "mods", find(shown, "explorer").content.mod, "main.js")));
-  assert.equal(readJson(join(home, "keys.json"))["layout:projects"]["ctrl-l"], "layout.toggle:panel");
+  assert.equal(readJson(join(home, "keys.json"))["layout:projects"]["cmd-l"], "layout.toggle:panel");
 
   const gone = install(home, "--uninstall", "projects-sidebar");
   assert.equal(gone.status, 0, gone.stderr);

@@ -1,6 +1,6 @@
 {
   "layout:projects": {
-    "ctrl-l": "layout.toggle:panel"
+    "cmd-l": "layout.toggle:panel"
   },
   "mod:code-file": {
     "cmd-s": "code-file.save",

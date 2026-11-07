@@ -70,7 +70,7 @@ const SHOW_EXPLORER = [
 test("S2: switching spaces and back brings an open Explorer back instead of closing it", () => {
   const memory = memoryWith();
   assert.deepEqual(sync(memory, "a", "explorer"), { commands: [], save: true });
-  assert.equal(memory.panels.a, "explorer", "opened with ctrl-l: remembered for this space");
+  assert.equal(memory.panels.a, "explorer", "opened with cmd-l: remembered for this space");
 
   assert.deepEqual(sync(memory, "b", "explorer"), { commands: [["layout.hide", { id: "panel" }]], save: false }, "b never had one");
   sync(memory, "b", null);
@@ -87,7 +87,7 @@ test("S2: the memory holds with Herdr's welcome having left an empty panel list"
   assert.deepEqual(sync(memory, "a", null, 0, []), { commands: SHOW_EXPLORER, save: false });
 });
 
-test("S2: closing the panel with ctrl-l is remembered, and the space comes back closed", () => {
+test("S2: closing the panel with cmd-l is remembered, and the space comes back closed", () => {
   const memory = memoryWith({ a: "explorer", b: null });
   sync(memory, "a", "explorer");
   assert.deepEqual(sync(memory, "a", null), { commands: [], save: true });
@@ -131,12 +131,12 @@ test("stock behavior kept: a stored panel that is no longer on offer closes, and
   assert.equal(none.space, undefined);
 });
 
-test("S2: the toggle reads Explorer and ⌃L and sits rightmost, there is no Files button, and Changes shows when picked", () => {
+test("S2: the toggle reads Explorer and ⌘L and sits rightmost, there is no Files button, and Changes shows when picked", () => {
   const both = panelButtons(["explorer", "changes"]);
   assert.deepEqual(both.map((b) => b.id), ["changes", "explorer"]);
   const explorer = both.at(-1);
   assert.equal(explorer.label, "Explorer");
-  assert.equal(explorer.hint, "⌃L");
+  assert.equal(explorer.hint, "⌘L");
   assert.equal(explorer.icon, "mods/code-tabs/panel.svg");
   assert.ok(existsSync(plugin("mods/code-tabs/panel.svg")));
   assert.equal(both[0].label, "Changes");
@@ -150,10 +150,10 @@ test("S2: the button selects explorer and opens the panel, and closes that same 
   assert.deepEqual(panelClick("changes", false), [["layout.select", { stack: "panel-body", child: "changes" }], ["layout.show", { id: "panel" }]]);
 });
 
-test("S2: button and ctrl-l act on the same panel of the projects layout, and every panel the bar offers is a child of its stack", () => {
+test("S2: button and cmd-l act on the same panel of the projects layout, and every panel the bar offers is a child of its stack", () => {
   const panel = find(layout(), "panel");
   const keys = readJson(plugin("keys.json"));
-  assert.equal(keys["layout:projects"]["ctrl-l"], `layout.toggle:${panel.id}`);
+  assert.equal(keys["layout:projects"]["cmd-l"], `layout.toggle:${panel.id}`);
   assert.deepEqual(panelClick("explorer", true), [["layout.hide", { id: panel.id }]]);
   const children = find(layout(), "panel-body").children.map((c) => c.id);
   for (const id of enabledPanels(undefined)) assert.ok(children.includes(id), id);

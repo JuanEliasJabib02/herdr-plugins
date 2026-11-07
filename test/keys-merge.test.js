@@ -238,7 +238,7 @@ test("install: merges the plugin's keys once; a second install changes nothing",
     // Through projects-sidebar's `requires`.
     "cmd-alt-s": "agent-sleep.sleep-now",
     "cmd-alt-w": "agent-sleep.wake-all",
-    "ctrl-l": "layout.toggle:panel",
+    "cmd-l": "layout.toggle:panel",
   });
   assert.equal(keys.global.f2, "tab.rename");
   const written = readFileSync(join(home, "keys.json"), "utf8");

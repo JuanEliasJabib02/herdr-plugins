@@ -91,7 +91,7 @@ export function doubleClickCommand(tab, view) {
   return view.preview ? [`${FILE_MOD}.pin-${view.doc}`] : null;
 }
 
-// Which panels the bar offers. The Explorer always: ctrl-l opens it whatever the
+// Which panels the bar offers. The Explorer always: cmd-l opens it whatever the
 // person picked in Herdr's welcome (its first look leaves an empty list), and a
 // panel not on offer closes at the next change of space. Changes as they picked.
 export function enabledPanels(chosen) {
@@ -102,7 +102,7 @@ export function enabledPanels(chosen) {
 // The toggle goes last, at the bar's right end.
 const PANEL_BUTTONS = Object.freeze([
   { id: "changes", label: "Changes", icon: "mods/changes/changes.svg" },
-  { id: "explorer", label: "Explorer", icon: "mods/code-tabs/panel.svg", hint: "⌃L" },
+  { id: "explorer", label: "Explorer", icon: "mods/code-tabs/panel.svg", hint: "⌘L" },
 ]);
 
 export function panelButtons(enabled) {

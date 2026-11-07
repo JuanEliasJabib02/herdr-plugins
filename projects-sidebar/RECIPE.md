@@ -342,7 +342,7 @@ across repos.
   `agents` → `{ "mod": "projects-agents" }`. The root sets `"theme":
   "one-dark-pro"`, and in the right panel's stack `panel-body` the child
   `explorer` → `{ "mod": "code-explorer" }` is active where Herdr has `files`:
-  all from the code-editor plugin, whose keys.json brings `ctrl-l` →
+  all from the code-editor plugin, whose keys.json brings `cmd-l` →
   `layout.toggle:panel`. Preview `layouts/projects.svg`.
 - **Mod `mods/projects-agents/`:** a copy of Herdr 0.1.13's shipped
   `agents` mod, made the way `mod.clone` makes one (`mod.json` records
