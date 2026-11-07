@@ -46,6 +46,14 @@ const USAGE = [
 
 const say = (text) => process.stderr.write(`${text}\n`);
 
+// A reader that closes its end (`usage --json | head -1`) isn't a failure:
+// the command finishes and its own code stands.
+const closedReader = (e) => {
+  if (e?.code !== "EPIPE") throw e;
+};
+process.stdout.on("error", closedReader);
+process.stderr.on("error", closedReader);
+
 async function main(argv) {
   const [name, ...args] = argv;
   if (name === "--version") {

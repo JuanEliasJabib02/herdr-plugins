@@ -497,6 +497,39 @@ test("use to another account starts reading its usage at once, without waiting f
   assert.equal(state()[A], undefined, "only the new account's");
 });
 
+test("use reads the new account even right after another read of it, which a plain --refresh wouldn't (D22, Orca's force)", async () => {
+  const s = sandbox();
+  orcaProfile(s.home, A, ANA);
+  orcaProfile(s.home, B, BEN);
+  orcaDb(s.home, { claudeManagedAccounts: [orcaRow(A, ANA, 1), orcaRow(B, BEN, 2)], activeClaudeManagedAccountId: A });
+  listJson(s);
+  const checkedAt = () => JSON.parse(s.read("usage-state.json")).accounts?.[B]?.checkedAt ?? null;
+  assert.equal(s.cli(["usage", "--refresh", "--account", B, "--json"]).status, 0);
+  const before = checkedAt();
+  assert.ok(before, "B was read");
+  await sleep(50);
+  assert.equal(s.cli(["usage", "--refresh", "--account", B, "--json"]).status, 0);
+  assert.equal(checkedAt(), before, "the floor holds a plain --refresh");
+
+  assert.equal(s.cli(["use", B, "--json"]).status, 0);
+  const deadline = Date.now() + 30_000;
+  while (checkedAt() === before && Date.now() < deadline) await sleep(100);
+  assert.notEqual(checkedAt(), before, "use read B again");
+});
+
+test("a reader that closes its end isn't a failure: the command keeps its own code and prints no stack", () => {
+  const s = sandbox();
+  orcaProfile(s.home, A, ANA);
+  orcaDb(s.home, { claudeManagedAccounts: [orcaRow(A, ANA, 1)], activeClaudeManagedAccountId: A });
+  listJson(s);
+  const code = join(s.out, "code");
+  for (const args of [["list", "--json"], ["usage", "--json"], ["--version"]]) {
+    const r = spawnSync("/bin/sh", ["-c", '{ "$0" "$@"; echo $? > "$CODE"; } | true', BIN, ...args], { env: { ...s.env, CODE: code }, encoding: "utf8", timeout: 30000 });
+    assert.equal(r.stderr, "", args.join(" "));
+    assert.equal(readFileSync(code, "utf8").trim(), "0", args.join(" "));
+  }
+});
+
 test("use refuses an unknown account with 7 and a missing id with 64, writing nothing", () => {
   const s = sandbox();
   listJson(s);

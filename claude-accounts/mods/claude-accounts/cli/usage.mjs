@@ -1,7 +1,7 @@
 // Claude usage per account (D4, D16), Orca's main/rate-limits/ ported to a
 // command that runs and exits. Owner: T3.
 //
-//   usage [--refresh] [--account <id>] [--json]
+//   usage [--refresh] [--force] [--account <id>] [--json]
 //     Merges the statusline's live/ drops (every run), reads the accounts
 //     that are due (each with its own token, from keychain.mjs), and prints
 //     accounts.v1.json, rebuilt. --account reads only that one (an unknown
@@ -372,9 +372,9 @@ const claimLive = (claim, now) => Boolean(claim) && now - claim.at <= CLAIM_VOID
 // Orca's polling plan, per account: 5 min after a good read; after a failure
 // 30 s doubling per failure up to 15 min; --refresh at most every 30 s;
 // inactive accounts at most every 60 s; a 429's Retry-After holds all but
-// --refresh.
-function isDue(entry, now, { refresh, active }) {
-  if (!entry || entry.checkedAt === null) return true;
+// --refresh. --force, a switch's read, has no floor (Orca's force: true).
+function isDue(entry, now, { refresh, force, active }) {
+  if (force || !entry || entry.checkedAt === null) return true;
   if (!refresh && entry.retryAt !== null && entry.retryAt > now) return false;
   const since = now - entry.checkedAt;
   if (!active && since < INACTIVE_DEBOUNCE_MS) return false;
@@ -415,7 +415,7 @@ async function claim(run, targets, all) {
         busy.push(account);
         continue;
       }
-      if (!isDue(entry, now, { refresh: run.refresh, active: account.id === run.active })) continue;
+      if (!isDue(entry, now, { refresh: run.refresh, force: run.force, active: account.id === run.active })) continue;
       (state.accounts[account.id] ??= blankEntry()).claim = { pid: process.pid, at: now };
       mine.push({ account, at: now });
     }
@@ -599,7 +599,7 @@ function describeAccount(a, active) {
 export async function usage(args) {
   const { values } = parseArgs({
     args,
-    options: { refresh: { type: "boolean" }, account: { type: "string" }, json: { type: "boolean" } },
+    options: { refresh: { type: "boolean" }, force: { type: "boolean" }, account: { type: "string" }, json: { type: "boolean" } },
     strict: true,
   });
   // Counted from the process's start, so a slow start doesn't push the
@@ -613,7 +613,8 @@ export async function usage(args) {
     const only = values.account;
     if (only !== undefined && !known.accounts.some((a) => a.id === only)) throw failure(`unknown account "${only}"`, 7);
     const targets = known.accounts.filter((a) => only === undefined || a.id === only);
-    const run = { home, env: process.env, refresh: values.refresh === true, active: known.active };
+    const force = values.force === true;
+    const run = { home, env: process.env, refresh: force || values.refresh === true, force, active: known.active };
     const { mine, busy } = await claim(run, targets, known.accounts);
     const done = await Promise.all([
       ...mine.map((claimed) => readAndMerge(run, claimed, deadline.signal)),

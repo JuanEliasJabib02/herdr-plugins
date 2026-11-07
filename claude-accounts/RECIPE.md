@@ -193,7 +193,7 @@ scripts/install.sh claude-accounts
   | `login <id\|new\|default> [--link]` | signs an account in, in the current terminal |
   | `import-orca` | imports Orca's accounts again |
   | `settings [set switchMode ask\|restart\|keep]` | reads or sets the switch setting |
-  | `usage [--refresh] [--account <id>]` | the usage, fetched when due |
+  | `usage [--refresh] [--force] [--account <id>]` | the usage, fetched when due; `--force` has no floor (`use` runs it for the new account) |
   | `terminal <t>` | a Herdr terminal's account, session and status |
   | `restart --cancel <t>` | cancels a terminal's restart or job that hasn't stopped Claude yet |
   | `restart --answer keep\|restart [--terminal <t>]...` | the switch dialog's answer: keep, or restart the ticked sessions |

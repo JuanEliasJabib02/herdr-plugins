@@ -27,7 +27,8 @@
 
 import { div, svg } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
-import { theme, props, openOverlay, closeOverlay, exec, readTextFile, watchFolder, home, appHome } from "herdr";
+import { theme, props, openOverlay, closeOverlay, exec, readTextFile, watchFolder, home, appHome, settings } from "herdr";
+import { zoomOf } from "./footer-model.js";
 import { MOD, FILES, stateDir, cliPath, readAccounts, readPendingSwitch } from "./store.js";
 import { confirmModel, initialTicked, toggleTicked, toggleGroup, confirmCommands, cliError, statusTerminals, statusArgv, withStatus } from "./accounts-model.js";
 
@@ -40,12 +41,24 @@ const STATUS_POLL = 2000;
 const SPINNER = Object.freeze(["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]);
 const CHECK = "mods/workspace-chrome/check.svg";
 const MINUS = "mods/workspace-chrome/minus.svg";
+const BODY_MAX = 460;
+// What's around the body: the header, the footer's buttons, and the margin
+// Herdr leaves between a dialog and the window's edges. A dialog taller than
+// the window would lose its buttons, so the body gives way.
+const AROUND_BODY = 158;
+const BODY_MIN = 60;
+
+function bodyMax() {
+  const room = window.viewport_size().height / zoomOf(settings()) - AROUND_BODY;
+  return Math.max(BODY_MIN, Math.min(BODY_MAX, Math.floor(room)));
+}
 
 // The only place that opens it: the footer (an Ask, or the restart toast's
 // Review) and the open-confirm command. modal: a click beside it doesn't
-// close it (Esc does, which answers Keep as is).
+// close it (Esc does, which answers Keep as is). No height: it's as tall as
+// what it says, as Orca's is, up to BODY_MAX of text and sessions.
 export function openConfirm() {
-  return openOverlay({ mod: MOD, kind: "dialog", modal: true, width: 500, height: 440, props: { view: "confirm" } });
+  return openOverlay({ mod: MOD, kind: "dialog", modal: true, width: 500, props: { view: "confirm" } });
 }
 
 export default class Confirm {
@@ -240,11 +253,11 @@ export default class Confirm {
     const t = theme();
     const m = confirmModel(this.pending, this.accounts, this.ticked, this.live);
     const root = v_flex().id("ca-confirm").track_focus(this.handle).on_key_down((e, cx) => this.key(e, cx, m))
-      .size_full().min_h(0).bg(t.popover).text_color(t.foreground).text_size(12.5);
+      .w_full().bg(t.popover).text_color(t.foreground).text_size(12.5);
     const header = h_flex().flex_none().px(18).pt(16).pb(4).gap(8).items_center()
       .child(div().flex_1().min_w(0).truncate().text_size(15).font_semibold().child(m.title))
       .child(div().text_size(11).text_color(t.dim).child(this.busy ? "" : "Esc"));
-    const body = v_flex().id("ca-confirm-body").flex_1().min_h(0).px(18).pt(4).pb(10).gap(12).overflow_y_scrollbar()
+    const body = v_flex().id("ca-confirm-body").max_h(bodyMax()).px(18).pt(4).pb(10).gap(12).overflow_y_scrollbar()
       .child(div().text_color(t.muted).child(m.body))
       .when(m.showList, (el) => el.child(this.list(t, m)))
       .when(Boolean(m.dontAsk), (el) => el.child(this.dontAsk(t, m.dontAsk)))

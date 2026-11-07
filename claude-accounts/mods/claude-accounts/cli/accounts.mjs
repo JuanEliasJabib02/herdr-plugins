@@ -371,7 +371,7 @@ async function writeActive(target) {
 // refreshForClaudeAccountChange with force. A failed read never undoes the
 // switch, and `use` doesn't wait for it.
 function readUsageOf(id) {
-  const child = spawn(process.execPath, [cliPath(), "usage", "--refresh", "--account", id, "--json"], { detached: true, stdio: "ignore", cwd: "/" });
+  const child = spawn(process.execPath, [cliPath(), "usage", "--force", "--account", id, "--json"], { detached: true, stdio: "ignore", cwd: "/" });
   child.on("error", () => {});
   child.unref();
 }
