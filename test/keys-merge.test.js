@@ -231,12 +231,21 @@ test("install: merges the plugin's keys once; a second install changes nothing",
   assert.equal(first.status, 0, first.stderr);
   assert.ok(existsSync(join(home, "mods/projects/main.js")));
   const keys = JSON.parse(readFileSync(join(home, "keys.json"), "utf8"));
-  assert.deepEqual(keys["layout:projects"], { f1: "projects.group1", f2: "projects.group2", f3: "projects.group3" });
+  assert.deepEqual(keys["layout:projects"], {
+    f1: "projects.group1",
+    f2: "projects.group2",
+    f3: "projects.group3",
+    // Through projects-sidebar's `requires`.
+    "cmd-alt-s": "agent-sleep.sleep-now",
+    "cmd-alt-w": "agent-sleep.wake-all",
+  });
   assert.equal(keys.global.f2, "tab.rename");
   const written = readFileSync(join(home, "keys.json"), "utf8");
+  const made = backups(home).length; // one per plugin that added keys
+  assert.ok(made >= 1);
   assert.equal(install(home).status, 0);
   assert.equal(readFileSync(join(home, "keys.json"), "utf8"), written);
-  assert.equal(backups(home).length, 1);
+  assert.equal(backups(home).length, made, "nothing to add: no new backup");
 });
 
 test("install --no-keys installs the mod and leaves keys.json untouched", () => {

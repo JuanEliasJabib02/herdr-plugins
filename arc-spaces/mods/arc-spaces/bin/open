@@ -1,0 +1,145 @@
+#!/bin/sh
+# open: macOS's open, except for a link clicked in Herdr, which opens in the Arc
+# space of its group (the arc-spaces plugin). Herdr runs `open <url>` by name,
+# and /usr/local/bin comes before /usr/bin on its PATH, so a link there gets here.
+# Everything else on this Mac that runs `open`, and anything that goes wrong,
+# ends in the real one.
+#
+# ARC_SPACES_OPEN, _OSASCRIPT, _HERDR, _HC, _APP, _TIMEOUT, _LS_TIMEOUT and
+# _HC_TIMEOUT are for the tests.
+
+real=${ARC_SPACES_OPEN:-/usr/bin/open}
+
+# A link is one http(s) URL. Every other call goes through before any work.
+[ $# -eq 1 ] || exec "$real" "$@"
+case $1 in
+  http://* | https://*) ;;
+  *) exec "$real" "$@" ;;
+esac
+
+# Only Herdr's own clicks. Terminals run under herdr-core, so a shell's or an
+# agent's `open` has another parent and goes through, as it does in Orca.
+parent=$(/bin/ps -o comm= -p "$PPID" 2>/dev/null)
+case $parent in
+  */Herdr.app/Contents/MacOS/Herdr | */herdr-app) ;;
+  *) exec "$real" "$@" ;;
+esac
+
+home=${HERDR_APP_HOME:-"$HOME/.config/herdr-app"}
+
+# Off, or no group has a name: nothing to ask Herdr.
+jq -e '(.["arc-spaces.v1"] // {}) | .enabled == true and any((.names // {})[]?; type == "string" and test("\\S"))' \
+  "$home/shared.json" >/dev/null 2>&1 || exec "$real" "$@"
+
+# Runs a command for at most $1 whole seconds (at most a day; a bad value: 1). The
+# alarm goes with the command itself (perl execs it), so it holds even when
+# whoever started it is gone; SIGALRM is reset first, since an ignored one
+# would be inherited and stop nothing. 142 when time runs out (SIGALRM's code),
+# 127 when it can't start, else its own code.
+limit_pl='my $s = int(shift); $s = 86400 if $s > 86400; $s = 1 unless $s >= 1; $SIG{ALRM} = "DEFAULT"; alarm $s; exec { $ARGV[0] } @ARGV or exit 127'
+limit() { /usr/bin/perl -e "$limit_pl" "$@"; }
+
+listing=$(limit "${ARC_SPACES_LS_TIMEOUT:-3}" "${ARC_SPACES_HERDR:-$parent}" ls 2>/dev/null) || exec "$real" "$@"
+
+# Where the shown space is now, as projects-sidebar's placeOf: its first
+# terminal with a live folder (herdr-core's record, which Herdr reads), else the
+# folder it was made in. A terminal hc can't read is skipped. The whole search
+# runs under one limit; when it runs out, the folder it was made in. Each hc get
+# carries the same limit, so one left running when the search is cut ends by
+# itself. A space on another machine has no terminal looked at.
+hc_timeout=${ARC_SPACES_HC_TIMEOUT:-3}
+live=$(printf '%s\n' "$listing" | limit "$hc_timeout" /bin/sh -c '
+  set -f
+  IFS="
+"
+  for terminal in $(jq -r "[.spaces[]? | select(.active == true)][0]
+      | select((.machine // null) == null) | .tabs[]?.terminals[]?.terminal | strings" 2>/dev/null); do
+    record=$(/usr/bin/perl -e "$3" "$2" "$1" get "$terminal" 2>/dev/null) || continue
+    live=$(printf "%s\n" "$record" | jq -r ".foreground.cwd // .cwd // empty | strings" 2>/dev/null)
+    [ -n "$live" ] && { printf "%s\n" "$live"; exit 0; }
+  done' sh "${ARC_SPACES_HC:-hc}" "$hc_timeout" "$limit_pl" 2>/dev/null)
+
+# The Arc space, or nothing when the group has no name or anything here fails.
+# Asked at the click, so it can't be stale: the place gives the project (the
+# longest checkout holding it, as projects-sidebar's matchSpaces), the project
+# gives the group. A space outside every group, or on another machine, uses the
+# active group, as Orca does. The switch is checked again: the file may have
+# changed since the first look.
+space=$(printf '%s\n' "$listing" | jq -r --arg live "$live" --arg userhome "$HOME" --slurpfile shared "$home/shared.json" '
+  # projects-sidebar normPath: forward slashes, no trailing slash ("/" stays).
+  def slashes: if type == "string" then gsub("\\\\"; "/") else . end;
+  def norm: slashes | if type == "string" and . != "" then (sub("/+$"; "") | if . == "" then "/" else . end) else "" end;
+  # Only the place gets ~ expanded (normPath with home, in matchSpaces).
+  def expand: slashes | if type == "string" and $userhome != "" and (. == "~" or startswith("~/")) then ($userhome | norm) + .[1:] else . end;
+  def absolute: type == "string" and startswith("/");
+  # What parseRegistry and parseCache keep: isGroup, isProject, isCheckout.
+  def group: type == "object" and (.id | type == "string" and . != "") and (.name | type == "string") and (.projects | type == "array");
+  def project: type == "object" and (.path | absolute) and (.name | type == "string");
+  def checkout: type == "object" and (.path | absolute) and has("branch") and (.branch == null or (.branch | type == "string")) and (.main | type == "boolean");
+  def inside($dir): . == $dir or startswith(if $dir == "/" then "/" else $dir + "/" end);
+  # parseRegistry as {groups: [{id, paths}], active}: version 1 or nothing; the
+  # first group of an id wins; no group left reads as emptyRegistry (g1); an
+  # unknown active group is the first. (Its first-claim-of-a-path rule needs no
+  # copy: the first group listing a project is the one found below anyway.)
+  # test/arc-spaces-open.test.js runs lib.js and this on the same cases.
+  def registry:
+    . as $raw
+    | (if type == "object" and .version == 1 and (.groups | type == "array") then
+         reduce (.groups[] | select(group)) as $g ({seen: {}, groups: []};
+           if .seen[$g.id] then . else
+             .seen[$g.id] = true
+             | .groups += [{id: $g.id, paths: [$g.projects[] | select(project) | .path | norm]}]
+           end)
+         | .groups
+       else [] end) as $groups
+    | if $groups == [] then {groups: [{id: "g1", paths: []}], active: "g1"}
+      else {groups: $groups, active: (if any($groups[]; .id == $raw.activeGroup) then $raw.activeGroup else $groups[0].id end)} end;
+  $shared[0] as $s
+  | ($s["arc-spaces.v1"] // {}) as $config
+  | select($config.enabled == true)
+  | ($s["projects.v1"] | registry) as $registry
+  | ([.spaces[] | select(.active == true)][0]) as $shown
+  | (if ($shown.machine // null) != null then "" elif $live != "" then $live else $shown.folder end | expand | norm) as $at
+  | ([($s["projects.cache.v1"] // {}) | objects
+      # parseCache: the valid entries by their normalized key; a later key that
+      # normalizes the same replaces the list and keeps the place of the first.
+      | with_entries(select((.key | absolute) and (.value | type == "array" and all(.[]; checkout))) | .key |= norm)
+      | to_entries[]
+      | .key as $project | .value[]
+      | {project: $project, path: (.path | norm)}
+      | select(.path as $path | $at | inside($path))]
+     # The longest; between equal ones the first, as matchSpaces keeps it.
+     | reduce .[] as $c (null; if . == null or ($c.path | length) > (.path | length) then $c else . end)
+     | .project?) as $project
+  | ([$registry.groups[] | select(any(.paths[]; . == $project))][0].id) as $own
+  | ($own // $registry.active) as $group
+  | ($config.names[$group] // "") | gsub("^\\s+|\\s+$"; "")
+' 2>/dev/null)
+[ -n "$space" ] || exec "$real" "$@"
+
+# A missing app can stop AppleScript on a "Where is Arc?" dialog.
+if [ ! -d "${ARC_SPACES_APP:-/Applications/Arc.app}" ] && [ ! -d "$HOME/Applications/Arc.app" ]; then
+  exec "$real" "$@"
+fi
+
+# Orca's script (src/main/arc-space-url-open.ts). The URL and the name go as
+# arguments, so neither can become script text. The limit: the first use waits
+# on macOS's Automation prompt, and a hung Arc must not eat the click. As in
+# Orca, a click that runs out of time also goes to the real open.
+limit "${ARC_SPACES_TIMEOUT:-10}" "${ARC_SPACES_OSASCRIPT:-/usr/bin/osascript}" \
+  -e 'on run argv' \
+  -e 'set targetUrl to item 1 of argv' \
+  -e 'set spaceName to item 2 of argv' \
+  -e 'tell application id "company.thebrowser.Browser"' \
+  -e 'activate' \
+  -e 'tell front window' \
+  -e 'tell space spaceName' \
+  -e 'focus' \
+  -e 'make new tab with properties {URL:targetUrl}' \
+  -e 'end tell' \
+  -e 'end tell' \
+  -e 'end tell' \
+  -e 'end run' \
+  "$1" "$space" >/dev/null 2>&1 && exit 0
+
+exec "$real" "$@"

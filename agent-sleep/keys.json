@@ -1,0 +1,6 @@
+{
+  "layout:projects": {
+    "cmd-alt-s": "agent-sleep.sleep-now",
+    "cmd-alt-w": "agent-sleep.wake-all"
+  }
+}

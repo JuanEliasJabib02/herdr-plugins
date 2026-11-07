@@ -45,7 +45,19 @@ test("projects layout: tree replaces Spaces, groups block sits above the footer"
   assert.deepEqual(groups.size, { px: 44 });
 });
 
-test("projects layout: the status bar is a row, workspace-status, the spotlight flask, then the claude-accounts footer (claude-accounts D10, spotlight D20)", () => {
+test("projects layout: agent-sleep's moon is the status bar's last cell, nothing of it in the sidebar, and requires installs it (agent-sleep D14)", () => {
+  const layout = read("layouts/projects.json");
+  const cells = find(layout, "status").children;
+  // No props: the copy with no view runs the plugin's loop.
+  assert.deepEqual(cells.at(-1), { id: "status-agent-sleep", type: "block", size: { px: 40 }, content: { mod: "agent-sleep" } });
+  assert.equal(find(layout, "agent-sleep"), null, "the sidebar's block is gone");
+  assert.ok(!mods(find(layout, "sidebar")).includes("agent-sleep"));
+  assert.deepEqual(find(layout, "sidebar").children.map((c) => c.id), ["brand", "sidebar-lists", "groups", "sidebar-footer"]);
+  const requires = readFileSync(new URL("../projects-sidebar/requires", import.meta.url), "utf8");
+  assert.ok(requires.split("\n").includes("agent-sleep"));
+});
+
+test("projects layout: the status bar is a row, workspace-status, the spotlight flask, the claude-accounts footer, then agent-sleep's moon (claude-accounts D10, spotlight D20, agent-sleep D14)", () => {
   const status = find(read("layouts/projects.json"), "status");
   assert.equal(status.type, "row");
   assert.equal(status.resizable, false);
@@ -54,6 +66,7 @@ test("projects layout: the status bar is a row, workspace-status, the spotlight 
     { id: "status-workspace", type: "block", size: { weight: 1 }, content: { mod: "workspace-status" } },
     { id: "status-spotlight", type: "block", size: { px: 40 }, content: { mod: "spotlight", props: { view: "footer" } } },
     { id: "status-usage", type: "block", size: { weight: 1 }, content: { mod: "claude-accounts", props: { view: "footer" } } },
+    { id: "status-agent-sleep", type: "block", size: { px: 40 }, content: { mod: "agent-sleep" } },
   ]);
 });
 

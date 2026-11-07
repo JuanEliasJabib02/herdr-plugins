@@ -3,3 +3,6 @@
 # without one, its block shows "<mod> did not load".
 claude-accounts
 spotlight
+# The status bar's last cell, the moon, runs the agent-sleep plugin's loop. It
+# stays off until turned on in the popup the moon opens.
+agent-sleep

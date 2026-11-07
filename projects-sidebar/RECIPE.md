@@ -336,8 +336,10 @@ across repos.
   is a row: `workspace-status` (weight 1), then `{ "mod": "spotlight",
   "props": { "view": "footer" } }` (px 40, the spotlight plugin's test-queue
   flask), then `{ "mod": "claude-accounts", "props": { "view": "footer" } }`
-  (weight 1), Claude's usage at its right as in Orca. Block `agents` →
-  `{ "mod": "projects-agents" }`. Preview `layouts/projects.svg`.
+  (weight 1), Claude's usage at its right as in Orca, and last
+  `status-agent-sleep` → `{ "mod": "agent-sleep" }` (px 40): the agent-sleep
+  plugin's moon, which must be in the shown layout for its loop to run. Block
+  `agents` → `{ "mod": "projects-agents" }`. Preview `layouts/projects.svg`.
 - **Mod `mods/projects-agents/`:** a copy of Herdr 0.1.13's shipped
   `agents` mod, made the way `mod.clone` makes one (`mod.json` records
   `cloned_from: { name: "agents", version: "0.1.13" }`, and the sort menu
