@@ -687,8 +687,9 @@ with zoom and find. It has no text model: nothing to edit or save.
   for it; a search that fails shows no count, and Enter tries again.
 - **Pages render as they scroll into view,** a few around them, sharp for a Retina
   screen, and a page already rendered at that size is reused, in this tab or another.
-  A file that changes on disk shows its new pages at the same place; a symlink is
-  followed to its file.
+  A file that changes on disk shows its new pages at the same place. A symlink is read
+  through to its file, but only the link's folder is watched: a change to the file in
+  another folder shows when the tab opens again.
 - **Going to a page** puts its top at the top of the view.
 
 **Commands:** `code-file.zoom-in`, `zoom-out`, `zoom-fit`, `find[:text]`, `find-next`,

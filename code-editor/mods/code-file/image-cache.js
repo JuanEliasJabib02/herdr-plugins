@@ -35,8 +35,69 @@ export function parseStat(stdout) {
 
 // R7: the document itself is an SVG: `<svg` first, after a BOM, an XML prolog,
 // comments or a doctype. An HTML page full of inline icons is not one.
-const SVG_START = /^\uFEFF?\s*(?:<\?xml[\s\S]*?\?>\s*)?(?:(?:<!--[\s\S]*?-->|<!DOCTYPE\s+svg[^>]*>)\s*)*<svg[\s>]/i;
-export const isSvg = (text) => SVG_START.test(String(text ?? ""));
+// A scan, not a regex (C-1): a lazy comment inside a repeated group could stretch
+// past later `-->`s, so a run of comments before anything else took 2^n steps, on
+// any local file or downloaded body. Each step below moves forward: linear time.
+const SPACE = /\s/; // U+FEFF, the BOM, is one too
+const startsAt = (text, i, word) => text.slice(i, i + word.length).toLowerCase() === word;
+
+function skipSpace(text, i) {
+  while (i < text.length && SPACE.test(text[i])) i++;
+  return i;
+}
+
+// Just past a doctype's closing `>`, scanning from after its name; -1 if it never
+// closes. Quoted ids and values are skipped whole, and so is the `[ \u2026 ]` internal
+// subset with its comments (C-2: Illustrator declares its entities there), so a
+// `>` or `]` inside them closes nothing.
+function doctypeEnd(text, i) {
+  let subset = false;
+  while (i < text.length) {
+    const c = text[i];
+    if (c === '"' || c === "'") {
+      const close = text.indexOf(c, i + 1);
+      if (close < 0) return -1;
+      i = close + 1;
+    } else if (subset && text.startsWith("<!--", i)) {
+      const close = text.indexOf("-->", i + 4);
+      if (close < 0) return -1;
+      i = close + 3;
+    } else if (c === ">" && !subset) {
+      return i + 1;
+    } else {
+      if (c === "[") subset = true;
+      else if (c === "]") subset = false;
+      i++;
+    }
+  }
+  return -1;
+}
+
+export function isSvg(input) {
+  const text = String(input ?? "");
+  let i = skipSpace(text, 0);
+  if (startsAt(text, i, "<?xml")) {
+    const close = text.indexOf("?>", i + 5);
+    if (close < 0) return false;
+    i = skipSpace(text, close + 2);
+  }
+  for (;;) {
+    if (text.startsWith("<!--", i)) {
+      const close = text.indexOf("-->", i + 4);
+      if (close < 0) return false;
+      i = close + 3;
+    } else if (startsAt(text, i, "<!doctype")) {
+      const name = skipSpace(text, i + 9);
+      if (name === i + 9 || !startsAt(text, name, "svg")) return false;
+      i = doctypeEnd(text, name + 3);
+      if (i < 0) return false;
+    } else {
+      break;
+    }
+    i = skipSpace(text, i);
+  }
+  return startsAt(text, i, "<svg") && /[\s/>]/.test(text[i + 4] ?? "");
+}
 
 // `sips -g format -g pixelWidth -g pixelHeight`.
 export function parseSips(stdout) {
@@ -47,8 +108,15 @@ export function parseSips(stdout) {
 
 // D12: an SVG's own width and height (plain or px), the viewBox's ratio for a
 // missing one, the viewBox alone, else a browser's 300 × 150.
+// Linear on anything: the first <svg and its attributes, read up to its `>` or
+// ROOT_TAG characters, whichever comes first (a root tag is short). A regex retried
+// from every `<svg` of a body with no `>` would be quadratic.
+const ROOT_TAG = 4096;
 export function svgSize(text) {
-  const attrs = /<svg\b([^>]*)>/i.exec(String(text ?? ""))?.[1] ?? "";
+  const body = String(text ?? "");
+  const at = body.search(/<svg\b/i);
+  const close = at < 0 ? -1 : body.indexOf(">", at);
+  const attrs = at < 0 ? "" : body.slice(at + 4, close < 0 ? at + 4 + ROOT_TAG : Math.min(close, at + 4 + ROOT_TAG));
   const attr = (name) => new RegExp(`(?:^|\\s)${name}\\s*=\\s*(["'])(.*?)\\1`, "i").exec(attrs)?.[2] ?? null;
   const length = (name) => {
     const m = /^\s*([\d.]+)\s*(?:px)?\s*$/i.exec(attr(name) ?? "");

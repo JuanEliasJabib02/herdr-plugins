@@ -243,6 +243,11 @@ test("D12: sizes: sips for rasters, the SVG's own width/height/viewBox, capped t
   assert.deepEqual(svgSize('<svg width="48" viewBox="0,0,24,16">'), { width: 48, height: 32 }, "one side and the viewBox's ratio");
   assert.deepEqual(svgSize('<svg width="100%" height="100%" viewBox="0 0 10 5">'), { width: 10, height: 5 }, "percentages say nothing");
   assert.deepEqual(svgSize("<svg>"), { width: 300, height: 150 }, "a browser's default");
+  const flood = "<svg ".repeat(200000) + ' width="9 height="9';
+  const started = performance.now();
+  assert.deepEqual(svgSize(flood), { width: 300, height: 150 }, "a tag that never closes: the default");
+  assert.ok(performance.now() - started < 100, "linear: a 1 MB body of open tags doesn't hold the thread");
+  assert.deepEqual(svgSize(`<svg width="40" height="20" ${"x ".repeat(5000)}>`), { width: 40, height: 20 }, "the root tag's attributes are read from its start");
   assert.deepEqual(fitWidth({ width: 1000, height: 500 }, 400), { width: 400, height: 200 });
   assert.deepEqual(fitWidth({ width: 90, height: 20 }, 400), { width: 90, height: 20 });
   assert.deepEqual(fitWidth({ width: 90, height: 20 }, Infinity), { width: 90, height: 20 });
@@ -260,6 +265,34 @@ test("R7: an SVG is a document that starts with <svg, after a BOM, an XML prolog
   assert.equal(isSvg("plain text <svg>"), false);
   assert.equal(isSvg("<svgx>"), false);
   assert.equal(isSvg(""), false);
+});
+
+test("R7, C-2: an Adobe Illustrator export, its doctype holding an internal subset of entities, is an SVG", () => {
+  const illustrator = [
+    '<?xml version="1.0" encoding="utf-8"?>',
+    "<!-- Generator: Adobe Illustrator 16.0.0, SVG Export Plug-In . SVG Version: 6.00 Build 0)  -->",
+    '<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd" [',
+    '\t<!ENTITY ns_extend "http://ns.adobe.com/Extensibility/1.0/">',
+    '\t<!ENTITY ns_flows "http://ns.adobe.com/Flows/1.0/">',
+    "]>",
+    '<svg version="1.1" id="Layer_1" xmlns="http://www.w3.org/2000/svg" xmlns:x="&ns_extend;" width="64px" height="32px" viewBox="0 0 64 32">',
+  ].join("\n");
+  assert.equal(isSvg(illustrator), true);
+  assert.equal(isSvg('<!DOCTYPE svg [ <!ENTITY a "]>"> <!-- ] > --> ]><svg>'), true, "a ] or > inside a quoted value or a comment doesn't end the subset");
+  assert.equal(isSvg('<!DOCTYPE svg [ <!ENTITY a "x">'), false, "a subset that never closes");
+  assert.equal(isSvg('<!DOCTYPE html [ <!ENTITY a "x"> ]><svg>'), false, "still an svg doctype only");
+});
+
+test("R7, C-1: the check takes linear time: thousands of comments before something that isn't <svg fail at once", () => {
+  const comments = "<!-- a -->".repeat(5000);
+  const started = performance.now();
+  assert.equal(isSvg(`${comments}<html>`), false);
+  const took = performance.now() - started;
+  assert.ok(took < 100, `took ${took.toFixed(1)} ms`);
+  assert.equal(isSvg(`${comments}<svg>`), true);
+  assert.equal(isSvg(`${comments}\n<svg/>`), true, "<svg followed by /");
+  assert.equal(isSvg("<!-- a --> b --><svg>"), false, "a comment ends at its first -->");
+  assert.equal(isSvg("<!-- never closed <svg>"), false);
 });
 
 const APP = "/home/juan/.config/herdr-app";
