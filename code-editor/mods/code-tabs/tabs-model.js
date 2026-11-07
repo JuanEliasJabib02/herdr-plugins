@@ -91,9 +91,10 @@ export function doubleClickCommand(tab, view) {
   return view.preview ? [`${FILE_MOD}.pin-${view.doc}`] : null;
 }
 
-// Which panels the bar offers. The Explorer always: cmd-l opens it whatever the
-// person picked in Herdr's welcome (its first look leaves an empty list), and a
-// panel not on offer closes at the next change of space. Changes as they picked.
+// Which panels are on offer, in the panel's header and the bar's memory. The
+// Explorer always: cmd-l opens it whatever the person picked in Herdr's welcome
+// (its first look leaves an empty list), and a panel not on offer closes at the
+// next change of space. Changes as they picked.
 export function enabledPanels(chosen) {
   const offersChanges = Array.isArray(chosen) ? chosen.includes("changes") : true;
   return offersChanges ? ["explorer", "changes"] : ["explorer"];
