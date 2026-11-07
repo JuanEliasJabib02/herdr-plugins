@@ -135,6 +135,211 @@ icons.
   in it, shows its name in italics and its Material icon; with `dirty: true` in
   `code-editor.live` it shows the dot, active or not.
 
+## The Explorer
+
+Mod `mods/code-explorer/`, in the right panel: the files of the space's repo as a tree
+with git marks, `Names` to filter them by path, `Contents` to search inside them, and
+the operations on them, with Orca's behavior and Orca's words. A file opens in a tab of
+its own, under **The editor**.
+
+**What you see**
+
+- **The card:** `chrome`, a 1 px `border`, radius 10, 13 px text in `foreground`.
+- **Header:** 42 px: the repo's name, semibold and truncated, with its folder as the
+  tooltip, then three 26 px buttons with radius 6 and 14 px icons in `muted`: "Collapse
+  All", "Refresh Explorer", which spins from 200 ms on, and "More Explorer Actions". A
+  button with nothing to do is at half opacity.
+- **More Explorer Actions:** under the header at the right, 228 px, `popover`, a 1 px
+  `border`, radius 8, 26 px rows at 12.5 px: "Show Dotfiles" and, in a git repo, "Show
+  Git Ignored Files", with a check while on, then "Reveal in Finder".
+- **The switch:** "Names" and "Contents" on `canvas`, radius 8, each 28 px high with
+  radius 6: `selected` and `foreground` when on, `muted` when not.
+- **"Find files",** in Names: 32 px, radius 7, a 1 px `input` border, `accent` while
+  focused, with a spinner while the list loads and an X, "Clear file filter", once
+  something's typed.
+- **A row:** 24 px, indented `depth × 16 + 8`, `hover` under the pointer, `selected` for
+  the file of the shown tab: a 12 px chevron on a folder that opens, its Material icon at
+  16 px, the name truncated, and at the right a read's error in `ansi1` at 11 px or the
+  git letter, semibold at 11 px.
+- **Git's colors,** on the letter and the name: M `#e2c08d`, A `#81b88b`, D `#c74e39`, R,
+  U and C `#73c991`. Ignored and with no letter: italic, `dim`, and a 12 px icon labeled
+  "Ignored by .gitignore". A folder that can't be entered is `dim`, with no chevron.
+- **In place of rows:** "No files in this workspace", "Select a workspace to browse
+  files", "Explorer works on this computer only", "No files match this filter", or "Could
+  not load files for this workspace:" and why, with "Retry". Over the rows, when it
+  applies, at 11 px: "A folder shows its first 5000 entries", "Searching the first 20000
+  files".
+- **Contents:** a 32 px bar, placeholder "Search", labeled "Search files": a spinner while
+  it runs, an X, "Clear search", and 22 px toggles "Match Case", "Match Whole Word", "Use
+  Regular Expression". Under it "{{count}} active" and "Toggle search details", which shows
+  "files to include" (`e.g. *.ts, src/**`) and "files to exclude" (`e.g. *.min.js,
+  dist/**`).
+- **Results:** "5 results in 2 files" at 11 px in `dim`, with "(results truncated)" when
+  they are. A file's row: chevron, icon, name, its folder in `dim` and a count. A match's
+  row: its line number, up to 26 characters before it, the match on `selected`, the rest.
+  Otherwise "Type to search in files", "No results. Try another search or adjust your
+  filters.", "Search failed. Try again." in `ansi1`, or "Select a workspace to search".
+- **A row's menu:** a popup at the pointer, 240 px, `popover`, the row's path in `dim` at
+  the top, 30 px rows with radius 7 at 12.8 px, in this order: "New File", "New Folder", a
+  line, "Copy Path", "Copy Relative Path", on a file "Duplicate", on a folder "Open in
+  Terminal", "Collapse Folder" and "Find in Folder", then "Reveal in Finder", a line,
+  "Rename", and "Delete" in `blocked`. Empty space under the rows offers the first two.
+- **The entry,** for naming: above the rows, what it's for at 11 px in `dim` ("New File in
+  src", "Rename a.js"), then a 26 px box with radius 5 and a 1 px `accent` border: an icon,
+  the input and an X, "Cancel".
+- **The Delete dialog:** modal, 400 by 230 px, `popover`. "Delete 'a.js'?", the path in
+  `dim`, "It moves to the Trash." (a folder: "It moves to the Trash with everything in
+  it."), an error in `blocked` if there is one, and "Cancel" and "Delete", 32 px high with
+  radius 8, "Delete" in `blocked`.
+- **When the Trash says no,** the same dialog: "Couldn't move 'a.js' to the Trash. Delete
+  it permanently?", "This cannot be undone.", and "Delete Permanently" in place of "Delete".
+
+**How it behaves**
+
+- **Which folder:** the focused terminal's, up to its repo's top. A focused file has none,
+  so the tree stays where it was; failing that, the space's first terminal, then the
+  space's folder. Going back to a folder already seen is instant.
+- **The tree:** a folder is read when opened. Folders come first, then natural order
+  without regard to case or accents. `.git`, `node_modules` and Herdr's write temporaries
+  never show. A symlinked folder that leaves the root shows and isn't entered.
+- **Keeping up:** a watch on the root, settled for 100 ms, and every 10 s, which also covers
+  a commit in a worktree. A hidden panel reads again when it shows.
+- **Git's marks** need the root to be the repo's top. A folder shows the strongest letter
+  below it, D over M over A and U over R over C, and a deleted file reaches no folder. A
+  letter wins over the ignored look.
+- **Show Dotfiles** is per root and **Show Git Ignored Files** for all of them, both on by
+  default and both kept across restarts.
+- **Opening a file:** a click opens it in preview, replacing the last preview in its place.
+  A double click within 400 ms pins it. A file already open is selected. A preview with
+  changes, pinned, or with a terminal beside it is never replaced.
+- **Names:** each word somewhere in the lower-cased path, in any order: no fuzzy match, no
+  ranking. Matches show as a tree with its folders open, and a chevron collapses one until
+  the filter's emptied. A query over 2 KiB matches nothing. Collapse All is off, and the
+  list leaves out what the tree hides plus caches like `.next`, `.cache`, `.vscode` and
+  `.local/share`.
+- **Contents:** starts 300 ms after the last change, and a new search stops the last one,
+  whose results stay until the new ones come. Up to 2000 results, and after 15 s what it
+  found is the answer, marked truncated. Esc clears it. Patterns split on commas, and
+  `*.{ts,tsx}` works. Leaving Contents stops the search and keeps the text.
+- **A result** opens pinned at its line. A clean file open alone in its tab reopens there; if
+  it can't, it's selected and a toast says "a.js is already open: line N".
+- **New File and New Folder** go in the folder pressed, or beside the file pressed, and open
+  that folder first. Enter creates, a blank name cancels, and Esc and the X cancel. A new
+  file opens pinned; a new folder opens nothing.
+- **Rename** fills the entry and selects the name before its extension. The same text does
+  nothing. An open folder stays open under its new name.
+- **An invalid or used name:** a toast, in Orca's words when it's taken ("A file or folder
+  named 'a.js' already exists in this location"), and the entry stays with its text to fix.
+  A file, a folder and a broken link all hold a name, and nothing is ever overwritten.
+- **Duplicate,** on files: `<stem> copy<ext>`, then `copy 2`, up to `copy 10`, with the same
+  mode, not opened. A link stays a link.
+- **Delete** asks, then moves to the Trash, and nothing happens on Enter. If the Trash fails
+  and the path is still there, the dialog offers "Delete Permanently", which is the one way
+  to `rm`. If it stopped without an answer, it says so and offers nothing, since nobody knows
+  what's left. Closing the dialog mid-run doesn't stop it: a failure becomes a toast.
+- **Unsaved changes stop it:** Rename, Duplicate and Delete refuse with `"a.js" has unsaved
+  changes` before touching the disk, for any file at that path or under it, in any space. A
+  draft on disk counts too, because `code-editor.live` can lag after a hang.
+- **Tabs follow:** a clean file's tab reopens at the new name in its old place, keeping
+  preview or pin, one at a time and each in its own space, and the tab that was active comes
+  back. With a terminal beside it, only the file's pane is replaced. Delete closes the tabs,
+  and only after the disk says the path is gone.
+- **Copy Path** is absolute and **Copy Relative Path** from the root. **Open in Terminal** is
+  a new tab in that folder. **Collapse Folder** takes what's open inside too, and shows only
+  with no filter. **Find in Folder** opens Contents with the folder in "files to include",
+  its special characters escaped, keeping what's typed.
+- **Refused everywhere:** the root itself, `.git` in any capitals, a path with `..`, and
+  anything whose real path leaves the root, including a link to it.
+
+**Commands,** `herdr-app do code-explorer.<command>`, each the same method as its click:
+`open:<rel>`, `pin:<rel>`, `toggle:<rel>`, `collapse-all`, `refresh`, `more`, `dotfiles`,
+`ignored`, `names`, `contents`, `filter:<text>`, `clear-filter`, `search:<text>`,
+`clear-search`, `match-case`, `whole-word`, `regex`, `search-details`, `include:<text>`,
+`exclude:<text>`, `open-result:<n>`, `toggle-result:<path>`, `menu:<rel>`, `new-file:<rel>`,
+`new-folder:<rel>`, `rename:<rel>`, `entry:<text>`, `entry-submit`, `entry-cancel`,
+`duplicate:<rel>`, `delete:<rel>`, `delete-confirm`, `delete-permanent`, `delete-cancel`,
+`copy-path:<rel>`, `copy-relative-path:<rel>`, `reveal:<rel>`, `open-in-terminal:<rel>`,
+`collapse-folder:<rel>`, `find-in-folder:<rel>`. On `menu`, `new-file`, `new-folder`, `reveal`
+and `open-in-terminal`, an empty `<rel>` is the root; `rename`, `duplicate` and `delete` refuse it.
+
+- **`<rel>//<name>`** on `new-file`, `new-folder` and `rename` is the entry, its text and
+  Enter in one command. No path and no valid name can hold `//`.
+- **What a click would have done** goes to the log as `code-explorer: <json>`: `tree` for the
+  rows, `results` for the search, `ops` for the entry, the dialog, the last operation and the
+  last copy.
+- **`menu-pick:<id>`** reaches an open menu's own copy, the same choice as clicking that item.
+- **`copy-path` and `copy-relative-path`** only report, in `ops`, and `menu-pick` on a copy item
+  only logs: from a test window, a real copy would overwrite the person's clipboard.
+
+**Built from**
+
+- **`main.js`:** one mod in views. The layout's copy is the panel, which draws and runs
+  programs, reads commands and runs every operation. An overlay's props `{ view }` make a
+  copy `file-menu.js`, the popup, or `file-dialog.js`, the dialog. A closed popup's tasks are
+  cut at 250 ms, so a menu only chooses and sends the panel a command, and copies with its
+  own `cx`.
+- **`tree-model.js`:** order, listing, rows, where a space is rooted, what a batch of changes
+  reloads, and opening a file: `planOpen` decides, `openFile` runs it, and `closeCommand` is
+  the one way to close a file's tab.
+- **`names-model.js`, `search-model.js`:** the filter, and the search with its arguments, parse
+  and trim. Neither has a Herdr import.
+- **`ops-model.js`:** the operations and their guards, with the programs and tabs passed in as
+  `io`. Each outcome is read from the disk afterwards, because `mv -n` onto a taken name says 0
+  and in this volume `foo` still resolves after `mv foo Foo`.
+- **`git-model.js`, `icon-model.js`:** the letters and what's ignored; which icon. `ui/` holds the
+  mod's own icons. It also draws `mods/workspace-chrome/` chevrons, `x`, `check` and `spinner`,
+  Herdr's own.
+- **Programs:** `git`, `sh`, `find` and `grep` to read, `pkill -f` to stop a search, `/bin/realpath`,
+  `/bin/ls`, `/bin/mkdir`, `/bin/mv`, `/bin/cp`, `/usr/bin/cmp`, `/usr/bin/trash -s`, `/bin/rm -rf`
+  and `/usr/bin/open -R`. Every path goes as one absolute argument, so `-rf` and `$(x)` are
+  names like any other.
+- **Herdr's shared state:** writes `code-editor.docs` (`{ [tabId]: { doc, file, preview } }`, nobody
+  else does) and `code-editor.op` (the Delete dialog's `{ rel, name, folder, step, busy, error }`),
+  and reads `code-editor.live`. An entry counts only while a `code-file` pane is in that tab. It
+  reads `<home>/code-editor/drafts/`.
+
+**Watch out**
+
+- **Clicks can't be posted to Herdr,** so the right click, the menu's items and the dialog's
+  buttons are proved through their commands, and pressing them for real is left for a person.
+- **The entry sits above the rows, not at the row:** a virtual list's row can't hold a handler,
+  and the rows scroll under it.
+- **Leaving the entry doesn't create anything,** unlike Orca: focus can leave on its own here, and
+  half a name isn't a name. Enter, Esc or its X.
+- **Delete asks first,** unlike Orca's local delete, and there's no undo.
+- **There's no "Copy":** `write_to_clipboard` only carries text, which is what Copy Path does.
+- **Duplicate refuses a file with unsaved changes** too, though it wouldn't lose them: it would
+  copy the disk's text, not what's on screen.
+- **A link that leaves the root can't be renamed or deleted from here,** even though only the link
+  would move. A broken link can, since it leads nowhere.
+- **A tab at a line reopens at the top** when its file's renamed: the Explorer doesn't know the line.
+- **Beside a terminal,** a renamed file's tab keeps its old name, as closing the file there does.
+- **`<mod>.<command>` reaches shown copies only:** hide the panel with the dialog open and its action
+  buttons don't arrive. Cancel and Esc close it anyway, and the file's untouched.
+- **`reveal` brings Finder forward,** so it's no command for a test window behind the person's work.
+- **macOS only:** `trash` and `open -R`. Without `trash`, Delete says it didn't finish and offers
+  nothing.
+- **Local files only:** in a remote space the panel says "Explorer works on this computer only" and
+  does nothing, since `writeTextFile` and `watchFolder` don't reach other machines.
+- **`main.js` and what it imports use `import * as herdr`** for what `test/code-explorer-names.test.js`'s
+  stand-in lacks: a named import of it fails that whole test file at load. For the same reason, an
+  `InputState` goes before `filterInput` in `init`.
+
+**Done when**
+
+- `node --test 'test/*.test.js'` reports `fail 0`: real files under a temp folder for taking a name,
+  a folder as the target, a change of capitals, names with a dash and the guards, and a stand-in
+  `trash` for its four outcomes. `herdr-app check "$PWD/code-editor/mods/code-explorer"` passes.
+- The tree shows a repo's letters, with its folders' strongest one, and `.git` and `node_modules`
+  never.
+- `filter:<word>` shows a tree of what matches, and `search:<word>` results that open at their line.
+- `new-file:<rel>//<name>` leaves an empty file and a pinned tab, `new-folder:<rel>//<name>` a folder,
+  and either one on a used name leaves a toast and the disk as it was.
+- `duplicate:<rel>` leaves `<stem> copy<ext>`, then `copy 2`.
+- `delete:<rel>`, then `delete-confirm`: `trash -s` for real, and the path gone from the disk.
+- `rename:<rel>//<name>` with a clean tab on that file reopens it with the new path. With unsaved
+  changes it's refused, and the file and the tab stay.
+
 ## The editor
 
 Mod `mods/code-file/`, one copy per file tab, with props `{ doc, file, line? }`:

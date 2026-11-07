@@ -2,19 +2,24 @@
 // (S1, S3): the repo's name and its three buttons, Names and Contents, and a lazy
 // tree with Material icons and git marks. A file opens in a tab of its own (S6).
 //
-// tree-model.js, names-model.js, search-model.js, git-model.js and icon-model.js decide;
-// this file draws and runs programs. Every click goes through a method a
-// `code-explorer.<command>` can also call (D2), since real clicks can't be posted to
-// Herdr: see command().
+// tree-model.js, names-model.js, search-model.js, ops-model.js, git-model.js and
+// icon-model.js decide; this file draws and runs programs. Every click goes through a
+// method a `code-explorer.<command>` can also call (D2), since real clicks can't be
+// posted to Herdr: see command().
 //
-// T8's row menu goes on the list, with on_item_secondary_click, and its items in
-// moreMenu().
+// One mod in views, as projects-sidebar's: the layout's copy has no props { view } and
+// is the panel, the only one that runs operations; file-menu.js and file-dialog.js are
+// the copies its overlays get.
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, v_virtual_list, Scrollbar, InputState, Input } from "gpui-base";
 import {
   spaces, panes, focused, exec, readTextFile, watchFolder, theme, shared, setShared, run, notify, nextCommand, layout, appHome, home,
 } from "herdr";
-import { ICON_THEME, fileIcon, parseIconTheme } from "./icon-model.js";
+// What's used from here by name would fail this whole file at load in a test whose
+// stand-in for Herdr lacks it: writeTextFile, closeOverlay and props.
+import * as herdr from "herdr";
+import * as fs from "fs/promises";
+import { ICON_THEME, fileIcon, folderIcon, parseIconTheme } from "./icon-model.js";
 import { GIT_COLORS, IGNORED_ARGS, ROOT_ARGS, STATUS_ARGS, buildFolderStatus, parseIgnored, parseRepo, parseStatus } from "./git-model.js";
 import {
   ALL, DOCS_KEY, LIST_LIMIT, LIST_SCRIPT, ROW_HEIGHT, TEXT, batchPlan, contentsMessage, indentOf, isDoubleClick, isShown, listingLimited, locate,
@@ -25,6 +30,12 @@ import {
   DEBOUNCE, SEARCH, SEARCH_LIMIT, activeFilters, isBlank, killArgs, matchAt, matchParts, newSearch, newTag, noResults, overLimit, parseResults, readSearch, searchError, searchKey,
   searchMessage, searchRows, searchSummary,
 } from "./search-model.js";
+import {
+  OPS, OP_KEY, clearPath, closeTabs, copyText, createPath, deleteForever, duplicateFile, entryTitle, folderPattern, movedFolders, relProblem, renamePath, renameSelection,
+  reopenTabs, splitTarget, targetFolder, trashPath, withoutFolder,
+} from "./ops-model.js";
+import FileMenu, { openFileMenu } from "./file-menu.js";
+import FileDialog, { openFileDialog } from "./file-dialog.js";
 
 // Changes a watch can't see (a commit in a worktree writes outside it), and every
 // change when the watch is refused. As Herdr's files panel.
@@ -40,6 +51,8 @@ const FILTER_LIST = "explorer-filter";
 const SEARCH_LIST = "explorer-search";
 // What the `results` command prints of a long list.
 const REPORTED_ROWS = 200;
+// A popup closing hands the keyboard back a moment after the entry took it.
+const ENTRY_REFOCUS = 150;
 const NO_GIT = { marks: new Map(), folders: new Map(), ignored: new Set() };
 
 // Herdr's shipped chrome icons, there in every install; the rest are this mod's.
@@ -48,6 +61,9 @@ const ui = (name) => `mods/code-explorer/ui/${name}.svg`;
 const baseName = (path) => path.slice(path.lastIndexOf("/") + 1);
 
 const stop = (_e, cx) => cx.stop_propagation();
+
+// The copies an overlay gets.
+const OVERLAYS = { "file-menu": FileMenu, "file-dialog": FileDialog };
 
 // What a folder belongs to: its repo's top in git, so a `cd` into a subfolder keeps
 // the same tree, else itself. `real` is what watchFolder and symlinks are measured
@@ -60,7 +76,14 @@ async function resolveFolder(cwd) {
 }
 
 export default class CodeExplorer extends View {
-  init(_props, cx) {
+  init(p, cx) {
+    const given = herdr.props?.() ?? p ?? {};
+    if (Object.hasOwn(OVERLAYS, given.view ?? "")) {
+      this.overlayView = new OVERLAYS[given.view]();
+      this.overlayView.init(given, cx);
+      return;
+    }
+    this.overlayView = null;
     // What's known of each root visited, so going back to a space is instant.
     this.roots = new Map();
     this.folders = new Map();
@@ -80,6 +103,14 @@ export default class CodeExplorer extends View {
     this.manual = false;
     this.spinning = false;
     this.opening = Promise.resolve();
+    // The disk's turn, apart: a Trash stuck for exec's 30 s doesn't hold up opening files.
+    this.working = Promise.resolve();
+    // Which row, if any, the press now reaching the panel was on.
+    this.rowPressed = false;
+    this.entry = null;
+    this.deleting = null;
+    this.lastOp = null;
+    this.copied = null;
     this.dotfiles = table(this.stored("dotfiles", {}));
     this.showIgnored = this.stored("ignored", true);
     this.search = newSearch();
@@ -93,6 +124,8 @@ export default class CodeExplorer extends View {
     this.searchInput.on("submit", (_e, cx) => { this.restartSearch(cx); cx.notify(); });
     this.includeInput = this.newField(SEARCH.includeHint, "include", (text, cx) => this.setPattern("include", text, cx));
     this.excludeInput = this.newField(SEARCH.excludeHint, "exclude", (text, cx) => this.setPattern("exclude", text, cx));
+    this.entryInput = InputState.new({});
+    this.entryInput.on("submit", (_e, cx) => { this.submitEntry(cx); cx.notify(); });
     this.filter = "";
     this.query = parseFilter("");
     this.filterCollapsed = new Set();
@@ -128,8 +161,11 @@ export default class CodeExplorer extends View {
     cx.spawn(async (cx) => {
       for (;;) {
         const raw = await nextCommand();
-        try { this.command(raw, cx); }
-        catch (e) { console.log(`code-explorer: ${raw} failed: ${e}`); }
+        try {
+          this.sync(cx);
+          if (!this.state) await this.ready(cx);
+          this.command(raw, cx);
+        } catch (e) { console.log(`code-explorer: ${raw} failed: ${e}`); }
         cx.notify();
       }
     });
@@ -162,6 +198,28 @@ export default class CodeExplorer extends View {
       "open-result": () => this.openResult(arg.trim() ? Number(arg) : null, cx),
       "toggle-result": () => this.toggleResultFile(arg),
       results: () => console.log(`code-explorer: ${JSON.stringify(this.searchSnapshot())}`),
+      menu: () => this.openMenu(arg),
+      // A menu's own, read by its copy: nothing to do in this one.
+      "menu-pick": () => {},
+      "new-file": () => this.startEntry("file", arg, cx),
+      "new-folder": () => this.startEntry("folder", arg, cx),
+      rename: () => this.startEntry("rename", arg, cx),
+      entry: () => this.typeEntry(arg),
+      "entry-submit": () => this.submitEntry(cx),
+      "entry-cancel": () => this.cancelEntry(),
+      duplicate: () => this.duplicate(arg, cx),
+      delete: () => this.askDelete(arg, cx),
+      "delete-confirm": () => this.confirmDelete(cx),
+      "delete-permanent": () => this.deletePermanently(cx),
+      "delete-cancel": () => this.cancelDelete(),
+      "delete-closed": () => this.deleteClosed(arg),
+      "copy-path": () => this.copy("path", arg),
+      "copy-relative-path": () => this.copy("relative", arg),
+      reveal: () => this.reveal(arg, cx),
+      "open-in-terminal": () => this.openInTerminal(arg),
+      "collapse-folder": () => this.collapseFolder(arg),
+      "find-in-folder": () => this.findInFolder(arg, cx),
+      ops: () => console.log(`code-explorer: ops ${JSON.stringify(this.opsSnapshot())}`),
     };
     if (Object.hasOwn(commands, name)) commands[name]();
     else console.log(`code-explorer: no command "${raw}"`);
@@ -192,7 +250,28 @@ export default class CodeExplorer extends View {
     };
   }
 
+  // What the `ops` command prints, to test what a click would have done.
+  opsSnapshot() {
+    const entry = this.entry, deleting = this.deleting;
+    return {
+      entry: entry ? { kind: entry.kind, rel: entry.rel, folder: entry.folder, busy: entry.busy, text: this.entryInput.value() } : null,
+      deleting: deleting ? { ...this.publicDelete(), open: deleting.open } : null,
+      last: this.lastOp,
+      copied: this.copied,
+    };
+  }
+
   // ── Which root ───────────────────────────────────────────────────────────
+
+  // sync runs in render, and a covered window or a locked screen draws nothing, so a
+  // command can be the first thing to need the root.
+  async ready(cx) {
+    const cwd = this.where?.cwd;
+    if (!cwd || this.where.machine) return;
+    const found = this.folders.get(cwd) ?? await resolveFolder(cwd);
+    this.folders.set(cwd, found);
+    if (this.where?.cwd === cwd) this.enter(found, cx);
+  }
 
   sync(cx) {
     const all = spaces(), active = all.find((s) => s.active);
@@ -205,7 +284,7 @@ export default class CodeExplorer extends View {
     this.where = where;
     // D21: writeTextFile and watchFolder are local only, and nothing here may
     // touch a local path by mistake.
-    if (!where?.cwd || where.machine) { this.state = null; return; }
+    if (!where?.cwd || where.machine) { this.state = null; this.entry = null; return; }
     const known = this.folders.get(where.cwd);
     if (known) { this.enter(known, cx); return; }
     if (!sameSpace) this.state = null;
@@ -229,6 +308,7 @@ export default class CodeExplorer extends View {
     if (this.state === state) return;
     this.state = state;
     this.plan = null;
+    this.entry = null;
     // A filter's text goes along to the new root; what it read or collapsed in the old
     // one doesn't, and neither does what it left here. ALL below reads the list.
     state.list = null;
@@ -416,19 +496,32 @@ export default class CodeExplorer extends View {
     const state = this.state, space = this.where?.space;
     if (!state || !space || !path || this.rows().find((r) => r.path === path)?.dir) return;
     const file = `${state.root}/${path}`;
+    this.inTurn("opening", cx, (cx) => openFile({ file, pin, space, line }, this.tabIo(cx)));
+  }
+
+  // One at a time in each lane, in the order asked.
+  inTurn(lane, cx, work) {
     cx.spawn(async (cx) => {
-      const turn = this.opening;
+      const turn = this[lane];
       let done;
-      this.opening = new Promise((resolve) => { done = resolve; });
+      this[lane] = new Promise((resolve) => { done = resolve; });
       await turn;
-      try {
-        await openFile({ file, pin, space, line }, {
-          spaces, panes, shared, setShared, run, notify, newDoc,
-          wait: (ms) => new Promise((resolve) => { cx.timer.after(ms, () => resolve()); }),
-        });
-      } catch (e) { console.log(`code-explorer: opening ${file} failed: ${e}`); }
+      try { await work(cx); }
+      catch (e) { console.log(`code-explorer: ${lane} failed: ${e}`); }
       finally { done(); cx.notify(); }
     });
+  }
+
+  tabIo(cx) {
+    return {
+      spaces, panes, shared, setShared, run, notify, newDoc,
+      wait: (ms) => new Promise((resolve) => { cx.timer.after(ms, () => resolve()); }),
+    };
+  }
+
+  // What ops-model.js runs against.
+  opIo(cx) {
+    return { ...this.tabIo(cx), exec, appHome, writeTextFile: herdr.writeTextFile, readdir: (dir) => fs.readdir(dir) };
   }
 
   canCollapse() {
@@ -455,6 +548,7 @@ export default class CodeExplorer extends View {
     const from = this.view;
     this.view = view;
     this.menu = false;
+    if (view !== "names") this.entry = null;
     // As in Orca: the text stays, and what was collapsed under it goes.
     if (view === "names") this.readList(cx);
     else this.filterCollapsed = new Set();
@@ -463,6 +557,246 @@ export default class CodeExplorer extends View {
     // unless the one on screen is it.
     if (view === "names") this.stopSearch(cx);
     else if (this.found.ranKey !== searchKey(this.state?.root ?? null, this.search)) this.restartSearch(cx);
+  }
+
+  // ── File operations (S13, D21, D23) ──────────────────────────────────────
+
+  // What's said of the last one, in the log's terms, and to the person if it failed.
+  report(op, result, { quiet = false } = {}) {
+    this.lastOp = { op, status: result.status, error: result.error ?? null, rel: result.rel ?? null };
+    if (result.error && !quiet) notify({ title: result.error, level: "error" });
+  }
+
+  // Every folder is read again, its open ones included: a rename can touch any of them.
+  reload(cx) {
+    this.plan = mergePlans(this.plan, ALL);
+    this.drain(cx);
+  }
+
+  isFolder(rel) {
+    if (!rel) return true;
+    const row = this.rows().find((r) => r.path === rel);
+    if (row) return row.dir;
+    const cut = rel.lastIndexOf("/");
+    const listed = this.state?.entries.get(cut === -1 ? "" : rel.slice(0, cut))?.find((e) => e.name === rel.slice(cut + 1));
+    // Past what's been read: a file here fails at the write, with nothing changed.
+    return listed ? listed.dir : true;
+  }
+
+  openMenu(rel) {
+    const state = this.state;
+    if (!state) return;
+    const row = rel ? this.rows().find((r) => r.path === rel) : null;
+    if (rel && !row) return;
+    openFileMenu({ root: state.root, rel, dir: rel ? row.dir : true, open: Boolean(row?.open), filtering: this.filtering() });
+  }
+
+  // A right click reaches the row first and then what's around the list, so what's
+  // around it opens the menu of the empty space only if no row took the press.
+  pressRow(path) {
+    this.rowPressed = true;
+    this.openMenu(path);
+  }
+
+  pressArea() {
+    if (!this.rowPressed) this.openMenu("");
+    this.rowPressed = false;
+  }
+
+  // The entry: the same for New File, New Folder and Rename. A command's `<rel>//<name>`
+  // is the text and Enter too (D2).
+  startEntry(kind, arg, cx) {
+    const state = this.state;
+    if (!state || this.entry?.busy) return;
+    const { rel, name } = splitTarget(arg);
+    if (kind === "rename" && !rel) return;
+    if (this.view !== "names") this.setView("names", cx);
+    const folder = kind === "rename" ? rel.slice(0, Math.max(rel.lastIndexOf("/"), 0)) : targetFolder(rel, this.isFolder(rel));
+    this.entry = { kind, rel, folder, busy: false, state };
+    if (kind !== "rename" && this.rows().find((r) => r.path === folder)?.enterable && !state.expanded.has(folder) && !this.filtering()) this.toggle(folder, cx);
+    const text = kind === "rename" ? baseName(rel) : "";
+    this.entryInput.set_value(text);
+    this.focusEntry(text, cx);
+    if (name !== null) {
+      this.typeEntry(name);
+      this.submitEntry(cx);
+    }
+  }
+
+  focusEntry(text, cx) {
+    const take = () => {
+      this.entryInput.focus();
+      if (text) this.entryInput.set_selected_range(renameSelection(text));
+    };
+    take();
+    cx.timer.after(ENTRY_REFOCUS, () => { if (this.entry && this.entryInput.value() === text) take(); });
+  }
+
+  typeEntry(text) {
+    if (this.entry) this.entryInput.set_value(text);
+  }
+
+  cancelEntry() {
+    if (!this.entry?.busy) this.entry = null;
+  }
+
+  entryKey(event, cx) {
+    if (event.key !== "escape") return;
+    cx.stop_propagation();
+    this.cancelEntry();
+    cx.notify();
+  }
+
+  // A failure keeps the entry and its text, to fix.
+  submitEntry(cx) {
+    const entry = this.entry;
+    if (!entry || entry.busy) return;
+    const raw = this.entryInput.value(), { state } = entry, where = { root: state.root, real: state.real };
+    entry.busy = true;
+    this.inTurn("working", cx, async (cx) => {
+      const io = this.opIo(cx);
+      const result = entry.kind === "rename"
+        ? await renamePath({ ...where, rel: entry.rel, raw }, io)
+        : await createPath({ ...where, folder: entry.folder, raw, kind: entry.kind }, io);
+      entry.busy = false;
+      this.report(entry.kind, result);
+      if (result.status === "error") return;
+      if (this.entry === entry) this.entry = null;
+      if (result.status === "cancel") return;
+      if (entry.kind === "rename") {
+        state.expanded = movedFolders(state.expanded, entry.rel, result.rel);
+        if (result.tabs.length) this.inTurn("opening", cx, (cx) => reopenTabs({ tabs: result.tabs, to: result.abs }, this.opIo(cx)));
+      }
+      // As in Orca: a new file opens for good; a new folder doesn't open.
+      if (entry.kind === "file" && this.state === state) this.open(result.rel, true, cx);
+      if (this.state === state) this.reload(cx);
+    });
+  }
+
+  duplicate(rel, cx) {
+    const state = this.state;
+    if (!state) return;
+    this.inTurn("working", cx, async (cx) => {
+      const result = await duplicateFile({ root: state.root, real: state.real, rel }, this.opIo(cx));
+      this.report("duplicate", result);
+      if (result.status === "ok" && this.state === state) this.reload(cx);
+    });
+  }
+
+  // What the dialog draws, in code-editor.op. D23: the run is here, never in the dialog.
+  publicDelete() {
+    const { rel, name, folder, step, busy, error } = this.deleting;
+    return { rel, name, folder, step, busy, error };
+  }
+
+  publishDelete() {
+    setShared(OP_KEY, this.deleting ? this.publicDelete() : null);
+  }
+
+  // The question, once nothing stops it: unsaved changes never get as far as a dialog.
+  askDelete(rel, cx) {
+    const state = this.state;
+    if (!state || this.deleting?.busy) return;
+    const folder = this.isFolder(rel);
+    this.inTurn("working", cx, async (cx) => {
+      const cleared = await clearPath({ root: state.root, real: state.real, rel }, this.opIo(cx));
+      if (cleared.error) { this.report("delete", { status: "error", error: cleared.error }); return; }
+      this.cancelDelete();
+      if (this.deleting) return;
+      this.deleting = { root: state.root, real: state.real, state, rel, name: cleared.name, folder, step: "confirm", busy: false, error: null, open: true, overlay: null };
+      this.publishDelete();
+      this.deleting.overlay = openFileDialog();
+    });
+  }
+
+  confirmDelete(cx) {
+    if (this.deleting?.step === "confirm") this.runDelete(trashPath, cx);
+  }
+
+  // D23: only once the Trash said no, which is what makes this step exist.
+  deletePermanently(cx) {
+    if (this.deleting?.step === "offer") this.runDelete(deleteForever, cx);
+  }
+
+  runDelete(action, cx) {
+    const del = this.deleting;
+    if (del.busy) return;
+    del.busy = true;
+    del.error = null;
+    this.publishDelete();
+    this.inTurn("working", cx, async (cx) => {
+      const io = this.opIo(cx), result = await action({ root: del.root, real: del.real, rel: del.rel }, io);
+      del.busy = false;
+      // With the dialog open, or with an offer no one would see, it's not a toast of its own.
+      this.report("delete", result, { quiet: del.open || result.status === "offer" });
+      if (result.status === "ok") {
+        closeTabs(result.tabs, io);
+        if (this.state === del.state) this.reload(cx);
+      } else if (del.open) {
+        if (result.status === "offer") del.step = "offer";
+        else del.error = result.error;
+        this.publishDelete();
+        return;
+      } else if (result.status === "offer") {
+        // Esc took the dialog away during the run: no offer to no one.
+        notify({ title: `Failed to move '${del.name}' to the Trash.`, level: "error" });
+      }
+      this.endDelete();
+    });
+  }
+
+  endDelete() {
+    const del = this.deleting;
+    this.deleting = null;
+    if (del?.open) herdr.closeOverlay(del.overlay);
+    this.publishDelete();
+  }
+
+  cancelDelete() {
+    if (this.deleting && !this.deleting.busy) this.endDelete();
+  }
+
+  // The dialog went, by whatever way. A run still going ends in a toast.
+  deleteClosed(overlay) {
+    const del = this.deleting;
+    if (!del || (overlay && del.overlay !== overlay)) return;
+    del.open = false;
+    if (!del.busy) this.endDelete();
+  }
+
+  // D2: a click copies in the menu's copy. This reports instead of writing, because a
+  // test window's clipboard is the person's.
+  copy(kind, rel) {
+    const state = this.state;
+    if (!state || !rel) return;
+    this.copied = { kind, text: copyText(kind, state.root, rel) };
+  }
+
+  // Nothing here changes a file, so the root is fine, and only the path's shape is asked.
+  reveal(rel, cx) {
+    const state = this.state;
+    if (!state || (rel && relProblem(rel))) return;
+    const abs = rel ? `${state.root}/${rel}` : state.root;
+    cx.spawn(async () => {
+      const r = await exec("/usr/bin/open", ["-R", abs]).catch(() => null);
+      if (r?.code !== 0) notify({ title: `Couldn't reveal ${baseName(abs)}`, level: "error" });
+    });
+  }
+
+  openInTerminal(rel) {
+    const state = this.state;
+    if (!state || (rel && relProblem(rel)) || !this.isFolder(rel)) return;
+    run("tab.new", { space: this.where.space, folder: rel ? `${state.root}/${rel}` : state.root });
+  }
+
+  collapseFolder(rel) {
+    if (this.state) this.state.expanded = withoutFolder(this.state.expanded, rel);
+  }
+
+  findInFolder(rel, cx) {
+    if (!this.state) return;
+    this.setView("contents", cx);
+    this.typePattern("include", folderPattern(rel), cx);
   }
 
   // ── The filter ───────────────────────────────────────────────────────────
@@ -786,7 +1120,8 @@ export default class CodeExplorer extends View {
     const text = filtering
       ? filterMessage({ tooLarge: this.query.tooLarge, loaded: Boolean(list?.loaded), error: failed, rows: rows.length })
       : treeMessage({ hasFolder: Boolean(this.where?.cwd), remote: Boolean(this.where?.machine), loaded: Boolean(state?.loaded), error: failed, rows: rows.length });
-    const area = v_flex().flex_1().min_h(0);
+    const area = v_flex().id("explorer-tree-area").flex_1().min_h(0)
+      .when(Boolean(state), (el) => el.on_mouse_down("right", (_e, cx) => { this.pressArea(); cx.notify(); }));
     if (text) {
       return area.child(this.message(t, text))
         .when(Boolean(failed), (el) => el.child(div().flex().justify_center().child(div().id("explorer-retry").h(26).px(10).flex().items_center().rounded(6).border_1().border_color(t.border).cursor_pointer()
@@ -803,8 +1138,26 @@ export default class CodeExplorer extends View {
       .child(div().flex_1().min_h(0).relative().pb(8)
         .child(v_virtual_list(id, rows.length, ROW_HEIGHT, (i) => rows[i].path, (range) => rows.slice(range.start, range.end).map((row) => this.row(t, filtering ? dressRow(row, git, icons) : row, root, activeFile)))
           .on_item_click((path, cx) => { this.clickRow(path, cx); cx.notify(); })
+          .on_item_secondary_click((path, _e, cx) => { this.pressRow(path); cx.notify(); })
           .size_full())
         .child(Scrollbar.vertical(id).absolute().inset_0()));
+  }
+
+  // Above the list and not in it: a row's renderer can't hold a handler or take the
+  // keyboard's Esc, and the rows scroll under it. Orca's 26 px.
+  entryBar(t) {
+    const entry = this.entry;
+    const icon = entry.kind === "folder" ? folderIcon(this.icons, "", false) : fileIcon(this.icons, entry.kind === "rename" ? baseName(entry.rel) : "");
+    return v_flex().flex_none().mx(10).mb(8).gap(3)
+      .child(div().px(2).text_size(11).text_color(t.dim).truncate().child(entryTitle(entry)))
+      .child(h_flex().id("explorer-entry").h(26).px(6).gap(6).items_center().rounded(5).border_1().border_color(t.accent)
+        .on_key_down((event, cx) => this.entryKey(event, cx))
+        .child(image(icon).size(16).flex_none())
+        .child(Input.new(this.entryInput).flex_1().min_w(0).h_full().text_size(13).text_color(t.foreground).accessibility_label(entryTitle(entry)))
+        .child(div().id("explorer-entry-cancel").size(18).flex_none().flex().items_center().justify_center().cursor_pointer().text_color(t.muted)
+          .tooltip(OPS.cancel).accessibility_label(OPS.cancel)
+          .on_click((_e, cx) => { this.cancelEntry(); cx.notify(); })
+          .child(svg(chrome("x")).size(12))));
   }
 
   contents(t) {
@@ -896,23 +1249,30 @@ export default class CodeExplorer extends View {
         .child(Scrollbar.vertical(SEARCH_LIST).absolute().inset_0())));
   }
 
-  // T8 adds Reveal in Finder after these. Drawn in the block, as the design has it;
-  // the backdrop keeps a press from reaching what's under it.
+  // Drawn in the block, as the design has it; the backdrop keeps a press from reaching
+  // what's under it.
   moreMenu(t) {
     const item = (id, label, on, action) => h_flex().id(`explorer-menu-${id}`).h(26).px(8).gap(12).items_center().justify_between().rounded(5).cursor_pointer()
       .hover((s) => s.bg(t.hover))
       .on_mouse_down("left", stop)
-      .on_click((_e, cx) => { cx.stop_propagation(); action(); cx.notify(); })
+      .on_click((_e, cx) => { cx.stop_propagation(); action(cx); cx.notify(); })
       .child(div().child(label))
       .when(on, (el) => el.child(svg(chrome("check")).size(14).flex_none().text_color(t.muted)));
     return v_flex().id("explorer-menu").absolute().top(40).right(8).w(228).p(4).rounded(8).border_1().border_color(t.border).bg(t.popover).shadow_lg().text_size(12.5)
       .on_mouse_down("left", stop)
       .child(item("dotfiles", TEXT.showDotfiles, this.showDotfilesNow(), () => this.toggleDotfiles()))
       // Only for git repos, as in Orca.
-      .when(Boolean(this.state?.git), (el) => el.child(item("ignored", TEXT.showIgnored, this.showIgnored, () => this.toggleIgnored())));
+      .when(Boolean(this.state?.git), (el) => el.child(item("ignored", TEXT.showIgnored, this.showIgnored, () => this.toggleIgnored())))
+      .child(item("reveal", OPS.reveal, false, (cx) => { this.menu = false; this.reveal("", cx); }));
+  }
+
+  // Herdr's last call for an overlay's copy. The panel has nothing to end.
+  async close(cx) {
+    await this.overlayView?.close?.(cx);
   }
 
   render(cx) {
+    if (this.overlayView) return this.overlayView.render(cx);
     this.sync(cx);
     if (this.stale && this.state && isShown(layout())) {
       this.stale = false;
@@ -926,6 +1286,7 @@ export default class CodeExplorer extends View {
       .child(this.header(t))
       .child(this.segments(t))
       .when(this.view === "names" && Boolean(this.state), (el) => el.child(this.filterBar(t)))
+      .when(this.view === "names" && Boolean(this.state) && Boolean(this.entry), (el) => el.child(this.entryBar(t)))
       .child(this.view === "names" ? this.names(t) : this.contents(t))
       .when(open, (el) => el
         .on_mouse_down_out((_e, cx) => { this.menu = false; cx.notify(); })

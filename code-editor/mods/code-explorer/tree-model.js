@@ -271,7 +271,7 @@ export const isDoubleClick = (last, path, now) => Boolean(last) && last.path ===
 export const DOCS_KEY = "code-editor.docs";
 export const LIVE_KEY = "code-editor.live";
 
-const FILE_MOD = "code-file";
+export const FILE_MOD = "code-file";
 const OPEN_POLL = 10, OPEN_TIMEOUT = 1000;
 
 // `shared` persists: what comes back may be anything an older build or a broken
@@ -298,6 +298,14 @@ function replaceable(tab, entry, live) {
 function reopenable(tab, entry, live) {
   return Boolean(entry) && tab.panes <= 1 && !table(live)[entry.doc]?.dirty;
 }
+
+// D21: a tab whose file was renamed can go for one at the new path unless it has changes.
+// A terminal beside it stays, in its tab, with only the file's pane closed.
+function movable(_tab, entry, live) {
+  return Boolean(entry) && !table(live)[entry.doc]?.dirty;
+}
+
+const GOES = { replace: replaceable, reopen: reopenable, moved: movable };
 
 // The decision, for the tabs of one space: { kind: "select", id, pin }, select what's
 // open and maybe pin it; { kind: "replace", id }, a new tab in that preview's place;
@@ -348,8 +356,9 @@ const baseName = (path) => path.slice(path.lastIndexOf("/") + 1);
 
 // Runs the decision against Herdr. `io`: { spaces, panes, shared, setShared, run,
 // notify, wait, newDoc }. Only code-explorer writes code-editor.docs (D10), and
-// main.js runs one of these at a time.
-export async function openFile({ file, pin = false, space, line = null }, io) {
+// main.js runs one of these at a time. `moved`: the tab of this file under its old name,
+// which this one takes the place of (D21), whatever else is open.
+export async function openFile({ file, pin = false, space, line = null, moved = null }, io) {
   const spaceNow = () => io.spaces().find((s) => s.id === space);
   const name = baseName(file);
   const failed = () => {
@@ -359,7 +368,7 @@ export async function openFile({ file, pin = false, space, line = null }, io) {
   const target = spaceNow();
   if (!target) return failed();
 
-  const plan = planOpen({ file, pin, line, tabs: target.tabs, docs: io.shared(DOCS_KEY), live: io.shared(LIVE_KEY), panes: io.panes() });
+  const plan = moved ? { kind: "moved", id: moved } : planOpen({ file, pin, line, tabs: target.tabs, docs: io.shared(DOCS_KEY), live: io.shared(LIVE_KEY), panes: io.panes() });
   if (plan.kind === "select") {
     io.run("tab.select", { id: plan.id });
     if (plan.pin) {
@@ -390,14 +399,14 @@ export async function openFile({ file, pin = false, space, line = null }, io) {
   io.setShared(DOCS_KEY, nextDocs(io.shared(DOCS_KEY), allTabs, id, { doc, file, preview: !pin }));
   if (!spaceNow().tabs.find((t) => t.id === id)?.active) io.run("tab.select", { id });
 
-  if (plan.kind === "replace" || plan.kind === "reopen") {
+  if (Object.hasOwn(GOES, plan.kind)) {
     // Asked again: the tab may have been edited, closed or split meanwhile.
     const old = spaceNow().tabs.find((t) => t.id === plan.id);
     const entry = entryOf(table(io.shared(DOCS_KEY)), plan.id);
-    const free = plan.kind === "reopen" ? reopenable : replaceable;
-    if (old && free(old, entry, io.shared(LIVE_KEY))) {
+    if (old && GOES[plan.kind](old, entry, io.shared(LIVE_KEY))) {
       const close = closeCommand(old, io.panes());
-      io.run("tab.move", { id, index: old.index });
+      // With a terminal beside it the old tab stays, so there's no place to take.
+      if (old.panes <= 1) io.run("tab.move", { id, index: old.index });
       if (close) io.run(...close);
     }
   }
