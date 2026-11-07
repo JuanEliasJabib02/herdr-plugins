@@ -5,7 +5,7 @@
 // by a command of the same name, so what can't be clicked in a test can still be
 // run (D2). A command reaches only the copy in the shown tab.
 
-import { View, div } from "gpui-kit";
+import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, Editor, EditorState, Scrollbar, VirtualListScrollHandle, v_virtual_list } from "gpui-base";
 import { appHome, exec, home, nextCommand, notify, panes, props, readTextFile, run, setShared, settings, shared, spaces, theme, watchFolder, writeTextFile } from "herdr";
 import * as fs from "fs/promises";
@@ -16,6 +16,9 @@ import {
 import { createDraftStore, draftsDir, findDraft, hashPath, resolveFile } from "./draft-model.js";
 import { SYNTAX, colorOf, lineIndex, splitLines, tokenizeLine } from "./line-view-model.js";
 import { BLAME_TEXT, blameArgs, blameDir, blameFailure, blameLabel, blameTarget, isBlameCommand, parseBlame } from "./blame-model.js";
+import { READER_TEXT, appZoomFor, initialMode, splitCommand, tooBigForPreview, viewKind } from "./reader-model.js";
+import { MarkdownPreview } from "./preview-view.js";
+import { PdfViewer } from "./pdf-view.js";
 
 const DRAFT_DELAY = 300; // after the last keystroke
 const GONE_WAIT = 250; // a file missing this long is gone, not mid-replace (D22)
@@ -76,7 +79,8 @@ export default class CodeFile extends View {
     if (!this.file) return;
     this.doc = typeof p.doc === "string" && p.doc !== "" ? p.doc : `f${hashPath(this.file)}`;
     this.line = Number.isInteger(p.line) && p.line >= 1 ? p.line : null;
-    this.mode = this.line ? "lines" : "editor"; // D16, or "blame" (D12)
+    this.kind = viewKind(this.file); // "markdown", "pdf" or "text" (lector-md D9, D10)
+    this.mode = initialMode(this.kind, this.line); // D16, "preview" (lector-md D9), or "blame" (D12)
     this.blameFrom = null; // the mode Blame came from, for a failure to go back to
     this.blameText = null; // the text the column is of
     this.blameLines = null; // parseBlame's; null while git answers
@@ -96,9 +100,28 @@ export default class CodeFile extends View {
     cx.timer.every(HIDDEN_POLL, () => {
       if (!this.isVisible()) this.wasVisible = false;
     });
+    this.preview = this.kind === "markdown" ? new MarkdownPreview(this.host()) : null;
+    this.pdf = null;
     this.pruneLive();
     this.listen(cx);
+    // lector-md D10: a PDF has no text: no drafts, no reads, and nothing to save.
+    if (this.kind === "pdf") {
+      this.pdf = new PdfViewer(this.host(), cx);
+      // Its keys (cmd-f, cmd-=) are the mod's: the keyboard has to be here.
+      this.scheduleFocus(cx);
+      return;
+    }
     this.open(cx);
+  }
+
+  // What the readers see of this copy (lector-md T1).
+  host() {
+    return {
+      file: this.file,
+      doc: this.doc,
+      text: () => this.model.value,
+      visible: () => this.isVisible(),
+    };
   }
 
   // ── Where this copy is ─────────────────────────────────────────────────────
@@ -299,6 +322,8 @@ export default class CodeFile extends View {
 
   onLoaded(cx) {
     if (this.mode === "lines" && isDirty(this.model)) this.mode = "editor";
+    // lector-md D9: a file too big for the preview opens in Source.
+    if (this.mode === "preview" && tooBigForPreview(this.model.value)) this.mode = "editor";
     if (this.mode === "editor") {
       this.showEditor(cx);
     } else {
@@ -360,6 +385,29 @@ export default class CodeFile extends View {
     if (!this.editor) this.showEditor(cx);
     this.scheduleFocus(cx);
     cx.notify();
+  }
+
+  // lector-md S5: back to the rendered file, with whatever the editor holds.
+  showPreview(cx) {
+    if (this.kind !== "markdown" || this.mode === "preview" || this.model.phase !== "ready") return;
+    this.syncEditor(cx);
+    this.mode = "preview";
+    // The editor leaves the screen and takes the keyboard with it (as Blame does).
+    this.scheduleFocus(cx);
+    cx.notify();
+  }
+
+  // D7: a command neither the file nor Blame knows goes to the reader; zoom that no
+  // reader takes is the window's again.
+  readerCommand(raw, cx) {
+    const split = splitCommand(raw);
+    if (!split) return;
+    const reader = this.pdf ?? (this.mode === "preview" ? this.preview : null);
+    if (reader?.command(split.name, split.arg, cx)) return;
+    if (split.name === "source") return this.startEditing(cx);
+    if (split.name === "preview") return this.showPreview(cx);
+    const zoom = appZoomFor(split.name);
+    if (zoom && !split.arg) run(zoom);
   }
 
   // ── Blame (S7, D12) ────────────────────────────────────────────────────────
@@ -560,6 +608,8 @@ export default class CodeFile extends View {
     const copy = this.blaming ? IO.unlink(this.blameCopy()).catch(() => {}) : null;
     this.editor?.release();
     this.scroll?.release();
+    this.preview?.release();
+    this.pdf?.release();
     try {
       await work;
     } catch (e) {
@@ -575,12 +625,12 @@ export default class CodeFile extends View {
       for (;;) {
         const raw = await nextCommand();
         const command = isBlameCommand(raw) ? "blame" : commandFor(raw, this.doc);
-        if (!command) continue;
         // One bad command must not take cmd-s with it.
         try {
-          this.act(command, cx);
+          if (command) this.act(command, cx);
+          else this.readerCommand(raw, cx);
         } catch (e) {
-          console.log(`code-file: ${command}: ${e}`);
+          console.log(`code-file: ${command ?? raw}: ${e}`);
         }
       }
     });
@@ -671,7 +721,23 @@ export default class CodeFile extends View {
       .children(notes.map((note) => div().flex_none().text_color(t.dim).child(note)))
       .when(m.phase === "ready", (el) => el.child(div().flex_none().text_color(t.dim).child(fileMeta(m, this.file))))
       .when(this.mode !== "blame" && m.phase === "ready", (el) => el.child(this.button(t, "header-blame", BLAME_TEXT.button, "blame")))
-      .when(this.mode !== "editor" && m.phase === "ready", (el) => el.child(this.button(t, "header-edit", TEXT.edit, "edit")));
+      .when(this.kind !== "markdown" && this.mode !== "editor" && m.phase === "ready", (el) => el.child(this.button(t, "header-edit", TEXT.edit, "edit")))
+      .when(this.kind === "markdown" && m.phase === "ready", (el) => el.child(this.viewToggle(t)));
+  }
+
+  // lector-md S5: Orca's icon-only toggle, 23 px high, items 24 px wide, the tooltip
+  // its label. Blame and the line view count as Source: their way back is the editor.
+  viewToggle(t) {
+    const item = (id, icon, label, on, go) => h_flex().id(id).h_full().min_w(24).px(5).items_center().justify_center().rounded(5)
+      .cursor_pointer().tooltip(label)
+      .when(on, (el) => el.bg(t.selected).text_color(t.foreground))
+      .when(!on, (el) => el.text_color(t.muted).hover((s) => s.bg(t.hover)))
+      .on_click((_event, cx) => go(cx))
+      .child(svg(`mods/code-file/ui/${icon}.svg`).size(14));
+    const preview = this.mode === "preview";
+    return h_flex().id("view-toggle").flex_none().h(23).p(1).gap(1).items_center().rounded(6).border_1().border_color(t.input)
+      .child(item("toggle-source", "code", READER_TEXT.source, !preview, (cx) => this.startEditing(cx)))
+      .child(item("toggle-preview", "eye", READER_TEXT.preview, preview, (cx) => this.showPreview(cx)));
   }
 
   banner(view, t) {
@@ -716,9 +782,10 @@ export default class CodeFile extends View {
     return (this.scroll ? list.track_scroll(this.scroll) : list).flex_1().min_h(0);
   }
 
-  body(t) {
+  body(t, cx) {
     const m = this.model;
     const wrap = div().id("file-body").track_focus(this.handle).flex_1().min_h(0).flex().flex_col();
+    if (this.pdf) return wrap.child(this.pdf.render(t, cx));
     if (m.phase === "limit") {
       return wrap.items_center().justify_center().gap(8).p(24)
         .child(div().text_color(t.foreground).child(m.limit.title))
@@ -726,6 +793,7 @@ export default class CodeFile extends View {
         .when(m.limit.retry, (el) => el.child(this.button(t, "limit-retry", TEXT.retry, "retry")));
     }
     if (m.phase !== "ready") return wrap.p(12).text_color(t.dim).child("Loading");
+    if (this.mode === "preview") return wrap.child(this.preview.render(t, cx));
     if (this.mode !== "editor") return wrap.relative().child(this.lineList(t)).child(Scrollbar.vertical(LINE_LIST).absolute().inset_0());
     return wrap.child(this.editor ? Editor.new(this.editor).flex_1().min_h(0) : div());
   }
@@ -760,7 +828,7 @@ export default class CodeFile extends View {
     return root
       .child(this.header(t))
       .when(Boolean(banner), (el) => el.child(this.banner(banner, t)))
-      .child(this.body(t))
+      .child(this.body(t, cx))
       .when(this.model.card, (el) => el.child(this.card(t)));
   }
 }

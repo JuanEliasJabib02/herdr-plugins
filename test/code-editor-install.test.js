@@ -50,10 +50,21 @@ function mods(node, out = []) {
 
 // ── S2: cmd-l ─────────────────────────────────────────────────────────────
 
+// lector-md D7: the PDF's find and zoom, beside the file's save and close.
+const FILE_KEYS = {
+  "cmd-s": "code-file.save",
+  "cmd-w": "code-file.close",
+  "cmd-f": "code-file.find",
+  "cmd-=": "code-file.zoom-in",
+  "cmd-+": "code-file.zoom-in",
+  "cmd--": "code-file.zoom-out",
+  "cmd-0": "code-file.zoom-reset",
+};
+
 test("S2: cmd-l toggles the panel in the projects layout only, so other layouts keep theirs; cmd-s and cmd-w go to the open file (D3, D18)", () => {
   assert.deepEqual(readJson(plugin("keys.json")), {
     "layout:projects": { "cmd-l": "layout.toggle:panel" },
-    "mod:code-file": { "cmd-s": "code-file.save", "cmd-w": "code-file.close" },
+    "mod:code-file": FILE_KEYS,
   });
 });
 
@@ -70,7 +81,7 @@ test("S2: installing merges cmd-l into the person's keys, in that layout's secti
   assert.equal(r.status, 0, r.stderr);
   const keys = readJson(join(home, "keys.json"));
   assert.deepEqual(keys["layout:projects"], { "cmd-l": "layout.toggle:panel" });
-  assert.deepEqual(keys["mod:code-file"], { "cmd-s": "code-file.save", "cmd-w": "code-file.close" });
+  assert.deepEqual(keys["mod:code-file"], FILE_KEYS);
   assert.deepEqual(keys.global, PERSON_KEYS.global);
   assert.deepEqual(keys.terminal, PERSON_KEYS.terminal);
 });
