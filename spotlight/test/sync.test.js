@@ -12,7 +12,7 @@ import {
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import {
-  REFS, ORCA_REFS_PREFIX, ERROR_CODES, SpotlightError, toSpotlightError,
+  REFS, RESCUED_PENDING, ORCA_REFS_PREFIX, ERROR_CODES, SpotlightError, toSpotlightError,
   gitContext, runGit, detectConflictOperation,
   activate, sync, assertDeactivatable, deactivate, purgeRefs,
   inspectRefs, readRefs, createCheckpointCommit,
@@ -530,7 +530,7 @@ describe("sync engine (D8)", () => {
     await rejectsCode(
       deactivate(failing, root),
       "restore-conflict",
-      /Restoring the root's original uncommitted changes conflicted.*refs\/herdr-spotlight\/rescued\//s,
+      /^Restoring the root's original uncommitted changes conflicted: .*\. Tus archivos sin seguimiento que estorbaban están a salvo en refs\/herdr-spotlight\/rescued\/\S+\.$/s,
     );
 
     const refs = await inspectRefs(ctx, root);
@@ -538,6 +538,19 @@ describe("sync engine (D8)", () => {
     assert.equal(run(root, "show", `${refs.backupSha}:new.txt`), "staged in root");
     const [rescued] = run(root, "for-each-ref", "--format=%(refname)", "refs/herdr-spotlight/rescued/").split("\n");
     assert.equal(run(root, "show", `${rescued}:to-delete.txt`), "mine");
+    // The failed attempt's reset overwrote the file; the pending ref remembers it.
+    assert.equal(read(root, "to-delete.txt"), "delete-me\n");
+    assert.equal(run(root, "rev-parse", RESCUED_PENDING), run(root, "rev-parse", rescued));
+
+    // The root sits on its original commit now, off the snapshot: Apagar igual.
+    const out = await deactivate(ctx, root, { force: true });
+    assert.equal(branchOf(root), "main");
+    assert.equal(run(root, "show", ":new.txt"), "staged in root");
+    assert.equal(read(root, "to-delete.txt"), "mine\n");
+    assert.equal(out.rescued.ref, rescued);
+    assert.deepEqual(out.rescued.restored, ["to-delete.txt"]);
+    assert.deepEqual(out.rescued.kept, []);
+    assert.deepEqual(run(root, "for-each-ref", "--format=%(refname)", "refs/herdr-spotlight/").split("\n"), [rescued]);
   });
 
   // ── Untracked root files in the turn-off's way ──────────────────────────
@@ -614,6 +627,342 @@ describe("sync engine (D8)", () => {
     const out = await deactivate(ctx, root);
     assert.equal(out.rescued, null);
     assert.equal(read(root, "scratch.txt"), "untracked, nowhere near the original\n");
+    assert.equal(run(root, "for-each-ref", "refs/herdr-spotlight/"), "");
+  });
+
+  test("a turn-off that fails after the rescue names the rescued ref and leaves the file; the next one saves it with any new file in one commit, writes both back and announces them", async () => {
+    run(wt, "rm", "-q", "to-delete.txt", "a.txt");
+    run(wt, "commit", "-qm", "drop two");
+    await activate(ctx, root, wt);
+    write(root, "to-delete.txt", "mine\n");
+    const failing = spying([], (args) => sub(args) === "reset");
+
+    let first;
+    await assert.rejects(deactivate(failing, root), (e) => {
+      assert.ok(e instanceof SpotlightError, `not a SpotlightError: ${e}`);
+      assert.equal(e.code, "git-failed", e.message);
+      const m = e.message.match(
+        /^git reset failed: simulated failure\. Tus archivos sin seguimiento que estorbaban están a salvo en (refs\/herdr-spotlight\/rescued\/\S+)\.$/,
+      );
+      assert.ok(m, e.message);
+      first = m[1];
+      return true;
+    });
+    assert.equal(read(root, "to-delete.txt"), "mine\n");
+    assert.equal(run(root, "rev-parse", RESCUED_PENDING), run(root, "rev-parse", first));
+    assert.equal((await inspectRefs(ctx, root)).active, true);
+
+    write(root, "a.txt", "mine too\n");
+    const out = await deactivate(ctx, root);
+
+    assert.equal(branchOf(root), "main");
+    assert.equal(read(root, "to-delete.txt"), "mine\n");
+    assert.equal(read(root, "a.txt"), "mine too\n");
+    assert.deepEqual(out.rescued.restored, ["a.txt", "to-delete.txt"]);
+    assert.deepEqual(out.rescued.kept, []);
+    assert.deepEqual(run(root, "ls-tree", "-r", "--name-only", out.rescued.ref).split("\n"), ["a.txt", "to-delete.txt"]);
+    const refs = await inspectRefs(ctx, root);
+    assert.deepEqual([refs.snapshotSha, refs.backupSha, refs.originalHeadSha, refs.originalBranch], [null, null, null, null]);
+    // The pending ref goes; both rescued refs stay.
+    assert.deepEqual(run(root, "for-each-ref", "--format=%(refname)", "refs/herdr-spotlight/").split("\n").sort(), [first, out.rescued.ref].sort());
+  });
+
+  const hasRef = (ref) => {
+    try {
+      run(root, "rev-parse", "--verify", "-q", ref);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  test("a fresh activation drops a pending rescue whose anchors are gone: its rescued ref stays, and the next turn-off doesn't write the old file back", async () => {
+    run(wt, "rm", "-q", "to-delete.txt");
+    run(wt, "commit", "-qm", "drop to-delete");
+    await activate(ctx, root, wt);
+    write(root, "to-delete.txt", "mine\n");
+    await rejectsCode(deactivate(spying([], (args) => sub(args) === "reset"), root), "git-failed");
+    const pending = run(root, "rev-parse", RESCUED_PENDING);
+    const [rescued] = run(root, "for-each-ref", "--format=%(refname)", "refs/herdr-spotlight/rescued/").split("\n");
+    // By hand: the anchors removed, the file moved away, the root back on main.
+    for (const ref of [REFS.snapshot, REFS.backup, REFS.originalHead]) run(root, "update-ref", "-d", ref);
+    run(root, "symbolic-ref", "--delete", REFS.originalBranch);
+    rmSync(join(root, "to-delete.txt"));
+    run(root, "checkout", "-q", "main", "--");
+    assert.equal(read(root, "to-delete.txt"), "delete-me\n");
+
+    const on = await activate(ctx, root, wt);
+
+    assert.equal(on.alreadyActive, false);
+    assert.equal(hasRef(RESCUED_PENDING), false);
+    assert.equal(run(root, "rev-parse", rescued), pending);
+
+    const out = await deactivate(ctx, root);
+
+    assert.equal(out.rescued, null);
+    assert.equal(branchOf(root), "main");
+    assert.equal(read(root, "to-delete.txt"), "delete-me\n");
+    assert.equal(run(root, "status", "--porcelain", "-uall"), "");
+    assert.deepEqual(run(root, "for-each-ref", "--format=%(refname)", "refs/herdr-spotlight/").split("\n"), [rescued]);
+  });
+
+  test("a takeover after a failed turn-off keeps the pending rescue: the next turn-off still writes it back", async () => {
+    run(wt, "rm", "-q", "to-delete.txt");
+    run(wt, "commit", "-qm", "drop to-delete");
+    const wt2 = join(base, "wt2");
+    run(root, "worktree", "add", "-q", wt2, "-b", "feature-2", "feature");
+    await activate(ctx, root, wt);
+    write(root, "to-delete.txt", "mine\n");
+    await rejectsCode(deactivate(spying([], (args) => sub(args) === "reset"), root), "git-failed");
+    const pending = run(root, "rev-parse", RESCUED_PENDING);
+
+    write(wt2, "a.txt", "wt2-version\n");
+    const takeover = await activate(ctx, root, wt2);
+
+    assert.equal(takeover.alreadyActive, true);
+    assert.equal(run(root, "rev-parse", RESCUED_PENDING), pending);
+    const out = await deactivate(ctx, root);
+    assert.equal(read(root, "to-delete.txt"), "mine\n");
+    assert.deepEqual(out.rescued.restored, ["to-delete.txt"]);
+    assert.equal(run(root, "rev-parse", out.rescued.ref), pending);
+    assert.equal(hasRef(RESCUED_PENDING), false);
+  });
+
+  test("a retry after a reset that failed part-way keeps the user's version: a file git already put back to the original's content isn't rescued over the pending one", async () => {
+    run(wt, "rm", "-q", "to-delete.txt");
+    run(wt, "commit", "-qm", "drop to-delete");
+    await activate(ctx, root, wt);
+    write(root, "to-delete.txt", "mine\n");
+    // The reset writes the original commit's file, then fails.
+    const partWay = spying([], (args) => {
+      if (sub(args) !== "reset") return false;
+      write(root, "to-delete.txt", "delete-me\n");
+      return true;
+    });
+    await rejectsCode(deactivate(partWay, root), "git-failed");
+    assert.equal(read(root, "to-delete.txt"), "delete-me\n");
+    const pending = run(root, "rev-parse", RESCUED_PENDING);
+
+    const out = await deactivate(ctx, root);
+
+    assert.equal(branchOf(root), "main");
+    assert.equal(read(root, "to-delete.txt"), "mine\n");
+    assert.deepEqual(out.rescued.restored, ["to-delete.txt"]);
+    assert.deepEqual(out.rescued.kept, []);
+    assert.equal(run(root, "show", `${out.rescued.ref}:to-delete.txt`), "mine");
+    assert.equal(run(root, "rev-parse", out.rescued.ref), pending);
+  });
+
+  test("turn-off with an untracked file whose content is already the original commit's at that path: not rescued, not reported, nothing lost", async () => {
+    run(wt, "rm", "-q", "to-delete.txt", "a.txt");
+    run(wt, "commit", "-qm", "drop two");
+    await activate(ctx, root, wt);
+    write(root, "to-delete.txt", "delete-me\n"); // the original's content
+    write(root, "a.txt", "mine\n");
+
+    const out = await deactivate(ctx, root);
+
+    assert.equal(read(root, "to-delete.txt"), "delete-me\n");
+    assert.equal(read(root, "a.txt"), "mine\n");
+    assert.deepEqual(out.rescued.restored, ["a.txt"]);
+    assert.deepEqual(out.rescued.kept, []);
+    assert.deepEqual(run(root, "ls-tree", "-r", "--name-only", out.rescued.ref).split("\n"), ["a.txt"]);
+    assert.equal(run(root, "status", "--porcelain", "-uall"), "M a.txt");
+  });
+
+  // Commits `files` on the root's main and fast-forwards the workspace to it.
+  function commitOnBoth(files) {
+    for (const [rel, content] of Object.entries(files)) write(root, rel, content);
+    run(root, "add", "-A");
+    run(root, "commit", "-qm", "more");
+    run(wt, "merge", "-q", "--ff-only", "main");
+  }
+
+  test("turn-off rescues an ignored root file at a path the original commit tracks and writes it back; a big ignored folder stays out of the rescue", async () => {
+    commitOnBoth({ "local.conf": "original conf\n" });
+    // The workspace stops tracking it and ignores it.
+    run(wt, "rm", "-q", "local.conf");
+    write(wt, ".gitignore", "node_modules/\nlocal.conf\n");
+    run(wt, "add", "-A");
+    run(wt, "commit", "-qm", "ignore local.conf");
+    await activate(ctx, root, wt);
+    assert.equal(existsSync(join(root, "local.conf")), false);
+    write(root, "local.conf", "my conf\n");
+    write(root, "node_modules/x/index.js", "dep\n");
+    assert.equal(run(root, "status", "--porcelain", "-uall"), "");
+
+    const out = await deactivate(ctx, root);
+
+    assert.equal(read(root, "local.conf"), "my conf\n");
+    assert.equal(read(root, "node_modules/x/index.js"), "dep\n");
+    assert.equal(run(root, "status", "--porcelain", "-uall"), "M local.conf");
+    assert.deepEqual(out.rescued.restored, ["local.conf"]);
+    assert.deepEqual(out.rescued.kept, []);
+    assert.deepEqual(run(root, "ls-tree", "-r", "--name-only", out.rescued.ref).split("\n"), ["local.conf"]);
+  });
+
+  test("turn-off with an untracked file in a folder where the original commit has a file: saved and announced, not written back, and the original file comes back", async () => {
+    commitOnBoth({ docs: "original docs\n" });
+    run(wt, "rm", "-q", "docs");
+    write(wt, "docs/a.md", "workspace doc\n");
+    run(wt, "add", "-A");
+    run(wt, "commit", "-qm", "docs folder");
+    await activate(ctx, root, wt);
+    write(root, "docs/notes.md", "my notes\n");
+
+    const out = await deactivate(ctx, root);
+
+    assert.equal(read(root, "docs"), "original docs\n");
+    assert.equal(run(root, "status", "--porcelain", "-uall"), "");
+    assert.deepEqual(out.rescued.restored, []);
+    assert.deepEqual(out.rescued.kept, ["docs/notes.md"]);
+    assert.deepEqual(run(root, "ls-tree", "-r", "--name-only", out.rescued.ref).split("\n"), ["docs/notes.md"]);
+    assert.equal(run(root, "show", `${out.rescued.ref}:docs/notes.md`), "my notes");
+  });
+
+  test("turn-off with an untracked file where the original commit has a folder: saved and announced, not written back, and the folder comes back", async () => {
+    commitOnBoth({ "lib/x.js": "original x\n" });
+    run(wt, "rm", "-q", "-r", "lib");
+    run(wt, "commit", "-qm", "drop lib");
+    await activate(ctx, root, wt);
+    assert.equal(existsSync(join(root, "lib")), false);
+    write(root, "lib", "my lib file\n");
+
+    const out = await deactivate(ctx, root);
+
+    assert.equal(read(root, "lib/x.js"), "original x\n");
+    assert.equal(run(root, "status", "--porcelain", "-uall"), "");
+    assert.deepEqual(out.rescued.restored, []);
+    assert.deepEqual(out.rescued.kept, ["lib"]);
+    assert.equal(run(root, "show", `${out.rescued.ref}:lib`), "my lib file");
+  });
+
+  test("turn-off on a case-insensitive checkout with an untracked file whose name differs only in case: saved and announced, and the original file comes back", async (t) => {
+    commitOnBoth({ "README.md": "original readme\n" });
+    let ignoreCase = "false";
+    try {
+      ignoreCase = run(root, "config", "--bool", "core.ignorecase");
+    } catch {
+      // Unset: git treats it as false.
+    }
+    if (ignoreCase !== "true") {
+      t.skip("core.ignorecase is false in this checkout");
+      return;
+    }
+    run(wt, "rm", "-q", "README.md");
+    run(wt, "commit", "-qm", "drop readme");
+    await activate(ctx, root, wt);
+    write(root, "Readme.md", "my readme\n");
+
+    const out = await deactivate(ctx, root);
+
+    assert.equal(read(root, "README.md"), "original readme\n");
+    assert.deepEqual(out.rescued.restored, []);
+    assert.deepEqual(out.rescued.kept, ["Readme.md"]);
+    assert.equal(run(root, "show", `${out.rescued.ref}:Readme.md`), "my readme");
+  });
+
+  test("turn-off with an untracked folder where the root's own uncommitted changes bring a file: the folder is saved and announced, and the staged file comes back", async () => {
+    write(root, "cfg", "staged cfg\n");
+    run(root, "add", "cfg");
+    await activate(ctx, root, wt);
+    write(root, "cfg/x.txt", "my x\n");
+
+    const out = await deactivate(ctx, root);
+
+    assert.equal(branchOf(root), "main");
+    assert.equal(read(root, "cfg"), "staged cfg\n");
+    assert.equal(run(root, "show", ":cfg"), "staged cfg");
+    assert.equal(run(root, "status", "--porcelain", "-uall"), "A  cfg");
+    assert.deepEqual(out.rescued.restored, []);
+    assert.deepEqual(out.rescued.kept, ["cfg/x.txt"]);
+    assert.equal(run(root, "show", `${out.rescued.ref}:cfg/x.txt`), "my x");
+  });
+
+  test("turn-off on a case-insensitive checkout with root changes saved at turn-on and an untracked file whose name differs only in case: the original file isn't deleted before they apply", async (t) => {
+    commitOnBoth({ "README.md": "original readme\n" });
+    let ignoreCase = "false";
+    try {
+      ignoreCase = run(root, "config", "--bool", "core.ignorecase");
+    } catch {
+      // Unset: git treats it as false.
+    }
+    if (ignoreCase !== "true") {
+      t.skip("core.ignorecase is false in this checkout");
+      return;
+    }
+    run(wt, "rm", "-q", "README.md");
+    run(wt, "commit", "-qm", "drop readme");
+    write(root, "a.txt", "root-uncommitted\n");
+    await activate(ctx, root, wt);
+    write(root, "Readme.md", "my readme\n");
+
+    const out = await deactivate(ctx, root);
+
+    assert.equal(branchOf(root), "main");
+    assert.equal(read(root, "README.md"), "original readme\n");
+    assert.equal(read(root, "a.txt"), "root-uncommitted\n");
+    assert.deepEqual(out.rescued.restored, []);
+    assert.deepEqual(out.rescued.kept, ["Readme.md"]);
+    assert.equal(run(root, "show", `${out.rescued.ref}:Readme.md`), "my readme");
+  });
+
+  // Nothing written: no rescue commit, no rescued or pending ref, root on the snapshot.
+  async function assertTurnOffUntouched(snapshot) {
+    assert.equal(run(root, "rev-parse", "HEAD"), snapshot);
+    assert.equal((await inspectRefs(ctx, root)).active, true);
+    assert.equal(run(root, "for-each-ref", "refs/herdr-spotlight/rescued/"), "");
+    assert.equal(hasRef(RESCUED_PENDING), false);
+  }
+
+  test("untracked-collision: a nested git repo inside a folder in the turn-off's way refuses it before anything is written; Apagar igual discards it and saves the rest without a gitlink", async () => {
+    commitOnBoth({ docs: "original docs\n" });
+    run(wt, "rm", "-q", "docs");
+    write(wt, "docs/a.md", "workspace doc\n");
+    run(wt, "add", "-A");
+    run(wt, "commit", "-qm", "docs folder");
+    const on = await activate(ctx, root, wt);
+    run(root, "init", "-q", "-b", "main", "docs/nested");
+    write(root, "docs/nested/f.txt", "nested\n");
+    run(join(root, "docs/nested"), "add", "-A");
+    run(join(root, "docs/nested"), "commit", "-qm", "nested");
+    write(root, "docs/notes.md", "my notes\n");
+
+    const refusal =
+      /^Hay un repo de git dentro de docs\/nested, en una ruta que apagar Spotlight escribiría\. Muévelo y vuelve a apagar, o usa Apagar igual para descartarlo\.$/;
+    await rejectsCode(deactivate(ctx, root), "untracked-collision", refusal);
+    await rejectsCode(assertDeactivatable(ctx, root), "untracked-collision", refusal);
+    await assertTurnOffUntouched(on.snapshotSha);
+    assert.equal(read(root, "docs/notes.md"), "my notes\n");
+    assert.equal(read(root, "docs/nested/f.txt"), "nested\n");
+
+    const out = await deactivate(ctx, root, { force: true });
+
+    assert.equal(branchOf(root), "main");
+    assert.equal(read(root, "docs"), "original docs\n");
+    assert.deepEqual(out.rescued.restored, []);
+    assert.deepEqual(out.rescued.kept, ["docs/notes.md"]);
+    assert.deepEqual(run(root, "ls-tree", "-r", "--name-only", out.rescued.ref).split("\n"), ["docs/notes.md"]);
+    assert.doesNotMatch(run(root, "ls-tree", "-r", out.rescued.ref), /^160000 /m);
+  });
+
+  test("untracked-collision: an unborn nested git repo in the turn-off's way refuses it; Apagar igual discards it", async () => {
+    commitOnBoth({ tool: "original tool\n" });
+    run(wt, "rm", "-q", "tool");
+    run(wt, "commit", "-qm", "drop tool");
+    const on = await activate(ctx, root, wt);
+    run(root, "init", "-q", "-b", "main", "tool"); // no commit yet
+    write(root, "tool/x.txt", "x\n");
+
+    await rejectsCode(deactivate(ctx, root), "untracked-collision", /^Hay un repo de git dentro de tool, /);
+    await assertTurnOffUntouched(on.snapshotSha);
+    assert.equal(read(root, "tool/x.txt"), "x\n");
+
+    const out = await deactivate(ctx, root, { force: true });
+
+    assert.equal(branchOf(root), "main");
+    assert.equal(read(root, "tool"), "original tool\n");
+    assert.equal(out.rescued, null);
     assert.equal(run(root, "for-each-ref", "refs/herdr-spotlight/"), "");
   });
 

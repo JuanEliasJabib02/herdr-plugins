@@ -22,6 +22,7 @@ import { join, dirname, basename } from "node:path";
 import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { acquire, unlock } from "../mods/spotlight/locks.js";
+import { rescuedNotes } from "../mods/spotlight/cli-work.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const MOD = join(HERE, "..", "mods", "spotlight");
@@ -530,6 +531,34 @@ test("toggle off on a root-diverged root refuses; `toggle --force` off restores 
   assert.ok(w.state().notes.some((n) => n.toast && /Spotlight off — root restaurado/.test(n.text)));
 });
 
+test("toggle off with a nested git repo where the original commit has a file refuses untracked-collision with the Apagar igual hint; `toggle --force` off discards it", async () => {
+  const w = makeWorld();
+  const app = makeRepo(w, "app", { pkg: DEV, tasks: ["AX-7"], files: { tool: "v1\n" } });
+  w.register([{ id: "g1", repos: [app] }]);
+  const ws = app.ws["AX-7"];
+  git(ws, "rm", "-q", "tool");
+  git(ws, "commit", "-q", "-m", "drop tool");
+  assert.equal((await w.cli(["toggle", "--workspace", ws])).code, 0);
+  await w.until((s) => s.queue.lighting[`direct/${app.root}`]?.phase === "done", { what: "lit" });
+  git(app.root, "init", "-q", "-b", "main", "tool");
+  write(app.root, "tool/x.txt", "x\n");
+
+  const refused = await w.cli(["toggle", "--workspace", ws]);
+  assert.equal(refused.code, 1, refused.stderr + refused.stdout);
+  assert.match(
+    refused.stderr,
+    /untracked-collision: Hay un repo de git dentro de tool, en una ruta que apagar Spotlight escribiría\. Muévelo y vuelve a apagar, o usa Apagar igual para descartarlo\. Para apagarlo igual: `spotlight toggle --workspace .* --force` \(Apagar igual\)\./,
+  );
+  assert.ok(refsOf(app.root).includes("refs/herdr-spotlight/snapshot"));
+  assert.equal(readFileSync(join(app.root, "tool/x.txt"), "utf8"), "x\n");
+
+  const forced = await w.cli(["toggle", "--workspace", ws, "--force"]);
+  assert.equal(forced.code, 0, forced.stderr + forced.stdout);
+  await w.until(() => refsOf(app.root).length === 0 && !w.state().repos[app.root], { what: "restored" });
+  assert.equal(git(app.root, "symbolic-ref", "--short", "HEAD"), "main");
+  assert.equal(readFileSync(join(app.root, "tool"), "utf8"), "v1\n");
+});
+
 test("toggle off with a file made by hand in the root where the original commit has one: off goes ahead, the file keeps its content, and the toast says so", async () => {
   const w = makeWorld();
   const app = makeRepo(w, "app", { pkg: DEV, tasks: ["AX-7"], files: { "page.txt": "v1\n" } });
@@ -552,6 +581,21 @@ test("toggle off with a file made by hand in the root where the original commit 
   const note = w.state().notes.find((n) => n.toast && /page\.txt/.test(n.text));
   assert.ok(note, JSON.stringify(w.state().notes));
   assert.match(note.text, /^app: page\.txt quedó como cambio sin commit \(tu versión\)\. Copia en refs\/herdr-spotlight\/rescued\/\S+\.$/);
+});
+
+test("rescuedNotes: the line for files not written back points at `git show <ref>:<archivo>`, never at a checkout that would overwrite what came back", () => {
+  const ref = "refs/herdr-spotlight/rescued/2026-11-06T00-00-00-000Z-abc1234";
+  const [one] = rescuedNotes({ ref, restored: [], kept: ["new.txt"] });
+  assert.equal(
+    one,
+    `new.txt no se devolvió: en esa ruta quedó lo que el root tenía antes de Spotlight. Tu versión está en ${ref} (git show ${ref}:<archivo>).`,
+  );
+  const [many] = rescuedNotes({ ref, restored: [], kept: ["a", "b", "c", "d"] });
+  assert.equal(
+    many,
+    `a, b, c (+1 más) no se devolvieron: en esa ruta quedó lo que el root tenía antes de Spotlight. Tu versión está en ${ref} (git show ${ref}:<archivo>).`,
+  );
+  assert.doesNotMatch(one + many, /git checkout/);
 });
 
 test("a repo that isn't enabled: `on` takes a slot-only turn and lights nothing; `toggle` on refuses not-enabled; `toggle` off still works", async () => {

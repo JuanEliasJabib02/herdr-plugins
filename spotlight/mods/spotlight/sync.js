@@ -11,13 +11,18 @@
 //   under refs/herdr-spotlight/* BEFORE anything destructive runs: a crash at
 //   any point leaves the root recoverable with plain git.
 // - Who holds the root lives in state.json (D7), not in these refs.
-// - A turn-off never destroys an untracked root file at a path it writes: the
-//   file is saved in a commit under refs/herdr-spotlight/rescued/* first (kept
-//   after the turn-off) and written back on top when nothing else claims it.
+// - A turn-off never destroys an untracked root file (ignored ones included)
+//   in the way of a path it writes: the file is saved in a commit under
+//   refs/herdr-spotlight/rescued/* first (kept after the turn-off) and written
+//   back on top when the original commit has a file at that exact path and
+//   nothing else claims it. A turn-off that fails after the save leaves
+//   refs/herdr-spotlight/rescued-pending, so the next one writes it back; a
+//   fresh activation drops it. A nested git repo in the way refuses the
+//   turn-off unless forced, which discards it.
 //
 // Node-only: the CLI imports it, the mod never does.
 import { execFile } from "node:child_process";
-import { access, realpath, rm } from "node:fs/promises";
+import { access, lstat, readdir, realpath, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { isGeneratedFile } from "./sync-generated.js";
 
@@ -30,6 +35,11 @@ export const REFS = Object.freeze({
 
 /** Where a turn-off saves untracked root files in its way, one ref per turn-off. */
 export const RESCUED_PREFIX = "refs/herdr-spotlight/rescued/";
+
+/** The rescue of a turn-off that hasn't finished: the next turn-off folds it
+ *  into its own and writes its files back. Deleted once a write-back lands.
+ *  Outside RESCUED_PREFIX: it points at a rescue, it isn't one. */
+export const RESCUED_PENDING = "refs/herdr-spotlight/rescued-pending";
 
 /** Orca Pro Max's own Spotlight refs: a root holding any is Orca's, not ours. */
 export const ORCA_REFS_PREFIX = "refs/orca/spotlight/";
@@ -489,8 +499,9 @@ async function applySnapshotToRoot(ctx, rootPath, snapshotSha) {
 // ── Operations ─────────────────────────────────────────────────────────────
 
 /** Projects `worktreePath` onto `rootPath`. Fresh when the root has no
- *  Spotlight refs (backs the root up, detaches it); a takeover when it has
- *  (keeps the first backup). Options:
+ *  Spotlight refs (backs the root up, detaches it, drops a pending rescue left
+ *  without its anchors); a takeover when it has (keeps the first backup and
+ *  any pending rescue). Options:
  *  - force: skip the root guards (root-diverged, untracked-collision), as
  *    Orca's "Activate anyway";
  *  - reuseIndexForHead: the holder HEAD of the previous checkpoint, when it
@@ -543,6 +554,10 @@ export async function activate(ctx, rootPath, worktreePath, opts = {}) {
     };
   }
 
+  // A pending rescue is a failed turn-off's, valid only while its anchors
+  // last; with none, it would write stale files over this activation's
+  // turn-off. Its commit stays reachable through its rescued/* ref.
+  await gitTry(ctx, rootPath, ["update-ref", "-d", RESCUED_PENDING]);
   const original = await backupRootState(ctx, rootPath);
   try {
     await applySnapshotToRoot(ctx, rootPath, checkpoint.sha);
@@ -593,8 +608,15 @@ export async function sync(ctx, rootPath, worktreePath, opts = {}) {
 
 /** Turn-off's refusals, read-only, run before anything touches the root or
  *  its server: an operation in progress, refs already gone, and (unless
- *  forced) a diverged root. Returns the refs. */
+ *  forced) a diverged root or a nested git repo in the way. Returns the refs. */
 export async function assertDeactivatable(ctx, rootPath, opts = {}) {
+  return (await checkTurnOff(ctx, rootPath, opts)).refs;
+}
+
+/** assertDeactivatable, returning also what it read for the turn-off: the
+ *  original commit's files, core.ignorecase, the items in the way and the
+ *  untracked entries under them. */
+async function checkTurnOff(ctx, rootPath, opts) {
   await assertRoot(ctx, rootPath);
   await assertNoConflictOperation(ctx, rootPath);
   const refs = await inspectRefs(ctx, rootPath);
@@ -602,77 +624,100 @@ export async function assertDeactivatable(ctx, rootPath, opts = {}) {
   // The reset --hard of a turn-off would silently destroy work committed or
   // edited in the root after activation: the backup predates it.
   if (!opts.force && refs.snapshotSha) assertRootOnSnapshot(refs, await readRootStatus(ctx, rootPath), true);
-  return refs;
+  const original = await treeFiles(ctx, rootPath, refs.originalHeadSha);
+  const ignoreCase = (await gitTry(ctx, rootPath, ["config", "--bool", "core.ignorecase"])) === "true";
+  const inTheWay = await itemsInTheWay(ctx, rootPath, refs, original, ignoreCase);
+  const untracked = await untrackedUnder(ctx, rootPath, inTheWay);
+  if (!opts.force) await assertNoNestedRepos(rootPath, inTheWay, untracked);
+  return { refs, original, ignoreCase, inTheWay, untracked };
 }
 
 /** Restores the root: its original commit, its branch, and its uncommitted
  *  changes (staged and unstaged), then deletes the refs. `force` discards a
- *  diverged root (Orca's "Turn off anyway"). Returns {originalBranch,
- *  branchMissing, branchInUse, warning, rescued}: when the branch can't be
- *  re-attached (deleted, or checked out in another worktree) the root is left
- *  detached at its original commit and `warning` is a `branch-missing`
- *  {code, message}. `rescued` is null, or {ref, restored, kept} when untracked
- *  root files were in the way: all saved in `ref`, `restored` written back on
- *  top, `kept` only in `ref` (the root's own changes brought those paths). */
+ *  diverged root (Orca's "Turn off anyway") and a nested git repo in the
+ *  way, which is never saved: a gitlink would keep none of its commits or
+ *  files. Returns {originalBranch, branchMissing, branchInUse, warning,
+ *  rescued}: when the branch can't be re-attached (deleted, or checked out in
+ *  another worktree) the root is left detached at its original commit and
+ *  `warning` is a `branch-missing` {code, message}. `rescued` is null, or {ref, restored, kept} when untracked
+ *  root files were in the way (or a turn-off that failed half-way had saved
+ *  some): all saved in `ref`, `restored` written back on top, `kept` only in
+ *  `ref` (the original commit has no file at that exact path, or the root's
+ *  own changes brought it). Any failure after that save names `ref`. */
 export async function deactivate(ctx, rootPath, opts = {}) {
-  const refs = await assertDeactivatable(ctx, rootPath, opts);
-  // Saved before anything is written, then cleared out of the reset's and the
-  // backup's way (a backup bringing a path that's there untracked can't apply).
-  const inTheWay = await untrackedInTheWay(ctx, rootPath, refs);
-  const rescuedRef = inTheWay.length > 0 ? await rescueFiles(ctx, rootPath, inTheWay) : null;
-  for (const p of inTheWay) await rm(join(rootPath, p), { force: true });
-  await git(ctx, rootPath, ["reset", "--hard", refs.originalHeadSha]);
+  const { refs, original, ignoreCase, inTheWay, untracked } = await checkTurnOff(ctx, rootPath, opts);
+  // Saved before anything is written. Nothing is removed before the reset:
+  // until it lands, a failure leaves every file where it was.
+  const rescue = await rescueItems(ctx, rootPath, untracked, refs.originalHeadSha);
+  try {
+    // Also deletes the untracked items in the way of the original's paths:
+    // their content is in the rescue.
+    await git(ctx, rootPath, ["reset", "--hard", refs.originalHeadSha]);
 
-  let branchMissing = false;
-  let branchInUse = false;
-  if (refs.originalBranch) {
-    const branchSha = await gitTry(ctx, rootPath, ["rev-parse", "--verify", "-q", `refs/heads/${refs.originalBranch}`]);
-    if (branchSha) {
-      try {
-        await git(ctx, rootPath, ["checkout", refs.originalBranch, "--"]);
-      } catch {
-        // Most often the branch got checked out in ANOTHER worktree while the
-        // root was detached. Stay detached at the original commit, so the
-        // turn-off still completes instead of wedging half torn down.
+    let branchMissing = false;
+    let branchInUse = false;
+    if (refs.originalBranch) {
+      const branchSha = await gitTry(ctx, rootPath, ["rev-parse", "--verify", "-q", `refs/heads/${refs.originalBranch}`]);
+      if (branchSha) {
+        try {
+          await git(ctx, rootPath, ["checkout", refs.originalBranch, "--"]);
+        } catch {
+          // Most often the branch got checked out in ANOTHER worktree while the
+          // root was detached. Stay detached at the original commit, so the
+          // turn-off still completes instead of wedging half torn down.
+          branchMissing = true;
+          branchInUse = true;
+        }
+      } else {
         branchMissing = true;
-        branchInUse = true;
       }
-    } else {
-      branchMissing = true;
     }
+
+    if (refs.backupSha && refs.backupSha !== refs.originalHeadSha) {
+      // A backup bringing a path that's there untracked can't apply.
+      await clearOutOfTheWay(rootPath, inTheWay, original, ignoreCase);
+      try {
+        // --index also restores what was staged vs unstaged.
+        await git(ctx, rootPath, ["stash", "apply", "--index", refs.backupSha]);
+      } catch (error) {
+        // The refs stay: the backup is still reachable, to retry or apply by
+        // hand (`git stash apply --index refs/herdr-spotlight/backup`).
+        throw new SpotlightError(
+          "restore-conflict",
+          `Restoring the root's original uncommitted changes conflicted: ${error instanceof Error ? error.message : String(error)}.`,
+        );
+      }
+    }
+
+    const rescued = rescue ? await writeBack(ctx, rootPath, refs, rescue, original) : null;
+
+    // The pending ref goes first: left behind with the anchors gone, the next
+    // turn-off would write its files back over a root that moved on.
+    if (rescue) await git(ctx, rootPath, ["update-ref", "-d", RESCUED_PENDING]);
+    await git(ctx, rootPath, ["update-ref", "-d", REFS.snapshot]);
+    await git(ctx, rootPath, ["update-ref", "-d", REFS.backup]);
+    await git(ctx, rootPath, ["update-ref", "-d", REFS.originalHead]);
+    if (refs.originalBranch) await gitTry(ctx, rootPath, ["symbolic-ref", "--delete", REFS.originalBranch]);
+
+    const warning = branchMissing
+      ? {
+        code: "branch-missing",
+        message: branchInUse
+          ? `The root is back on its original commit but left detached: branch "${refs.originalBranch}" is checked out in another worktree.`
+          : `The root is back on its original commit but left detached: branch "${refs.originalBranch}" no longer exists.`,
+      }
+      : null;
+    return { originalBranch: refs.originalBranch, branchMissing, branchInUse, warning, rescued };
+  } catch (error) {
+    if (!rescue) throw error;
+    // RESCUED_PENDING stays: the next turn-off writes these files back.
+    const { code, message } = toSpotlightError(error);
+    const stop = /[.!?]$/.test(message) ? "" : ".";
+    throw new SpotlightError(
+      code,
+      `${message}${stop} Tus archivos sin seguimiento que estorbaban están a salvo en ${rescue.ref}.`,
+    );
   }
-
-  if (refs.backupSha && refs.backupSha !== refs.originalHeadSha) {
-    try {
-      // --index also restores what was staged vs unstaged.
-      await git(ctx, rootPath, ["stash", "apply", "--index", refs.backupSha]);
-    } catch (error) {
-      // The refs stay: the backup is still reachable, to retry or apply by
-      // hand (`git stash apply --index refs/herdr-spotlight/backup`).
-      const saved = rescuedRef ? ` The untracked root files in the turn-off's way are in ${rescuedRef}.` : "";
-      throw new SpotlightError(
-        "restore-conflict",
-        `Restoring the root's original uncommitted changes conflicted: ${error instanceof Error ? error.message : String(error)}.${saved}`,
-      );
-    }
-  }
-
-  const rescued = rescuedRef ? await writeBack(ctx, rootPath, refs, rescuedRef, inTheWay) : null;
-
-  await git(ctx, rootPath, ["update-ref", "-d", REFS.snapshot]);
-  await git(ctx, rootPath, ["update-ref", "-d", REFS.backup]);
-  await git(ctx, rootPath, ["update-ref", "-d", REFS.originalHead]);
-  if (refs.originalBranch) await gitTry(ctx, rootPath, ["symbolic-ref", "--delete", REFS.originalBranch]);
-
-  const warning = branchMissing
-    ? {
-      code: "branch-missing",
-      message: branchInUse
-        ? `The root is back on its original commit but left detached: branch "${refs.originalBranch}" is checked out in another worktree.`
-        : `The root is back on its original commit but left detached: branch "${refs.originalBranch}" no longer exists.`,
-    }
-    : null;
-  return { originalBranch: refs.originalBranch, branchMissing, branchInUse, warning, rescued };
 }
 
 const chunksOf = (list) => {
@@ -681,56 +726,239 @@ const chunksOf = (list) => {
   return out;
 };
 
-/** Untracked root files (non-ignored, beyond generated files) at paths a
- *  turn-off writes: the original commit's files and the backup's. The reset
- *  would overwrite them, the backup refuses to apply over them, and their
- *  content was never in any git object. Sorted. */
-async function untrackedInTheWay(ctx, rootPath, refs) {
-  const { untrackedPaths } = await readRootStatus(ctx, rootPath);
-  if (untrackedPaths.size === 0) return [];
-  const shas = [refs.originalHeadSha];
-  if (refs.backupSha && refs.backupSha !== refs.originalHeadSha) shas.push(refs.backupSha);
-  const hit = new Set();
-  for (const sha of shas) {
-    const raw = await gitRaw(ctx, rootPath, ["ls-tree", "-r", "-z", "--name-only", sha]);
-    for (const p of raw.split("\0")) if (p && untrackedPaths.has(p)) hit.add(p);
-  }
-  return [...hit].sort();
+const splitZ = (raw) => raw.split("\0").filter(Boolean);
+
+// Case-folded and NFC-normalized, as a case-insensitive APFS compares names.
+const foldName = (name) => name.normalize("NFC").toLowerCase();
+
+/** Every file path of a commit's tree. */
+async function treeFiles(ctx, rootPath, sha) {
+  return splitZ(await gitRaw(ctx, rootPath, ["ls-tree", "-r", "-z", "--name-only", sha]));
 }
 
-/** Commits `paths` as they are on disk, through a temp index, to a new ref
- *  under RESCUED_PREFIX (no parent, on no branch). Returns the ref. */
-async function rescueFiles(ctx, rootPath, paths) {
-  const indexPath = resolve(rootPath, await git(ctx, rootPath, ["rev-parse", "--git-path", RESCUE_INDEX]));
-  const env = { GIT_INDEX_FILE: indexPath, ...LITERAL };
-  await rm(indexPath, { force: true });
-  try {
-    for (const chunk of chunksOf(paths)) await git(ctx, rootPath, ["add", "-f", "--", ...chunk], { env });
-    const treeSha = await git(ctx, rootPath, ["write-tree"], { env });
-    const sha = await git(ctx, rootPath, [...IDENTITY_ARGS, "commit-tree", treeSha, "-m", RESCUE_MESSAGE]);
-    const ref = `${RESCUED_PREFIX}${new Date().toISOString().replace(/[:.]/g, "-")}-${sha.slice(0, 7)}`;
-    await git(ctx, rootPath, ["update-ref", ref, sha]);
-    return ref;
-  } finally {
+/** lstat and readdir under the root, memoized: the walk below asks the same
+ *  parent folders once per path under them. */
+function diskOf(rootPath, ignoreCase) {
+  const kinds = new Map();
+  const listings = new Map();
+  /** "dir", "other" (a file or symlink), or null when nothing is there. */
+  const kind = (rel) => {
+    if (!kinds.has(rel)) {
+      kinds.set(rel, lstat(join(rootPath, rel)).then((st) => (st.isDirectory() ? "dir" : "other"), () => null));
+    }
+    return kinds.get(rel);
+  };
+  const list = (rel) => {
+    if (!listings.has(rel)) listings.set(rel, readdir(join(rootPath, rel)).catch(() => []));
+    return listings.get(rel);
+  };
+  /** `rel` as named on disk, component by component: the exact name, else
+   *  (core.ignorecase) the entry equal folded, else the name asked for. */
+  const actualPath = async (rel) => {
+    const out = [];
+    for (const part of rel.split("/")) {
+      const entries = await list(out.join("/"));
+      let name = entries.includes(part) ? part : null;
+      if (name === null && ignoreCase) name = entries.find((e) => foldName(e) === foldName(part)) ?? null;
+      out.push(name ?? part);
+    }
+    return out.join("/");
+  };
+  return { kind, actualPath };
+}
+
+/** Root items in the way of a path a turn-off writes (the original commit's
+ *  files and the backup's) that the index doesn't track, beyond generated
+ *  files: the reset would overwrite or delete them, the backup refuses to
+ *  apply over them, and their content was never in any git object. Read from
+ *  disk, not `status`, so ignored files count too, and without walking
+ *  ignored trees like node_modules: per path, its first parent that is a file
+ *  or symlink, else the path itself (a file, symlink or folder) by its
+ *  on-disk name, which under core.ignorecase may differ in case. Sorted. */
+async function itemsInTheWay(ctx, rootPath, refs, original, ignoreCase) {
+  const wanted = new Set(original);
+  if (refs.backupSha && refs.backupSha !== refs.originalHeadSha) {
+    for (const p of await treeFiles(ctx, rootPath, refs.backupSha)) wanted.add(p);
+  }
+  const index = new Set(splitZ(await gitRaw(ctx, rootPath, ["ls-files", "-z"])));
+  const disk = diskOf(rootPath, ignoreCase);
+  const items = new Set();
+  for (const w of wanted) {
+    if (index.has(w)) continue;
+    const parts = w.split("/");
+    let hit = null;
+    let clear = false;
+    for (let i = 1; i < parts.length && hit === null && !clear; i += 1) {
+      const prefix = parts.slice(0, i).join("/");
+      // A tracked parent is the reset's to replace; a missing one leaves room.
+      if (index.has(prefix)) clear = true;
+      else {
+        const kind = await disk.kind(prefix);
+        if (kind === null) clear = true;
+        else if (kind !== "dir") hit = prefix;
+      }
+    }
+    if (clear) continue;
+    if (hit === null && (await disk.kind(w)) === null) continue;
+    const actual = await disk.actualPath(hit ?? w);
+    if (index.has(actual) || isGeneratedFile(actual)) continue;
+    items.add(actual);
+  }
+  return [...items].sort();
+}
+
+/** The untracked entries under `items` (ignored files included; the
+ *  workspace's tracked files inside a folder item stay out, the reset handles
+ *  those), beyond generated files. A nested git repo (or a submodule's
+ *  worktree) is one entry ending in "/", git's own marker. */
+async function untrackedUnder(ctx, rootPath, items) {
+  const out = [];
+  for (const chunk of chunksOf(items)) {
+    // No --exclude-standard: ignored files are listed too.
+    const raw = await gitRaw(ctx, rootPath, ["ls-files", "-z", "--others", "--", ...chunk], { env: LITERAL });
+    for (const p of splitZ(raw)) if (!isGeneratedFile(p)) out.push(p);
+  }
+  return out;
+}
+
+const isNestedRepoEntry = (p) => p.endsWith("/");
+
+/** A nested git repo in the way could be saved only as a gitlink, a pointer to
+ *  commits the rescue doesn't hold (none at all in an unborn one, which `git
+ *  add` refuses), and the turn-off would then delete it with its .git. Found
+ *  by git's marker, or an item that is itself a folder with a .git entry. */
+async function assertNoNestedRepos(rootPath, items, untracked) {
+  const found = new Set(untracked.filter(isNestedRepoEntry).map((p) => p.slice(0, -1)));
+  for (const item of items) {
+    const isDir = await lstat(join(rootPath, item)).then((st) => st.isDirectory(), () => false);
+    if (isDir && (await lstat(join(rootPath, item, ".git")).then(() => true, () => false))) found.add(item);
+  }
+  if (found.size === 0) return;
+  const paths = [...found].sort();
+  const shown = paths.slice(0, 5).join(", ");
+  const more = paths.length > 5 ? ` (+${paths.length - 5} más)` : "";
+  throw new SpotlightError(
+    "untracked-collision",
+    paths.length === 1
+      ? `Hay un repo de git dentro de ${shown}, en una ruta que apagar Spotlight escribiría. Muévelo y vuelve a apagar, o usa Apagar igual para descartarlo.`
+      : `Hay repos de git dentro de ${shown}${more}, en rutas que apagar Spotlight escribiría. Muévelos y vuelve a apagar, o usa Apagar igual para descartarlos.`,
+    { paths },
+  );
+}
+
+/** `files` minus each regular file whose content is the original commit's
+ *  blob at that exact path: that content is git's own (a reset that failed
+ *  part-way wrote it, or it never changed), the reset writes it back
+ *  identically, and saved on top of a pending rescue it would bury the user's
+ *  version there. Hashed with the default filters, as `git add` would.
+ *  Symlinks are always kept. */
+async function withoutOriginalContent(ctx, rootPath, files, originalHeadSha) {
+  const regular = [];
+  for (const p of files) {
+    if (await lstat(join(rootPath, p)).then((st) => st.isFile(), () => false)) regular.push(p);
+  }
+  const blobs = new Map();
+  for (const chunk of chunksOf(regular)) {
+    const raw = await gitRaw(ctx, rootPath, ["ls-tree", "-z", originalHeadSha, "--", ...chunk], { env: LITERAL });
+    for (const entry of splitZ(raw)) {
+      const tab = entry.indexOf("\t");
+      const [mode, type, sha] = entry.slice(0, tab).split(" ");
+      if (type === "blob" && mode.startsWith("100")) blobs.set(entry.slice(tab + 1), sha);
+    }
+  }
+  const same = new Set();
+  for (const chunk of chunksOf(regular.filter((p) => blobs.has(p)))) {
+    const hashes = (await git(ctx, rootPath, ["hash-object", "--", ...chunk], { env: LITERAL })).split("\n");
+    chunk.forEach((p, i) => {
+      if (hashes[i] === blobs.get(p)) same.add(p);
+    });
+  }
+  return files.filter((p) => !same.has(p));
+}
+
+/** Saves the `untracked` entries under the items in the way in one commit
+ *  through a temp index, seeded with the pending rescue of a turn-off that
+ *  failed half-way, so one commit holds both. Left out: a nested repo's entry
+ *  (only Apagar igual gets here with one) and a file already holding the
+ *  original commit's content. Reuses the pending commit when nothing new
+ *  turned up. The commit gets a ref under RESCUED_PREFIX (no parent, on no
+ *  branch) and RESCUED_PENDING points at it. Returns {ref, sha}, or null when
+ *  there is nothing to save. */
+async function rescueItems(ctx, rootPath, untracked, originalHeadSha) {
+  const pending = await gitTry(ctx, rootPath, ["rev-parse", "--verify", "-q", `${RESCUED_PENDING}^{commit}`]);
+  const files = await withoutOriginalContent(
+    ctx, rootPath, untracked.filter((p) => !isNestedRepoEntry(p)), originalHeadSha,
+  );
+  if (files.length === 0 && !pending) return null;
+
+  let sha = pending;
+  if (files.length > 0) {
+    const indexPath = resolve(rootPath, await git(ctx, rootPath, ["rev-parse", "--git-path", RESCUE_INDEX]));
+    const env = { GIT_INDEX_FILE: indexPath, ...LITERAL };
     await rm(indexPath, { force: true });
+    try {
+      if (pending) await git(ctx, rootPath, ["read-tree", pending], { env });
+      for (const chunk of chunksOf(files)) await git(ctx, rootPath, ["add", "-f", "--", ...chunk], { env });
+      const treeSha = await git(ctx, rootPath, ["write-tree"], { env });
+      const pendingTree = pending ? await git(ctx, rootPath, ["rev-parse", `${pending}^{tree}`]) : null;
+      if (treeSha !== pendingTree) {
+        sha = await git(ctx, rootPath, [...IDENTITY_ARGS, "commit-tree", treeSha, "-m", RESCUE_MESSAGE]);
+      }
+    } finally {
+      await rm(indexPath, { force: true });
+    }
+  }
+
+  let ref = sha === pending
+    ? await gitTry(ctx, rootPath, ["for-each-ref", "--count=1", "--points-at", sha, "--format=%(refname)", RESCUED_PREFIX])
+    : null;
+  if (!ref) {
+    ref = `${RESCUED_PREFIX}${new Date().toISOString().replace(/[:.]/g, "-")}-${sha.slice(0, 7)}`;
+    await git(ctx, rootPath, ["update-ref", ref, sha]);
+  }
+  await git(ctx, rootPath, ["update-ref", RESCUED_PENDING, sha]);
+  return { ref, sha };
+}
+
+/** Right before the backup applies: removes the items in the way still on
+ *  disk that aren't the original commit's own (one of its files, a folder
+ *  holding some, or under core.ignorecase the same path folded). Those would
+ *  block the apply, and their content is in the rescue. */
+async function clearOutOfTheWay(rootPath, items, original, ignoreCase) {
+  if (items.length === 0) return;
+  const key = ignoreCase ? foldName : (p) => p;
+  const own = new Set();
+  for (const p of original) {
+    const parts = p.split("/");
+    for (let i = 1; i <= parts.length; i += 1) own.add(key(parts.slice(0, i).join("/")));
+  }
+  for (const item of items) {
+    if (!own.has(key(item))) await rm(join(rootPath, item), { recursive: true, force: true });
   }
 }
 
-/** Puts the rescued files back on top of the restored root, unstaged, except
- *  where the root's own uncommitted changes brought a version of their own:
- *  those win, and the rescued file stays only in the ref. */
-async function writeBack(ctx, rootPath, refs, ref, paths) {
+/** Puts back on top of the restored root, unstaged, each file of the rescue
+ *  whose exact path is a file of the original commit, unless the root's own
+ *  uncommitted changes brought a version of their own (those win). The rest
+ *  (a path the root's changes brought, a file under a folder that was in the
+ *  way, one where the original has a folder, a case-only name) stays only in
+ *  the ref. */
+async function writeBack(ctx, rootPath, refs, rescue, original) {
+  const files = (await treeFiles(ctx, rootPath, rescue.sha)).sort();
+  const originalFiles = new Set(original);
   let claimed = new Set();
   if (refs.backupSha && refs.backupSha !== refs.originalHeadSha) {
-    const raw = await gitRaw(ctx, rootPath, ["diff", "--name-only", "-z", "--no-renames", "--diff-filter=d", refs.originalHeadSha, refs.backupSha]);
-    claimed = new Set(raw.split("\0").filter(Boolean));
+    claimed = new Set(splitZ(await gitRaw(ctx, rootPath, [
+      "diff", "--name-only", "-z", "--no-renames", "--diff-filter=d", refs.originalHeadSha, refs.backupSha,
+    ])));
   }
-  const restored = paths.filter((p) => !claimed.has(p));
-  const kept = paths.filter((p) => claimed.has(p));
+  const restored = files.filter((p) => originalFiles.has(p) && !claimed.has(p));
+  const back = new Set(restored);
+  const kept = files.filter((p) => !back.has(p));
   for (const chunk of chunksOf(restored)) {
-    await git(ctx, rootPath, ["restore", `--source=${ref}`, "--worktree", "--", ...chunk], { env: LITERAL });
+    await git(ctx, rootPath, ["restore", `--source=${rescue.ref}`, "--worktree", "--", ...chunk], { env: LITERAL });
   }
-  return { ref, restored, kept };
+  return { ref: rescue.ref, restored, kept };
 }
 
 /** Teardown when a normal turn-off can't finish (the repo is going away):

@@ -415,9 +415,11 @@ export function rescuedNotes(rescued) {
     lines.push(`${names(rescued.restored)} ${verb} como cambio sin commit (tu versión). Copia en ${rescued.ref}.`);
   }
   if (rescued.kept.length > 0) {
-    const verb = rescued.kept.length === 1 ? "volvió" : "volvieron";
+    // `git show`, not `git checkout <ref> -- <archivo>`: that would overwrite
+    // what came back, and nothing else keeps that version once the refs go.
+    const verb = rescued.kept.length === 1 ? "devolvió" : "devolvieron";
     lines.push(
-      `${names(rescued.kept)} ${verb} con tus cambios sin commit de antes de Spotlight; tu versión está en ${rescued.ref} (git checkout ${rescued.ref} -- <archivo>).`,
+      `${names(rescued.kept)} no se ${verb}: en esa ruta quedó lo que el root tenía antes de Spotlight. Tu versión está en ${rescued.ref} (git show ${rescued.ref}:<archivo>).`,
     );
   }
   return lines;
