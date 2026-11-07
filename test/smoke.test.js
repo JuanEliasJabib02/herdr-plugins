@@ -57,13 +57,14 @@ test("projects layout: agent-sleep's moon is the status bar's last cell, nothing
   assert.ok(requires.split("\n").includes("agent-sleep"));
 });
 
-test("projects layout: the status bar is a row, workspace-status, the claude-accounts footer, then agent-sleep's moon (claude-accounts D10, agent-sleep D14)", () => {
+test("projects layout: the status bar is a row, workspace-status, the spotlight flask, the claude-accounts footer, then agent-sleep's moon (claude-accounts D10, spotlight D20, agent-sleep D14)", () => {
   const status = find(read("layouts/projects.json"), "status");
   assert.equal(status.type, "row");
   assert.equal(status.resizable, false);
   assert.deepEqual(status.size, { px: 28 });
   assert.deepEqual(status.children, [
     { id: "status-workspace", type: "block", size: { weight: 1 }, content: { mod: "workspace-status" } },
+    { id: "status-spotlight", type: "block", size: { px: 40 }, content: { mod: "spotlight", props: { view: "footer" } } },
     { id: "status-usage", type: "block", size: { weight: 1 }, content: { mod: "claude-accounts", props: { view: "footer" } } },
     { id: "status-agent-sleep", type: "block", size: { px: 40 }, content: { mod: "agent-sleep" } },
   ]);

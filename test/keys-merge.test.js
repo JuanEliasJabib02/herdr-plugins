@@ -223,7 +223,7 @@ function fakeHome() {
   writeFileSync(join(home, "keys.json"), `${JSON.stringify(HERDR, null, 2)}\n`);
   return home;
 }
-const install = (home, ...args) => spawnSync("sh", [INSTALL, ...args], { encoding: "utf8", env: { ...process.env, HERDR_APP_HOME: home } });
+const install = (home, ...args) => spawnSync("sh", [INSTALL, ...args], { encoding: "utf8", env: { ...process.env, HOME: home, HERDR_APP_HOME: home } });
 
 test("install: merges the plugin's keys once; a second install changes nothing", () => {
   const home = fakeHome();

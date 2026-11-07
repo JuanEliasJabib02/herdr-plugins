@@ -13,7 +13,10 @@
 # keys.json is merged into <home>/keys.json (new keys only, after a backup)
 # unless --no-keys; uninstalling leaves keys.json as it is. A plugin's
 # `requires` file names other plugin folders of this repo that it needs
-# beside it; they are installed first, unless --alone.
+# beside it; they are installed first, unless --alone. A plugin's `bin` file
+# names executables of its mods to put on PATH: each is linked as
+# ~/.local/bin/<its name> to the installed copy, listed in the manifest like
+# the rest, and a name there that isn't such a link stops the install too.
 set -eu
 
 repo=$(cd "$(dirname "$0")/.." && pwd)
@@ -47,20 +50,93 @@ items() {
 
 owned() { [ -f "$manifest" ] && grep -qxF "$1" "$manifest"; }
 
+# Commands on PATH: links in ~/.local/bin to the installed copy, so agents,
+# hooks and Herdr's exec (whose PATH starts with ~/.local/bin) find them.
+# The manifest lists a link by its absolute path; the rest are relative to
+# Herdr's home.
+bindir=${HOME:+"$HOME/.local/bin"}
+home_abs=$(cd "$home" 2>/dev/null && pwd) || home_abs=$home
+
+# Removes one manifest line: an item of Herdr's home, or a command's link,
+# only while it is still a link into this home (a file or a link someone put
+# there since stays, named).
+drop() {
+  case $1 in
+    /*)
+      to=$(readlink "$1" 2>/dev/null || true)
+      case $to in
+        "$home_abs"/*) rm -f "$1" && echo "removed $1" ;;
+        *) if [ -e "$1" ] || [ -L "$1" ]; then echo "kept $1: it no longer links into $home_abs" >&2; fi ;;
+      esac
+      ;;
+    *)
+      if [ -e "$home/$1" ]; then rm -rf "${home:?}/$1" && echo "removed $home/$1"; fi
+      ;;
+  esac
+}
+
 if [ "$mode" = uninstall ]; then
   [ -f "$manifest" ] || { echo "nothing installed for $plugin"; exit 0; }
   while IFS= read -r item; do
-    [ -n "$item" ] && [ -e "$home/$item" ] && rm -rf "${home:?}/$item" && echo "removed $home/$item"
+    [ -z "$item" ] || drop "$item"
   done < "$manifest"
   rm "$manifest"
   [ -f "$src/keys.json" ] && echo "keys: $home/keys.json keeps the plugin's shortcuts ($src/keys.json); remove them by hand if you want"
   exit 0
 fi
 
-# Refuse before touching anything when a name belongs to someone else.
+# The commands the plugin's `bin` file lists, one per line (# comments): a
+# path to an executable file inside one of its mods, linked under its file
+# name. A line that isn't one, or a name an earlier line took, is named and
+# skipped. Prints the paths that pass, one per line.
+commands() {
+  [ -f "$src/bin" ] || return 0
+  names=" "
+  while IFS= read -r entry || [ -n "$entry" ]; do
+    entry=$(printf '%s' "${entry%%#*}" | tr -d '[:space:]')
+    [ -n "$entry" ] || continue
+    case $entry in
+      mods/*/*) bad=no ;;
+      *) bad=yes ;;
+    esac
+    case $entry in
+      *[!A-Za-z0-9._/-]*|*//*|*/.*|*/) bad=yes ;;
+    esac
+    if [ "$bad" = yes ]; then
+      echo "bin: $entry isn't a file of the plugin's mods; skipped" >&2
+      continue
+    fi
+    if [ ! -f "$src/$entry" ] || [ ! -x "$src/$entry" ]; then
+      echo "bin: $entry isn't an executable file of the plugin; skipped" >&2
+      continue
+    fi
+    name=${entry##*/}
+    case $names in
+      *" $name "*) echo "bin: $entry: a command named $name is already listed; skipped" >&2; continue ;;
+    esac
+    names="$names$name "
+    echo "$entry"
+  done < "$src/bin"
+}
+cmds=$(commands)
+if [ -n "$cmds" ] && [ -z "$bindir" ]; then
+  echo "install: HOME isn't set, so there's no ~/.local/bin for $plugin's commands; nothing changed" >&2
+  exit 1
+fi
+
+# Refuse before touching anything when a name belongs to someone else: an
+# item, or a command's link that isn't already this install's (a link to the
+# installed copy).
 for item in $(items); do
   if { [ -e "$home/$item" ] || [ -L "$home/$item" ]; } && ! owned "$item"; then
     echo "install: $home/$item exists and wasn't installed from $plugin; nothing changed" >&2
+    exit 1
+  fi
+done
+for entry in $cmds; do
+  link="$bindir/${entry##*/}"
+  if { [ -e "$link" ] || [ -L "$link" ]; } && [ "$(readlink "$link" 2>/dev/null || true)" != "$home_abs/$entry" ]; then
+    echo "install: $link exists and wasn't installed from $plugin; nothing changed" >&2
     exit 1
   fi
 done
@@ -68,10 +144,11 @@ done
 # What the plugin needs beside it, installed after its own names pass the
 # check above (a refused install changes nothing) and before its own copy: its
 # `requires` file, one plugin folder of this repo per line (# comments).
-# projects-sidebar's layout draws claude-accounts' footer, and a block whose
-# mod isn't installed shows "<mod> did not load". Each runs once per install
-# (HERDR_PLUGINS_SEEN breaks a loop); one this repo doesn't have is named
-# and skipped. --uninstall never removes them: another plugin may use them.
+# projects-sidebar's layout draws claude-accounts' and spotlight's footers,
+# and a block whose mod isn't installed shows "<mod> did not load". Each runs
+# once per install (HERDR_PLUGINS_SEEN breaks a loop); one this repo doesn't
+# have is named and skipped. --uninstall never removes them: another plugin
+# may use them.
 if [ "$alone" = no ] && [ -f "$src/requires" ]; then
   seen=" ${HERDR_PLUGINS_SEEN:-} $plugin "
   while IFS= read -r dep || [ -n "$dep" ]; do
@@ -125,13 +202,34 @@ for item in $(items); do
   record "$item"
   echo "installed $home/$item"
 done
+# The commands, once the copies they point at are in place. A link already
+# pointing there is kept as it is (the check above refused any other).
+for entry in $cmds; do
+  link="$bindir/${entry##*/}"
+  target="$home_abs/$entry"
+  if [ "$(readlink "$link" 2>/dev/null || true)" != "$target" ]; then
+    mkdir -p "$bindir"
+    ln -s "$target" "$link"
+  fi
+  record "$link"
+  echo "linked $link -> $target"
+done
+if [ -n "$cmds" ]; then
+  case ":$PATH:" in
+    *":$bindir:"*) ;;
+    *) echo "bin: $bindir isn't on your PATH; add it to run $(for e in $cmds; do printf '%s ' "${e##*/}"; done)by name" ;;
+  esac
+fi
 # Only once every copy succeeded: what an earlier install brought and the
 # plugin no longer has.
-items > "$manifest.new"
+{
+  items
+  for entry in $cmds; do echo "$bindir/${entry##*/}"; done
+} > "$manifest.new"
 if [ -f "$manifest" ]; then
   while IFS= read -r item; do
     if [ -n "$item" ] && ! grep -qxF "$item" "$manifest.new"; then
-      rm -rf "${home:?}/$item" && echo "removed $home/$item"
+      drop "$item"
     fi
   done < "$manifest"
 fi
