@@ -34,7 +34,7 @@ export function modeLabel(mode) {
 }
 
 // Whether the Mac should be kept awake (D5): mode on, or mode agent with at
-// least one agents() entry working. blocked (waiting for input or a
+// least one terminals() entry working. blocked (waiting for input or a
 // permission), done and idle let it sleep, as in Orca; no grace period.
 export function isActive(mode, agents) {
   const value = parseMode(mode);
