@@ -7,7 +7,8 @@
 // exceptions change the persisted keys here: T10 added two optional fields,
 // a group's `organize` (D29) and the folded Task-mode lanes, `tasks` (D31);
 // T13 added the task notes, `projects.notes.v1`, and their helpers (D34);
-// T15 added a project's saved base, `base`, and setProjectBase (D37).
+// T15 added a project's saved base, `base`, and setProjectBase (D37); the PR
+// status added `projects.prs.v1`, read and merged by pr-model.js.
 
 // ── Persisted keys ─────────────────────────────────────────────────────────
 
@@ -23,6 +24,7 @@ export const KEYS = {
   agents: "projects.agents.v1", // the last knownAgents() result
   notes: "projects.notes.v1", // { [taskKey]: note }: a task's note, up to 30 chars, at most 500 notes (noteKeyOf, parseNotes)
   notesBackup: "projects.notes.v1.backup", // the first stored projects.notes.v1 that didn't read back as itself, as it was (notesWrites)
+  prs: "projects.prs.v1", // { [workspacePath]: { number, state, url } }: the PR of each workspace's branch, state open | draft | merged | closed (pr-model.js parsePrs)
 };
 
 // Whether writing `next` over `prev` changes anything: values are plain

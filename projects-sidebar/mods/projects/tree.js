@@ -21,9 +21,10 @@ import {
   theme, props, notify, run, exec, spaces, panes, agents, focused, layout, home, window, pickFolder, watchFolder,
 } from "herdr";
 import { icon } from "./config.js";
-import { findProject, activeGroup, matchSpaces, noteKeyOf, noteOf, baseName } from "./lib.js";
+import { findProject, activeGroup, matchSpaces, noteKeyOf, noteOf, baseName, normPath } from "./lib.js";
 import * as store from "./store.js";
-import { repoOf, listWorktrees } from "./git.js";
+import { repoOf, listWorktrees, workspacePrs } from "./git.js";
+import { PR_COLORS, prLabel, prMemo, mergePrs } from "./pr-model.js";
 import {
   buildTree, openAction, railAction, isNarrow, projectPaths, pruneCache, watchDirs, eachLimit, liveFolder, addProjectAt, reorderProject,
 } from "./tree-model.js";
@@ -41,6 +42,11 @@ const LISTERS = 4;
 const FALLBACK = 60000;
 // After a watch wakes: a worktree add writes several files; list once after.
 const SETTLE = 500;
+// The PRs of the active group's workspaces are asked of GitHub this often
+// while the window is in front, and again on coming back to it (a PR merged
+// in the browser) or switching groups, at most every PR_AGAIN.
+const PR_EVERY = 60000;
+const PR_AGAIN = 10000;
 
 // Herdr's shipped chrome icons (chevrons): there in every install.
 const chrome = (name) => `mods/workspace-chrome/${name}.svg`;
@@ -65,9 +71,21 @@ export default class Tree {
     this.known = new Map(); // project path -> the token of its watch loop
     this.token = 0;
     this.failed = new Set(); // projects git couldn't list last time (folder gone)
+    // PR status: which account sees each owner's repos, whether a round is
+    // running, when the last one started, and what the window and the active
+    // group were at the last tick.
+    this.prMemo = prMemo();
+    this.prBusy = false;
+    this.prAt = 0;
+    this.wasActive = false;
+    this.prGroup = null;
     this.sync(cx);
-    // New or removed projects (Add project here, the project menu in its popup).
-    cx.timer.every(1000, (cx) => this.sync(cx));
+    // New or removed projects (Add project here, the project menu in its
+    // popup), and whether the PRs are due.
+    cx.timer.every(1000, (cx) => {
+      this.sync(cx);
+      this.prTick(cx);
+    });
     cx.timer.every(FALLBACK, (cx) => {
       if (window().active) this.listAll(cx);
     });
@@ -158,6 +176,41 @@ export default class Tree {
     });
   }
 
+  // ── PR status ────────────────────────────────────────────────────────────
+
+  // Only the window in front asks (every copy draws what it stored): every
+  // PR_EVERY, or PR_AGAIN after coming back to the window or to another group.
+  prTick(cx) {
+    const active = Boolean(window().active);
+    const group = activeGroup(store.registry())?.id ?? null;
+    const back = active && (!this.wasActive || group !== this.prGroup);
+    this.wasActive = active;
+    this.prGroup = group;
+    if (!active) return;
+    if (Date.now() - this.prAt >= (back ? PR_AGAIN : PR_EVERY)) this.refreshPrs(cx);
+  }
+
+  // One round: each project of the active group asked once (pr-model.js
+  // projectPrs), LISTERS at a time, then stored together (mergePrs: a project
+  // that failed keeps what it showed). Stored only when a PR changed, which
+  // re-renders every copy.
+  refreshPrs(cx) {
+    if (this.prBusy) return;
+    this.prBusy = true;
+    this.prAt = Date.now();
+    const projects = (activeGroup(store.registry())?.projects ?? []).map((p) => normPath(p.path));
+    const lists = store.cache();
+    cx.spawn(async () => {
+      try {
+        const results = await eachLimit(projects, LISTERS, (p) => workspacePrs(p, lists[p] ?? [], this.prMemo));
+        const rounds = projects.map((project, i) => ({ project, ...(results[i].ok ? results[i].value : { ok: false, prs: {} }) }));
+        store.savePrs(mergePrs(store.prs(), rounds, store.cache()));
+      } finally {
+        this.prBusy = false;
+      }
+    });
+  }
+
   // ── Drawing ──────────────────────────────────────────────────────────────
 
   render() {
@@ -181,9 +234,11 @@ export default class Tree {
     const notes = byTask ? store.notes() : {};
     // Other plugins' badges (D38), read once; the rail draws none.
     const badges = narrow ? {} : store.badges();
+    // The PR of each workspace's branch, read once; the rail shows none.
+    const prs = narrow ? {} : store.prs();
     const body = model.empty
       ? narrow ? [] : [emptyState(t)]
-      : narrow ? model.projects.map((p) => railRow(p, t)) : model.rows.map((r) => row(r, t, notes, badges));
+      : narrow ? model.projects.map((p) => railRow(p, t)) : model.rows.map((r) => row(r, t, notes, badges, prs));
     return v_flex().size_full().min_h(0).bg(t.chrome).text_size(13)
       .child(header(model.group, narrow, byTask, t))
       .child(v_flex().id("projects-list").flex_1().min_h(0).px(narrow ? 0 : 8).pb(14).overflow_y_scrollbar().mode("always")
@@ -238,10 +293,11 @@ function focusedProject() {
 
 // `notes`: projects.notes.v1, read once per render (Task mode only).
 // `badges`: other plugins' badges by workspace path (store.js badges).
-function row(r, t, notes, badges) {
+// `prs`: the PR of each workspace's branch by path (store.js prs).
+function row(r, t, notes, badges, prs) {
   if (r.kind === "task") return taskRow(r, t, notes);
   if (r.kind === "project") return projectRow(r, t);
-  if (r.kind === "workspace") return workspaceRow(r, t, badges[r.path] ?? []);
+  if (r.kind === "workspace") return workspaceRow(r, t, badges[r.path] ?? [], prs[r.path] ?? null);
   if (r.kind === "agent") return agentRow(r, t);
   const what = r.kind === "missing" ? "Can't read this folder." : "Loading…";
   const text = r.projectName ? `${r.projectName} · ${what}` : what;
@@ -344,12 +400,16 @@ function projectRow(p, t) {
 }
 
 // A workspace: home (main checkout) or branch icon, or its agent's status in
-// that place; other plugins' badges after the label (D38); the open dot when
-// it has a space; highlighted when shown.
-function workspaceRow(w, t, badges) {
+// that place; the branch icon in its PR's color (green open, purple merged,
+// red closed, gray draft; pr-model.js PR_COLORS), its hover naming the PR;
+// other plugins' badges after the label (D38); the open dot when it has a
+// space; highlighted when shown.
+function workspaceRow(w, t, badges, pr) {
   const width = badgeMaxWidth(badges.length);
   const busy = Boolean(w.status) && w.status !== "idle";
-  const lead = busy ? statusMark(w.status, t) : svg(icon(w.main ? "home" : "branch")).size(13).flex_none().text_color(t.dim);
+  const shown = !busy && !w.main && pr ? pr : null;
+  const tone = shown ? t[PR_COLORS[shown.state]] ?? t.dim : t.dim;
+  const lead = busy ? statusMark(w.status, t) : svg(icon(w.main ? "home" : "branch")).size(13).flex_none().text_color(tone);
   return h_flex().id(`w:${w.path}`).h(28).flex_none().pl(26).pr(8).gap(8).items_center().rounded(8)
     .cursor_pointer()
     .when(w.selected, (el) => el.bg(t.selected))
@@ -361,7 +421,9 @@ function workspaceRow(w, t, badges) {
       cx.stop_propagation();
       openWorkspaceMenu(w.project, w.path);
     })
-    .child(h_flex().w(14).flex_none().items_center().justify_center().child(lead))
+    .child(h_flex().id(`lead:${w.path}`).w(14).flex_none().items_center().justify_center()
+      .when(Boolean(shown), (el) => el.tooltip(prLabel(shown)))
+      .child(lead))
     .child(div().flex_1().min_w(0).truncate().text_color(w.open ? t.foreground : t.muted).child(w.label))
     .when(badges.length > 0, (el) => el.child(h_flex().flex_none().gap(BADGE_GAP).items_center()
       .children(badges.map((b) => badge(w, b, width, t)))))

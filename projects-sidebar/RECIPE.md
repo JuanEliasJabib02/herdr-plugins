@@ -27,6 +27,10 @@ across repos.
     - Leading icon: the agent's status mark while one of its spaces is
       working, blocked or done; otherwise a home icon on the main checkout and
       a branch icon on the others.
+    - The branch icon takes the color of the branch's newest GitHub PR, as
+      Orca shows it: green (`ansi2`) open, purple (`ansi5`) merged, red
+      (`ansi1`) closed without merging, `dim` gray as a draft. Its hover
+      names it ("PR #161 · Open"). With no PR it stays `dim`.
     - Label: the branch on the main checkout. On the others, the branch's
       last segment (`user/feat-x` → `feat-x`), or the folder name when
       detached. It is bright when the workspace has a space.
@@ -370,8 +374,9 @@ across repos.
     --test` (Delete's and Rename's against a real git).
   - `store.js` is the only code that touches the shared keys: `projects.v1`
     (groups and projects), `projects.ui.v1` (collapsed), `projects.cache.v1`
-    (worktree lists), `projects.agents.v1` (`knownAgents()`) and
-    `projects.notes.v1` (task notes). A stored `projects.v1` with a malformed
+    (worktree lists), `projects.agents.v1` (`knownAgents()`),
+    `projects.notes.v1` (task notes) and `projects.prs.v1` (the PR of each
+    workspace's branch, `pr-model.js`). A stored `projects.v1` with a malformed
     group or project keeps the valid rest, and the original is copied to
     `projects.v1.backup` before the first write over it; a malformed
     `projects.notes.v1` goes to `projects.notes.v1.backup` the same way.
@@ -402,6 +407,20 @@ across repos.
   - `gh api` (Rename of a pushed branch on GitHub): `repos/<o>/<r>` (can
     you push), `repos/<o>/<r>/pulls` (open PRs from the branch) and
     `branches/<old>/rename`, run in the repo with your gh account.
+  - `gh api graphql` (the PR colors): one query per project of the active
+    group, with every workspace branch but the main checkout's, every
+    minute while the window is in front, and again on coming back to it or
+    switching groups (at most every 10 s). Only the window in front asks,
+    and only for repos whose origin is GitHub (an ssh alias of github.com
+    counts). The answer is stored in `projects.prs.v1`, so every window
+    draws it and it is there at the next start.
+  - Two GitHub accounts: gh runs in the project's folder, where a gh
+    wrapper that picks the account by repo picks it, and plain gh uses its
+    active account. When GitHub answers that it can't see the repo, the
+    other accounts `gh auth status --json hosts` lists are tried through
+    `sh -c` with `GH_TOKEN` from `gh auth token --user <login>` (the token
+    stays in that shell), and the account that sees it is remembered for
+    that owner while Herdr runs.
   - `ssh -G <host>`, to read which host an ssh alias of origin's URL is.
   - `test -e`, to check whether a folder exists.
   - Whatever program another plugin's badge names in its `exec`, when you
@@ -507,8 +526,10 @@ against.
 **Watch out**
 
 - **This mod runs git and reaches the network:** `git fetch origin` in
-  every repo you create in, and `ls-remote`, `fetch`, `push` and `gh` when
-  you rename a pushed branch. It reads repo folders outside its own and
+  every repo you create in, `ls-remote`, `fetch`, `push` and `gh` when
+  you rename a pushed branch, and `gh api graphql` every minute for the PR
+  colors while the window is in front (one GraphQL point per project with
+  workspaces). It reads repo folders outside its own and
   writes worktrees under `~/orca/workspaces`. Change `WORKTREE_ROOT` in
   `config.js` to put them elsewhere.
 - **Install by copying.** Herdr doesn't load a mod folder that is a
