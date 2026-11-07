@@ -204,8 +204,9 @@ scripts/install.sh claude-accounts
   Exit codes: 0 ok, 1 any other failure (a state file that can't be read,
   a failed sign-in), 2 no session id, 3 terminal missing or not Claude, 4
   timeout, 5 account needs sign-in, 6 landed on another account, 7 unknown
-  account or job, 8 terminal can't move, 9 job failed, 10 job cancelled, 64
-  bad usage, 75 still running (under `--wait`). The contract other plugins
+  account or job, 8 terminal can't move, 9 job failed, 10 job cancelled, 11
+  `resume` with a live job to another account, 64 bad usage, 75 still running
+  (under `--wait`). The contract other plugins
   code against (`accounts.v1.json`, and `list`, `usage`, `terminal`, `use`
   and `resume` with their output shapes) is [CONTRACT.md](CONTRACT.md).
 - **Commands:** `claude-accounts.open-popup`, `claude-accounts.open-panel`,

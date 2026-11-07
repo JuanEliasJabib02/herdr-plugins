@@ -21,8 +21,8 @@
 //                                    "full", "compact" or "tightest"
 //   formatSince(date, now)           "since Nov 3", for cache figures that
 //                                    start after the range does (D11)
-//   formatCoverage(coverage)         the note for cache figures that cover
-//                                    only part of the range's tokens (D11)
+//   formatCoverage(what, coverage)   the note for figures that cover only
+//                                    part of the range's tokens (D11)
 
 const MINUTE = 60_000;
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
@@ -223,15 +223,16 @@ export function formatSince(date, now = Date.now()) {
   return `since ${MONTHS[month - 1]} ${day}${sameYear ? "" : `, ${year}`}`;
 }
 
-// The note under cache figures that cover only part of the range's tokens
-// (claude-usage's totals.cacheCoverage, 0–1): those figures come from
-// sessions still on disk, as Orca's do, and the note says what share of the
-// range that is. null when they cover it all (1), or the range has no
-// tokens (null). The share never reads 100% while below 1, nor 0% above 0.
-export function formatCoverage(coverage) {
+// The note under a group of figures that covers only part of the range's
+// tokens (claude-usage's totals.cacheCoverage, totals.turnFiguresCoverage:
+// 0–1): those figures come from sessions still on disk, as Orca's do, and the
+// note names them and says what share of the range that is. null when they
+// cover it all (1), or the range has no tokens (null). The share never reads
+// 100% while below 1, nor 0% above 0.
+export function formatCoverage(what, coverage) {
   if (!isNumber(coverage) || coverage >= 1) return null;
   const c = Math.max(0, coverage);
   const pct = Math.round(c * 100);
   const share = c > 0 && pct === 0 ? "<1" : String(Math.min(99, pct));
-  return `Cache figures cover only sessions still on disk: ${share}% of this range's tokens.`;
+  return `${what} cover only sessions still on disk: ${share}% of this range's tokens.`;
 }

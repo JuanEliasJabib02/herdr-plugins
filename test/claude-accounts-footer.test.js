@@ -161,6 +161,19 @@ test("footer density: full, then one number per window, then the tightest number
   assert.deepEqual(texts(footerModel({ doc: DOC, mode: "compact", width: c.full - 2, now: NOW })), ["65%"]);
 });
 
+test("footer, tightest level: the most used window even when it's the monthly one the other levels leave out, and its tooltip names it (D25)", () => {
+  const doc = docWith(ANA, { [ANA]: { usage: { session: w(10), weekly: w(20), fable: null, monthly: w(85) } } });
+  const m = footerModel({ doc, mode: "verbose", width: 0, now: NOW });
+  assert.equal(m.level, "tightest");
+  assert.deepEqual(m.sections, [{ key: "monthly", text: "85%", color: "blocked" }]);
+  assert.match(m.tooltip, /85% 30d/);
+  // The levels above keep Orca's rule: no monthly beside session and weekly.
+  const wider = footerModel({ doc, mode: "verbose", width: m.needs.compact, now: NOW });
+  assert.equal(wider.level, "compact");
+  assert.deepEqual(wider.sections.map((x) => x.key), ["session", "weekly"]);
+  assert.doesNotMatch(wider.tooltip ?? "", /85%/);
+});
+
 test("footer, tightest level without numbers: \"--\" signed out, after an error or with none; ··· while loading (D25)", () => {
   const tight = (doc) => footerModel({ doc, mode: "verbose", width: 0, now: NOW });
   const signedOut = tight(docWith("default"));

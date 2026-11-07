@@ -39,7 +39,7 @@
 //   chartBars(daily)                      the daily chart's bars
 //   detailsModel({ details, range, now, execError })   the whole window
 
-import { formatDate, formatDuration, formatSince, formatUpdated } from "./format.js";
+import { formatCoverage, formatDate, formatDuration, formatSince, formatUpdated } from "./format.js";
 
 export const RANGES = Object.freeze(["7", "30", "90", "all"]);
 export const DEFAULT_RANGE = "7";
@@ -297,19 +297,6 @@ function sinceLabel(day, from, now) {
   return first && from && first > from ? formatSince(first, now) : null;
 }
 
-// The note under a group of figures that covers only part of the range's
-// tokens (totals.cacheCoverage, totals.turnFiguresCoverage: 0–1), with the
-// group named: format.js's formatCoverage rule. null when it covers it all
-// (1) or the range has no tokens (null). The share never reads 100% while
-// below 1, nor 0% above 0.
-function coverageNote(what, coverage) {
-  if (!isNumber(coverage) || coverage >= 1) return null;
-  const c = Math.max(0, coverage);
-  const pct = Math.round(c * 100);
-  const part = c > 0 && pct === 0 ? "<1" : String(Math.min(99, pct));
-  return `${what} cover only sessions still on disk: ${part}% of this range's tokens.`;
-}
-
 // Orca's Zero-cache-read turns: zero-cache turns over turns, rounded, or n/a
 // with none. Both counts are claude-usage's v5 ones (zeroCacheReadResponses
 // over turnResponses), so the hint says the base.
@@ -366,8 +353,8 @@ function report(result, now) {
       { key: "active", label: "Active time", value: formatActiveTime(totals.seconds), hint: "Time active in your own sessions; claude -p runs aren't counted.", since: null },
     ],
     coverage: [
-      coverageNote("Input, output and cache figures", totals.cacheCoverage),
-      coverageNote("Zero-cache-read turns and cost", totals.turnFiguresCoverage),
+      formatCoverage("Input, output and cache figures", totals.cacheCoverage),
+      formatCoverage("Zero-cache-read turns and cost", totals.turnFiguresCoverage),
     ].filter(Boolean),
     explanation: EXPLANATION,
     daily: chartBars(result.daily),

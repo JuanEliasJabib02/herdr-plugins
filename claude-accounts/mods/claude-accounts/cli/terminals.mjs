@@ -212,6 +212,11 @@ const NEWLINE = 0x0a;
 // A user line that holds a slash command, its output or a `!` shell line.
 const COMMAND_TEXT = /^<(command-(name|message|args)|local-command-[a-z-]+|bash-(input|stdout|stderr))>/;
 const INTERRUPTED = /^\[Request interrupted by user[^\]]*\]$/;
+// What the harness wraps around a turn: never what the person wrote, and it
+// can share a line with what they did write.
+const HARNESS_BLOCK = /<(task-notification|system-reminder|agent-message|cross-session-message)\b[^>]*>[\s\S]*?<\/\1>/g;
+// A paste's wrapper: the text inside is the person's.
+const PASTE_TAG = /<\/?pasted_content\b[^>]*>/g;
 
 // Cut at max UTF-16 units, without leaving half a surrogate pair (Orca's
 // truncatePreservingSurrogates).
@@ -241,7 +246,7 @@ function promptOf(line) {
     if (content.some((part) => part?.type === "tool_result")) return null;
     text = content.filter((part) => part?.type === "text" && typeof part.text === "string").map((part) => part.text).join(" ");
   } else return null;
-  const oneLine = text.replace(/\s+/g, " ").trim();
+  const oneLine = text.replace(HARNESS_BLOCK, " ").replace(PASTE_TAG, " ").replace(/\s+/g, " ").trim();
   if (!oneLine || COMMAND_TEXT.test(oneLine) || INTERRUPTED.test(oneLine)) return null;
   return cutAt(oneLine, PROMPT_MAX).trimEnd();
 }

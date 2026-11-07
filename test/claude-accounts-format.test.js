@@ -219,14 +219,16 @@ test("formatSince: 'since <date>' from claude-usage's cacheSince day, the year a
   }
 });
 
-test("formatCoverage: below 1, the cache figures cover only sessions still on disk, with the share; null when they cover it all or there are no tokens", () => {
+test("formatCoverage: below 1, the figures it names cover only sessions still on disk, with the share; null when they cover it all or there are no tokens", () => {
   const note = (share) => `Cache figures cover only sessions still on disk: ${share}% of this range's tokens.`;
-  assert.equal(formatCoverage(0.7182), note("72"));
-  assert.equal(formatCoverage(0.631), note("63"));
-  assert.equal(formatCoverage(0.9996), note("99"));
-  assert.equal(formatCoverage(0.004), note("<1"));
-  assert.equal(formatCoverage(0), note("0"));
-  for (const none of [1, 1.2, null, undefined, NaN, "0.5"]) assert.equal(formatCoverage(none), null, String(none));
+  const cache = (coverage) => formatCoverage("Cache figures", coverage);
+  assert.equal(cache(0.7182), note("72"));
+  assert.equal(cache(0.631), note("63"));
+  assert.equal(cache(0.9996), note("99"));
+  assert.equal(cache(0.004), note("<1"));
+  assert.equal(cache(0), note("0"));
+  for (const none of [1, 1.2, null, undefined, NaN, "0.5"]) assert.equal(cache(none), null, String(none));
+  assert.equal(formatCoverage("Cost", 0.5), "Cost cover only sessions still on disk: 50% of this range's tokens.");
 });
 
 // ── store.js ───────────────────────────────────────────────────────────────

@@ -100,6 +100,8 @@ function sandbox() {
     writeFileSync(join(shims, name), `#!/bin/sh\nexit ${code}\n`);
     chmodSync(join(shims, name), 0o755);
   }
+  // A Keychain that doesn't answer for $FAKE_KEYCHAIN_SLEEP seconds, when set.
+  writeFileSync(join(shims, "security"), '#!/bin/sh\n[ -n "${FAKE_KEYCHAIN_SLEEP:-}" ] && exec sleep "$FAKE_KEYCHAIN_SLEEP"\nexit 44\n');
   writeFileSync(join(shims, "claude"), FAKE_CLAUDE);
   chmodSync(join(shims, "claude"), 0o755);
   const env = {
@@ -482,13 +484,14 @@ test("use to another account starts reading its usage at once, without waiting f
   await sleep(1500);
   assert.deepEqual(Object.keys(state()), []);
 
-  const started = Date.now();
-  const r = s.cli(["use", B, "--json"]);
+  // A read that lasts until keychain.mjs gives up on the Keychain, 3 s, and
+  // says so: `use` is back long before that.
+  const r = s.cli(["use", B, "--json"], { FAKE_KEYCHAIN_SLEEP: "30" });
   assert.equal(r.status, 0, r.stderr);
-  assert.ok(Date.now() - started < 8000, "use doesn't wait for the read");
-  // The read runs on its own: only B's, here with no login in the Keychain.
-  const read = () => state()[B]?.needsSignIn === true;
-  const deadline = Date.now() + 10_000;
+  const read = () => state()[B]?.error === "keychain";
+  assert.equal(read(), false, "use waited for the read");
+  // The read runs on its own: only B's.
+  const deadline = Date.now() + 30_000;
   while (!read() && Date.now() < deadline) await sleep(100);
   assert.ok(read(), `B's usage was read: ${JSON.stringify(state()[B])}`);
   assert.equal(state()[A], undefined, "only the new account's");

@@ -645,6 +645,40 @@ test("use, Ask (D23): each listed session carries its last prompt from its trans
   assert.equal(rows.t3[1].length, 200);
 });
 
+test("use, Ask (D23): what the harness wraps around a turn isn't a prompt, and a paste loses its tags", () => {
+  const s = sandbox({ active: A, switchMode: "ask" });
+  // t1: everything after the person's prompt came from the harness.
+  const t1 = s.term("t1", { on: A });
+  writeTranscript(t1, [
+    userLine("fix the login bug"),
+    userLine("<task-notification>\n<task-id>a1</task-id>\n<summary>Agent done</summary>\n</task-notification>"),
+    userLine("<system-reminder>The date changed</system-reminder>"),
+    userLine('<agent-message from="helper">hello</agent-message>'),
+    userLine([{ type: "text", text: '<cross-session-message from="worker">hello</cross-session-message>' }]),
+  ]);
+  // t2: the harness's blocks around the person's own words: their words stay.
+  const t2 = s.term("t2", { on: A });
+  writeTranscript(t2, [userLine("<system-reminder>context\nhere</system-reminder>\n¿y el menú?\n<task-notification>x</task-notification>")]);
+  // t3: a paste beside the person's words, and t4 a paste alone.
+  const t3 = s.term("t3", { on: A });
+  writeTranscript(t3, [userLine('mira esto <pasted_content id="ab12">el log\nde ayer</pasted_content>')]);
+  const t4 = s.term("t4", { on: A });
+  writeTranscript(t4, [userLine('<pasted_content id="cd34">\nsolo lo pegado\n</pasted_content>')]);
+  // t5: nothing but the harness: no prompt.
+  const t5 = s.term("t5", { on: A });
+  writeTranscript(t5, [userLine("<task-notification>x</task-notification>")]);
+
+  s.json(["use", B]);
+  const prompts = Object.fromEntries(s.pending().sessions.map((x) => [x.terminal, x.prompt]));
+  assert.deepEqual(prompts, {
+    t1: "fix the login bug",
+    t2: "¿y el menú?",
+    t3: "mira esto el log de ayer",
+    t4: "solo lo pegado",
+    t5: null,
+  });
+});
+
 test("terminal --json reads the status live, as the switch dialog polls it while open (D23)", () => {
   const s = sandbox();
   const t1 = s.term("t1", { on: A, status: "idle" });
@@ -953,6 +987,26 @@ test("D19, restart mode: B→C while t1's restart to B is stopping (the old Clau
   assert.equal(s.item((i) => i.id === first.id).state, "done");
   assert.equal(accountNow(s, "t1"), C);
   assert.deepEqual(s.typed("t1").map((x) => x.dir), [s.dirs[B], s.dirs[C]]);
+});
+
+test("D19, restart mode: B→C→A while t1's restart to B is stopping (the old Claude still up, read as on A): the switch behind it follows, and t1 ends on A", async () => {
+  const s = sandbox({ active: A, switchMode: "restart" });
+  signInC(s);
+  const t1 = s.term("t1", { on: A, ignoreTerm: true });
+  s.json(["use", B]);
+  const first = await until(() => s.item((i) => i.terminal === "t1" && i.state === "stopping"), WAIT, "t1's restart to B stopping", s.queue);
+  s.json(["use", C]);
+  s.json(["use", A]);
+  assert.ok(alive(t1.pid), "the old Claude was still up during use A");
+  const second = s.item((i) => i.terminal === "t1" && i.id !== first.id);
+  assert.ok(second, `the item behind the started one is still there: ${JSON.stringify(s.queue())}`);
+  assert.deepEqual([second.from, second.to], [B, A]);
+  // The old Claude goes at last: the first restart ends on B, then the second.
+  process.kill(t1.pid, "SIGKILL");
+  await until(() => s.item((i) => i.id === second.id && i.state === "done"), WAIT, "t1's restart back to A", s.queue);
+  assert.equal(s.item((i) => i.id === first.id).state, "done");
+  assert.equal(accountNow(s, "t1"), A);
+  assert.deepEqual(s.typed("t1").map((x) => x.dir), [s.dirs[B], s.dirs[A]]);
 });
 
 test("D19, restart mode: B→C right after t1's restart to B began (a Claude that stops at once): t1 ends on C", async () => {

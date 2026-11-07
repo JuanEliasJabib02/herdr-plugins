@@ -213,11 +213,12 @@ function footerContent(account, mode, now) {
   const shown = mode === "compact" ? [tight] : inlineSections(list);
   const updated = account.usageUpdatedAt;
   const calm = account.error === "expired" && !account.needsSignIn && isNumber(updated) && now - updated <= CALM_STALE_MAX_AGE;
+  const chip = (s) => ({ key: s.key, percent: formatPercent(s.percent), label: chipLabel(s, now), color: colorToken(s.percent) });
   return {
     kind: "usage",
-    tight: tight.key,
+    tight: chip(tight),
     bar: mode === "compact" ? null : { fill: tight.percent, color: colorToken(tight.percent) },
-    sections: shown.map((s) => ({ key: s.key, percent: formatPercent(s.percent), label: chipLabel(s, now), color: colorToken(s.percent) })),
+    sections: shown.map(chip),
     warning: Boolean(account.error || account.needsSignIn) && !calm,
     note: noteText(notice(account, true)),
   };
@@ -231,10 +232,13 @@ function footerShape(c, level) {
   const s = { kind: c.kind, level, unit: null, bar: null, sections: [], label: null, warning: false, signIn: null, refresh: !tightest && c.kind !== "signIn", tooltip: null };
   const noNumber = tightest ? { text: NO_NUMBER, color: "muted" } : null;
   if (c.kind === "usage") {
-    const fullText = c.sections.map((x) => `${x.percent} ${x.label}`).join(" · ");
+    // The tightest window can be the monthly one the other levels leave out:
+    // its number shows here, so the tooltip names it too.
+    const named = tightest && !c.sections.some((x) => x.key === c.tight.key) ? [...c.sections, c.tight] : c.sections;
+    const fullText = named.map((x) => `${x.percent} ${x.label}`).join(" · ");
     s.unit = tightest ? null : "Used";
     s.bar = full ? c.bar : null;
-    const shown = tightest ? [c.sections.find((x) => x.key === c.tight) ?? c.sections[0]] : c.sections;
+    const shown = tightest ? [c.tight] : c.sections;
     s.sections = shown.map((x) => ({ key: x.key, text: full ? `${x.percent} ${x.label}` : x.percent, color: x.color }));
     s.warning = !tightest && c.warning;
     s.tooltip = [full ? null : fullText, c.note].filter(Boolean).join("\n") || null;

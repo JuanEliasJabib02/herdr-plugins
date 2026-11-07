@@ -564,7 +564,10 @@ export async function afterUse(from, to) {
     doc.items = doc.items.filter((item) => {
       if (item.kind !== "switch" || !NOT_STARTED.has(item.state)) return true;
       write = true;
-      if (runsOnAccount(accountOf.get(item.terminal) ?? null, to, known)) return false;
+      // The scan reads where the terminal runs now. With an item already
+      // acting on it, it won't run there for long: this one follows the
+      // switch, and runItem drops it if that item leaves it on `to` anyway.
+      if (!blockedBy(doc, item, t) && runsOnAccount(accountOf.get(item.terminal) ?? null, to, known)) return false;
       Object.assign(item, { to, updatedAt: now });
       return true;
     });
