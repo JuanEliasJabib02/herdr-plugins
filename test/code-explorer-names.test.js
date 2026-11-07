@@ -887,7 +887,7 @@ test("S1: Contents hides the filter and keeps its text; back on Names it filters
   assert.deepEqual(w.paths(), ["src"]);
   await w.send("contents");
   const drawn = w.draw();
-  assert.equal(findKind(drawn, "Input"), null);
+  assert.notEqual(findKind(drawn, "Input").arg, w.input, "the filter's input is Names'");
   assert.match(textOf(drawn), new RegExp(TEXT.typeToSearch));
   assert.equal(w.snap().filtering, false);
   const reads = w.gitReads();

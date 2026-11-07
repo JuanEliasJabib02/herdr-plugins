@@ -2,25 +2,29 @@
 // (S1, S3): the repo's name and its three buttons, Names and Contents, and a lazy
 // tree with Material icons and git marks. A file opens in a tab of its own (S6).
 //
-// tree-model.js, names-model.js, git-model.js and icon-model.js decide; this file
-// draws and runs programs. Every click goes through a method a
+// tree-model.js, names-model.js, search-model.js, git-model.js and icon-model.js decide;
+// this file draws and runs programs. Every click goes through a method a
 // `code-explorer.<command>` can also call (D2), since real clicks can't be posted to
 // Herdr: see command().
 //
-// T7's search plugs in at contents(); T8's row menu on the list, with
-// on_item_secondary_click, and its items in moreMenu().
+// T8's row menu goes on the list, with on_item_secondary_click, and its items in
+// moreMenu().
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, v_virtual_list, Scrollbar, InputState, Input } from "gpui-base";
 import {
   spaces, panes, focused, exec, readTextFile, watchFolder, theme, shared, setShared, run, notify, nextCommand, layout, appHome, home,
 } from "herdr";
-import { ICON_THEME, parseIconTheme } from "./icon-model.js";
+import { ICON_THEME, fileIcon, parseIconTheme } from "./icon-model.js";
 import { GIT_COLORS, IGNORED_ARGS, ROOT_ARGS, STATUS_ARGS, buildFolderStatus, parseIgnored, parseRepo, parseStatus } from "./git-model.js";
 import {
   ALL, DOCS_KEY, LIST_LIMIT, LIST_SCRIPT, ROW_HEIGHT, TEXT, batchPlan, contentsMessage, indentOf, isDoubleClick, isShown, listingLimited, locate,
   mergePlans, newDoc, openFile, parseCommand, parseListing, pruneExpanded, table, toggleExpanded, treeMessage, visibleRows,
 } from "./tree-model.js";
 import { LIST_CAP, buildNameIndex, dressRow, filterMessage, filteredRows, lastResult, pacer, parseFilter, parseLists, readFileList, sameLists } from "./names-model.js";
+import {
+  DEBOUNCE, SEARCH, SEARCH_LIMIT, activeFilters, isBlank, killArgs, matchAt, matchParts, newSearch, newTag, noResults, overLimit, parseResults, readSearch, searchError, searchKey,
+  searchMessage, searchRows, searchSummary,
+} from "./search-model.js";
 
 // Changes a watch can't see (a commit in a worktree writes outside it), and every
 // change when the watch is refused. As Herdr's files panel.
@@ -33,6 +37,9 @@ const SPINNER_DELAY = 200;
 const LIST = "explorer-tree";
 // Its own list, so a filter neither starts from the tree's scroll nor moves it.
 const FILTER_LIST = "explorer-filter";
+const SEARCH_LIST = "explorer-search";
+// What the `results` command prints of a long list.
+const REPORTED_ROWS = 200;
 const NO_GIT = { marks: new Map(), folders: new Map(), ignored: new Set() };
 
 // Herdr's shipped chrome icons, there in every install; the rest are this mod's.
@@ -75,6 +82,17 @@ export default class CodeExplorer extends View {
     this.opening = Promise.resolve();
     this.dotfiles = table(this.stored("dotfiles", {}));
     this.showIgnored = this.stored("ignored", true);
+    this.search = newSearch();
+    this.searchDetails = false;
+    this.searchFocus = null;
+    // `id` is whose answer still counts; `wait` the 300 ms, `limit` the 15 s, `tag` the
+    // name of the program running; `ranKey` what the results on screen answer. The rows
+    // are worked out with the results: render only reads them.
+    this.found = { id: 0, wait: null, limit: null, tag: null, loading: false, results: null, error: null, ranKey: null, rows: [], collapsed: new Set(), lastClick: null };
+    this.searchInput = this.newField(SEARCH.placeholder, "search", (text, cx) => this.setSearch(text, cx));
+    this.searchInput.on("submit", (_e, cx) => { this.restartSearch(cx); cx.notify(); });
+    this.includeInput = this.newField(SEARCH.includeHint, "include", (text, cx) => this.setPattern("include", text, cx));
+    this.excludeInput = this.newField(SEARCH.excludeHint, "exclude", (text, cx) => this.setPattern("exclude", text, cx));
     this.filter = "";
     this.query = parseFilter("");
     this.filterCollapsed = new Set();
@@ -133,6 +151,17 @@ export default class CodeExplorer extends View {
       contents: () => this.setView("contents", cx),
       filter: () => this.typeFilter(arg, cx),
       "clear-filter": () => this.typeFilter("", cx),
+      search: () => { this.setView("contents", cx); this.typeSearch(arg, cx); },
+      "clear-search": () => this.typeSearch("", cx),
+      "match-case": () => this.toggleSearch("caseSensitive", cx),
+      "whole-word": () => this.toggleSearch("wholeWord", cx),
+      regex: () => this.toggleSearch("useRegex", cx),
+      "search-details": () => this.toggleDetails(),
+      include: () => this.typePattern("include", arg, cx),
+      exclude: () => this.typePattern("exclude", arg, cx),
+      "open-result": () => this.openResult(arg.trim() ? Number(arg) : null, cx),
+      "toggle-result": () => this.toggleResultFile(arg),
+      results: () => console.log(`code-explorer: ${JSON.stringify(this.searchSnapshot())}`),
     };
     if (Object.hasOwn(commands, name)) commands[name]();
     else console.log(`code-explorer: no command "${raw}"`);
@@ -147,6 +176,19 @@ export default class CodeExplorer extends View {
       filtering: this.filtering(), filterCollapsed: [...this.filterCollapsed],
       listed: list ? { loaded: list.loaded, error: list.error, limited: list.limited } : null,
       expanded: state ? [...state.expanded] : [], rows: this.filtering() ? rows.map((row) => dressRow(row, state.marks, this.icons)) : rows, docs: table(shared(DOCS_KEY)),
+    };
+  }
+
+  // What the `results` command prints, to test what a click would have done.
+  searchSnapshot() {
+    const found = this.found, results = found.results;
+    return {
+      view: this.view, root: this.state?.root ?? null, ...this.search, details: this.searchDetails, loading: found.loading, error: found.error,
+      summary: found.error ? null : searchSummary(results), message: searchMessage({ query: this.search.query, results, loading: found.loading, error: found.error })?.text ?? null,
+      total: results?.total ?? null, files: results?.files.length ?? null, truncated: results?.truncated ?? null,
+      rows: found.rows.slice(0, REPORTED_ROWS).map((row) => (row.kind === "file"
+        ? { file: row.path, count: row.count, collapsed: row.collapsed }
+        : { n: row.match.n, path: row.path, line: row.match.line, ...matchParts(row.match) })),
     };
   }
 
@@ -191,10 +233,14 @@ export default class CodeExplorer extends View {
     // one doesn't, and neither does what it left here. ALL below reads the list.
     state.list = null;
     this.filterCollapsed = new Set();
+    // The search's text goes along too, and searches there.
+    this.dropResults();
     // sync runs in render: the tree swaps now, and timers start from a task.
     cx.spawn(async (cx) => {
       this.request(ALL, cx);
       this.watch(state, cx);
+      this.restartSearch(cx);
+      cx.notify();
     });
   }
 
@@ -366,7 +412,7 @@ export default class CodeExplorer extends View {
 
   // One at a time, in click order: a double click's second click must find the tab
   // its first one made.
-  open(path, pin, cx) {
+  open(path, pin, cx, line = null) {
     const state = this.state, space = this.where?.space;
     if (!state || !space || !path || this.rows().find((r) => r.path === path)?.dir) return;
     const file = `${state.root}/${path}`;
@@ -376,7 +422,7 @@ export default class CodeExplorer extends View {
       this.opening = new Promise((resolve) => { done = resolve; });
       await turn;
       try {
-        await openFile({ file, pin, space }, {
+        await openFile({ file, pin, space, line }, {
           spaces, panes, shared, setShared, run, notify, newDoc,
           wait: (ms) => new Promise((resolve) => { cx.timer.after(ms, () => resolve()); }),
         });
@@ -406,11 +452,17 @@ export default class CodeExplorer extends View {
   }
 
   setView(view, cx) {
+    const from = this.view;
     this.view = view;
     this.menu = false;
     // As in Orca: the text stays, and what was collapsed under it goes.
     if (view === "names") this.readList(cx);
     else this.filterCollapsed = new Set();
+    if (view === from) return;
+    // Leaving Contents stops its search, as in Orca. Back, what's typed gets its answer
+    // unless the one on screen is it.
+    if (view === "names") this.stopSearch(cx);
+    else if (this.found.ranKey !== searchKey(this.state?.root ?? null, this.search)) this.restartSearch(cx);
   }
 
   // ── The filter ───────────────────────────────────────────────────────────
@@ -470,6 +522,171 @@ export default class CodeExplorer extends View {
     localStorage.setItem("ignored", JSON.stringify(this.showIgnored));
     this.menu = false;
     this.prepareRows();
+  }
+
+  // ── The search ───────────────────────────────────────────────────────────
+
+  newField(placeholder, name, change) {
+    const input = InputState.new({ placeholder });
+    input.on("change", (_e, cx) => { change(input.value(), cx); cx.notify(); });
+    input.on("focus", (_e, cx) => { this.searchFocus = name; cx.notify(); });
+    input.on("blur", (_e, cx) => { if (this.searchFocus === name) this.searchFocus = null; cx.notify(); });
+    return input;
+  }
+
+  // What typing does. All of these start over.
+  setSearch(text, cx) {
+    if (text === this.search.query) return;
+    this.search.query = text;
+    this.restartSearch(cx);
+  }
+
+  setPattern(field, text, cx) {
+    if (text === this.search[field]) return;
+    this.search[field] = text;
+    this.restartSearch(cx);
+  }
+
+  // What the X and the commands do: the inputs show it too.
+  typeSearch(text, cx) {
+    this.searchInput.set_value(text);
+    this.setSearch(text, cx);
+  }
+
+  typePattern(field, text, cx) {
+    this.searchDetails = true;
+    (field === "include" ? this.includeInput : this.excludeInput).set_value(text);
+    this.setPattern(field, text, cx);
+  }
+
+  toggleSearch(option, cx) {
+    this.search[option] = !this.search[option];
+    this.restartSearch(cx);
+  }
+
+  toggleDetails() {
+    this.searchDetails = !this.searchDetails;
+  }
+
+  // Herdr has no way to blur an input from here, so it clears and keeps the keyboard.
+  searchKeyDown(event, cx) {
+    if (event.key !== "escape" || !this.search.query) return;
+    cx.stop_propagation();
+    this.typeSearch("", cx);
+    cx.notify();
+  }
+
+  // The one way a search starts: 300 ms from the last change. What was waiting or
+  // running stops, and its answer is dropped: the results on screen stay until the
+  // new ones come. Off Contents, or with no root yet, setView and enter pick it up.
+  restartSearch(cx) {
+    this.stopSearch(cx);
+    const found = this.found;
+    found.error = null;
+    if (isBlank(this.search) || overLimit(this.search)) {
+      this.showResults(isBlank(this.search) ? null : noResults(), null);
+      return;
+    }
+    if (this.view !== "contents" || !this.state) return;
+    const id = found.id;
+    found.loading = true;
+    found.wait = cx.timer.after(DEBOUNCE, (cx) => {
+      found.wait = null;
+      this.runSearch(id, cx);
+    });
+  }
+
+  stopSearch(cx) {
+    const found = this.found;
+    found.id++;
+    found.loading = false;
+    found.wait?.cancel();
+    found.limit?.cancel();
+    found.wait = null;
+    found.limit = null;
+    if (found.tag) this.killSearch(found.tag, cx);
+    found.tag = null;
+  }
+
+  // exec has no cancel. Without pkill the program ends at exec's own 30 s, unheard.
+  killSearch(tag, cx) {
+    const [command, args] = killArgs(tag);
+    cx.spawn(async () => { await exec(command, args).catch(() => null); });
+  }
+
+  runSearch(id, cx) {
+    const found = this.found, state = this.state, options = { ...this.search };
+    if (id !== found.id || !state) return;
+    const live = () => id === found.id, tag = newTag();
+    let overtime = false;
+    found.tag = tag;
+    // As in Orca: what it found by then is the answer, and says it's short.
+    found.limit = cx.timer.after(SEARCH_LIMIT, (cx) => {
+      overtime = true;
+      found.limit = null;
+      this.killSearch(tag, cx);
+    });
+    cx.spawn(async (cx) => {
+      let results = null, error = null;
+      try {
+        const output = await readSearch({ root: state.root, options, tag, live }, exec);
+        if (!live() || !output) return;
+        error = searchError(output);
+        if (!error) {
+          results = await parseResults(output, options, pacer(() => new Promise((resolve) => { cx.timer.after(1, () => resolve()); })));
+          if (overtime) results.truncated = true;
+        }
+      } catch (e) {
+        console.log(`code-explorer: search failed: ${e}`);
+        error = SEARCH.failed;
+      }
+      if (!live()) return;
+      found.limit?.cancel();
+      found.limit = null;
+      found.tag = null;
+      found.loading = false;
+      this.showResults(results, error);
+      cx.notify();
+    });
+  }
+
+  showResults(results, error) {
+    const found = this.found;
+    found.results = results;
+    found.error = error;
+    found.ranKey = searchKey(this.state?.root ?? null, this.search);
+    found.rows = searchRows(results, found.collapsed);
+  }
+
+  // Another root's: nothing of it shows here, and what's running answers no one.
+  dropResults() {
+    const found = this.found;
+    found.id++;
+    found.loading = false;
+    found.results = null;
+    found.error = null;
+    found.ranKey = null;
+    found.rows = [];
+    found.collapsed = new Set();
+  }
+
+  toggleResultFile(path) {
+    const found = this.found;
+    found.collapsed = toggleExpanded(found.collapsed, path);
+    found.rows = searchRows(found.results, found.collapsed);
+  }
+
+  // D11, D16: a result opens at its line, pinned. Its second press isn't another open.
+  clickResult(key, cx) {
+    if (key.startsWith("file:")) { this.toggleResultFile(key.slice("file:".length)); return; }
+    const found = this.found, double = isDoubleClick(found.lastClick, key, Date.now());
+    found.lastClick = double ? null : { path: key, at: Date.now() };
+    if (!double) this.openResult(Number(key.slice("match:".length)), cx);
+  }
+
+  openResult(n, cx) {
+    const hit = matchAt(this.found.results, n);
+    if (hit) this.open(hit.path, true, cx, hit.line);
   }
 
   // ── Drawing ──────────────────────────────────────────────────────────────
@@ -590,9 +807,93 @@ export default class CodeExplorer extends View {
         .child(Scrollbar.vertical(id).absolute().inset_0()));
   }
 
-  // T7's search goes here.
   contents(t) {
-    return v_flex().flex_1().min_h(0).child(this.message(t, contentsMessage({ hasFolder: Boolean(this.where?.cwd), remote: Boolean(this.where?.machine) })));
+    const hasFolder = Boolean(this.where?.cwd), remote = Boolean(this.where?.machine);
+    const area = v_flex().flex_1().min_h(0);
+    if (remote || !hasFolder) return area.child(this.message(t, contentsMessage({ hasFolder, remote })));
+    return area.child(this.searchBar(t)).child(this.searchFilters(t)).child(this.searchResults(t));
+  }
+
+  searchToggle(t, id, label, icon, on, action) {
+    return div().id(id).size(22).flex_none().flex().items_center().justify_center().rounded(4).cursor_pointer()
+      .tooltip(label).accessibility_label(label)
+      .text_color(on ? t.foreground : t.muted)
+      .when(on, (el) => el.bg(t.selected))
+      .hover((s) => s.bg(on ? t.selected : t.hover).text_color(t.foreground))
+      .on_click((_e, cx) => { action(cx); cx.notify(); })
+      .child(svg(ui(icon)).size(14));
+  }
+
+  searchBar(t) {
+    const search = this.search;
+    return h_flex().id("explorer-search-bar").h(32).flex_none().mx(10).mb(4).pl(8).pr(4).gap(4).items_center().rounded(7).border_1()
+      .border_color(this.searchFocus === "search" ? t.accent : t.input).text_color(t.muted)
+      .on_key_down((event, cx) => this.searchKeyDown(event, cx))
+      .child(svg(ui("search")).size(14).flex_none())
+      .child(Input.new(this.searchInput).flex_1().min_w(0).h_full().text_size(13).text_color(t.foreground).accessibility_label(SEARCH.label))
+      .when(this.found.loading, (el) => el.child(div().id("explorer-search-loading").flex_none().child(svg(chrome("spinner")).size(12).spin(900))))
+      .when(Boolean(search.query), (el) => el.child(div().id("explorer-clear-search").size(20).flex_none().flex().items_center().justify_center().cursor_pointer()
+        .tooltip(SEARCH.clear).accessibility_label(SEARCH.clear)
+        .on_click((_e, cx) => { this.typeSearch("", cx); cx.notify(); })
+        .child(svg(chrome("x")).size(12))))
+      .child(this.searchToggle(t, "explorer-search-case", SEARCH.matchCase, "case-sensitive", search.caseSensitive, (cx) => this.toggleSearch("caseSensitive", cx)))
+      .child(this.searchToggle(t, "explorer-search-word", SEARCH.wholeWord, "whole-word", search.wholeWord, (cx) => this.toggleSearch("wholeWord", cx)))
+      .child(this.searchToggle(t, "explorer-search-regex", SEARCH.regex, "regex", search.useRegex, (cx) => this.toggleSearch("useRegex", cx)));
+  }
+
+  searchField(t, id, name, label, input) {
+    return v_flex().flex_none().gap(3).pb(6)
+      .child(div().text_size(11).text_color(t.muted).child(label))
+      .child(h_flex().id(id).h(28).px(8).items_center().rounded(6).border_1().border_color(this.searchFocus === name ? t.accent : t.input)
+        .child(Input.new(input).flex_1().min_w(0).h_full().text_size(12.5).text_color(t.foreground)));
+  }
+
+  searchFilters(t) {
+    const active = activeFilters(this.search);
+    return v_flex().flex_none().mx(10)
+      .child(h_flex().h(26).gap(4).items_center().justify_end()
+        .when(active > 0, (el) => el.child(div().text_size(11).text_color(t.muted).child(`${active} active`)))
+        .child(this.iconButton(t, "explorer-search-details", SEARCH.details, svg(ui("more")).size(14), true, () => this.toggleDetails())))
+      .when(this.searchDetails, (el) => el
+        .child(this.searchField(t, "explorer-search-include", "include", SEARCH.include, this.includeInput))
+        .child(this.searchField(t, "explorer-search-exclude", "exclude", SEARCH.exclude, this.excludeInput)));
+  }
+
+  // Called from the list's layout, on later frames too: it reads only what it's given.
+  resultRow(t, row, icons) {
+    const line = h_flex().w_full().h(ROW_HEIGHT).flex_none().items_center().cursor_pointer().hover((s) => s.bg(t.hover));
+    if (row.kind === "file") {
+      return line.pl(8).pr(10).gap(4)
+        .child(svg(chrome(row.collapsed ? "chevron-right" : "chevron-down")).size(12).flex_none().text_color(t.dim))
+        .child(image(fileIcon(icons, row.name)).size(14).flex_none())
+        .child(h_flex().flex_1().min_w(0).gap(6).items_center().overflow_hidden()
+          .child(div().flex_none().text_size(12).child(row.name))
+          .when(Boolean(row.dir), (el) => el.child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.dim).child(row.dir))))
+        .child(div().flex_none().px(6).rounded(8).bg(t.hover).text_size(10).text_color(t.muted).child(String(row.count)));
+    }
+    const parts = matchParts(row.match);
+    return line.pl(28).pr(8).gap(6)
+      .child(div().flex_none().text_size(10).text_color(t.dim).child(String(row.match.line)))
+      .child(h_flex().flex_1().min_w(0).items_center().overflow_hidden().text_size(12).text_color(t.muted)
+        .when(Boolean(parts.before), (el) => el.child(div().flex_none().child(parts.before)))
+        .when(Boolean(parts.match), (el) => el.child(div().flex_none().rounded(2).bg(t.selected).text_color(t.foreground).child(parts.match)))
+        .when(Boolean(parts.after), (el) => el.child(div().flex_1().min_w(0).truncate().child(parts.after))));
+  }
+
+  searchResults(t) {
+    const found = this.found, rows = found.rows, icons = this.icons;
+    const summary = found.error ? null : searchSummary(found.results);
+    const said = searchMessage({ query: this.search.query, results: found.results, loading: found.loading, error: found.error });
+    return v_flex().flex_1().min_h(0)
+      .when(Boolean(summary), (el) => el.child(div().flex_none().px(14).pb(4).text_size(11).text_color(t.dim).child(summary)))
+      .when(Boolean(said), (el) => el.child(said.failed
+        ? div().id("explorer-search-error").p(12).text_size(12).text_color(t.ansi1).child(said.text)
+        : this.message(t, said.text)))
+      .when(rows.length > 0, (el) => el.child(div().flex_1().min_h(0).relative().pb(8)
+        .child(v_virtual_list(SEARCH_LIST, rows.length, ROW_HEIGHT, (i) => rows[i].key, (range) => rows.slice(range.start, range.end).map((row) => this.resultRow(t, row, icons)))
+          .on_item_click((key, cx) => { this.clickResult(key, cx); cx.notify(); })
+          .size_full())
+        .child(Scrollbar.vertical(SEARCH_LIST).absolute().inset_0())));
   }
 
   // T8 adds Reveal in Finder after these. Drawn in the block, as the design has it;

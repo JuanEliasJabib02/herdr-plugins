@@ -4,7 +4,7 @@
 import { fileIcon, folderIcon } from "./icon-model.js";
 import { isIgnored } from "./git-model.js";
 
-// S10, and D21's and S11's texts the tree shows.
+// S10, D21's, and S11's for before a search; the rest of S11 in search-model.js.
 export const TEXT = {
   collapseAll: "Collapse All",
   refresh: "Refresh Explorer",
@@ -177,7 +177,7 @@ export function treeMessage({ hasFolder, remote, loaded, error, rows }) {
   return TEXT.noFiles;
 }
 
-// T7 replaces this with its results; the texts for before a search stay.
+// Contents with nowhere to search. With somewhere, search-model.js's searchMessage.
 export function contentsMessage({ hasFolder, remote }) {
   if (remote) return TEXT.remote;
   return hasFolder ? TEXT.typeToSearch : TEXT.noWorkspaceSearch;
@@ -293,17 +293,25 @@ function replaceable(tab, entry, live) {
   return !state?.dirty && !state?.pinned;
 }
 
+// D21: a tab that can go for a copy of the same file, at a line: props can't change, and
+// nothing is lost with no changes and nothing beside it.
+function reopenable(tab, entry, live) {
+  return Boolean(entry) && tab.panes <= 1 && !table(live)[entry.doc]?.dirty;
+}
+
 // The decision, for the tabs of one space: { kind: "select", id, pin }, select what's
 // open and maybe pin it; { kind: "replace", id }, a new tab in that preview's place;
+// { kind: "reopen", id }, the same for a copy of this file, to show `line`;
 // or { kind: "new" }. Opening pinned leaves a preview where it is.
-export function planOpen({ file, pin, tabs, docs, live, panes }) {
+export function planOpen({ file, pin, tabs, docs, live, panes, line = null }) {
   const known = table(docs);
   // An entry alone isn't enough: closing a file with a terminal beside it leaves the
   // tab and the entry, and that tab no longer holds the file.
   const entryHere = (tab) => (panes.some((p) => p.tab === tab.id && p.mod === FILE_MOD) ? entryOf(known, tab.id) : null);
   for (const tab of tabs) {
     const entry = entryHere(tab);
-    if (entry?.file === file) return { kind: "select", id: tab.id, pin: Boolean(pin && entry.preview) };
+    if (entry?.file !== file) continue;
+    return line && reopenable(tab, entry, live) ? { kind: "reopen", id: tab.id } : { kind: "select", id: tab.id, pin: Boolean(pin && entry.preview) };
   }
   if (!pin) for (const tab of tabs) if (replaceable(tab, entryHere(tab), live)) return { kind: "replace", id: tab.id };
   return { kind: "new" };
@@ -341,7 +349,7 @@ const baseName = (path) => path.slice(path.lastIndexOf("/") + 1);
 // Runs the decision against Herdr. `io`: { spaces, panes, shared, setShared, run,
 // notify, wait, newDoc }. Only code-explorer writes code-editor.docs (D10), and
 // main.js runs one of these at a time.
-export async function openFile({ file, pin = false, space }, io) {
+export async function openFile({ file, pin = false, space, line = null }, io) {
   const spaceNow = () => io.spaces().find((s) => s.id === space);
   const name = baseName(file);
   const failed = () => {
@@ -351,20 +359,22 @@ export async function openFile({ file, pin = false, space }, io) {
   const target = spaceNow();
   if (!target) return failed();
 
-  const plan = planOpen({ file, pin, tabs: target.tabs, docs: io.shared(DOCS_KEY), live: io.shared(LIVE_KEY), panes: io.panes() });
+  const plan = planOpen({ file, pin, line, tabs: target.tabs, docs: io.shared(DOCS_KEY), live: io.shared(LIVE_KEY), panes: io.panes() });
   if (plan.kind === "select") {
     io.run("tab.select", { id: plan.id });
     if (plan.pin) {
       const docs = table(io.shared(DOCS_KEY));
       io.setShared(DOCS_KEY, { ...docs, [plan.id]: { ...docs[plan.id], preview: false } });
     }
+    // D21: it can't go to a line and it can't be replaced, so it says which.
+    if (line) io.notify({ title: `${name} is already open: line ${line}`, level: "info" });
     return plan;
   }
 
   const before = new Set(target.tabs.map((t) => t.id));
   const doc = io.newDoc();
   try {
-    io.run("tab.new", { name, space, mod: FILE_MOD, props: { doc, file } });
+    io.run("tab.new", { name, space, mod: FILE_MOD, props: line ? { doc, file, line } : { doc, file } });
   } catch {
     return failed();
   }
@@ -380,11 +390,12 @@ export async function openFile({ file, pin = false, space }, io) {
   io.setShared(DOCS_KEY, nextDocs(io.shared(DOCS_KEY), allTabs, id, { doc, file, preview: !pin }));
   if (!spaceNow().tabs.find((t) => t.id === id)?.active) io.run("tab.select", { id });
 
-  if (plan.kind === "replace") {
-    // Asked again: the preview may have been edited, closed or split meanwhile.
+  if (plan.kind === "replace" || plan.kind === "reopen") {
+    // Asked again: the tab may have been edited, closed or split meanwhile.
     const old = spaceNow().tabs.find((t) => t.id === plan.id);
     const entry = entryOf(table(io.shared(DOCS_KEY)), plan.id);
-    if (old && replaceable(old, entry, io.shared(LIVE_KEY))) {
+    const free = plan.kind === "reopen" ? reopenable : replaceable;
+    if (old && free(old, entry, io.shared(LIVE_KEY))) {
       const close = closeCommand(old, io.panes());
       io.run("tab.move", { id, index: old.index });
       if (close) io.run(...close);

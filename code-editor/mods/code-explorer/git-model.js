@@ -4,7 +4,7 @@
 
 // Reading writes nothing under .git (no index lock, no fsmonitor cookie), or the
 // folder watch would wake itself (Herdr's files panel does the same).
-const READ_ONLY = ["--no-optional-locks", "-c", "core.fsmonitor=false"];
+export const READ_ONLY = ["--no-optional-locks", "-c", "core.fsmonitor=false"];
 export const STATUS_ARGS = [...READ_ONLY, "status", "--porcelain=v1", "-z", "--no-renames", "--untracked-files=all"];
 // D7. --directory stops at an ignored folder rather than listing all it holds.
 export const IGNORED_ARGS = [...READ_ONLY, "ls-files", "-z", "-oi", "--exclude-standard", "--directory"];

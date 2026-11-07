@@ -11,7 +11,7 @@ import { TEXT, compareEntries, isDotfile, isHiddenName } from "./tree-model.js";
 
 const QUERY_MAX_BYTES = 2 * 1024;
 
-function overBytes(text, limit) {
+export function overBytes(text, limit) {
   if (text.length > limit) return true;
   let bytes = 0;
   for (let i = 0; i < text.length; i++) {
@@ -43,7 +43,7 @@ const FIND_BYTES = 4 * 1024 * 1024;
 
 // shared/quick-open-filter.ts: generated caches and state, never hand-edited, plus
 // what the tree always hides. Names can't find what's in them, tracked or not.
-const PRUNED_NAMES = [".git", "node_modules", ".next", ".nuxt", ".cache", ".stably", ".vscode", ".idea", ".yarn", ".pnpm-store", ".terraform", ".docker", ".husky", ".npm", ".npm-global", ".gvfs"];
+export const PRUNED_NAMES = [".git", "node_modules", ".next", ".nuxt", ".cache", ".stably", ".vscode", ".idea", ".yarn", ".pnpm-store", ".terraform", ".docker", ".husky", ".npm", ".npm-global", ".gvfs"];
 const PRUNED = new Set(PRUNED_NAMES);
 const LOCAL_SHARE = ".local/share";
 
