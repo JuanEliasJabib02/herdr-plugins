@@ -543,7 +543,9 @@ export function batchNamesFile(batch, { dir, realDir, name }) {
 // The names Herdr's `files` mod gives EditorState. Coloring blocks the window
 // (1 MiB 4.5 s, 200 KB 0.43 s), so a big file opens as plain text.
 const LANGUAGES = Object.freeze({ ts: "js", tsx: "js", mts: "js", cts: "js", jsx: "js", mjs: "js", toml: "yaml", yml: "yaml", jsonc: "json", svelte: "html", vue: "html" });
-export const COLOR_LIMIT = 256 * 1024;
+// Herdr colors the whole file again on each key: 125 ms at 50 KB, 440 ms at 200 KB
+// (measured), against 25 ms for a small file.
+export const COLOR_LIMIT = 50 * 1024;
 
 const LABELS = Object.freeze({
   js: "JavaScript", mjs: "JavaScript", cjs: "JavaScript", jsx: "JavaScript", ts: "TypeScript", tsx: "TypeScript", mts: "TypeScript", cts: "TypeScript",

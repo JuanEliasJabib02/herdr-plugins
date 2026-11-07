@@ -493,6 +493,8 @@ export default class CodeFile extends View {
       notify({ title: TEXT.noTab, body: baseName(this.file), level: "error" });
       return;
     }
+    // A tab that outlives its file stops carrying its name: called by its number again.
+    if (action[0] === "pane.close") run("tab.rename", { id, name: "" });
     run(action[0], action[1]);
   }
 
@@ -640,7 +642,7 @@ export default class CodeFile extends View {
     return h_flex().id("file-header").h(30).flex_none().pl(12).pr(8).gap(10).items_center().border_b_1().border_color(t.border).text_size(12)
       .child(div().flex_1().min_w(0).truncate().text_color(t.dim).when(Boolean(mono), (el) => el.font_family(mono)).child(shown))
       .children(notes.map((note) => div().flex_none().text_color(t.dim).child(note)))
-      .child(div().flex_none().text_color(t.dim).child(fileMeta(m, this.file)))
+      .when(m.phase === "ready", (el) => el.child(div().flex_none().text_color(t.dim).child(fileMeta(m, this.file))))
       .when(this.mode !== "blame" && m.phase === "ready", (el) => el.child(this.button(t, "header-blame", BLAME_TEXT.button, "blame")))
       .when(this.mode !== "editor" && m.phase === "ready", (el) => el.child(this.button(t, "header-edit", TEXT.edit, "edit")));
   }

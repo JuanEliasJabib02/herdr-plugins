@@ -1,11 +1,11 @@
 # Code editor
 
-A code editor and Explorer for Herdr, built from how Orca does them. So far:
-in the projects layout, `ctrl-l` opens and closes the right panel, the panel
-opens on an Explorer block, the whole window wears One Dark Pro, Material's file
-and folder icons are in place for the Explorer to draw, and the tab bar knows the
-Explorer and draws a file's tab. The Explorer is still a placeholder. A file opens
-in its own tab, in the editor described under **The editor**, at the end.
+A code editor and Explorer for Herdr, built from how Orca does them. In the projects
+layout, `ctrl-l` opens and closes a right panel with the Explorer: a file tree with
+git marks, `Names` to filter by path, `Contents` to search inside files, and file
+operations. Each file opens in its own tab, in Herdr's editor, with saving, conflicts,
+drafts and a Blame view. The whole window wears One Dark Pro, and files wear Material's
+icons.
 
 **What you see**
 
@@ -26,8 +26,7 @@ in its own tab, in the editor described under **The editor**, at the end.
 - **Right panel** (`panel`, in projects-sidebar's layout): 368 px wide, 280 to
   900, to the right of the terminals, closed until you open it. It shows one
   block at a time: the Explorer, or Herdr's `changes`.
-- **Explorer block:** a card with the `background` color, a 1 px `border` and
-  radius 10, 12 px of padding, and "Explorer" in `muted` at 13 px.
+- **Explorer block:** described under **The Explorer**.
 - **Theme:** One Dark Pro on the whole window, terminals and panels alike:
   background `#282c34`, foreground `#abb2bf`, accent `#528bff`, `chrome` and
   `surface` `#21252b`, `canvas` `#1d1f23`, `border` `#3e4452`.
@@ -78,8 +77,8 @@ in its own tab, in the editor described under **The editor**, at the end.
   those icons with `image()`: exact name first, then longest suffix, in lower case,
   else `icons/file.svg`. It also draws `mods/pane/close.svg`,
   `mods/workspace-chrome/spinner.svg` and `mods/changes/changes.svg`, Herdr's own.
-- **Mod `mods/code-explorer/`** (`mod.json` `{ "place": "none" }`): `main.js` is
-  the placeholder. It uses Herdr's `theme`, and runs no program and no command.
+- **Mod `mods/code-explorer/`** (`mod.json` `{ "place": "none" }`): described
+  under **The Explorer**.
 - **Art, `mods/code-explorer/icons/`:** Orca's Material Icons plugin
   (`stablyai/orca-plugins`, `plugins/material-icons/icons`) byte for byte: 279
   SVGs, 21 of them `_light` variants, and `theme.json`. Its tables `icons`,
@@ -127,7 +126,7 @@ in its own tab, in the editor described under **The editor**, at the end.
   `<home>/mods/code-explorer/icons/theme.json`, and `scripts/install.sh
   --uninstall code-editor` removes both.
 - In the projects layout, `ctrl-l` with a terminal focused opens the panel on the
-  "Explorer" card and closes it again, and the terminal's screen stays as it was.
+  Explorer and closes it again, and the terminal's screen stays as it was.
 - In the projects layout, the terminals' cards are `#282c34` and the canvas
   around them `#1d1f23`.
 - With the Explorer open in a space, switching to another space and back shows it
@@ -199,7 +198,8 @@ someone else changes it.
   is its Save. Save closes only once the write landed; if it fails the card goes and
   the banner stays. Don't Save deletes the draft, then closes.
 - **Which close:** the last pane closes the tab, and a space's last tab still asks.
-  With a terminal beside the file, only the file's pane closes.
+  With a terminal beside the file, only the file's pane closes, and the tab goes back
+  to being called by its number.
 - **A preview becomes permanent** on the first edit, on a double click on its tab, and
   when a pane splits in beside it.
 - **The keyboard:** the editor takes it when the file opens and when its tab comes back.
@@ -237,7 +237,8 @@ reaches only the copy in the shown tab, and one naming another doc is ignored.
 
 - **Closes that don't ask,** on purpose: `cmd-w` with the keyboard outside the mod, and
   Close in the tab's menu. The draft covers them.
-- **Over 256 KB opens without colors,** because coloring blocks the window. Herdr's
+- **Over 50 KB opens without colors,** because Herdr colors the whole file again on
+  each key: 125 ms at 50 KB, 440 ms at 200 KB. Herdr's
   editor colors `js`, `json`, `py`, `rs`, `go`, `sh`, `css`, `yaml`, `sql`, `java`, `c`,
   `rb`, `php`, `lua` and `makefile`, and TS, JSX and such go as `js`. Markdown, HTML and
   a few others come out plain.

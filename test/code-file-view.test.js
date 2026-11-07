@@ -433,6 +433,27 @@ test("D18: closing a clean file closes its tab, never `confirmed`", async () => 
   assert.deepEqual(w.closes(), [["tab.close", { id: "t1" }]]);
 });
 
+test("D18: a tab that outlives its file stops carrying the file's name", async () => {
+  const w = await open({ tabPanes: 2 });
+  await w.command("close");
+  await flush();
+  const names = w.runs.map(([n]) => n);
+  assert.deepEqual(w.runs.find(([n]) => n === "tab.rename"), ["tab.rename", { id: "t1", name: "" }]);
+  assert.ok(names.indexOf("tab.rename") < names.indexOf("pane.close"), "before the copy goes");
+});
+
+test("D18: a tab closing whole renames nothing", async () => {
+  const w = await open();
+  await w.command("close");
+  await flush();
+  assert.equal(w.runs.find(([n]) => n === "tab.rename"), undefined);
+});
+
+test("D22: a file that doesn't open says nothing about its language or encoding", async () => {
+  const w = await open({ disk: { [FILE]: "a\0b" } });
+  assert.ok(!textOf(w.draw()).includes("UTF-8"));
+});
+
 test("D18: with a terminal beside it only its pane closes, naming the pane", async () => {
   const w = await open({ tabPanes: 2 });
   await w.command("close");
@@ -1091,8 +1112,8 @@ test("D22: a read-only file opens read-only and says so; Read-only is checked wi
   assert.deepEqual(w.writes, []);
 });
 
-test("D14: over 256 KB opens as txt and the header says so", async () => {
-  const w = await open({ disk: { [FILE]: "x".repeat(256 * 1024 + 1) } });
+test("D14: over 50 KB opens as txt and the header says so", async () => {
+  const w = await open({ disk: { [FILE]: "x".repeat(50 * 1024 + 1) } });
   assert.equal(w.editor().opts.language, "txt");
   assert.ok(textOf(w.draw()).includes("Sin colores: archivo grande"));
 });

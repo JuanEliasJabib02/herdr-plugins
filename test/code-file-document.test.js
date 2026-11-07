@@ -795,8 +795,8 @@ test("D14: language: the same names as Herdr's files mod", () => {
   assert.equal(lang("/a/b.__proto__"), "__proto__");
 });
 
-test("D14: over 256 KB opens as txt and the header says so", () => {
-  const limit = 256 * 1024;
+test("D14: over 50 KB opens as txt and the header says so", () => {
+  const limit = 50 * 1024;
   assert.deepEqual([languageFor("/a/b.js", limit).language, languageFor("/a/b.js", limit).noColors], ["js", false]);
   assert.deepEqual([languageFor("/a/b.js", limit + 1).language, languageFor("/a/b.js", limit + 1).noColors], ["txt", true]);
   assert.equal(languageFor("/a/b.txt", limit + 1).noColors, false, "plain text loses no colors");
