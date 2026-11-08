@@ -70,6 +70,54 @@ test("projects layout: the status bar is a row, workspace-status, the spotlight 
   ]);
 });
 
+test("S6: the PR card sits atop Changes in the right panel: the stack's child `changes` is a fixed column, the card's block above Herdr's Changes (D3)", () => {
+  const layout = read("layouts/projects.json");
+  const body = find(layout, "panel-body");
+  assert.deepEqual(body.children.map((c) => c.id), ["explorer", "changes"], "code-tabs' header selects these ids");
+  const changes = find(layout, "changes");
+  assert.equal(changes.type, "column");
+  assert.equal(changes.resizable, false, "a dragged card would be clipped, and the drag saved");
+  assert.ok(changes.gap > 0, "Changes draws its own box with no margin: a gap keeps the two apart");
+  assert.deepEqual(changes.children.map((c) => c.id), ["pr-card", "changes-diff"]);
+  const card = find(layout, "pr-card");
+  assert.equal(card.type, "block");
+  assert.deepEqual(card.content, { mod: "projects", props: { view: "pr" } });
+  assert.ok(Number.isInteger(card.size?.px) && card.size.px > 0, "fixed height (D4)");
+  assert.equal(card.size.weight, undefined);
+  assert.deepEqual(find(layout, "changes-diff"), { id: "changes-diff", type: "block", size: { weight: 1 }, content: { mod: "changes" } });
+  assert.equal(mods(layout).filter((m) => m === "changes").length, 1, "one copy of Herdr's Changes");
+});
+
+test("S5: the PR card is the mod's `pr` view, checked by check-views through DEFAULT_VIEW (D2)", () => {
+  const src = (f) => readFileSync(new URL(`../projects-sidebar/mods/projects/${f}`, import.meta.url), "utf8");
+  const main = src("main.js");
+  assert.match(main, /^\s+pr:\s*PrCard,$/m);
+  assert.match(main, /^import PrCard from "\.\/pr-card\.js";$/m);
+  // scripts/check-views.sh rewrites this line to check each view.
+  assert.match(main, /^const DEFAULT_VIEW = "tree";$/m);
+  assert.match(main, /pr\.view \?\? DEFAULT_VIEW/);
+  const card = src("pr-card.js");
+  assert.match(card, /export default class PrCard\b/);
+  assert.match(card, /cardState\(/, "it draws T2's state (pr-card-model.js)");
+  assert.match(src("git.js"), /export const readPrCard = [\s\S]*?readCard\(/, "git.js binds readCard to exec");
+});
+
+test("S5: the card shows the workspace of the folder Changes shows, asks one at a time by key, only while shown, and hides when it has nothing to say (D5, D9, D10)", () => {
+  const card = readFileSync(new URL("../projects-sidebar/mods/projects/pr-card.js", import.meta.url), "utf8");
+  assert.match(card, /pane\?\.cwd \|\| f\?\.cwd \|\| space\?\.folder/, "Changes' folder: the focused pane's, then focused()'s, then the space's");
+  assert.match(card, /checkoutAt\(/, "matched as the sidebar matches spaces");
+  assert.match(card, /if \(this\.busy\) return;/, "one read at a time");
+  assert.match(card, /this\.key === key/, "an answer for a key that moved on is never drawn");
+  assert.match(card, /active === "changes"/, "the timer asks only while Changes shows");
+  assert.match(card, /Date\.now\(\) - this\.at < EVERY \|\| !window\(\)\.active/, "the 30 s re-read only from the window in front, as the sidebar's colors (D1)");
+  assert.match(card, /run\("layout\.hide", \{ id: BLOCK \}\)/);
+  assert.match(card, /run\("layout\.show", \{ id: BLOCK \}\)/);
+  assert.match(card, /const BLOCK = "pr-card";/);
+  assert.match(card, /exec\("open", \[url\]\)/, "Abrir en GitHub goes through `open`, so arc-spaces picks the Arc space");
+  assert.match(card, /url\.startsWith\("https:\/\/github\.com\/"\)/, "only a GitHub URL reaches it");
+  assert.doesNotMatch(card, /open_url\(/);
+});
+
 test("the workspace menu is a view of the mod (D20)", () => {
   const src = (f) => readFileSync(new URL(`../projects-sidebar/mods/projects/${f}`, import.meta.url), "utf8");
   assert.match(src("main.js"), /"workspace-menu":\s*WorkspaceMenu/);

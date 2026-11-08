@@ -8,7 +8,8 @@
 // a group's `organize` (D29) and the folded Task-mode lanes, `tasks` (D31);
 // T13 added the task notes, `projects.notes.v1`, and their helpers (D34);
 // T15 added a project's saved base, `base`, and setProjectBase (D37); the PR
-// status added `projects.prs.v1`, read and merged by pr-model.js.
+// status added `projects.prs.v1`, read and merged by pr-model.js. The PR card
+// shares matchSpaces' rule through checkoutAt, so the two can't drift.
 
 // ── Persisted keys ─────────────────────────────────────────────────────────
 
@@ -480,24 +481,51 @@ export async function listCheckouts(project, git) {
 
 // ── Spaces ─────────────────────────────────────────────────────────────────
 
+// Every checkout of the worktree lists (`cache`: projects.cache.v1), paths
+// normalized once: [{ project, path, branch, main }].
+function checkoutList(cache, home) {
+  const checkouts = [];
+  for (const [project, list] of Object.entries(cache ?? {})) {
+    for (const c of Array.isArray(list) ? list : []) {
+      checkouts.push({ project: normPath(project, home), path: normPath(c?.path, home), branch: c?.branch ?? null, main: c?.main === true });
+    }
+  }
+  return checkouts;
+}
+
+// The checkout that is the normalized folder `at` or holds it, the deepest
+// when several do; null when none does or `at` isn't absolute.
+function deepestAt(checkouts, at) {
+  if (!isAbsolute(at)) return null;
+  let best = null;
+  for (const c of checkouts) if (c.path && inside(at, c.path) && (!best || c.path.length > best.path.length)) best = c;
+  return best;
+}
+
+// The checkout a folder of this machine is in, { project, path, branch, main
+// }, from the worktree lists (`cache`: projects.cache.v1): the one that is
+// the folder or holds it, the deepest when several do; null when none does or
+// the folder isn't absolute. `~` is expanded with `home`. The PR card
+// (pr-card.js) places the folder Changes shows with it, by matchSpaces' own
+// rule (the same two steps), so the card and the sidebar never disagree (D5).
+export function checkoutAt(cache, folder, home) {
+  const c = deepestAt(checkoutList(cache, home), normPath(folder, home));
+  return c && { ...c };
+}
+
 // Which workspace each space shows: { [spaceId]: { project, path } }, from
 // the worktree lists (`cache`: projects.cache.v1), spaces() and panes()
 // (mods/worktree/main.js `spaceOf`). A space matches when it is on this
 // machine and its live folder (placeOf) is a checkout or inside one; the
-// deepest checkout wins. Spaces that match nothing are absent: the sidebar
-// shows them nowhere. The tree and the attention dot both use this.
+// deepest checkout wins (checkoutAt's rule: the list is built once here).
+// Spaces that match nothing are absent: the sidebar shows them nowhere. The
+// tree and the attention dot both use this.
 export function matchSpaces(cache, spaces, panes, home) {
-  const checkouts = [];
-  for (const [project, list] of Object.entries(cache ?? {})) {
-    for (const c of Array.isArray(list) ? list : []) checkouts.push({ project: normPath(project, home), path: normPath(c?.path, home) });
-  }
+  const checkouts = checkoutList(cache, home);
   const out = {};
   for (const space of spaces ?? []) {
     if ((space.machine ?? null) !== null) continue;
-    const at = normPath(placeOf(space, panes), home);
-    if (!isAbsolute(at)) continue;
-    let best = null;
-    for (const c of checkouts) if (c.path && inside(at, c.path) && (!best || c.path.length > best.path.length)) best = c;
+    const best = deepestAt(checkouts, normPath(placeOf(space, panes), home));
     if (best) out[space.id] = { project: best.project, path: best.path };
   }
   return out;

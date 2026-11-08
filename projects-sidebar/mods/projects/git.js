@@ -11,6 +11,7 @@ import { fetchOrigin, defaultBaseOf, recentBasesOf, baseExistsIn, branchExistsIn
 import { removalCheck as checkRemoval, removeWorkspace as removeWith, removeTask as removeTaskWith } from "./remove-workspace-model.js";
 import { renameCheck as checkRename, renameWorkspace as renameWith, sshHostnameOf } from "./rename-workspace-model.js";
 import { projectPrs, accountsOf } from "./pr-model.js";
+import { readCard } from "./pr-card-model.js";
 
 // { ok, out, err } (mods/worktree/main.js `git`). Rejects when git can't
 // start there: not installed, or the folder is gone.
@@ -160,3 +161,8 @@ const prIo = { git, gh, ghAs, accounts: ghAccounts, hostname: sshHostname };
 // The PRs of a project's workspaces (pr-model.js projectPrs): { ok, prs }.
 // `memo`: pr-model.js prMemo(), kept by the caller between rounds.
 export const workspacePrs = (project, checkouts, memo) => projectPrs(project, checkouts, prIo, memo);
+
+// What the PR card shows for one workspace (pr-card-model.js readCard), asked
+// through the same account path: space = { project, path, branch }; `memo`:
+// the card's own prMemo(). Never rejects.
+export const readPrCard = ({ project, path, branch }, memo) => readCard({ project, path, branch }, prIo, memo);

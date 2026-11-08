@@ -26,7 +26,8 @@ icons.
   window's whole height beside the tab bar and the terminals, down to the status
   bar, on `chrome`, flush with the window's edge, a 1 px `border` divider on its
   left. 368 px wide, 280 to 900, closed until you open it. It shows one block at a
-  time: the Explorer, or Herdr's `changes`, which draws its own card.
+  time: the Explorer, or Herdr's `changes`, which draws its own card, with
+  projects-sidebar's PR card above it (hidden where it has nothing to say).
 - **The panel's header** (42 px, like the tab bar, so their bottom lines run on
   as one): an icon per panel, 34 px wide with a 16 px icon, the Explorer's files
   and then Changes' branch if picked in Herdr's welcome. The shown one is
@@ -98,8 +99,12 @@ icons.
   `work-row` holds the column `work` (tab bar and terminals) and the column
   `panel`, whose block `panel-header` draws `{ "mod": "code-tabs", "props": {
   "view": "panel" } }` above the stack `panel-body`, which has `active: "explorer"` with the
-  children `explorer` → `{ "mod": "code-explorer" }` and `changes` →
-  `{ "mod": "changes" }`. projects-sidebar's `requires` installs this plugin
+  children `explorer` → `{ "mod": "code-explorer" }` and `changes`, a column
+  (`"resizable": false`, gap 8) holding projects-sidebar's PR card, `pr-card` →
+  `{ "mod": "projects", "props": { "view": "pr" } }` (px 176), above `changes-diff`
+  → `{ "mod": "changes" }` (weight 1). The header and its per-space memory know
+  only the stack's child ids, `explorer` and `changes`, so what `changes` holds
+  is projects-sidebar's. projects-sidebar's `requires` installs this plugin
   first.
 
 **Watch out**

@@ -154,14 +154,20 @@ test("S5: install brings the icons with the mod, where image() finds them", () =
 
 // ── The layout ─────────────────────────────────────────────────────────────
 
-test("the panel opens on the Explorer: the stack's files child became it, and changes stays (D1)", () => {
+test("the panel opens on the Explorer: the stack's files child became it, and changes stays, now a column with projects-sidebar's PR card above Herdr's Changes (D1)", () => {
   const body = find(layout(), "panel-body");
   assert.equal(body.type, "stack");
   assert.equal(body.active, "explorer");
-  assert.deepEqual(body.children, [
-    { id: "explorer", type: "block", content: { mod: "code-explorer" } },
-    { id: "changes", type: "block", content: { mod: "changes" } },
-  ]);
+  assert.deepEqual(body.children.map((c) => c.id), ["explorer", "changes"]);
+  assert.deepEqual(body.children[0], { id: "explorer", type: "block", content: { mod: "code-explorer" } });
+  const changes = body.children[1];
+  assert.equal(changes.type, "column", "the header selects it by its id, whatever it holds");
+  assert.equal(changes.resizable, false);
+  const [card, diff] = changes.children;
+  assert.equal(card.id, "pr-card");
+  assert.deepEqual(card.content, { mod: "projects", props: { view: "pr" } });
+  assert.ok(card.size.px > 0, "the card is a fixed height");
+  assert.deepEqual(diff, { id: "changes-diff", type: "block", size: { weight: 1 }, content: { mod: "changes" } });
   assert.ok(!mods(layout()).includes("files"), "no copy of Herdr's files mod");
 });
 

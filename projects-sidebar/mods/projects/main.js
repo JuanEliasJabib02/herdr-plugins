@@ -14,6 +14,8 @@
 //   task-menu         a task lane's right-click menu (Task mode)
 //   task-note         a task's note
 //   delete-task       the Delete task dialog (a task lane's workspaces)
+//   pr                the PR card, above Changes in the right panel (the
+//                     PR of the branch Changes shows)
 // Copies never reach into each other: they share state through store.js
 // (setShared re-renders every copy) and act through herdr commands.
 
@@ -32,6 +34,7 @@ import TaskMenu from "./task-menu.js";
 import TaskNote from "./task-note.js";
 import DeleteTask from "./delete-task.js";
 import NewWorkspace, { commands as newWorkspaceCommands } from "./new-workspace.js";
+import PrCard from "./pr-card.js";
 
 const VIEWS = {
   tree: Tree,
@@ -47,7 +50,12 @@ const VIEWS = {
   "task-menu": TaskMenu,
   "task-note": TaskNote,
   "delete-task": DeleteTask,
+  pr: PrCard,
 };
+
+// The view of a copy given no props: the tree. scripts/check-views.sh
+// rewrites this line to check each view with `herdr-app check`.
+const DEFAULT_VIEW = "tree";
 
 // Every key command of the mod ("projects.<name>" in keys.json, or
 // `herdr-app do projects.<name>`), by name. A handler gets { cx, copy }.
@@ -56,7 +64,7 @@ const COMMANDS = { ...treeCommands, ...groupsCommands, ...newWorkspaceCommands }
 export default class Projects extends View {
   init(p, cx) {
     const pr = props() ?? p ?? {};
-    this.name = pr.view ?? "tree";
+    this.name = pr.view ?? DEFAULT_VIEW;
     const V = VIEWS[this.name];
     this.view = V ? new V() : null;
     this.view?.init?.(pr, cx);

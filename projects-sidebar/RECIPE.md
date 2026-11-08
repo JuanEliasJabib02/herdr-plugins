@@ -178,6 +178,25 @@ across repos.
   - The group menu is a 210 × 200 popup: Organize by Project, Organize by
     Task, a separator, Rename…, Delete group. The New / Rename group form is
     a 380 × 214 dialog.
+- **PR card** (the right panel's Changes, above Herdr's diff, as Orca shows
+  the PR atop Source Control): a 176 px card with rounded 10 corners, a 1 px
+  `border` and the terminals' `background`, 8 px above Changes' own card.
+  - With a PR: "PR #161 · Open" after a branch icon, semibold, in the
+    sidebar icon's color (green open, purple merged, red closed, `dim`
+    draft), with "+2,305" (`ansi2`) and "−942" (`ansi1`) at its right; the
+    title (13 px); "head → base" in `muted` with "↑4 ↓9" (ahead of and
+    behind `origin/<base>` here) in `dim`; "Checks" then "✓ 5 de 5 pasan"
+    (green), "✗ 1 falla" (red), "… 2 corriendo" (yellow) or "Sin checks";
+    "Reviews" then "1 aprobado" (green), "Cambios pedidos" (red) or "Sin
+    reviews"; then two 26 px buttons, "Abrir en GitHub" (outlined) and
+    "Mergear ▾", drawn off (`raised`, `dim`) until Mergear is built, its
+    hover saying why GitHub wouldn't merge it ("Es un draft", "Tiene
+    conflictos con main", "Bloqueado por las reglas de main", …).
+  - Without one, centered: "Esta rama no tiene PR" and the branch under it.
+    A detached workspace says "Este workspace no está en una rama"; GitHub
+    not answering, "GitHub no respondió", or "Ninguna cuenta de gh ve
+    <owner>/<repo>" when no account you're logged into sees the repo.
+  - "Leyendo el PR…" while a workspace's first answer is read.
 
 **How it behaves**
 
@@ -330,6 +349,28 @@ across repos.
 - **What moves:** a worktree made or removed outside Herdr shows up within
   a moment (the repo's `.git/worktrees` is watched). A 60 s fallback runs
   while the window is in front.
+- **The PR card:**
+  - It is about the workspace whose folder Changes, right below, shows: the
+    focused pane's live folder, else the focused terminal's, else the
+    space's, placed in a checkout by the sidebar's own rule (the deepest
+    checkout holding it). So the card and the diff are always the same
+    repo, a companion repo's pane included.
+  - It reads GitHub when that workspace or its branch changes, and again
+    every 30 s while the same one shows, one read at a time, with the
+    sidebar's account path (the account that sees the repo). An answer that
+    comes after you moved to another workspace is never drawn; it is kept
+    for its own workspace, so going back draws it at once.
+  - Nothing is asked while the panel is closed or on the Explorer; it reads
+    again once Changes shows.
+  - It hides its own block, and Changes takes the whole panel, when it has
+    nothing to say: a space on another machine, a folder outside every
+    project, a project's main checkout, or an origin that isn't GitHub
+    (Bitbucket's, for now). It shows again on the next workspace with
+    something to say.
+  - "Abrir en GitHub" runs `open <url>`, so with the arc-spaces plugin the
+    PR opens in the Arc space of the workspace's group, where that group's
+    GitHub account is signed in. Only a `https://github.com/` URL is
+    opened; a failure is a toast.
 
 **Built from**
 
@@ -350,7 +391,12 @@ across repos.
   "props": { "view": "panel" } }` sits above the stack `panel-body`, where the
   child `explorer` → `{ "mod": "code-explorer" }` is active where Herdr has
   `files`: all from the code-editor plugin, whose keys.json brings `cmd-l` →
-  `layout.toggle:panel`. Preview `layouts/projects.svg`.
+  `layout.toggle:panel`. The stack's other child, `changes`, is a column
+  (`"resizable": false`, gap 8) that keeps that id, so the panel's header and
+  its per-space memory still select it: the block `pr-card` → `{ "mod":
+  "projects", "props": { "view": "pr" } }` (px 176, the PR card) above
+  `changes-diff` → `{ "mod": "changes" }` (weight 1, Herdr's Changes).
+  Preview `layouts/projects.svg`.
 - **Mod `mods/projects-agents/`:** a copy of Herdr 0.1.13's shipped
   `agents` mod, made the way `mod.clone` makes one (`mod.json` records
   `cloned_from: { name: "agents", version: "0.1.13" }`, and the sort menu
@@ -367,11 +413,18 @@ across repos.
   - `rename-workspace` = `rename-workspace.js`;
   - `task-menu` = `task-menu.js`, `task-note` = `task-note.js`,
     `delete-task` = `delete-task.js`;
+  - `pr` = `pr-card.js` (the PR card, in the panel's `pr-card` block);
   - `project-menu`, `workspace-menu`, `group-menu`, `group-form`.
+  - `main.js` names the view a copy without props draws in one line,
+    `const DEFAULT_VIEW = "tree";`, which `scripts/check-views.sh` rewrites
+    to check each view.
   - Pure logic is in `lib.js`, `tree-model.js`, `task-model.js`,
     `new-workspace-model.js`, `remove-workspace-model.js`,
-    `rename-workspace-model.js` and `badges-model.js`, tested with `node
-    --test` (Delete's and Rename's against a real git).
+    `rename-workspace-model.js`, `badges-model.js`, `pr-model.js` (the PR
+    colors) and `pr-card-model.js` (the PR card), tested with `node
+    --test` (Delete's and Rename's against a real git). The card finds its
+    workspace with `lib.js` `checkoutAt`, the rule `matchSpaces` places
+    spaces by.
   - `store.js` is the only code that touches the shared keys: `projects.v1`
     (groups and projects), `projects.ui.v1` (collapsed), `projects.cache.v1`
     (worktree lists), `projects.agents.v1` (`knownAgents()`),
@@ -390,7 +443,8 @@ across repos.
   F1–F3 in section `layout:projects`.
 - **Herdr functions:** `spaces`, `panes`, `agents`, `focused`,
   `knownAgents`, `layout`, `window`, `home`, `pickFolder`, `watchFolder`,
-  `exec`, `run` (`space.select`, `space.new`, `space.close`, `pane.focus`),
+  `exec`, `run` (`space.select`, `space.new`, `space.close`, `pane.focus`,
+  and the PR card's `layout.show` and `layout.hide` of its own block),
   `openOverlay`, `closeOverlay`, `shared`, `setShared`, `notify`, `theme`,
   `props`, `nextCommand`.
 - **Programs it runs:**
@@ -414,6 +468,11 @@ across repos.
     and only for repos whose origin is GitHub (an ssh alias of github.com
     counts). The answer is stored in `projects.prs.v1`, so every window
     draws it and it is there at the next start.
+  - `gh api graphql` (the PR card): one query for the newest PR of the
+    branch Changes shows, with its checks, reviews and the repo's merge
+    methods, when that workspace changes and every 30 s while Changes
+    shows; then `git rev-list --left-right --count origin/<base>...HEAD` in
+    the workspace for ↑↓.
   - Two GitHub accounts: gh runs in the project's folder, where a gh
     wrapper that picks the account by repo picks it, and plain gh uses its
     active account. When GitHub answers that it can't see the repo, the
@@ -423,6 +482,7 @@ across repos.
     that owner while Herdr runs.
   - `ssh -G <host>`, to read which host an ssh alias of origin's URL is.
   - `test -e`, to check whether a folder exists.
+  - `open <url>`, the PR card's "Abrir en GitHub".
   - Whatever program another plugin's badge names in its `exec`, when you
     click that badge; its hover says which ("· runs <program>").
 - **Art:** its own Lucide-style icons in `icons/` (folder, branch, home,
@@ -529,7 +589,8 @@ against.
   every repo you create in, `ls-remote`, `fetch`, `push` and `gh` when
   you rename a pushed branch, and `gh api graphql` every minute for the PR
   colors while the window is in front (one GraphQL point per project with
-  workspaces). It reads repo folders outside its own and
+  workspaces), plus one for the PR card every 30 s while Changes shows and
+  each time it shows another workspace. It reads repo folders outside its own and
   writes worktrees under `~/orca/workspaces`. Change `WORKTREE_ROOT` in
   `config.js` to put them elsewhere.
 - **Install by copying.** Herdr doesn't load a mod folder that is a
@@ -578,7 +639,16 @@ against.
   Project to move or remove a project. Collapsing a project also only
   applies in Project mode.
 - **`herdr-app check` draws only the tree view.** Check the other views
-  from a copy whose `main.js` defaults to them.
+  from a copy whose `main.js` defaults to them: `scripts/check-views.sh
+  projects-sidebar/mods/projects pr` checks the PR card. Outside Herdr it
+  has no workspace, so that check draws its empty state only.
+- **The PR card hides by clicking:** its `layout.hide` / `layout.show` is a
+  layout click, which Herdr saves in `layouts/.state/`. Moving between a
+  workspace the card shows and one it doesn't (a main checkout, a Bitbucket
+  repo) writes that file; it never runs when nothing changes.
+- **The PR card and the diff can differ** only when the folder Changes
+  shows is a repo nested in a registered checkout (a submodule): the card
+  shows the checkout's branch, the diff the nested repo.
 - **Limits:**
   - Only the first three groups have keys.
   - Branch names have no user prefix and are slugged to 48 characters,
@@ -599,7 +669,8 @@ against.
 **Done when**
 
 - `node --test 'test/*.test.js'` reports `fail 0`, and `herdr-app check`
-  passes on `mods/projects`.
+  passes on `mods/projects`, and `scripts/check-views.sh
+  projects-sidebar/mods/projects pr` on the PR card.
 - After `scripts/install.sh` and `layout.switch {name: "projects"}`, the
   sidebar shows "Projects" with an empty state. The groups bar shows one
   highlighted code icon whose tooltip reads "Projects · F1".
@@ -633,3 +704,10 @@ against.
   (`test`, `test-2`, … then "Servers" with `main`), each row naming its
   project. A folded lane stays folded after a reload. Organize by Project
   brings the tree back.
+- `cmd-l`, then the panel's Changes icon, on a workspace whose branch has an
+  open GitHub PR: the PR card sits above Changes with "PR #<n> · Open" in
+  green, its title, "head → base" with ↑↓, Checks and Reviews, and "Abrir
+  en GitHub" opens the PR. On a branch without one: "Esta rama no tiene
+  PR". On the project's main checkout, or a repo whose origin isn't
+  GitHub, the card is gone and Changes takes the whole panel. `cmd-l` and
+  the header's icons still open, switch and close the panel.
