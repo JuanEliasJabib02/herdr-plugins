@@ -18,7 +18,7 @@ import {
   planServer, lockfileInstalls, missingInstalls, installsFor, chainInstall, detectServerScripts, commandTemplate, expectedPort,
 } from "./server-plan.js";
 import { inspectServer, readServerState, startServer, restartServer, stopServer } from "./server.js";
-import { logPathFor, appendLogHeader, rotateLog } from "./server-log.js";
+import { logPathFor, appendLogHeader, rotateLog, readStartFailure } from "./server-log.js";
 import { portUrl, foreignListener, stopProcessTree } from "./ports.js";
 import { release, pause, regrant, snapshot } from "./queue.js";
 import {
@@ -32,11 +32,12 @@ const sha1 = (text) => crypto.createHash("sha1").update(text).digest("hex");
 export const serverId = (workspace) => sha1(normRoot(workspace)).slice(0, 12);
 
 // Errors whose toast opens the server popup (Forzar sync, Apagar igual, D22;
-// Liberar puerto y arrancar, D24).
-const POPUP_CODES = new Set(["root-diverged", "untracked-collision", "port-busy"]);
+// Liberar puerto y arrancar, D24; Ver log and Reintentar, D25).
+const POPUP_CODES = new Set(["root-diverged", "untracked-collision", "port-busy", "server-exited"]);
 // Errors about the server, not the root: a sync that goes through leaves
-// them, and only a start that goes through clears them (D24).
-const SERVER_ERRORS = new Set(["port-busy"]);
+// them; a start that goes through clears them (D24), and so does the server
+// coming up to listen after them (D25).
+const SERVER_ERRORS = new Set(["port-busy", "server-exited"]);
 
 const qctxOf = (cx) => ({ now: cx.now(), ...cx.settings.queue });
 
@@ -314,20 +315,28 @@ export async function ensureServer(cx, root, opts = {}) {
 
 // ── A busy port (D23, D24) ─────────────────────────────────────────────────
 
-// The port-busy error of a holder found by checkPort.
-export function portBusyError({ port, pid, command, cwd }) {
+// The port-busy error of a holder found by checkPort; with no pid, a port a
+// server found taken when it started (D25) and nobody listens on any more.
+export function portBusyError({ port, pid = null, command = null, cwd = null }) {
+  if (!Number.isInteger(pid)) {
+    const which = Number.isInteger(port) ? `El puerto ${port}` : "El puerto del server";
+    return { code: "port-busy", port: port ?? null, pid: null, command: null, cwd: null, message: `${which} estaba ocupado al arrancar el server.` };
+  }
   const where = cwd ? `pid ${pid}, en ${cwd}` : `pid ${pid}`;
   return { code: "port-busy", port, pid, command, cwd, message: `El puerto ${port} lo tiene ${command ?? "otro proceso"} (${where}).` };
 }
 
 // Who holds the port this start takes, from outside the server terminal's
-// tree (rootPid; none when there's no terminal yet). With `freePort`, the
-// process the recorded port-busy error (`shown`) names is stopped first —
-// SIGTERM to it and its descendants, SIGKILL 5 s later — and only while it
+// tree (rootPid; none when there's no terminal yet). The port is the one
+// the command will take (D23), else the one a recorded port-busy names (a
+// server that died on it, D25, whose command doesn't say). With `freePort`,
+// the process the recorded port-busy error (`shown`) names is stopped first
+// — SIGTERM to it and its descendants, SIGKILL 5 s later — and only while it
 // is still the one holding that port: whatever took it since is shown, not
 // stopped. → { busy: { port, pid, command, cwd } | null, freed }.
 async function checkPort(cx, root, { command, settings, rootPid, freePort, shown }) {
-  const port = await expectedPort({ root, command, settings, io: cx.io });
+  const recorded = shown?.code === "port-busy" && Number.isInteger(shown.port) ? shown.port : null;
+  const port = (await expectedPort({ root, command, settings, io: cx.io })) ?? recorded;
   if (port === null) return { busy: null, freed: null };
   const holder = async () => {
     const found = await foreignListener(port, rootPid, cx.serverDeps);
@@ -371,6 +380,83 @@ async function refusePort(cx, root, { busy, freed, plan, seen, logPath, workspac
     event: `Server not started — port ${busy.port} is held by ${busy.command ?? "another process"} (pid ${busy.pid})`,
   });
   return { state: "port-busy", error, plan, freed };
+}
+
+// ── A server that died at start (D25) ──────────────────────────────────────
+
+// How long the reap and `on` wait for a repo's lock before deciding a dead
+// start. A start or restart in flight holds that lock, and the free prompt
+// it leaves between a Ctrl-C and the line it types next is no death.
+const DEAD_START_LOCK_MS = 300;
+
+// Spotlight started the server (`starting`) and the terminal's shell leads
+// again with no port open (server.js readServerState: stopped, no owner).
+const diedAtStart = (record, live) =>
+  record?.serverState === "starting" && live?.state === "stopped" && live.owner === null;
+
+function serverExitedError(line) {
+  return { code: "server-exited", message: line ? `El server se cayó al arrancar: ${line}` : "El server se cayó al arrancar." };
+}
+
+// Why a dead start died, from its log since the last start marker: a port
+// already taken is port-busy, T13's shape, naming the process that still
+// listens there if one does (the port from the log, else the command's,
+// D23); anything else is server-exited with its first error line.
+async function deadStartError(cx, root, record) {
+  const failure = readStartFailure(record.logPath ?? logPathFor(root));
+  if (failure.kind !== "addr-in-use") return serverExitedError(failure.line);
+  const port =
+    failure.port ??
+    (await expectedPort({ root, command: record.serverCommand ?? null, settings: repoSettings(cx.settings, root), io: cx.io }));
+  // The server's tree has no port left: whoever listens there is someone else.
+  const holder = Number.isInteger(port) ? await foreignListener(port, null, cx.serverDeps) : null;
+  return portBusyError({ port, ...(holder ?? {}) });
+}
+
+// Records a dead start under the repo's lock, where the record and the
+// terminal are read again, so a start or restart in flight is never taken
+// for one: lastError, serverState stopped, and a toast that opens the popup
+// (one per error). A lock held past DEAD_START_LOCK_MS leaves it `starting`
+// for the next reap. → the error recorded, or null.
+async function settleDeadStart(cx, root) {
+  try {
+    return await cx.store.withRepoLock(
+      root,
+      async () => {
+        const record = cx.store.readState().repos[root];
+        if (!record?.serverTerminal || record.serverState !== "starting") return null;
+        const live = await readServerState(
+          { root, terminal: record.serverTerminal, logPath: record.logPath, serverPid: record.serverPid, port: repoSettings(cx.settings, root).port },
+          cx.serverDeps,
+        );
+        if (!diedAtStart(record, live)) return null;
+        const error = await deadStartError(cx, root, record);
+        const now = cx.now();
+        const wrote = await cx.store.updateState((s) => {
+          const rec = s.repos[root];
+          if (!rec || rec.serverState !== "starting" || rec.serverStartedAt !== record.serverStartedAt) return false;
+          const known = rec.lastError?.code === error.code && rec.lastError?.message === error.message;
+          Object.assign(rec, { serverState: "stopped", ports: [], lastError: { ...error, at: now } });
+          if (!known) errorNote(s, { root, name: cx.nameOf(root), workspace: rec.holder, error, now });
+          return true;
+        });
+        return wrote.result ? error : null;
+      },
+      { timeoutMs: DEAD_START_LOCK_MS },
+    );
+  } catch (e) {
+    if (e instanceof LockError && e.code === "lock-timeout") return null;
+    throw e;
+  }
+}
+
+// A server error goes once the server listens after it (D25): only on the
+// way into `listening`, so a refused restart over a server that kept
+// listening keeps its port-busy (D24).
+function clearOnListen(record, liveState) {
+  if (liveState === "listening" && record.serverState !== "listening" && SERVER_ERRORS.has(record.lastError?.code)) {
+    record.lastError = null;
+  }
 }
 
 // ── sync ───────────────────────────────────────────────────────────────────
@@ -541,9 +627,13 @@ export async function describeServer(cx, state, member, key, syncErrors = {}) {
     cx.serverDeps,
   );
   const running = live.state === "listening" || live.state === "starting";
-  // D24: a start refused over a busy port; nothing will open it, and the
-  // agent reads who holds it.
-  const busy = record.lastError?.code === "port-busy" && live.state !== "listening" ? { portBusy: true, error: record.lastError.message } : {};
+  // D25: a start that died says why, read from its log now (recordServers
+  // records it). D24, D25: a start a busy port refused, or one that died
+  // before; nothing will open a port, and the agent reads why.
+  const deadStart = diedAtStart(record, live);
+  const died = deadStart ? await deadStartError(cx, member.root, record) : null;
+  const why = died ?? (SERVER_ERRORS.has(record.lastError?.code) && live.state !== "listening" ? record.lastError : null);
+  const down = why ? { serverError: true, error: why.message } : {};
   return {
     ...base,
     listening: live.state === "listening",
@@ -553,14 +643,15 @@ export async function describeServer(cx, state, member, key, syncErrors = {}) {
     port: live.port ?? configured,
     url: live.url ?? portUrl(configured),
     syncError,
-    ...busy,
+    deadStart,
+    ...down,
   };
 }
 
 // Polls until every lit repo listens, or has no server (15 s after the wait
 // began), or the deadline passes (O/src/main/spotlight/spotlight-agent-servers.ts:96-132).
-// A repo waiting for a variant, or whose start a busy port refused (D24),
-// has nothing to wait for. → { servers, ready }.
+// A repo waiting for a variant, whose start a busy port refused (D24), or
+// whose server died starting (D25), has nothing to wait for. → { servers, ready }.
 export async function waitForTurnServers(cx, { members, key, deadline, syncErrors }) {
   const litAt = cx.now();
   for (;;) {
@@ -569,7 +660,7 @@ export async function waitForTurnServers(cx, { members, key, deadline, syncError
     const lit = servers.filter((s) => s.lit);
     const ready = lit.length > 0 && lit.every((s) => s.listening);
     const settled = lit.every(
-      (s) => s.listening || s.needsVariant || s.portBusy || (s.server !== "running" && cx.now() - litAt >= cx.graceMs),
+      (s) => s.listening || s.needsVariant || s.serverError || (s.server !== "running" && cx.now() - litAt >= cx.graceMs),
     );
     if (ready || settled || cx.now() >= deadline) return { servers, ready };
     await cx.sleep(Math.min(cx.portPollMs, Math.max(0, deadline - cx.now())));
@@ -577,11 +668,16 @@ export async function waitForTurnServers(cx, { members, key, deadline, syncError
 }
 
 // What `on` saw of each lit server goes back to state.json (badges, status).
+// A start that died is recorded as the reap records it (D25); one whose
+// repo lock was busy stays `starting`, so the next reap still sees it.
 export async function recordServers(cx, servers) {
+  for (const sv of servers) if (sv.lit && sv.deadStart) await settleDeadStart(cx, sv.root);
   await cx.store.updateState((s) => {
     for (const sv of servers) {
       const r = s.repos[sv.root];
       if (!sv.lit || !sv.serverState || !r || r.serverState === "needs-variant") continue;
+      if (sv.deadStart && r.serverState === "starting") continue;
+      clearOnListen(r, sv.serverState);
       r.serverState = sv.serverState;
       r.ports = sv.ports;
     }
@@ -644,7 +740,8 @@ export function applyTurnEnd(queue, cur, d, qctx) {
 // `spotlight reap` (the footer, every 30 s and on terminal changes; D12,
 // D13, D19, D10): refs win; each requesting terminal's turn end (release,
 // pause, or a detached `classify` when the usage is stale, spawned again
-// when it died: J-005); holders' activity; gone servers, log rotation and a
+// when it died: J-005); holders' activity; gone servers, servers that died
+// starting (D25) and server errors a listen ends, log rotation and a
 // detached sync for a server running another env than the effective one
 // (J-002); a regrant (a raised cap); and lights for turns whose marker is
 // missing or whose light died.
@@ -696,6 +793,12 @@ export async function reap(cx, { full = true, skip = null } = {}) {
       { root, terminal: rec.serverTerminal, logPath: rec.logPath, serverPid: rec.serverPid, port: repoSettings(cx.settings, root).port },
       cx.serverDeps,
     );
+    // D25: a start that died is decided under the repo lock, which writes
+    // its state; until then it stays `starting`.
+    if (diedAtStart(rec, live)) {
+      await settleDeadStart(cx, root);
+      continue;
+    }
     if (live.state) servers.push({ root, state: live.state, ports: live.ports });
     // J-002: a server in another env than the effective one restarts through
     // a detached sync (D18: a restart outlasts the reap's second). Only
@@ -750,6 +853,7 @@ export async function reap(cx, { full = true, skip = null } = {}) {
     for (const sv of servers) {
       const r = s.repos[sv.root];
       if (!r) continue;
+      clearOnListen(r, sv.state);
       r.serverState = sv.state;
       r.ports = sv.ports;
     }

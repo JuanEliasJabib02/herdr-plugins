@@ -242,3 +242,28 @@ test("Liberar puerto y arrancar: only on port-busy, with its argv; never a force
   // Nothing holds the root (nothing to start): no button.
   assert.deepEqual(model({ state: stateWith(repo({ holder: null, lastError: PORT_BUSY })) }).force, []);
 });
+
+// T14 (D25): a server that died at start, or a start a busy port refused.
+// The popup offers Ver log (the server terminal, which holds what it
+// printed) and Reintentar (`spotlight restart`), in the places of Ver server
+// and Reiniciar, on both codes.
+const SERVER_EXITED = { code: "server-exited", message: "El server se cayó al arrancar: SyntaxError: Unexpected token ';'", at: 4 };
+
+test("a server that didn't come up: Ver log and Reintentar on port-busy and server-exited, with Ver server's and Reiniciar's argv", () => {
+  for (const lastError of [PORT_BUSY, SERVER_EXITED]) {
+    const m = model({ state: stateWith(repo({ serverState: "stopped", ports: [], lastError })) });
+    assert.deepEqual(m.actions, [
+      { id: "peek", label: "Ver log", argv: [BIN, "peek", "--repo", ROOT] },
+      { id: "restart", label: "Reintentar", argv: [BIN, "restart", "--repo", ROOT] },
+      { id: "off", label: "Apagar", argv: [BIN, "toggle", "--workspace", H], danger: true },
+    ], lastError.code);
+    assert.equal(m.error.message, lastError.message);
+  }
+  // A server that exited holds no port of anyone's: no force path.
+  assert.deepEqual(model({ state: stateWith(repo({ serverState: "stopped", ports: [], lastError: SERVER_EXITED })) }).force, []);
+  // Any other error, or none: Ver server and Reiniciar.
+  for (const lastError of [null, { code: "root-diverged", message: "m", at: 3 }, { code: "git-failed", message: "m", at: 3 }]) {
+    const m = model({ state: stateWith(repo({ lastError })) });
+    assert.deepEqual(m.actions.map((a) => a.label), ["Ver server", "Reiniciar", "Apagar"], lastError?.code ?? "none");
+  }
+});

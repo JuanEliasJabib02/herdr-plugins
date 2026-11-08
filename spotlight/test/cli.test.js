@@ -138,6 +138,14 @@ try {
         try { fs.appendFileSync(argv[4], "fake server: " + argv[7] + "\\r\\n"); } catch {}
         if (s.listen[t.cwd]) t.serverPorts = s.listen[t.cwd];
         else delete t.serverPorts;
+        // A server that dies at start: what it printed lands in the log, and
+        // the shell leads again after one look at the running \`script\`.
+        const crash = (s.crash ?? {})[t.cwd];
+        if (crash) {
+          try { fs.appendFileSync(argv[4], crash); } catch {}
+          delete t.serverPorts;
+          t.pendingShell = 1;
+        }
       }
       out(0, { started: null, status: null, turn: 0 });
       break;
@@ -336,6 +344,15 @@ function makeWorld() {
     listen(root, ports) {
       w.hcUpdate((s) => {
         s.listen[root] = ports;
+      });
+    },
+    // The next server lines typed in `root`'s terminal die at start, printing
+    // `text` (null: they run again).
+    crash(root, text) {
+      w.hcUpdate((s) => {
+        s.crash ??= {};
+        if (text == null) delete s.crash[root];
+        else s.crash[root] = text;
       });
     },
     // Listeners outside every terminal: [{ pid, port, cwd }] (real pids).
@@ -1611,4 +1628,167 @@ test("restart --free-port: TERM to the port's holder and its descendants, KILL a
   const rec = w.state().repos[app.root];
   assert.equal(rec.lastError, null);
   assert.ok(w.state().notes.some((n) => n.repo === app.root && n.text.includes(`Puerto 3008 liberado`)), JSON.stringify(w.state().notes));
+});
+
+// ── T14: a server that dies at start leaves an error (D25) ─────────────────
+
+const ESC = "\u001b";
+
+// What spotlight-1's last start printed in the speaking-english log of the
+// incident (S14, L15), byte for byte: Next's half died on EADDRINUSE :3008.
+const SE_CRASH =
+  "\r\n" +
+  "> speaking-english@1.0.0 dev /Users/juan/Desktop/Software/Sideprojects/speaking-english\r\n" +
+  "> npm-run-all --parallel dev:next dev:convex\r\n" +
+  "\r\n" +
+  "\r\n" +
+  "> speaking-english@1.0.0 dev:next /Users/juan/Desktop/Software/Sideprojects/speaking-english\r\n" +
+  "> next dev -p 3008\r\n" +
+  "\r\n" +
+  "\r\n" +
+  "> speaking-english@1.0.0 dev:convex /Users/juan/Desktop/Software/Sideprojects/speaking-english\r\n" +
+  "> convex dev\r\n" +
+  "\r\n" +
+  "\u001b[31m\u001b[1m⨯\u001b[22m\u001b[39m Failed to start server\r\n" +
+  "Error: listen EADDRINUSE: address already in use :::3008\r\n" +
+  "    at <unknown> (Error: listen EADDRINUSE: address already in use :::3008)\r\n" +
+  "    at new Promise (<anonymous>) {\r\n" +
+  "  code: \u001b[32m'EADDRINUSE'\u001b[39m,\r\n" +
+  "  errno: \u001b[33m-48\u001b[39m,\r\n" +
+  "  syscall: \u001b[32m'listen'\u001b[39m,\r\n" +
+  "  address: \u001b[32m'::'\u001b[39m,\r\n" +
+  "  port: \u001b[33m3008\u001b[39m\r\n" +
+  "}\r\n" +
+  "\u001b[?25h\r\n" +
+  "\u001b[41m\u001b[30m ELIFECYCLE \u001b[39m\u001b[49m \u001b[31mCommand failed with exit code 1.\u001b[39m\r\n" +
+  "\u001b[41m\u001b[30m ELIFECYCLE \u001b[39m\u001b[49m \u001b[31mCommand failed.\u001b[39m\r\n" +
+  "ERROR: \"dev:next\" exited with 1.\r\n" +
+  "\u001b[41m\u001b[30m ELIFECYCLE \u001b[39m\u001b[49m \u001b[31mCommand failed with exit code 1.\u001b[39m\r\n";
+
+// A Node server with a syntax error, colored as pnpm prints it.
+const SYNTAX_CRASH =
+  "\r\n> crashy@1.0.0 dev /Users/u/code/crashy\r\n> node server.js\r\n\r\n" +
+  "/Users/u/code/crashy/server.js:3\r\n" +
+  "const port = ;\r\n" +
+  "             ^\r\n\r\n" +
+  `${ESC}[31mSyntaxError: Unexpected token ';'${ESC}[39m\r\n` +
+  "    at wrapSafe (node:internal/modules/cjs/loader:1469:18)\r\n\r\n" +
+  "Node.js v24.11.0\r\n";
+
+// The server terminal shows Spotlight's own server listening on `ports`:
+// `script` writing this repo's log in front.
+function listenNow(w, root, ports) {
+  const logPath = w.state().repos[root].logPath;
+  w.hcUpdate((s) => {
+    const t = Object.values(s.terminals).find((x) => x.labels?.["spotlight.repo"] === root);
+    t.foreground = { pid: s.nextPid++, name: "script", argv: ["script", "-F", "-q", "-a", logPath, "/bin/zsh", "-c", "pnpm dev"], cwd: t.cwd };
+    t.serverPorts = ports;
+  });
+}
+
+const toastsOf = (w, root, text) => w.state().notes.filter((n) => n.repo === root && n.toast && n.text.includes(text));
+
+test("the speaking-english death: the reap reads EADDRINUSE :3008 in the log since the last start → port-busy port 3008 (its holder while one listens), one toast that opens the popup; never while a start holds the repo lock; a later listen clears it", async () => {
+  const w = makeWorld();
+  const app = makeRepo(w, "speaking", { pkg: SE_PKG, tasks: ["AX-30"] });
+  w.register([{ id: "g1", repos: [app] }]);
+  w.crash(app.root, SE_CRASH);
+  const ws = app.ws["AX-30"];
+  assert.equal((await w.cli(["toggle", "--workspace", ws])).code, 0);
+  await w.until((s) => s.queue.lighting[`direct/${app.root}`]?.phase === "done", { what: "lit" });
+  assert.equal(w.state().repos[app.root].serverState, "starting");
+  assert.equal(scriptLines(w).length, 1);
+
+  // A start or restart in flight holds the repo lock: the reap decides nothing.
+  const lock = lockDirOf(w, app.root);
+  const owner = await acquire(lock);
+  try {
+    assert.equal((await w.cli(["reap"])).code, 0);
+    assert.equal(w.state().repos[app.root].serverState, "starting");
+    assert.equal(w.state().repos[app.root].lastError, null);
+  } finally {
+    unlock(lock, owner);
+  }
+
+  // Nobody listens on 3008 any more: port-busy with the port alone.
+  assert.equal((await w.cli(["reap"])).code, 0);
+  let rec = w.state().repos[app.root];
+  assert.equal(rec.serverState, "stopped");
+  {
+    const { at, ...error } = rec.lastError;
+    assert.deepEqual(error, {
+      code: "port-busy", port: 3008, pid: null, command: null, cwd: null, message: "El puerto 3008 estaba ocupado al arrancar el server.",
+    });
+    assert.ok(Number.isFinite(at));
+  }
+  const first = toastsOf(w, app.root, "El puerto 3008 estaba ocupado");
+  assert.equal(first.length, 1, JSON.stringify(w.state().notes));
+  assert.deepEqual(first[0].action, serverNoteAction(ws));
+  assert.equal((await w.cli(["reap"])).code, 0);
+  assert.equal(toastsOf(w, app.root, "El puerto 3008 estaba ocupado").length, 1, "one toast per error");
+
+  // Reintentar starts it again (the pre-start check finds 3008 free); this
+  // time the port's holder still listens when it dies: it is named.
+  const retry = await w.cli(["restart", "--repo", app.root]);
+  assert.equal(retry.code, 0, retry.stderr + retry.stdout);
+  assert.equal(scriptLines(w).length, 2);
+  assert.equal(w.state().repos[app.root].lastError, null, "a start that goes through clears it");
+  const holder = spawnProc("sleep", ["303"]);
+  w.foreign([{ pid: holder.pid, port: 3008, cwd: "/Users/u/old/speaking-english" }]);
+  assert.equal((await w.cli(["reap"])).code, 0);
+  rec = w.state().repos[app.root];
+  const message = `El puerto 3008 lo tiene sleep 303 (pid ${holder.pid}, en /Users/u/old/speaking-english).`;
+  {
+    const { at, ...error } = rec.lastError;
+    assert.deepEqual(error, { code: "port-busy", port: 3008, pid: holder.pid, command: "sleep 303", cwd: "/Users/u/old/speaking-english", message });
+  }
+  assert.equal(toastsOf(w, app.root, message).length, 1);
+  assert.equal(alive(holder.pid), true, "the reap kills nothing");
+
+  // The port is free and the server comes up after all: the error goes.
+  holder.kill("SIGKILL");
+  await holder.exited;
+  listenNow(w, app.root, [3008]);
+  assert.equal((await w.cli(["reap"])).code, 0);
+  rec = w.state().repos[app.root];
+  assert.equal(rec.serverState, "listening");
+  assert.deepEqual(rec.ports, [3008]);
+  assert.equal(rec.lastError, null);
+});
+
+test("a server that dies at start with any other error: `on` says 'El server se cayó al arrancar: <first error line>' at once and leaves server-exited with a toast; Reintentar clears it", async () => {
+  const w = makeWorld();
+  const app = makeRepo(w, "crashy", { pkg: { scripts: { dev: "node server.js" } }, tasks: ["AX-31"] });
+  w.register([{ id: "g1", repos: [app] }]);
+  w.crash(app.root, SYNTAX_CRASH);
+  const ws = app.ws["AX-31"];
+  const t = w.agent(ws);
+
+  const on = await w.cli(["on", "--timeout-ms", "30000"], { terminal: t, cwd: ws });
+  assert.equal(on.code, 0, on.stderr + on.stdout);
+  const message = "El server se cayó al arrancar: SyntaxError: Unexpected token ';'";
+  assert.ok(on.stdout.includes(`\n  ${" ".repeat("crashy".length)}  ${message}\n`), on.stdout);
+  assert.match(on.stdout, /crashy {2}- {2}no server running/);
+  assert.ok(on.ms < 12_000, `waited ${on.ms} ms for a server that already died`);
+  const rec = w.state().repos[app.root];
+  assert.equal(rec.serverState, "stopped");
+  const { at, ...error } = rec.lastError;
+  assert.deepEqual(error, { code: "server-exited", message });
+  const toast = toastsOf(w, app.root, message);
+  assert.equal(toast.length, 1, JSON.stringify(w.state().notes));
+  assert.deepEqual(toast[0].action, serverNoteAction(ws));
+
+  // `status` shows it; a sync of the holder keeps it (the server still isn't up).
+  const status = await w.cli(["status"]);
+  assert.ok(status.stdout.includes(`server-exited: ${message}`), status.stdout);
+  write(ws, "page.txt", "edit\n");
+  assert.equal((await w.cli(["sync", "--repo", app.root])).code, 0);
+  assert.equal(w.state().repos[app.root].lastError?.code, "server-exited");
+
+  // Reintentar, with the bug fixed: the start goes through and clears it.
+  w.crash(app.root, null);
+  const retry = await w.cli(["restart", "--repo", app.root]);
+  assert.equal(retry.code, 0, retry.stderr + retry.stdout);
+  assert.equal(w.state().repos[app.root].lastError, null);
+  assert.equal(w.state().repos[app.root].serverState, "starting");
 });

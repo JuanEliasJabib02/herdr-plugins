@@ -13,6 +13,7 @@ import { join } from "node:path";
 import {
   stripTerminalSequences, repoSlug, logDir, logPathFor, formatClock, headerLine, appendLogHeader,
   rotateLog, tailLog, MAX_LOG_BYTES, KEEP_LOG_BYTES, TRIM_MARKER,
+  isStartMarker, logSinceLastStart, startFailure, readStartFailure,
 } from "../mods/spotlight/server-log.js";
 
 const ESC = "\u001b";
@@ -196,4 +197,192 @@ test("tailLog: the last N lines of a big log without reading it whole; a missing
   mkdirSync(join(dir, "folder.log"));
   assert.equal(tailLog(join(dir, "folder.log")), null);
   rmSync(dir, { recursive: true, force: true });
+});
+
+// ── A start that died (T14, D25) ──
+// When Spotlight's server was `starting` and the shell is back at its prompt
+// with no port, the CLI reads the log since the last start marker: an
+// address in use becomes port-busy, anything else server-exited with the
+// first error line.
+
+// The speaking-english log of the incident (S14, L15), byte for byte as
+// `script -F` and the CLI wrote it: haddock's start interrupted, then two
+// starts of spotlight-1 that died on EADDRINUSE :3008.
+const SPEAKING_ENGLISH_LOG =
+  "\n" +
+  "── Spotlight: haddock (juanjabibarcticgrey/fix-app-direction) · 19:38:20 ──\n" +
+  "\n" +
+  "── Spotlight: haddock (juanjabibarcticgrey/fix-app-direction) · started: pnpm install --frozen-lockfile && pnpm dev · 19:38:20 ──\n" +
+  "Lockfile is up to date, resolution step is skipped\r\n" +
+  "Progress: resolved \u001b[96m1\u001b[39m, reused \u001b[96m0\u001b[39m, downloaded \u001b[96m0\u001b[39m, added \u001b[96m0\u001b[39m\r\n" +
+  "\u001b[1APackages: \u001b[32m+228\u001b[39m\u001b[0K\r\n" +
+  `${ESC}[32m+${ESC}[39m`.repeat(198) + "\r\n" +
+  "Progress: resolved \u001b[96m1\u001b[39m, reused \u001b[96m0\u001b[39m, downloaded \u001b[96m0\u001b[39m, added \u001b[96m0\u001b[39m\r\n" +
+  "\u001b[1AProgress: resolved \u001b[96m228\u001b[39m, reused \u001b[96m0\u001b[39m, downloaded \u001b[96m0\u001b[39m, added \u001b[96m0\u001b[39m\r\n" +
+  "^C\n" +
+  "── Spotlight: haddock (juanjabibarcticgrey/fix-app-direction) · stopped · 19:38:22 ──\n" +
+  "\n" +
+  "── Spotlight: spotlight-1 (spotlight-1) · 12:49:42 ──\n" +
+  "\n" +
+  "── Spotlight: spotlight-1 (spotlight-1) · started: pnpm dev · 12:49:42 ──\n" +
+  "\r\n" +
+  "> speaking-english@1.0.0 dev /Users/juan/Desktop/Software/Sideprojects/speaking-english\r\n" +
+  "> npm-run-all --parallel dev:next dev:convex\r\n" +
+  "\r\n" +
+  "\r\n" +
+  "> speaking-english@1.0.0 dev:next /Users/juan/Desktop/Software/Sideprojects/speaking-english\r\n" +
+  "> next dev -p 3008\r\n" +
+  "\r\n" +
+  "\r\n" +
+  "> speaking-english@1.0.0 dev:convex /Users/juan/Desktop/Software/Sideprojects/speaking-english\r\n" +
+  "> convex dev\r\n" +
+  "\r\n" +
+  "\u001b[31m\u001b[1m⨯\u001b[22m\u001b[39m Failed to start server\r\n" +
+  "Error: listen EADDRINUSE: address already in use :::3008\r\n" +
+  "    at <unknown> (Error: listen EADDRINUSE: address already in use :::3008)\r\n" +
+  "    at new Promise (<anonymous>) {\r\n" +
+  "  code: \u001b[32m'EADDRINUSE'\u001b[39m,\r\n" +
+  "  errno: \u001b[33m-48\u001b[39m,\r\n" +
+  "  syscall: \u001b[32m'listen'\u001b[39m,\r\n" +
+  "  address: \u001b[32m'::'\u001b[39m,\r\n" +
+  "  port: \u001b[33m3008\u001b[39m\r\n" +
+  "}\r\n" +
+  "\u001b[?25h\r\n" +
+  "\u001b[41m\u001b[30m ELIFECYCLE \u001b[39m\u001b[49m \u001b[31mCommand failed with exit code 1.\u001b[39m\r\n" +
+  "\u001b[41m\u001b[30m ELIFECYCLE \u001b[39m\u001b[49m \u001b[31mCommand failed.\u001b[39m\r\n" +
+  "ERROR: \"dev:next\" exited with 1.\r\n" +
+  "\u001b[41m\u001b[30m ELIFECYCLE \u001b[39m\u001b[49m \u001b[31mCommand failed with exit code 1.\u001b[39m\r\n" +
+  "\n" +
+  "── Spotlight: spotlight-1 (spotlight-1) · 12:51:18 ──\n" +
+  "\n" +
+  "── Spotlight: spotlight-1 (spotlight-1) · started: pnpm dev · 12:51:18 ──\n" +
+  "\r\n" +
+  "> speaking-english@1.0.0 dev /Users/juan/Desktop/Software/Sideprojects/speaking-english\r\n" +
+  "> npm-run-all --parallel dev:next dev:convex\r\n" +
+  "\r\n" +
+  "\r\n" +
+  "> speaking-english@1.0.0 dev:next /Users/juan/Desktop/Software/Sideprojects/speaking-english\r\n" +
+  "> next dev -p 3008\r\n" +
+  "\r\n" +
+  "\r\n" +
+  "> speaking-english@1.0.0 dev:convex /Users/juan/Desktop/Software/Sideprojects/speaking-english\r\n" +
+  "> convex dev\r\n" +
+  "\r\n" +
+  "\u001b[31m\u001b[1m⨯\u001b[22m\u001b[39m Failed to start server\r\n" +
+  "Error: listen EADDRINUSE: address already in use :::3008\r\n" +
+  "    at <unknown> (Error: listen EADDRINUSE: address already in use :::3008)\r\n" +
+  "    at new Promise (<anonymous>) {\r\n" +
+  "  code: \u001b[32m'EADDRINUSE'\u001b[39m,\r\n" +
+  "  errno: \u001b[33m-48\u001b[39m,\r\n" +
+  "  syscall: \u001b[32m'listen'\u001b[39m,\r\n" +
+  "  address: \u001b[32m'::'\u001b[39m,\r\n" +
+  "  port: \u001b[33m3008\u001b[39m\r\n" +
+  "}\r\n" +
+  "\u001b[?25h\r\n" +
+  "\u001b[41m\u001b[30m ELIFECYCLE \u001b[39m\u001b[49m \u001b[31mCommand failed with exit code 1.\u001b[39m\r\n" +
+  "\u001b[41m\u001b[30m ELIFECYCLE \u001b[39m\u001b[49m \u001b[31mCommand failed.\u001b[39m\r\n" +
+  "ERROR: \"dev:next\" exited with 1.\r\n" +
+  "\u001b[41m\u001b[30m ELIFECYCLE \u001b[39m\u001b[49m \u001b[31mCommand failed with exit code 1.\u001b[39m\r\n";
+
+// A start marker as the CLI writes it (server.js typeWhenIdle: "started:" or
+// "restarted:" and the command), then what the server printed.
+const startedAt = new Date(2026, 10, 8, 10, 0, 0).getTime();
+const marker = (event = "started", command = "pnpm dev") =>
+  `\n${headerLine({ workspace: "app", branch: "main", event: `${event}: ${command}`, at: startedAt })}\n`;
+
+// A Node server with a syntax error, colored as pnpm prints it.
+const SYNTAX_ERROR_START =
+  "\r\n> app@1.0.0 dev /Users/u/code/app\r\n> node server.js\r\n\r\n" +
+  "/Users/u/code/app/server.js:3\r\n" +
+  "const port = ;\r\n" +
+  "             ^\r\n\r\n" +
+  `${ESC}[31mSyntaxError: Unexpected token ';'${ESC}[39m\r\n` +
+  "    at wrapSafe (node:internal/modules/cjs/loader:1469:18)\r\n" +
+  "    at Module._compile (node:internal/modules/cjs/loader:1491:20)\r\n\r\n" +
+  "Node.js v24.11.0\r\n" +
+  `${ESC}[41m${ESC}[30m ELIFECYCLE ${ESC}[39m${ESC}[49m ${ESC}[31mCommand failed with exit code 1.${ESC}[39m\r\n`;
+
+const logFile = (text) => {
+  const dir = tmp();
+  const p = join(dir, "app.log");
+  writeFileSync(p, text);
+  return { dir, p };
+};
+
+test("isStartMarker: the CLI's started and restarted headers, never a holder switch, a stop or a start left alone", () => {
+  assert.equal(isStartMarker("── Spotlight: spotlight-1 (spotlight-1) · started: pnpm dev · 12:51:18 ──"), true);
+  assert.equal(isStartMarker(headerLine({ workspace: "app", event: "restarted: pnpm install && pnpm dev", at: startedAt })), true);
+  assert.equal(isStartMarker(headerLine({ event: "started: vite", at: startedAt })), true);
+  assert.equal(isStartMarker("── Spotlight: spotlight-1 (spotlight-1) · 12:51:18 ──"), false);
+  assert.equal(isStartMarker("── Spotlight: haddock (fix) · stopped · 19:38:22 ──"), false);
+  assert.equal(isStartMarker(headerLine({ workspace: "app", event: "Server not started — port 3008 is held by node (pid 9)", at: startedAt })), false);
+  assert.equal(isStartMarker("started: pnpm dev"), false);
+});
+
+test("logSinceLastStart: the speaking-english log (two starts of spotlight-1) → only what the last start printed, as plain text", () => {
+  const { dir, p } = logFile(SPEAKING_ENGLISH_LOG);
+  const text = logSinceLastStart(p);
+  assert.ok(!text.includes(ESC) && !text.includes("\r"), "ANSI codes and CRs stripped");
+  assert.ok(text.startsWith("\n> speaking-english@1.0.0 dev /Users/juan/Desktop/Software/Sideprojects/speaking-english\n"), text.slice(0, 120));
+  assert.equal(text.match(/Failed to start server/g)?.length, 1, "the first start of spotlight-1 is not read");
+  assert.ok(!text.includes("Lockfile is up to date"), "nor haddock's");
+  assert.ok(text.includes("\n⨯ Failed to start server\nError: listen EADDRINUSE: address already in use :::3008\n"));
+  assert.ok(text.endsWith('ERROR: "dev:next" exited with 1.\n ELIFECYCLE  Command failed with exit code 1.\n'), text.slice(-120));
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("readStartFailure: the speaking-english log is an address in use on 3008", () => {
+  const { dir, p } = logFile(SPEAKING_ENGLISH_LOG);
+  assert.deepEqual(readStartFailure(p), {
+    kind: "addr-in-use", port: 3008, line: "Error: listen EADDRINUSE: address already in use :::3008",
+  });
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("readStartFailure: any other death names its first error line (a SyntaxError), colors stripped", () => {
+  const { dir, p } = logFile(`${marker()}${SYNTAX_ERROR_START}`);
+  assert.deepEqual(readStartFailure(p), { kind: "exited", line: "SyntaxError: Unexpected token ';'" });
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("only the text after the last start marker is read: an earlier start's EADDRINUSE doesn't decide a later SyntaxError, nor the reverse; a restart marker counts", () => {
+  const first = `${marker()}Error: listen EADDRINUSE: address already in use :::3000\r\n`;
+  const a = logFile(`${first}${marker("restarted")}${SYNTAX_ERROR_START}`);
+  assert.deepEqual(readStartFailure(a.p), { kind: "exited", line: "SyntaxError: Unexpected token ';'" });
+  const b = logFile(`${marker()}${SYNTAX_ERROR_START}${marker()}${first.slice(marker().length)}`);
+  assert.deepEqual(readStartFailure(b.p), { kind: "addr-in-use", port: 3000, line: "Error: listen EADDRINUSE: address already in use :::3000" });
+  for (const { dir } of [a, b]) rmSync(dir, { recursive: true, force: true });
+});
+
+test("startFailure: other address-in-use wordings and where their port is; npm's `> ` echoes and the CLI's headers are no error lines; no error line → the last line; no output → no line", () => {
+  assert.deepEqual(startFailure("error when starting dev server:\nError: Port 5173 is already in use\n"), {
+    kind: "addr-in-use", port: 5173, line: "Error: Port 5173 is already in use",
+  });
+  assert.deepEqual(startFailure("ERROR: [Errno 48] error while attempting to bind on address ('127.0.0.1', 8000): address already in use\n"), {
+    kind: "addr-in-use", port: null, line: "ERROR: [Errno 48] error while attempting to bind on address ('127.0.0.1', 8000): address already in use",
+  });
+  assert.deepEqual(startFailure("Error: listen EADDRINUSE\n  port: 4000\n"), { kind: "addr-in-use", port: 4000, line: "Error: listen EADDRINUSE" });
+  assert.deepEqual(
+    startFailure(`\n> app@1.0.0 dev:error-page /x\n> node error.js\n${headerLine({ event: "Server left alone — failed", at: startedAt })}\nzsh: command not found: nodee\n`),
+    { kind: "exited", line: "zsh: command not found: nodee" },
+  );
+  assert.deepEqual(startFailure("\n> app@1.0.0 dev\n> node quiet.js\nbye for now\n\n"), { kind: "exited", line: "bye for now" });
+  assert.deepEqual(startFailure("\n\n> app@1.0.0 dev\n"), { kind: "exited", line: null });
+  assert.deepEqual(startFailure(""), { kind: "exited", line: null });
+  // A line too long for a toast is cut.
+  const long = startFailure(`Error: ${"x".repeat(400)}\n`).line;
+  assert.ok(long.length <= 160 && long.endsWith("…"), long);
+});
+
+test("logSinceLastStart: a marker far back in a big log is still found; a log with no marker, or no log, is null", () => {
+  const filler = Array.from({ length: 6000 },(_, i) => `${ESC}[2mcompiling module ${i}${ESC}[22m\r\n`).join("");
+  const big = logFile(`${"old output\r\n".repeat(10)}${marker()}${filler}Error: Cannot find module 'left-pad'\r\n`);
+  assert.ok(Buffer.byteLength(readFileSync(big.p)) > 128 * 1024);
+  assert.deepEqual(readStartFailure(big.p), { kind: "exited", line: "Error: Cannot find module 'left-pad'" });
+  assert.ok(logSinceLastStart(big.p).startsWith("compiling module 0\n"));
+  const none = logFile("just output\r\n");
+  assert.equal(logSinceLastStart(none.p), null);
+  assert.deepEqual(readStartFailure(none.p), { kind: "exited", line: null });
+  assert.equal(logSinceLastStart(join(none.dir, "missing.log")), null);
+  for (const { dir } of [big, none]) rmSync(dir, { recursive: true, force: true });
 });

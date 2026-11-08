@@ -76,6 +76,17 @@ Beyond Orca, which neither checks nor frees the port: before typing the server l
 - That click is the only path that ever stops a process Spotlight didn't start. Agents get the message; `--free-port` is left out of `spotlight --help` and of the skill.
 - The pieces are `ports.js` (`portListeners`, `foreignListener`, `stopProcessTree`) and `cli-work.mjs` (`ensureServer`).
 
+## A server that dies at start
+
+Orca leaves such a server "stopped" with nothing said; here it is an error.
+
+- When the server state is `starting` and the terminal's shell is back at its prompt with no port, the server died at start. The reap and `spotlight on` decide it under the repo lock (a busy lock leaves it for the next reap, so a restart in flight is never taken for a death).
+- `server-log.js` reads the log after the last `── Spotlight: … · started: … ──` marker, ANSI stripped:
+  - `EADDRINUSE`, "address already in use" or Vite's "Port N is already in use" → `port-busy` (the shape above), naming the process that still listens there, or "El puerto 3008 estaba ocupado al arrancar el server." when none does.
+  - Anything else → `lastError {code: "server-exited", message: "El server se cayó al arrancar: <first error line>"}` (npm's `> ` echo lines skipped, the last line when no line looks like an error, cut at 160 characters).
+- One toast per error, opening the server popup; the popup's first buttons read Ver log (the server terminal) and Reintentar (`restart`); the server badge is red with the message as tooltip. `spotlight on` stops waiting and prints the line.
+- Only a change into `listening` clears it; a sync keeps it.
+
 ## Continuar and auto-resume
 
 When an agent's turn ends in an error, a sign-in prompt or a usage limit, its request is paused in place (D13). Continuar picks it up again, like Orca. The rules are `resume.js` (pure, shared by the board and the CLI); the CLI side is `cli-resume.mjs`.

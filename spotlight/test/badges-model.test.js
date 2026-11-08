@@ -245,6 +245,38 @@ test("an error turns the flashlight red with its text; a root with an error and 
   assert.deepEqual(out.value[FRONT][0].action, { command: `spotlight.server.${serverIdOf(FRONT)}` });
 });
 
+test("a server that didn't come up (D24, D25): the server badge is red and its tooltip is the error's message, also before any server ran", () => {
+  const exited = { code: "server-exited", message: "El server se cayó al arrancar: SyntaxError: Unexpected token ';'", at: 5 };
+  const busy = {
+    code: "port-busy", port: 3008, pid: 900, command: "next-server (v16.0.1)", cwd: "/Users/u/old",
+    message: "El puerto 3008 lo tiene next-server (v16.0.1) (pid 900, en /Users/u/old).", at: 5,
+  };
+  for (const lastError of [exited, busy]) {
+    const s = baseState();
+    Object.assign(s.repos[BACK], { serverState: "stopped", ports: [], lastError });
+    const { value } = build(s);
+    for (const at of [B1, BACK]) {
+      const server = value[at][1];
+      assert.equal(server.tone, "blocked", lastError.code);
+      assert.equal(server.tooltip, lastError.message);
+      assert.deepEqual(server.action, { command: `spotlight.server.${serverIdOf(at)}` });
+      assert.equal(value[at][0].tone, "blocked");
+      assert.equal(value[at][0].tooltip, `Spotlight: ${lastError.message}`);
+    }
+    assertContract(value);
+  }
+  // A start refused before any server ran (no command, no terminal yet)
+  // says why, not "Sin server".
+  const first = baseState();
+  Object.assign(first.repos[BACK], { serverState: "stopped", serverCommand: null, serverTerminal: null, ports: [], lastError: busy });
+  assert.equal(build(first).value[B1][1].tooltip, busy.message);
+  assert.equal(build(first).value[B1][1].tone, "blocked");
+  // Listening again: the port badge, whatever an older error says.
+  const back = baseState();
+  back.repos[BACK].lastError = exited;
+  assert.equal(build(back).value[B1][1].text, ":3000+1");
+});
+
 test("queue badges: queued #N with its reason, paused for the limit or sign-in, none with the queue off", () => {
   const { value } = build();
   const clock = value[B2][1];

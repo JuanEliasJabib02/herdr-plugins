@@ -11,7 +11,9 @@
 //             the repo's dev:<v> apps; the running one selected, the
 //             inferred one marked (its note, inferredVariantNote)
 //   urls      each listening port, the picked one first
-//   actions   Ver server, Reiniciar, Apagar
+//   actions   Ver server, Reiniciar, Apagar; on a server that didn't come up
+//             (port-busy, server-exited: D24, D25) the first two read Ver
+//             log (the server terminal holds what it printed) and Reintentar
 //   force     on root-diverged / untracked-collision only: Forzar sync (the
 //             holder's tree over the root), Proyectar igual (a refused
 //             takeover or fresh activation, forced), Apagar igual; on
@@ -28,6 +30,9 @@ import { pickPort, portUrl } from "./ports.js";
 
 const ENV_LABELS = { local: "Local", dev: "Dev", prod: "Prod" };
 const FORCE_CODES = new Set(["root-diverged", "untracked-collision"]);
+// The server didn't come up: a busy port refused its start (D24), or it died
+// starting (D25).
+const DOWN_CODES = new Set(["port-busy", "server-exited"]);
 // A server that's up (state.json's serverState).
 const RUNNING = new Set(["starting", "listening"]);
 
@@ -104,14 +109,16 @@ export function serverViewModel({ state, settings, repo, workspace, detection, b
   const picked = pickPort(ports, repoSet.port);
   const urls = picked === null ? [] : [picked, ...ports.filter((p) => p !== picked)].map(portUrl);
 
+  const error = record?.lastError ?? null;
+  // D25: same controls, named for a server that didn't come up.
+  const down = DOWN_CODES.has(error?.code);
   const actions = [];
-  if (record?.serverTerminal || holder) actions.push({ id: "peek", label: "Ver server", argv: [bin, "peek", "--repo", root] });
+  if (record?.serverTerminal || holder) actions.push({ id: "peek", label: down ? "Ver log" : "Ver server", argv: [bin, "peek", "--repo", root] });
   if (holder) {
-    actions.push({ id: "restart", label: "Reiniciar", argv: [bin, "restart", "--repo", root] });
+    actions.push({ id: "restart", label: down ? "Reintentar" : "Reiniciar", argv: [bin, "restart", "--repo", root] });
     actions.push({ id: "off", label: "Apagar", argv: [bin, "toggle", "--workspace", holder], danger: true });
   }
 
-  const error = record?.lastError ?? null;
   const force = [];
   if (error && FORCE_CODES.has(error.code)) {
     if (holder) force.push({ id: "force-sync", label: "Forzar sync", argv: [bin, "sync", "--repo", root, "--force", "--detach"] });

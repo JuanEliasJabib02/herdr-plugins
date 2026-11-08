@@ -19,7 +19,9 @@
 //                  workspace (`spotlight toggle --workspace <path>`).
 //   2. server      on the holder's and the root's rows while Spotlight is on
 //                  there: ":3000" / ":3000+1" listening, "…" starting, red
-//                  when stopped or gone. A click opens the server popup:
+//                  when stopped or gone, with the error as its tooltip when
+//                  a busy port or a death at start is why (D24, D25). A
+//                  click opens the server popup:
 //                  the command `spotlight.server.<id>` reaches the footer
 //                  copy's nextCommand() as "server.<id>" (probed, RECIPE.md),
 //                  and `servers[id]` names the workspace.
@@ -190,11 +192,19 @@ function litFlashlight(record, at, { bin, root }) {
   return badge({ icon: "flashlight", tone: "working", tooltip: `Spotlight${who}${synced}`, action: toggle(bin, at) });
 }
 
+// The server didn't come up: a busy port refused its start (D24), or it died
+// starting (D25). Its badge says why.
+const DOWN_CODES = new Set(["port-busy", "server-exited"]);
+const DOWN_STATES = new Set(["stopped", "gone"]);
+
 // 2. The server badge of a lit repo's holder or root row.
 function serverBadge(record, at, configured) {
   const ports = Array.isArray(record.ports) ? record.ports.filter(Number.isInteger) : [];
   const what = [record.serverEnv, record.serverCommand].filter(Boolean).join(" · ");
   const action = popup(at);
+  if (DOWN_CODES.has(record.lastError?.code) && DOWN_STATES.has(record.serverState ?? "stopped")) {
+    return badge({ icon: "server", tone: "blocked", tooltip: record.lastError.message || errorText(record.lastError), action });
+  }
   switch (record.serverState) {
     case "listening": {
       const picked = pickPort(ports, configured);
