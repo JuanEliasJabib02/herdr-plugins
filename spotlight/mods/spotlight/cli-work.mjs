@@ -10,7 +10,9 @@
 
 import path from "node:path";
 import crypto from "node:crypto";
-import { activate, sync, deactivate, assertDeactivatable, readRefs, toSpotlightError } from "./sync.js";
+import {
+  activate, sync, deactivate, assertDeactivatable, readRefs, readOrcaHolds, toSpotlightError, ORCA_HOLDS_MESSAGE,
+} from "./sync.js";
 import { emptyRepo, addNote, reconcileRepo, rememberVariant } from "./store.js";
 import { pidAlive, LockError } from "./locks.js";
 import { repoSettings, normRoot } from "./settings.js";
@@ -689,11 +691,36 @@ export async function recordServers(cx, servers) {
 
 // ── reap ───────────────────────────────────────────────────────────────────
 
+// D27: reconcileRepo for a root Orca's Spotlight may have (`orcaHolds`, its
+// HEAD detached on an "Orca Spotlight" commit). While Orca has it, our record
+// (or our orphan refs) says orca-holds, never reconcileRepo's root-diverged:
+// that one offers Forzar sync and Apagar igual in the popup, which would undo
+// Orca's projection, and flipping a sync's orca-holds back to it on every
+// reap would toast it again on the next sync. Once Orca lets go, the record
+// is decided again without that error: by reconcileRepo, a record with no
+// holder (our orphan refs) from scratch. → reconcileRepo's { action,
+// record? }, plus "orca-holds" and "cleared" (the error gone, nothing else).
+export function reconcileWithOrca(before, refs, orcaHolds, at) {
+  if (!refs?.rootHeadSha) return reconcileRepo(before, refs, at);
+  const flagged = before?.lastError?.code === "orca-holds";
+  if (orcaHolds && refs.active) {
+    if (flagged) return { action: "keep" };
+    const record = before ?? { ...emptyRepo(), lastSnapshotSha: refs.snapshotSha };
+    return { action: "orca-holds", record: { ...record, lastError: { code: "orca-holds", message: ORCA_HOLDS_MESSAGE, at } } };
+  }
+  if (!flagged) return reconcileRepo(before, refs, at);
+  const cleared = before.holder ? { ...before, lastError: null } : null;
+  const out = reconcileRepo(cleared, refs, at);
+  if (out.action !== "keep") return out;
+  return cleared ? { action: "cleared", record: cleared } : { action: "keep" };
+}
+
 // Refs win (D7): T1's readRefs into T2's reconcileRepo for each repo in
 // state.json plus every registered one (to find orphan refs). A repo whose
 // lock is busy is skipped: someone is working on it, and reap returns in
 // under a second (D18). A record with no holder and no refs (a fresh
 // activation that failed) is kept: it carries the error for the badge.
+// A root Orca's Spotlight has reads orca-holds (reconcileWithOrca, D27).
 export async function reconcileFree(cx) {
   const store = cx.reapStore;
   const roots = [...new Set([...Object.keys(store.readState().repos), ...registeredRoots(cx.shared)])];
@@ -703,10 +730,14 @@ export async function reconcileFree(cx) {
       try {
         await store.withRepoLock(root, async () => {
           const refs = await readRefs(root);
+          // Only a root off our snapshot can be Orca's; read here, under the
+          // repo lock and outside the state lock (never across git, D7).
+          const orcaHolds = Boolean(refs.active && refs.rootHeadSha && refs.rootHeadSha !== refs.snapshotSha) &&
+            (await readOrcaHolds(root));
           await store.updateState((s) => {
             const before = s.repos[root] ?? null;
             if (before && !before.holder && !refs.active) return;
-            const out = reconcileRepo(before, refs, cx.now());
+            const out = reconcileWithOrca(before, refs, orcaHolds, cx.now());
             if (out.action === "keep") return;
             if (out.action === "clear") delete s.repos[root];
             else s.repos[root] = out.record;

@@ -18,7 +18,9 @@
 //             holder's tree over the root), Proyectar igual (a refused
 //             takeover or fresh activation, forced), Apagar igual; on
 //             port-busy only: Liberar puerto y arrancar (D24: stops the
-//             process holding the server's port, then starts the server)
+//             process holding the server's port, then starts the server);
+//             never on orca-holds (D27: Orca's Spotlight has the root, and
+//             the engine refuses it forced too): only its message, in error
 // Changing env or variant runs `spotlight env`, which restarts only a server
 // whose command or env changes. The popup's props, D22's shape shared with T8's
 // board row and the toasts' action: { view: "server", repo, workspace }
@@ -29,6 +31,7 @@ import { serverEnvsWithCommand, commandTemplate, isSafeVariant, formatVariant, i
 import { pickPort, portUrl } from "./ports.js";
 
 const ENV_LABELS = { local: "Local", dev: "Dev", prod: "Prod" };
+// Never orca-holds nor orca-active: forcing can't take a root from Orca (D27).
 const FORCE_CODES = new Set(["root-diverged", "untracked-collision"]);
 // The server didn't come up: a busy port refused its start (D24), or it died
 // starting (D25).

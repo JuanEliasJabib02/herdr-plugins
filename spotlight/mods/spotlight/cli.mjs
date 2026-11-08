@@ -350,8 +350,9 @@ async function verbToggle(cx, opts) {
       const hint = forceable
         ? ` Para apagarlo igual: \`spotlight toggle --workspace ${workspace} --force\` (Apagar igual).`
         : "";
-      // The popup offers Apagar igual from the record's error.
-      if (forceable) {
+      // The popup offers Apagar igual from the record's error; orca-holds is
+      // recorded too, so the popup says why at once instead of after a reap (D27).
+      if (forceable || error.code === "orca-holds") {
         const now = cx.now();
         await cx.store.updateState((s) => {
           if (s.repos[root]) s.repos[root].lastError = { ...error, at: now };

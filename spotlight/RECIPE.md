@@ -104,6 +104,16 @@ Turn-off (`toggle` off, Apagar, Apagar igual) always leaves the server dead (D26
 - A free prompt, a process Spotlight didn't start, or no terminal: nothing is sent or killed.
 - The pieces are `ports.js` (`serverSnapshot`, `serverLeftovers`, `stopLeftovers` over T13's `stopProcessTree`) and `server.js` (`stopServer`).
 
+## A root Orca's Spotlight holds
+
+While both apps run, Orca Pro Max's Spotlight can take a root this plugin holds (seen on 2026-11-08: Orca reset the root under Herdr's holder). The two must never fight over it.
+
+- The sign: the root's HEAD is detached on a commit authored exactly "Orca Spotlight" (`git cat-file commit HEAD`). An attached HEAD never counts.
+- Turning on, syncing and turning off refuse with `lastError {code: "orca-holds", message: "Este root lo tiene el Spotlight de Orca: apágalo allá primero."}` and leave the root as Orca left it. No `--force` gets past it; the popup shows the message and no Forzar sync, Proyectar igual or Apagar igual.
+- The reap's reconcile keeps `orca-holds` instead of flipping it to `root-diverged`, and drops it once Orca lets go (back on our snapshot: cleared; anywhere else: the usual `root-diverged`).
+- Not caught: when Orca lit a clean workspace its snapshot is the user's own commit, so the root reads `root-diverged`. Orca's `refs/orca/spotlight/*` would tell, but stale ones stay behind for weeks and would block legitimate turn-offs.
+- The pieces are `sync.js` (`orcaHoldsRoot`, checked before every git step of on, sync and off) and `cli-work.mjs` (`reconcileWithOrca`).
+
 ## Continuar and auto-resume
 
 When an agent's turn ends in an error, a sign-in prompt or a usage limit, its request is paused in place (D13). Continuar picks it up again, like Orca. The rules are `resume.js` (pure, shared by the board and the CLI); the CLI side is `cli-resume.mjs`.

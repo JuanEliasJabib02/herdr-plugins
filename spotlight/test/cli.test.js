@@ -1005,6 +1005,26 @@ test("D28: logs --repo <name> after the turn-off: a repo known only to settings,
   assert.equal(unknown.code, 2);
 });
 
+test("D27: turning off a root Orca's Spotlight took refuses, records orca-holds at once, and leaves the root alone", async () => {
+  const w = makeWorld();
+  const app = makeRepo(w, "orcaheld", { pkg: DEV, tasks: ["AX-91"] });
+  w.register([{ id: "g1", repos: [app] }]);
+  const ws = app.ws["AX-91"];
+  assert.equal((await w.cli(["toggle", "--workspace", ws])).code, 0);
+  await w.until((s) => s.queue.lighting[`direct/${app.root}`]?.phase === "done", { what: "lit" });
+  // Orca's Spotlight takes the root: detached on a commit authored "Orca Spotlight".
+  const git = (...args) => execFileSync("git", args, { cwd: app.root, encoding: "utf8" }).trim();
+  const tree = git("write-tree");
+  const orca = git("-c", "user.name=Orca Spotlight", "-c", "user.email=o@x", "commit-tree", tree, "-p", "HEAD", "-m", "Orca Spotlight snapshot");
+  git("reset", "-q", "--hard", orca);
+
+  const off = await w.cli(["toggle", "--workspace", ws, "--force"]);
+  assert.notEqual(off.code, 0);
+  assert.match(off.stdout + off.stderr, /Este root lo tiene el Spotlight de Orca: apágalo allá primero\./);
+  assert.equal(w.state().repos[app.root].lastError?.code, "orca-holds");
+  assert.equal(git("rev-parse", "HEAD"), orca);
+});
+
 test("logs --path, logs after the notes, peek, and env --variant checked before it is stored", async () => {
   const w = makeWorld();
   const app = makeRepo(w, "app", { pkg: DEV, tasks: ["AX-31"] });

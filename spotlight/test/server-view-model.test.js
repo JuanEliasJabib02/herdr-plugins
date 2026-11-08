@@ -188,6 +188,27 @@ test("force actions only on root-diverged and untracked-collision, each with its
   }
 });
 
+test("orca-holds (D27): Orca's Spotlight has the root: its message, and no Forzar sync, Proyectar igual nor Apagar igual", () => {
+  const ORCA = { code: "orca-holds", message: "Este root lo tiene el Spotlight de Orca: apágalo allá primero.", at: 3 };
+  const failedTakeover = {
+    "ax/AX-2": { grantId: 5, phase: "error", members: [{ root: ROOT, workspace: W2 }], errors: { [ROOT]: ORCA.message }, finishedAt: 7 },
+  };
+  // Held by us when Orca took it, with a takeover it refused waiting.
+  const held = model({ state: stateWith(repo({ lastError: ORCA }), { queue: { requests: [], lighting: failedTakeover } }) });
+  assert.deepEqual(held.force, []);
+  assert.deepEqual(held.error, ORCA);
+  // Apagar (no force) stays: it refuses with the same message while Orca has it.
+  assert.deepEqual(ids(held.actions), ["peek", "restart", "off"]);
+  // A refused fresh turn-on: no holder, no Proyectar igual.
+  const fresh = model({
+    state: stateWith(repo({ holder: null, lastError: ORCA }), {
+      queue: { requests: [], lighting: { [`direct/${ROOT}`]: { phase: "error", members: [{ root: ROOT, workspace: W2 }], errors: { [ROOT]: ORCA.message } } } },
+    }),
+  });
+  assert.deepEqual(fresh.force, []);
+  assert.equal(fresh.error.message, ORCA.message);
+});
+
 test("modIo: T5a's detection over Herdr-style readTextFile and readdir", async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "sl-modio-"));
   try {
