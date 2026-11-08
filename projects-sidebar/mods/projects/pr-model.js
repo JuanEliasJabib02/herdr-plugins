@@ -13,7 +13,8 @@
 // repo (it belongs to the other account), each other account gh is logged
 // into is tried, through GH_TOKEN set inside a shell (git.js ghAs: the token
 // never comes into the mod), and the one that sees it is remembered for that
-// owner until it stops seeing it.
+// owner until it stops seeing it. The PR card in the right panel
+// (pr-card-model.js) asks through the same path (askGitHub).
 
 import { githubOf } from "./rename-workspace-model.js";
 
@@ -44,8 +45,9 @@ function prOf(v) {
   return { number: v.number, state: v.state, url: v.url };
 }
 
-// GitHub's PR node → { number, state, url }: OPEN as draft when it is one.
-function fromNode(n) {
+// GitHub's PR node → { number, state, url }: OPEN as draft when it is one;
+// null when it isn't a PR (prOf). The PR card reads its nodes with it too.
+export function prFromNode(n) {
   if (!isObject(n)) return null;
   const state = n.state === "OPEN" ? (n.isDraft === true ? "draft" : "open") : n.state === "MERGED" ? "merged" : n.state === "CLOSED" ? "closed" : null;
   return prOf({ number: n.number, state, url: n.url });
@@ -63,25 +65,33 @@ export function prQueryArgs({ owner, repo }, branches) {
   return ["api", "graphql", "-f", `query=${query}`, "-f", `o=${owner}`, "-f", `r=${repo}`, ...branches.flatMap((b, i) => ["-f", `b${i}=${b}`])];
 }
 
-// GitHub's answer to prQueryArgs (gh prints it even when it exits 1):
-// { ok, notFound, prs: { [branch]: pr | null } }. notFound: the account
-// can't see the repo; anything else that isn't an answer is a failure.
-export function parsePrAnswer(out, branches) {
+// The `repository` of a `gh api graphql` answer about one repo (gh prints
+// it even when it exits 1): { ok: true, repository } or { ok: false,
+// notFound }. notFound: the account can't see the repo, so another account
+// may (askGitHub); anything else that isn't an answer is a failure.
+export function repositoryAnswer(out) {
   let json;
   try {
     json = JSON.parse(String(out ?? ""));
   } catch {
-    return { ok: false, notFound: false, prs: {} };
+    return { ok: false, notFound: false };
   }
   const repository = isObject(json) && isObject(json.data) ? json.data.repository : undefined;
-  if (!isObject(repository)) {
-    const errors = isObject(json) && Array.isArray(json.errors) ? json.errors : [];
-    return { ok: false, notFound: repository === null && errors.some((e) => e?.type === "NOT_FOUND"), prs: {} };
-  }
+  if (isObject(repository)) return { ok: true, repository };
+  const errors = isObject(json) && Array.isArray(json.errors) ? json.errors : [];
+  return { ok: false, notFound: repository === null && errors.some((e) => e?.type === "NOT_FOUND") };
+}
+
+// GitHub's answer to prQueryArgs: { ok, notFound, prs: { [branch]: pr |
+// null } } (repositoryAnswer).
+export function parsePrAnswer(out, branches) {
+  const a = repositoryAnswer(out);
+  if (!a.ok) return { ok: false, notFound: a.notFound, prs: {} };
+  const repository = a.repository;
   const prs = {};
   branches.forEach((b, i) => {
     const nodes = repository[`b${i}`]?.nodes;
-    prs[b] = Array.isArray(nodes) ? fromNode(nodes[0]) : null;
+    prs[b] = Array.isArray(nodes) ? prFromNode(nodes[0]) : null;
   });
   return { ok: true, notFound: false, prs };
 }
@@ -99,12 +109,12 @@ export function accountsOf(out) {
 
 // One call, never rejecting: who null is the project's folder (io.gh), else
 // that login (io.ghAs). A gh that can't start reads as a failure.
-async function ask(io, project, who, args, branches) {
+async function ask(io, project, who, args, parse) {
   try {
     const r = who === null ? await io.gh(project, args) : await io.ghAs(who, project, args);
-    return parsePrAnswer(r.out, branches);
+    return parse(r.out);
   } catch {
-    return { ok: false, notFound: false, prs: {} };
+    return { ok: false, notFound: false };
   }
 }
 
@@ -119,22 +129,29 @@ async function accounts(io, memo) {
   return memo.accounts;
 }
 
-// One chunk of branches, through whoever sees the repo: the account
-// remembered for its owner, then the project's folder, then each other
-// account. Stops at the first answer, or at a failure that isn't "can't see
-// it" (GitHub down, rate limit: another account wouldn't help).
-async function askChunk(io, project, repo, branches, memo) {
+// One `gh api graphql` call about `repo`, through whoever sees it: the
+// account remembered for its owner, then the project's folder, then each
+// other account. Stops at the first answer, or at a failure that isn't
+// "can't see it" (GitHub down, rate limit: another account wouldn't help).
+// The sidebar's colors (projectPrs) and the PR card (pr-card-model.js) both
+// ask through here, each with the memo (prMemo) its caller keeps.
+//   args: the gh argv   parse(out) → { ok, notFound, … } (repositoryAnswer)
+// Resolves what parse returned, with `who` on an answer: the account that
+// gave it (null: gh in the project's folder, else the login asked through
+// io.ghAs), so a later write goes through the same one. { ok: false,
+// notFound: true } when no account sees the repo; never rejects.
+export async function askGitHub(io, project, repo, args, parse, memo) {
   const owner = repo.owner.toLowerCase();
-  const args = prQueryArgs(repo, branches);
   const tried = new Set();
   // The answer, a failure to stop at, or null to try the next one.
   const attempt = async (who) => {
     if (tried.has(who)) return null;
     tried.add(who);
-    const r = await ask(io, project, who, args, branches);
+    const r = await ask(io, project, who, args, parse);
     if (r.ok) {
       if (who === null) memo.owners.delete(owner);
       else memo.owners.set(owner, who);
+      return { ...r, who };
     }
     return r.notFound ? null : r;
   };
@@ -147,8 +164,12 @@ async function askChunk(io, project, repo, branches, memo) {
     const r = await attempt(who);
     if (r) return r;
   }
-  return { ok: false, notFound: true, prs: {} };
+  return { ok: false, notFound: true };
 }
+
+// One chunk of branches (askGitHub).
+const askChunk = (io, project, repo, branches, memo) =>
+  askGitHub(io, project, repo, prQueryArgs(repo, branches), (out) => parsePrAnswer(out, branches), memo);
 
 // The PRs of a project's workspaces: { ok, prs: { [workspacePath]: pr } }
 // with only the branches that have one. ok false: GitHub didn't answer for
