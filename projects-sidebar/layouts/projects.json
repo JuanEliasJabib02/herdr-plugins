@@ -257,6 +257,16 @@
               }
             },
             {
+              "id": "status-keep-awake",
+              "type": "block",
+              "size": {
+                "px": 64
+              },
+              "content": {
+                "mod": "keep-awake"
+              }
+            },
+            {
               "id": "status-agent-sleep",
               "type": "block",
               "size": {
