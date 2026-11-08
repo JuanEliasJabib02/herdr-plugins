@@ -17,6 +17,15 @@
 // merge pinned to the head commit, mergeArgs) with the account that read the
 // PR, and what came of it (mergeOutcome, mergeReport). merge-pr.js draws the
 // popup and the dialog; git.js binds mergePr to exec.
+//
+// Crear PR (D7, last): what the card hands the dialog on a branch without a
+// PR (createRequest, createSeenOf), the dialog's defaults (createBaseOf,
+// createBaseChoices, readCreateFacts: the last commit's subject, and
+// whether the branch must be published first, pushPlan), what it says
+// (createPrompt, createBlocker), the create itself (createPr: the push when
+// needed, then GitHub's REST create, createArgs) with the account that read
+// the card, and what came of it (createOutcome, createReport). create-pr.js
+// draws the dialog; git.js binds readCreateFacts and createPr to exec.
 
 import { githubOf } from "./rename-workspace-model.js";
 import { PR_COLORS, prLabel, prFromNode, repositoryAnswer, askGitHub, askAs, ghBy } from "./pr-model.js";
@@ -317,6 +326,10 @@ export function seenOf(raw) {
   return { owner, repo, number, head, headOid, base, method, who };
 }
 
+// Which account acts (S2), as Mergear's and Crear PR's dialogs say it: `who`
+// null is gh in the project's folder, else that login.
+const accountOf = (who) => (who === null ? "Con la cuenta de gh de este repo" : `Con la cuenta ${who}`);
+
 // What the confirm dialog says for a checked `seen`: the PR, where it goes,
 // the method, and which account merges (S2).
 export function mergePrompt(seen, title) {
@@ -325,7 +338,7 @@ export function mergePrompt(seen, title) {
     title: str(title),
     branches: `${seen.head} → ${seen.base}`,
     method: METHOD_LABELS[seen.method] ?? seen.method,
-    account: seen.who === null ? "Con la cuenta de gh de este repo" : `Con la cuenta ${seen.who}`,
+    account: accountOf(seen.who),
     note: "No se puede deshacer. La rama queda: Delete workspace la borra.",
   };
 }
@@ -402,10 +415,12 @@ export async function mergePr({ project, seen: raw }, io) {
   return mergeOutcome({ call, after, seen });
 }
 
-// GitHub's refusal of the PUT, { status, message }, when gh got a 4xx (the
-// request was refused: nothing merged); null otherwise. gh api prints
-// GitHub's body ({ message, status }) on stdout and "gh: <message> (HTTP
-// <status>)" on stderr.
+// GitHub's refusal of a write (Mergear's PUT, Crear PR's POST), { status,
+// message, details }, when gh got a 4xx (the request was refused: nothing
+// merged or created); null otherwise. gh api prints GitHub's body ({
+// message, errors, status }) on stdout and "gh: <message> (HTTP <status>)"
+// on stderr. details: what a 422's errors say ("A pull request already
+// exists for …", or "base invalid"), "" without them.
 function refusalOf(call) {
   if (!call || call.ok || call.rejected) return null;
   let body = null;
@@ -418,7 +433,12 @@ function refusalOf(call) {
   const status = Number(isObject(body) && /^\d{3}$/.test(String(body.status)) ? body.status : /\(HTTP (\d{3})\)/.exec(line)?.[1]);
   if (!(status >= 400 && status < 500)) return null;
   const said = isObject(body) && typeof body.message === "string" ? body.message.trim() : "";
-  return { status, message: said || line.replace(/^gh:\s*/, "").replace(/\s*\(HTTP \d{3}\)\s*$/, "") };
+  const errors = isObject(body) && Array.isArray(body.errors) ? body.errors : [];
+  const details = errors
+    .map((e) => (isObject(e) ? str(e.message).trim() || [str(e.field), str(e.code)].filter(Boolean).join(" ") : str(e).trim()))
+    .filter(Boolean)
+    .join("; ");
+  return { status, message: said || line.replace(/^gh:\s*/, "").replace(/\s*\(HTTP \d{3}\)\s*$/, ""), details };
 }
 
 // What the merge's call came to, from GitHub's answer and, when there was
@@ -452,5 +472,342 @@ export function mergeReport(r, { seen, open }) {
   const err = r?.err || `GitHub no lo mergeó${NOTHING}`;
   if (open) return { close: false, error: err, toast: null };
   const title = r?.status === "unsure" ? `${label} sin confirmar` : `${label} sin mergear`;
+  return { close: false, error: "", toast: { title, body: err, level: r?.status === "failed" ? "error" : "warning" } };
+}
+
+// ── Crear PR (D7) ──────────────────────────────────────────────────────────
+
+// Said after every refusal that created nothing.
+const NOT_CREATED = ": no se creó el PR.";
+
+// How long a push may take: the person's pre-push hooks run (no
+// --no-verify), and exec's own limit is 30 s.
+export const PUSH_TIMEOUT = 120000;
+
+// A branch name as an argv entry and a GitHub field: never a flag, and
+// nothing git's ref names refuse at a glance (a space, a control character,
+// ~ ^ : ? * [ \, "..", "@{").
+const isBranch = (b) => typeof b === "string" && b !== "" && !b.startsWith("-") && !/[\s\x00-\x1f\x7f~^:?*[\\]|\.\.|@\{/.test(b);
+
+// A commit id as git prints it (SHA-1, or SHA-256).
+const OID = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
+
+const firstLine = (s) => String(s ?? "").split("\n").map((l) => l.trim()).find(Boolean) ?? "";
+
+// A message never shows a URL's userinfo (it can hold a token), as Rename's
+// (rename-workspace-model.js redact).
+const redact = (s) => String(s ?? "").replace(/([A-Za-z][A-Za-z0-9+.-]*:\/\/)[^/\s@]*@/g, "$1");
+
+// The line of git push's stderr that says what happened: `To <url>` and
+// hints come first and say nothing (rename-workspace-model.js pushLine).
+const pushLine = (s) => redact(String(s ?? "").split("\n").map((l) => l.trim()).filter(Boolean).find((l) => !/^To\s|^hint:/.test(l)) ?? "");
+
+// The git Crear PR runs in the workspace, for branch `b` (isBranch). Refs
+// are named in full, so a name is never read as an option or as another
+// ref; `--` ends the options where git takes paths.
+export const CREATE_GIT = {
+  // The dialog's title: the branch's last commit's subject.
+  subject: (b) => ["log", "-1", "--format=%s", `refs/heads/${b}`, "--"],
+  // The branch's commit here.
+  head: (b) => ["rev-parse", "--verify", "--quiet", `refs/heads/${b}^{commit}`],
+  // origin's copy of the branch, asked of origin now (network): a line
+  // "<sha>\trefs/heads/<b>", or nothing when origin doesn't have it.
+  remote: (b) => ["ls-remote", "origin", `refs/heads/${b}`],
+  // "<behind>\t<ahead>" of the branch against origin's copy.
+  count: (remote, local) => ["rev-list", "--left-right", "--count", `${remote}...${local}`, "--"],
+  // origin's copy fetched, when its commit isn't here to count against. One
+  // ref, never the whole remote (exec's 30 s limit).
+  fetch: (b) => ["fetch", "--no-tags", "origin", `+refs/heads/${b}:refs/remotes/origin/${b}`],
+  // D7: `git push -u origin <branch>`, the refspec in full. Never forced: no
+  // --force, no lease, no "+"; git refuses what isn't a fast-forward.
+  push: (b) => ["push", "-u", "origin", `refs/heads/${b}:refs/heads/${b}`],
+};
+
+// What the card hands the dialog when the branch has no PR, null otherwise:
+// { project (where gh runs), path (the workspace: where git counts and
+// pushes), seen: { owner, repo, branch, defaultBranch, who } } (the repo,
+// the branch, GitHub's default branch, and the account that read it: S2).
+//   s: cardState's "none"   target: the card's workspace, { project, path }
+export function createRequest(s, target) {
+  if (s?.kind !== "none" || !s.repo || !isBranch(s.branch)) return null;
+  const project = target?.project;
+  const path = target?.path;
+  if (typeof project !== "string" || !project || typeof path !== "string" || !path) return null;
+  return { project, path, seen: { owner: s.repo.owner, repo: s.repo.repo, branch: s.branch, defaultBranch: str(s.defaultBranch), who: s.who ?? null } };
+}
+
+// The dialog's `seen` as its props carry it, checked: { owner, repo,
+// branch, defaultBranch, who } or null when any of it isn't what the card
+// hands over (defaultBranch "" when GitHub gave none).
+export function createSeenOf(raw) {
+  if (!isObject(raw)) return null;
+  const { owner, repo, branch, defaultBranch, who } = raw;
+  if (!isName(owner) || !isName(repo) || !isBranch(branch)) return null;
+  if (typeof defaultBranch !== "string" || (defaultBranch !== "" && !isBranch(defaultBranch))) return null;
+  if (who !== null && !(typeof who === "string" && LOGIN.test(who))) return null;
+  return { owner, repo, branch, defaultBranch, who };
+}
+
+// The base a new PR starts on (D7), as a branch of origin ("develop"): the
+// project's saved base (D37, "origin/develop") when git has it (`has`:
+// baseExistsIn's answer), else the repo's default branch, "" when there is
+// neither (the base is then picked).
+export function createBaseOf(saved, defaultBranch, has) {
+  if (has && typeof saved === "string" && saved.startsWith("origin/") && saved.length > 7) return saved.slice(7);
+  return str(defaultBranch);
+}
+
+// The Base list: the default first, then origin's recent branches
+// (recentBasesOf, "origin/…"), never the PR's own branch, origin/HEAD or a
+// repeat.
+export function createBaseChoices(def, recent, head) {
+  const names = (Array.isArray(recent) ? recent : [])
+    .filter((b) => typeof b === "string" && b.startsWith("origin/") && b !== "origin/HEAD")
+    .map((b) => b.slice(7));
+  return [...new Set([def, ...names])].filter((b) => isBranch(b) && b !== head);
+}
+
+// The gh argv of GitHub's REST create (D7): POST repos/<o>/<r>/pulls with
+// the title (trimmed), the head branch (this repo's), the base, the
+// description and draft. Typed text goes as raw fields (-f: never read as
+// @file); only draft is typed (-F), as true or false. Never `gh pr create`.
+// null, nothing to send, with an empty title, a head or base that isn't a
+// branch, a base that is the head, or a repo that isn't one.
+export function createArgs({ owner, repo }, { title, head, base, body, draft }) {
+  if (!isName(owner) || !isName(repo) || !isBranch(head) || !isBranch(base) || head === base) return null;
+  const t = typeof title === "string" ? title.trim() : "";
+  if (!t || typeof draft !== "boolean" || (body != null && typeof body !== "string")) return null;
+  return [
+    "api", "-X", "POST", `repos/${owner}/${repo}/pulls`,
+    "-f", `title=${t}`, "-f", `head=${head}`, "-f", `base=${base}`, "-f", `body=${body ?? ""}`, "-F", `draft=${draft}`,
+  ];
+}
+
+// Whether the branch must be published before its PR (D7), from git's
+// answers: local, its commit here; remote, origin's (null: origin doesn't
+// have the branch); counts, { behind, ahead } of local against remote (null:
+// git couldn't compare them). → { push, why, ahead, blocked }:
+//   push: publish first ("Publicar y crear PR"); why: "missing" (origin
+//   doesn't have it) or "ahead" (`ahead` commits it lacks); blocked: why no
+//   PR can be made from here now, "" when one can. A branch that split from
+//   origin's would need a forced push: never (D7), so it says what to do.
+export function pushPlan({ branch, local, remote, counts }) {
+  const plan = (push, why = null, ahead = 0, blocked = "") => ({ push, why, ahead, blocked });
+  if (!remote) return plan(true, "missing");
+  if (remote === local) return plan(false);
+  if (!counts) return plan(false, null, 0, `git no pudo comparar ${branch} con origin/${branch}.`);
+  if (counts.ahead === 0) return plan(false);
+  if (counts.behind === 0) return plan(true, "ahead", counts.ahead);
+  return plan(false, null, counts.ahead, `${branch} y origin/${branch} se separaron. Trae los commits de origin (git pull) antes de crear el PR.`);
+}
+
+// git(cwd, args) that never rejects: a rejection (exec's limit, git gone)
+// reads as a failure.
+async function tryGit(git, cwd, args, opts) {
+  try {
+    return opts ? await git(cwd, args, opts) : await git(cwd, args);
+  } catch (e) {
+    return { ok: false, out: "", err: String(e?.message ?? e) };
+  }
+}
+
+// "<behind>\t<ahead>" → { behind, ahead }, null when git didn't count.
+function countsOf(r) {
+  const m = r.ok ? /^(\d+)\s+(\d+)$/.exec(String(r.out).trim()) : null;
+  return m ? { behind: Number(m[1]), ahead: Number(m[2]) } : null;
+}
+
+// The branch against origin, read now in the workspace `path`: { ok: true,
+// local, remote, ...pushPlan } or { ok: false, err } when git can't tell
+// (the branch isn't here, origin can't be read). When origin's commit isn't
+// here to count against, that one branch is fetched once. Never rejects.
+export async function readPushState({ path, branch }, git) {
+  if (!isBranch(branch)) return { ok: false, err: "No hay una rama para el PR" };
+  const h = await tryGit(git, path, CREATE_GIT.head(branch));
+  const local = h.ok ? firstLine(h.out) : "";
+  if (!OID.test(local)) return { ok: false, err: `git no encuentra la rama ${branch}` };
+  const ls = await tryGit(git, path, CREATE_GIT.remote(branch));
+  if (!ls.ok) {
+    const why = redact(firstLine(ls.err));
+    return { ok: false, err: `git no pudo leer origin${why ? ` (${why})` : ""}` };
+  }
+  const ref = `refs/heads/${branch}`;
+  const remote = String(ls.out ?? "").split("\n").map((l) => l.trim().split(/\s+/)).find(([sha, name]) => name === ref && OID.test(sha))?.[0] ?? null;
+  let counts = null;
+  if (remote && remote !== local) {
+    counts = countsOf(await tryGit(git, path, CREATE_GIT.count(remote, local)));
+    if (!counts && (await tryGit(git, path, CREATE_GIT.fetch(branch))).ok) counts = countsOf(await tryGit(git, path, CREATE_GIT.count(remote, local)));
+  }
+  return { ok: true, local, remote, ...pushPlan({ branch, local, remote, counts }) };
+}
+
+// What the dialog starts from, read when it opens: { title: the branch's
+// last commit's subject ("" when git can't say), push: readPushState }.
+// Publishes and creates nothing. Never rejects.
+//   io = { git } as readCard's
+export async function readCreateFacts({ path, branch }, io) {
+  const subject = async () => {
+    if (!isBranch(branch)) return "";
+    const r = await tryGit(io.git, path, CREATE_GIT.subject(branch));
+    return r.ok ? firstLine(r.out) : "";
+  };
+  const [title, push] = await Promise.all([subject(), readPushState({ path, branch }, io.git)]);
+  return { title, push };
+}
+
+// What the dialog says: { header, branches: "head → base", account (S2),
+// note: why it publishes first, or that git is being asked, warning: what
+// git says against a PR now (origin unreadable, a branch split from
+// origin's), label: the button, "Publicar y crear PR" when it publishes
+// first, else "Crear PR" }. A warning doesn't turn the button off: its click
+// checks again (createPr), which refuses while it still holds, and never
+// publishes what the button didn't say.
+//   plan: readPushState's answer, undefined while it is asked
+export function createPrompt({ seen, base, plan }) {
+  const b = seen.branch;
+  let note = "";
+  if (plan === undefined || plan === null) note = "Comprobando la rama en origin…";
+  else if (plan.ok && plan.push && plan.why === "missing") note = `origin no tiene ${b}: se publica primero.`;
+  else if (plan.ok && plan.push) note = plan.ahead === 1 ? "1 commit sin publicar: se publica primero." : `${plan.ahead} commits sin publicar: se publican primero.`;
+  let warning = "";
+  if (plan && !plan.ok) warning = `${plan.err || "git no respondió"}. Crear PR lo vuelve a comprobar.`;
+  else if (plan?.blocked) warning = plan.blocked;
+  return {
+    header: "Crear PR",
+    branches: `${b} → ${base || "…"}`,
+    account: accountOf(seen.who),
+    note,
+    warning,
+    label: plan?.ok && plan.push ? "Publicar y crear PR" : "Crear PR",
+  };
+}
+
+// Why Crear PR can't run now, "" when it can: what is left to fill in the
+// form. git's state never turns it off (createPrompt's warning).
+export function createBlocker({ seen, base, title }) {
+  if (!seen) return "No hay una rama para el PR.";
+  if (!base) return "Elige una base.";
+  if (base === seen.branch) return `La base no puede ser ${base}.`;
+  if (typeof title !== "string" || !title.trim()) return "Escribe un título.";
+  return "";
+}
+
+// GitHub's 201 → { number, url, draft }, null when it isn't a PR on GitHub.
+function createdOf(out) {
+  let json;
+  try {
+    json = JSON.parse(String(out ?? ""));
+  } catch {
+    return null;
+  }
+  if (!isObject(json) || !isNumber(json.number) || typeof json.html_url !== "string" || !json.html_url.startsWith("https://github.com/")) return null;
+  return { number: json.number, url: json.html_url, draft: json.draft === true };
+}
+
+// Crear PR (D7), in this order, never rejecting:
+//   1. origin is still the repo the card read (git, githubOf);
+//   2. the branch against origin, read again (readPushState): nothing is
+//      made from a branch git can't place or that split from origin's, and
+//      commits the button didn't say it publishes (`push` false) are never
+//      published unseen: "changed", with the plan the button now shows;
+//   3. when the plan says so, `git push -u origin <branch>`, never forced;
+//   4. GitHub's REST create (createArgs) with the account that read the card
+//      (`seen.who`, ghBy: never another);
+//   5. with no answer to trust (exec's limit, a 5xx, a 2xx that isn't a
+//      PR), the branch's newest PR read again with that account.
+//   req = { project: where gh runs, path: the workspace, seen: the dialog's
+//     props (createSeenOf), base, title, body, draft, push: what the
+//     button said (true: "Publicar y crear PR") }
+//   io = { git, gh, ghAs, hostname } as readCard's
+// Resolves { status, err, pr, plan }:
+//   "created"  GitHub made it: pr = { number, url, draft }
+//   "changed"  origin is another repo, or there is something to publish the
+//              button didn't say; nothing published or created
+//   "refused"  git or GitHub refused (a 4xx), or the branch split from
+//              origin's; no PR made
+//   "failed"   nothing could be checked, or the push didn't finish in time
+//   "unsure"   sent, no answer, and no PR shows yet: a retry is safe (GitHub
+//              never opens a second PR from a branch to the same base)
+//   plan: the branch against origin now (after a push, nothing left to
+//   publish), for the button; null when unknown. A push that went through
+//   before a failure is said in err: the branch stays published.
+export async function createPr({ project, path, seen: raw, base, title, body, draft, push }, io) {
+  const result = (status, err = "", pr = null, plan = null) => ({ status, err, pr, plan });
+  const seen = createSeenOf(raw);
+  const args = seen ? createArgs(seen, { title, head: seen.branch, base, body, draft }) : null;
+  if (!args || typeof project !== "string" || !project || typeof path !== "string" || !path) return result("failed", `Faltan datos del PR${NOT_CREATED}`);
+  const named = `${seen.owner}/${seen.repo}`;
+  const b = seen.branch;
+  let origin;
+  try {
+    origin = await githubOf(project, io, io.git);
+  } catch {
+    return result("failed", `git no respondió${NOT_CREATED}`);
+  }
+  const same = (x, y) => x.toLowerCase() === y.toLowerCase();
+  if (!origin || !same(origin.owner, seen.owner) || !same(origin.repo, seen.repo)) return result("changed", `El origin ya no es ${named}${NOT_CREATED}`);
+  let plan = await readPushState({ path, branch: b }, io.git);
+  if (!plan.ok) return result("failed", `${plan.err}${NOT_CREATED}`, null, plan);
+  if (plan.blocked) return result("refused", plan.blocked, null, plan);
+  if (plan.push && push !== true) return result("changed", `Hay commits de ${b} sin publicar: ahora el botón los publica antes de crear el PR.`, null, plan);
+  let pushed = false;
+  if (plan.push) {
+    let p;
+    try {
+      p = await io.git(path, CREATE_GIT.push(b), { timeout: PUSH_TIMEOUT });
+    } catch {
+      return result("failed", `git push no terminó a tiempo: puede que aún publique ${b}. No se creó el PR.`);
+    }
+    if (!p.ok) {
+      const line = pushLine(p.err);
+      return result("refused", `git no publicó ${b}${line ? ` (${line})` : ""}${NOT_CREATED}`, null, plan);
+    }
+    pushed = true;
+    plan = { ...plan, push: false, why: null, ahead: 0 };
+  }
+  const call = await send(io, project, seen.who, args);
+  const answered = (call.ok && createdOf(call.out)) || refusalOf(call);
+  const after = answered ? null : await askAs(io, project, seen.who, cardQueryArgs(seen, b), parseCardAnswer);
+  const out = createOutcome({ call, after, seen, base });
+  const kept = pushed && out.status !== "created" ? ` ${b} ya quedó publicada en origin.` : "";
+  return { ...out, err: out.err + kept, plan };
+}
+
+// What the create's call came to, from GitHub's answer and, when there was
+// none to trust, from the branch's newest PR read again (mergeOutcome's
+// model: never from the call alone).
+//   call: { ok, rejected, out, err } (send)   after: parseCardAnswer of the
+//   read after it, or null   seen, base: what was asked for
+// → { status: "created" | "refused" | "unsure", err, pr }: a 2xx with the
+// PR made it; a 4xx refused it, with GitHub's message (and a 422's
+// details); otherwise an open PR from the branch into that base, read
+// again, is the one made; none yet may be retried.
+export function createOutcome({ call, after, seen, base }) {
+  const result = (status, err = "", pr = null) => ({ status, err, pr });
+  const made = call?.ok ? createdOf(call.out) : null;
+  if (made) return result("created", "", made);
+  const refused = refusalOf(call);
+  if (refused) {
+    const said = refused.message || `HTTP ${refused.status}`;
+    return result("refused", `GitHub no creó el PR: ${refused.details ? `${said}: ${refused.details}` : said}`);
+  }
+  const pr = after?.ok ? after.pr : null;
+  if (pr && (pr.state === "open" || pr.state === "draft") && pr.head === seen.branch && pr.base === base) {
+    return result("created", "", { number: pr.number, url: pr.url, draft: pr.state === "draft" });
+  }
+  return result("unsure", `GitHub no confirmó el PR y aún no aparece en ${seen.branch}. Puedes volver a intentar: GitHub no abre dos PR de ${seen.branch} a ${base}.`);
+}
+
+// What createPr's result does to the dialog (mergeReport's model): {
+// close, error, toast }. Created closes it with a toast; anything else stays
+// in the dialog as `error` while it is open (open), else is a toast.
+export function createReport(r, { seen, base, open }) {
+  if (r?.status === "created" && r.pr) {
+    const body = `${seen.branch} → ${base}${r.pr.draft ? " · draft" : ""}`;
+    return { close: Boolean(open), error: "", toast: { title: `PR #${r.pr.number} creado`, body, level: "success" } };
+  }
+  const err = r?.err || "GitHub no creó el PR.";
+  if (open) return { close: false, error: err, toast: null };
+  const title = r?.status === "unsure" ? "PR sin confirmar" : "PR sin crear";
   return { close: false, error: "", toast: { title, body: err, level: r?.status === "failed" ? "error" : "warning" } };
 }

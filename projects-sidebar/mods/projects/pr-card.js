@@ -5,8 +5,9 @@
 // sidebar icon's color with +/−, the title, head → base with ↑↓, the checks,
 // the reviews, then [Abrir en GitHub] and [Mergear ▾] (D6: the methods
 // popup and the confirm dialog of merge-pr.js; drawn off, with the reason as
-// its hover, when GitHub wouldn't take it). A branch without a PR says so.
-// The model is pr-card-model.js (readCard, cardState, mergeRequest); this
+// its hover, when GitHub wouldn't take it). A branch without a PR says so,
+// with [Crear PR] (D4, D7: the dialog of create-pr.js). The model is
+// pr-card-model.js (readCard, cardState, mergeRequest, createRequest); this
 // file picks the workspace, asks, and draws.
 //
 // Which workspace (D5): the folder Changes shows (Herdr's changes/main.js
@@ -16,9 +17,9 @@
 // When: keyed on that checkout's path and branch. A read starts when the key
 // changes, and again every EVERY while the same one shows in the window in
 // front, one at a time; also at once when the tree stores another PR for
-// that workspace (D8: after a merge, Mergear asks the tree for a round, so
-// the purple shows here too; also a PR merged in the browser) and when
-// [Mergear ▾] is clicked. An
+// that workspace (D8: after a merge or a create, the dialog asks the tree
+// for a round, so the purple or the new PR shows here too; also a PR merged
+// in the browser) and when [Mergear ▾] or [Crear PR] is clicked. An
 // answer whose key moved on is never drawn: it is kept for its own
 // workspace, so switching back draws at once. Nothing is asked while the
 // panel is closed or on the Explorer (a hidden copy's timers keep running,
@@ -37,8 +38,9 @@ import { checkoutAt } from "./lib.js";
 import * as store from "./store.js";
 import { readPrCard } from "./git.js";
 import { prMemo } from "./pr-model.js";
-import { cardState, mergeRequest } from "./pr-card-model.js";
+import { cardState, mergeRequest, createRequest } from "./pr-card-model.js";
 import { openMergeMenu } from "./merge-pr.js";
+import { openCreatePr } from "./create-pr.js";
 
 // The card's block in layouts/projects.json.
 const BLOCK = "pr-card";
@@ -147,6 +149,15 @@ export default class PrCard {
     this.read(cx);
   }
 
+  // [Crear PR] (D4, D7): the create dialog, handed the branch, its repo and
+  // the account that read it (createRequest), and a read now, as Mergear's.
+  create(cx) {
+    const req = createRequest(this.state, this.target);
+    if (!req) return;
+    openCreatePr(req);
+    this.read(cx);
+  }
+
   // One read of the shown workspace. Its answer is kept for that workspace,
   // and drawn only if it is still the one shown; then the tick reads the one
   // shown now, if Changes moved on meanwhile.
@@ -208,19 +219,25 @@ export default class PrCard {
     const box = v_flex().id("pr-card").size_full().min_h(0).overflow_hidden().rounded(10).border_1().border_color(t.border)
       .bg(t.background).text_color(t.foreground).text_size(12.5);
     if (!s) return box.items_center().justify_center().child(div().text_color(t.dim).child("Leyendo el PR…"));
-    if (s.kind !== "pr") return box.child(note(s, t));
+    if (s.kind !== "pr") return box.child(note(s, t, s.kind === "none" ? (cx) => this.create(cx) : null));
     return box.p(12).justify_between().children(prRows(s, t, (cx) => this.merge(cx)));
   }
 }
 
 // A branch without a PR, or a card that can't show one: one line, centered,
-// and the branch under it when there is one.
-function note(s, t) {
+// and the branch under it when there is one. create(cx): [Crear PR]'s
+// click, given only on a branch without a PR (D4: the form is a dialog).
+function note(s, t, create) {
   return v_flex().size_full().px(16).gap(6).items_center().justify_center()
     .child(h_flex().max_w(320).gap(7).items_center()
       .child(svg(icon("branch")).size(13).flex_none().text_color(t.dim))
       .child(div().min_w(0).truncate().text_color(t[s.color] ?? t.muted).child(s.text)))
-    .when(Boolean(s.branch), (el) => el.child(div().max_w(320).truncate().text_size(11.5).text_color(t.dim).child(s.branch)));
+    .when(Boolean(s.branch), (el) => el.child(div().max_w(320).truncate().text_size(11.5).text_color(t.dim).child(s.branch)))
+    .when(Boolean(create), (el) => el.child(div().id("pr-create").mt(6).h(26).px(10).flex().items_center().rounded(6).text_size(12)
+      .bg(t.solid).text_color(t.solid_foreground).cursor_pointer()
+      .hover((st) => st.opacity(0.88))
+      .on_click((_e, cx) => create(cx))
+      .child("Crear PR")));
 }
 
 // S5's rows: the header in the PR's color with +/−, the title, head → base

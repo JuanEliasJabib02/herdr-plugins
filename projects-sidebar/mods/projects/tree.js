@@ -192,7 +192,7 @@ export default class Tree {
     if (Date.now() - this.prAt >= (back ? PR_AGAIN : PR_EVERY)) this.refreshPrs(cx);
   }
 
-  // projects.refresh-prs (D8): a round now, asked by Mergear after a merge.
+  // projects.refresh-prs (D8): a round now, asked by Mergear and Crear PR after each attempt.
   // While one runs, one more is recorded and runs after it: a round that
   // started before the merge read GitHub before it, so it is never the last
   // word on the sidebar's colors.

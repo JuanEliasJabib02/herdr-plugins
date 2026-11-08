@@ -11,12 +11,13 @@ import { fetchOrigin, defaultBaseOf, recentBasesOf, baseExistsIn, branchExistsIn
 import { removalCheck as checkRemoval, removeWorkspace as removeWith, removeTask as removeTaskWith } from "./remove-workspace-model.js";
 import { renameCheck as checkRename, renameWorkspace as renameWith, sshHostnameOf } from "./rename-workspace-model.js";
 import { projectPrs, accountsOf } from "./pr-model.js";
-import { readCard, mergePr } from "./pr-card-model.js";
+import { readCard, mergePr, readCreateFacts, createPr } from "./pr-card-model.js";
 
 // { ok, out, err } (mods/worktree/main.js `git`). Rejects when git can't
-// start there: not installed, or the folder is gone.
-export async function git(cwd, args) {
-  const r = await exec("git", args, { cwd });
+// start there (not installed, or the folder is gone) or at exec's limit: 30
+// s, or `timeout` ms when given (Crear PR's push, whose hooks run).
+export async function git(cwd, args, { timeout } = {}) {
+  const r = await exec("git", args, timeout ? { cwd, timeout } : { cwd });
   return { ok: r.code === 0, out: (r.stdout ?? "").trim(), err: (r.stderr ?? r.stdout ?? "").trim() };
 }
 
@@ -172,3 +173,18 @@ export const readPrCard = ({ project, path, branch }, memo) => readCard({ projec
 // the project's folder, or that login through ghAs), pinned to the head
 // commit the card showed. Resolves { status, err, note }; never rejects.
 export const mergePullRequest = ({ project, seen }) => mergePr({ project, seen }, prIo);
+
+// Crear PR (D7, pr-card-model.js readCreateFacts): what the dialog starts
+// from, read when it opens: the branch's last commit's subject, and whether
+// it must be published first (origin asked with ls-remote). Publishes and
+// creates nothing. Resolves { title, push }; never rejects.
+export const createPrFacts = ({ path, branch }) => readCreateFacts({ path, branch }, prIo);
+
+// Crear PR (D7, pr-card-model.js createPr): checks origin and the branch
+// again, publishes it first when needed (`git push -u origin <branch>`,
+// never forced, with PUSH_TIMEOUT), then creates the PR through GitHub's
+// REST API with the account that read the card (`seen.who`: gh in the
+// project's folder, or that login through ghAs). Resolves { status, err,
+// pr, plan }; never rejects.
+export const createPullRequest = ({ project, path, seen, base, title, body, draft, push }) =>
+  createPr({ project, path, seen, base, title, body, draft, push }, prIo);

@@ -4,14 +4,17 @@
 // the card's state: header, "head → base", +/−, ↑↓, the checks and reviews
 // lines, whether Mergear is enabled and why not (D6), the merge methods the
 // repo allows, and the "Esta rama no tiene PR" / "El origin no es GitHub"
-// states. gh and git are fakes passed through io: no test reaches the
-// network.
+// states; Mergear (D6) and Crear PR (D7: the dialog's defaults, the push
+// when needed, the create with the account that read the card). gh and git
+// are fakes passed through io: no test reaches the network.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import {
   cardQueryArgs, parseCardAnswer, readCard, cardState,
   mergeArgs, mergeRequest, mergeMenuItems, seenOf, mergePrompt, mergePr, mergeOutcome, mergeReport,
+  createRequest, createSeenOf, createBaseOf, createBaseChoices, createArgs, pushPlan, readPushState, readCreateFacts,
+  createPrompt, createBlocker, createPr, createOutcome, createReport, CREATE_GIT, PUSH_TIMEOUT,
 } from "../projects-sidebar/mods/projects/pr-card-model.js";
 import { prMemo, projectPrs } from "../projects-sidebar/mods/projects/pr-model.js";
 
@@ -656,4 +659,366 @@ test("S4 merge report: merged closes the dialog with a toast; anything else stay
   assert.deepEqual(mergeReport({ status: "changed", err, note: "" }, { seen: SEEN, open: false }), { close: false, error: "", toast: { title: "PR #161 sin mergear", body: err, level: "warning" } });
   assert.deepEqual(mergeReport({ status: "failed", err: "x", note: "" }, { seen: SEEN, open: false }).toast.level, "error");
   assert.deepEqual(mergeReport({ status: "unsure", err: "y", note: "" }, { seen: SEEN, open: false }).toast, { title: "PR #161 sin confirmar", body: "y", level: "warning" });
+});
+
+// ── Crear PR (D7, S4, S5): the dialog's defaults, the push, the create ─────
+
+// The branch's commit here, and origin's copy of it when they differ.
+const HEAD = "1".repeat(40);
+const ORIGIN = "2".repeat(40);
+const URL162 = "https://github.com/Arctic-Grey/Target-Sports-USA/pull/162";
+// GitHub's 201: the PR it made.
+const CREATED = JSON.stringify({ number: 162, html_url: URL162, state: "open", draft: true });
+// What the card hands the dialog (createRequest's seen), and the dialog's
+// request as Crear PR sends it: S5's form, Draft on.
+const CREATE_SEEN = Object.freeze({ owner: "Arctic-Grey", repo: "Target-Sports-USA", branch: "juan/fix-totals", defaultBranch: "main", who: null });
+const CREATE = Object.freeze({ project: "/p", path: "/w/a", seen: CREATE_SEEN, base: "main", title: "Fix checkout totals", body: "Arregla los totales.", draft: true, push: false });
+const POST_162 = [
+  "api", "-X", "POST", "repos/Arctic-Grey/Target-Sports-USA/pulls",
+  "-f", "title=Fix checkout totals", "-f", "head=juan/fix-totals", "-f", "base=main", "-f", "body=Arregla los totales.", "-F", "draft=true",
+];
+const PUSH = ["push", "-u", "origin", "refs/heads/juan/fix-totals:refs/heads/juan/fix-totals"];
+
+// The workspace /w/a of project /p, its branch juan/fix-totals at `local`
+// (null: git doesn't find it); origin's copy at `remote` (null: origin
+// doesn't have the branch; "fail": ls-remote fails); `counts`: what rev-list
+// prints comparing the two, one per call, the last repeating (null: git
+// can't, origin's commit isn't here); `fetchOk`: the one-branch fetch;
+// `push`: git push's answer ("reject": exec's limit); `subject`: the last
+// commit's subject. gh: `sees` is the account that sees the repo; the POST
+// answers `post` ("reject": exec's limit); each GraphQL read takes the next
+// of `reads`. Every call goes to `log` in order: ["git", cwd, args, opts]
+// or ["gh", who, args]. Crear PR never lists accounts.
+function createIo({
+  url = "git@github.com:Arctic-Grey/Target-Sports-USA.git", sees = null, local = HEAD, remote = null, counts = [null], fetchOk = true,
+  push = { ok: true, out: "", err: "To github.com:Arctic-Grey/Target-Sports-USA.git\n * [new branch]      juan/fix-totals -> juan/fix-totals" },
+  post = { code: 0, out: CREATED, err: "" }, reads = [cardAnswer(null)], subject = "Fix checkout totals",
+} = {}) {
+  const log = [];
+  const ok = (out = "") => ({ ok: true, out, err: "" });
+  const fail = (err) => ({ ok: false, out: "", err });
+  const gh = (who, cwd, args) => {
+    log.push(["gh", who, args]);
+    assert.equal(cwd, "/p", "gh runs in the project's folder, where a wrapper picks its account");
+    if (args.includes("POST")) {
+      if (post === "reject") throw new Error("exec: gh timed out after 30000 ms");
+      return { ok: post.code === 0, ...post };
+    }
+    if (who !== sees) return { ok: false, code: 1, out: NOT_FOUND, err: "gh: Could not resolve to a Repository" };
+    return { ok: true, code: 0, out: reads.length > 1 ? reads.shift() : reads[0], err: "" };
+  };
+  const io = {
+    git: async (cwd, args, opts) => {
+      log.push(["git", cwd, args, opts]);
+      const line = args.join(" ");
+      if (line === "remote get-url origin") return ok(url);
+      if (args[0] === "log") return subject === null ? fail("fatal: bad revision") : ok(subject);
+      if (args[0] === "rev-parse") return local ? ok(local) : fail("");
+      if (args[0] === "ls-remote") return remote === "fail" ? fail("fatal: Could not read from remote repository.") : ok(remote ? `${remote}\trefs/heads/juan/fix-totals` : "");
+      if (args[0] === "rev-list") {
+        const c = counts.length > 1 ? counts.shift() : counts[0];
+        return c === null ? fail(`fatal: bad revision '${ORIGIN}...${HEAD}'`) : ok(c);
+      }
+      if (args[0] === "fetch") return fetchOk ? ok() : fail("fatal: unable to access origin");
+      if (args[0] === "push") {
+        if (push === "reject") throw new Error("exec: git timed out after 120000 ms");
+        return push;
+      }
+      return fail("unexpected");
+    },
+    gh: async (cwd, args) => gh(null, cwd, args),
+    ghAs: async (login, cwd, args) => gh(login, cwd, args),
+    accounts: async () => {
+      throw new Error("Crear PR never goes through the accounts");
+    },
+    hostname: async () => null,
+  };
+  return { io, log };
+}
+
+const gitCalls = (log, verb) => log.filter(([kind, , args]) => kind === "git" && args[0] === verb);
+const posts = (log) => log.filter(([kind, , args]) => kind === "gh" && args.includes("POST"));
+
+test("S5 Crear PR: the card hands the dialog the branch, its repo, the repo's default branch and the account that read it; nothing while the branch has a PR", () => {
+  const none = cardState({ status: "none", repo: { ...REPO, defaultBranch: "main", methods: ["squash"] }, branch: "juan/fix-totals", who: null });
+  const ws = { project: "/p", path: "/w/a" };
+  assert.deepEqual(createRequest(none, ws), { project: "/p", path: "/w/a", seen: CREATE_SEEN });
+  assert.equal(createRequest({ ...none, who: "JuanEliasJabib02" }, ws).seen.who, "JuanEliasJabib02", "the fallback login that read it (S2)");
+  assert.equal(createRequest(cardOf(prNode()), ws), null, "a branch with a PR: Mergear, not Crear PR");
+  assert.equal(createRequest(cardState({ status: "failed", unseen: false, repo: null }), ws), null);
+  assert.equal(createRequest(cardState({ status: "no-branch" }), ws), null);
+  assert.equal(createRequest(none, { project: "", path: "/w/a" }), null, "no project to run gh in");
+  assert.equal(createRequest(none, { project: "/p", path: null }), null, "no workspace to push from");
+  assert.equal(createRequest(none, null), null);
+});
+
+test("S5 create dialog: the props are checked before anything is shown or sent", () => {
+  assert.deepEqual(createSeenOf({ ...CREATE_SEEN }), CREATE_SEEN);
+  assert.deepEqual(createSeenOf({ ...CREATE_SEEN, who: "JuanEliasJabib02", extra: 1 }), { ...CREATE_SEEN, who: "JuanEliasJabib02" });
+  assert.deepEqual(createSeenOf({ ...CREATE_SEEN, defaultBranch: "" }), { ...CREATE_SEEN, defaultBranch: "" }, "a repo GitHub gave no default branch: the base is picked");
+  for (const bad of [
+    { owner: "a/b" }, { repo: "" }, { branch: "" }, { branch: "-x" }, { branch: "a b" }, { branch: null }, { defaultBranch: null },
+    { defaultBranch: "-main" }, { who: "-x" }, { who: "" }, { who: undefined },
+  ]) {
+    assert.equal(createSeenOf({ ...CREATE_SEEN, ...bad }), null, JSON.stringify(bad));
+  }
+  assert.equal(createSeenOf(null), null);
+  assert.equal(createSeenOf("x"), null);
+});
+
+test("S5 Base: the project's saved base when git has it, else the repo's default branch; the list is that, then origin's recent branches, never the PR's own branch", () => {
+  assert.equal(createBaseOf("origin/develop", "main", true), "develop", "the saved base (D37), as a branch of origin");
+  assert.equal(createBaseOf("origin/develop", "main", false), "main", "a saved base git no longer has");
+  assert.equal(createBaseOf(null, "main", false), "main");
+  assert.equal(createBaseOf(null, "", false), "", "nothing to start from: the base is picked");
+  const recent = ["origin/HEAD", "origin/juan/fix-totals", "origin/develop", "origin/main", "origin/release/1", "main"];
+  assert.deepEqual(createBaseChoices("main", recent, "juan/fix-totals"), ["main", "develop", "release/1"]);
+  assert.deepEqual(createBaseChoices("develop", recent, "juan/fix-totals"), ["develop", "main", "release/1"], "the default first");
+  assert.deepEqual(createBaseChoices("", ["origin/develop"], "x"), ["develop"]);
+  assert.deepEqual(createBaseChoices("main", null, "x"), ["main"]);
+});
+
+test("S4 create argv: GitHub's REST create, POST repos/<o>/<r>/pulls with the title, head, base, description and draft, byte for byte (D7)", () => {
+  const form = { title: "  Fix checkout totals ", head: "juan/fix-totals", base: "main", body: "Arregla los totales.", draft: true };
+  assert.deepEqual(createArgs(REPO, form), POST_162);
+  assert.deepEqual(createArgs(REPO, { ...form, draft: false, body: "" }).slice(-6), ["-f", "base=main", "-f", "body=", "-F", "draft=false"]);
+  const odd = createArgs(REPO, { ...form, title: "@/etc/passwd", body: "@notes.md\nline 2" });
+  assert.equal(odd[odd.indexOf("title=@/etc/passwd") - 1], "-f", "typed text is a raw field: -F would read @file");
+  assert.equal(odd[odd.indexOf("body=@notes.md\nline 2") - 1], "-f");
+  assert.ok(!POST_162.some((a) => /delete|merge/i.test(a)));
+  for (const bad of [
+    { title: "" }, { title: "   " }, { title: null }, { base: "juan/fix-totals" }, { head: "-x" }, { base: "" }, { base: "a b" },
+    { draft: "yes" }, { draft: undefined }, { body: 5 },
+  ]) {
+    assert.equal(createArgs(REPO, { ...form, ...bad }), null, JSON.stringify(bad));
+  }
+  for (const bad of [{ owner: "../x" }, { repo: "a/b" }, { owner: "" }]) assert.equal(createArgs({ ...REPO, ...bad }, form), null, JSON.stringify(bad));
+});
+
+test("S4 push: a branch origin doesn't have, or with unpushed commits, is published first; nothing unpushed isn't; a branch that split from origin's is never forced", () => {
+  const b = "juan/fix-totals";
+  assert.deepEqual(pushPlan({ branch: b, local: HEAD, remote: null, counts: null }), { push: true, why: "missing", ahead: 0, blocked: "" });
+  assert.deepEqual(pushPlan({ branch: b, local: HEAD, remote: HEAD, counts: null }), { push: false, why: null, ahead: 0, blocked: "" });
+  assert.deepEqual(pushPlan({ branch: b, local: HEAD, remote: ORIGIN, counts: { behind: 0, ahead: 3 } }), { push: true, why: "ahead", ahead: 3, blocked: "" });
+  assert.deepEqual(pushPlan({ branch: b, local: HEAD, remote: ORIGIN, counts: { behind: 2, ahead: 0 } }), { push: false, why: null, ahead: 0, blocked: "" }, "origin has more: nothing to publish");
+  assert.deepEqual(pushPlan({ branch: b, local: HEAD, remote: ORIGIN, counts: { behind: 1, ahead: 1 } }), {
+    push: false, why: null, ahead: 1, blocked: "juan/fix-totals y origin/juan/fix-totals se separaron. Trae los commits de origin (git pull) antes de crear el PR.",
+  });
+  assert.equal(pushPlan({ branch: b, local: HEAD, remote: ORIGIN, counts: null }).blocked, "git no pudo comparar juan/fix-totals con origin/juan/fix-totals.");
+});
+
+test("S5 create dialog: the button says Publicar y crear PR when it publishes first, why, and which account creates it (S2)", () => {
+  const plan = (p) => ({ ok: true, push: false, why: null, ahead: 0, blocked: "", ...p });
+  assert.deepEqual(createPrompt({ seen: CREATE_SEEN, base: "main", plan: plan() }), {
+    header: "Crear PR", branches: "juan/fix-totals → main", account: "Con la cuenta de gh de este repo", note: "", warning: "", label: "Crear PR",
+  });
+  const missing = createPrompt({ seen: { ...CREATE_SEEN, who: "JuanEliasJabib02" }, base: "develop", plan: plan({ push: true, why: "missing" }) });
+  assert.deepEqual(missing, {
+    header: "Crear PR", branches: "juan/fix-totals → develop", account: "Con la cuenta JuanEliasJabib02",
+    note: "origin no tiene juan/fix-totals: se publica primero.", warning: "", label: "Publicar y crear PR",
+  });
+  assert.equal(createPrompt({ seen: CREATE_SEEN, base: "main", plan: plan({ push: true, why: "ahead", ahead: 1 }) }).note, "1 commit sin publicar: se publica primero.");
+  assert.equal(createPrompt({ seen: CREATE_SEEN, base: "main", plan: plan({ push: true, why: "ahead", ahead: 3 }) }).note, "3 commits sin publicar: se publican primero.");
+  const asking = createPrompt({ seen: CREATE_SEEN, base: "", plan: undefined });
+  assert.equal(asking.note, "Comprobando la rama en origin…");
+  assert.equal(asking.label, "Crear PR");
+  assert.equal(asking.branches, "juan/fix-totals → …");
+  assert.equal(asking.warning, "");
+  // What git says against a PR now is a warning, not a lock: the click
+  // checks again (createPr), so the dialog never stays stuck on a moment
+  // origin couldn't be read, or on a split fixed with a pull meanwhile.
+  const split = createPrompt({ seen: CREATE_SEEN, base: "main", plan: plan({ ahead: 1, blocked: "juan/fix-totals y origin/juan/fix-totals se separaron. Trae los commits de origin (git pull) antes de crear el PR." }) });
+  assert.equal(split.warning, "juan/fix-totals y origin/juan/fix-totals se separaron. Trae los commits de origin (git pull) antes de crear el PR.");
+  assert.equal(split.label, "Crear PR");
+  const offline = createPrompt({ seen: CREATE_SEEN, base: "main", plan: { ok: false, err: "git no pudo leer origin (fatal: x)" } });
+  assert.equal(offline.warning, "git no pudo leer origin (fatal: x). Crear PR lo vuelve a comprobar.");
+  assert.equal(offline.label, "Crear PR", "never Publicar on a guess: the click finds out, and publishes only once the button says so");
+});
+
+test("S5 create dialog: Crear PR is off, saying why, while the base is missing or is the branch itself, or the title is empty", () => {
+  const ready = { seen: CREATE_SEEN, base: "main", title: "Fix" };
+  assert.equal(createBlocker(ready), "");
+  assert.equal(createBlocker({ ...ready, base: "" }), "Elige una base.");
+  assert.equal(createBlocker({ ...ready, base: "juan/fix-totals" }), "La base no puede ser juan/fix-totals.");
+  assert.equal(createBlocker({ ...ready, title: "  " }), "Escribe un título.");
+  assert.equal(createBlocker({ ...ready, seen: null }), "No hay una rama para el PR.");
+});
+
+test("S4 push state: read from git in the workspace, origin asked with ls-remote; origin's commit fetched once when it isn't here", async () => {
+  const missing = createIo({ remote: null });
+  assert.deepEqual(await readPushState({ path: "/w/a", branch: "juan/fix-totals" }, missing.io.git), { ok: true, local: HEAD, remote: null, push: true, why: "missing", ahead: 0, blocked: "" });
+  assert.deepEqual(missing.log.map(([, cwd, args]) => [cwd, args]), [
+    ["/w/a", CREATE_GIT.head("juan/fix-totals")],
+    ["/w/a", ["ls-remote", "origin", "refs/heads/juan/fix-totals"]],
+  ]);
+  assert.deepEqual(CREATE_GIT.head("juan/fix-totals"), ["rev-parse", "--verify", "--quiet", "refs/heads/juan/fix-totals^{commit}"]);
+  const same = createIo({ remote: HEAD });
+  assert.equal((await readPushState({ path: "/w/a", branch: "juan/fix-totals" }, same.io.git)).push, false);
+  assert.equal(gitCalls(same.log, "rev-list").length, 0, "the same commit: nothing to count");
+  const ahead = createIo({ remote: ORIGIN, counts: ["0\t3"] });
+  assert.deepEqual(await readPushState({ path: "/w/a", branch: "juan/fix-totals" }, ahead.io.git), { ok: true, local: HEAD, remote: ORIGIN, push: true, why: "ahead", ahead: 3, blocked: "" });
+  assert.deepEqual(gitCalls(ahead.log, "rev-list")[0][2], ["rev-list", "--left-right", "--count", `${ORIGIN}...${HEAD}`, "--"]);
+  assert.equal(gitCalls(ahead.log, "fetch").length, 0);
+  const unknown = createIo({ remote: ORIGIN, counts: [null, "0\t2"] });
+  assert.equal((await readPushState({ path: "/w/a", branch: "juan/fix-totals" }, unknown.io.git)).ahead, 2);
+  assert.deepEqual(gitCalls(unknown.log, "fetch").map(([, , args]) => args), [["fetch", "--no-tags", "origin", "+refs/heads/juan/fix-totals:refs/remotes/origin/juan/fix-totals"]], "that one branch, once");
+  const split = createIo({ remote: ORIGIN, counts: ["1\t1"] });
+  assert.match((await readPushState({ path: "/w/a", branch: "juan/fix-totals" }, split.io.git)).blocked, /se separaron/);
+  const lost = createIo({ remote: ORIGIN, counts: [null], fetchOk: false });
+  assert.equal((await readPushState({ path: "/w/a", branch: "juan/fix-totals" }, lost.io.git)).blocked, "git no pudo comparar juan/fix-totals con origin/juan/fix-totals.");
+  const gone = createIo({ local: null });
+  assert.deepEqual(await readPushState({ path: "/w/a", branch: "juan/fix-totals" }, gone.io.git), { ok: false, err: "git no encuentra la rama juan/fix-totals" });
+  const offline = createIo({ remote: "fail" });
+  assert.deepEqual(await readPushState({ path: "/w/a", branch: "juan/fix-totals" }, offline.io.git), { ok: false, err: "git no pudo leer origin (fatal: Could not read from remote repository.)" });
+  const broken = async () => {
+    throw new Error("spawn git ENOENT");
+  };
+  assert.equal((await readPushState({ path: "/w/a", branch: "juan/fix-totals" }, broken)).ok, false, "never rejects");
+});
+
+test("S5 create dialog: the title starts as the last commit's subject, read with the push state", async () => {
+  const { io, log } = createIo({ remote: null, subject: "Fix checkout totals" });
+  assert.deepEqual(await readCreateFacts({ path: "/w/a", branch: "juan/fix-totals" }, io), {
+    title: "Fix checkout totals",
+    push: { ok: true, local: HEAD, remote: null, push: true, why: "missing", ahead: 0, blocked: "" },
+  });
+  assert.deepEqual(gitCalls(log, "log")[0].slice(1, 3), ["/w/a", ["log", "-1", "--format=%s", "refs/heads/juan/fix-totals", "--"]]);
+  const none = createIo({ subject: null });
+  assert.equal((await readCreateFacts({ path: "/w/a", branch: "juan/fix-totals" }, none.io)).title, "", "git can't say: the title is typed");
+  assert.equal(posts(log).length + gitCalls(log, "push").length, 0, "opening the dialog publishes and creates nothing");
+});
+
+test("S4 create: a branch origin doesn't have is published first (git push -u, never forced), then GitHub creates the PR with the account that read the card", async () => {
+  const { io, log } = createIo({ remote: null });
+  const r = await createPr({ ...CREATE, push: true }, io);
+  assert.deepEqual(r.status, "created");
+  assert.deepEqual(r.pr, { number: 162, url: URL162, draft: true });
+  assert.equal(r.err, "");
+  assert.equal(r.plan.push, false, "published: the button goes back to Crear PR");
+  const pushes = gitCalls(log, "push");
+  assert.deepEqual(pushes.map(([, cwd, args, opts]) => [cwd, args, opts]), [["/w/a", PUSH, { timeout: PUSH_TIMEOUT }]]);
+  assert.ok(PUSH_TIMEOUT > 30000, "the person's pre-push hooks run: more than exec's 30 s");
+  assert.ok(!PUSH.some((a) => /force|^\+/.test(a)), "never forced");
+  assert.deepEqual(posts(log).map(([, who, args]) => [who, args]), [[null, POST_162]], "through gh in the project's folder (who null)");
+  assert.ok(log.indexOf(pushes[0]) < log.indexOf(posts(log)[0]), "published before the PR is asked for");
+  assert.deepEqual(CREATE_GIT.push("juan/fix-totals"), PUSH);
+});
+
+test("S2 create: a card read through another account creates the PR with that account's credentials, and no other account is tried", async () => {
+  const { io, log } = createIo({ remote: HEAD, sees: "JuanEliasJabib02" });
+  const r = await createPr({ ...CREATE, seen: { ...CREATE_SEEN, who: "JuanEliasJabib02" } }, io);
+  assert.equal(r.status, "created");
+  assert.deepEqual(log.filter(([kind]) => kind === "gh").map(([, who, args]) => [who, args]), [["JuanEliasJabib02", POST_162]]);
+});
+
+test("S4 create: with nothing to publish no push runs, even when the button still said Publicar (someone pushed meanwhile)", async () => {
+  for (const push of [false, true]) {
+    const { io, log } = createIo({ remote: ORIGIN, counts: ["4\t0"] });
+    const r = await createPr({ ...CREATE, push }, io);
+    assert.equal(r.status, "created", `button push ${push}`);
+    assert.equal(gitCalls(log, "push").length, 0);
+    assert.deepEqual(posts(log).map(([, , args]) => args), [POST_162]);
+  }
+});
+
+test("S4 create: commits that need publishing, when the button said Crear PR, are never published unseen: nothing is pushed or created, and the button learns it", async () => {
+  const { io, log } = createIo({ remote: ORIGIN, counts: ["0\t2"] });
+  const r = await createPr({ ...CREATE, push: false }, io);
+  assert.deepEqual(r, {
+    status: "changed",
+    err: "Hay commits de juan/fix-totals sin publicar: ahora el botón los publica antes de crear el PR.",
+    pr: null,
+    plan: { ok: true, local: HEAD, remote: ORIGIN, push: true, why: "ahead", ahead: 2, blocked: "" },
+  });
+  assert.equal(gitCalls(log, "push").length + posts(log).length, 0);
+});
+
+test("S4 create: a push git refuses, or that doesn't finish in time, creates nothing", async () => {
+  const hook = createIo({ remote: null, push: { ok: false, out: "", err: "To github.com:Arctic-Grey/Target-Sports-USA.git\n ! [remote rejected] juan/fix-totals -> juan/fix-totals (pre-receive hook declined)\nerror: failed to push some refs to 'https://x:secret@github.com/Arctic-Grey/Target-Sports-USA.git'" } });
+  const r = await createPr({ ...CREATE, push: true }, hook.io);
+  assert.equal(r.status, "refused");
+  assert.equal(r.err, "git no publicó juan/fix-totals (! [remote rejected] juan/fix-totals -> juan/fix-totals (pre-receive hook declined)): no se creó el PR.");
+  assert.equal(posts(hook.log).length, 0);
+  const slow = createIo({ remote: null, push: "reject" });
+  assert.deepEqual(await createPr({ ...CREATE, push: true }, slow.io), {
+    status: "failed", err: "git push no terminó a tiempo: puede que aún publique juan/fix-totals. No se creó el PR.", pr: null, plan: null,
+  });
+  assert.equal(posts(slow.log).length, 0);
+});
+
+test("S4 create: an origin that is another repo now, a branch split from origin's, git that can't read origin, or props that aren't a branch publish and create nothing; it never rejects", async () => {
+  const moved = createIo({ url: "git@github.com:Arctic-Grey/Other.git", remote: null });
+  assert.deepEqual(await createPr({ ...CREATE, push: true }, moved.io), { status: "changed", err: "El origin ya no es Arctic-Grey/Target-Sports-USA: no se creó el PR.", pr: null, plan: null });
+  const split = createIo({ remote: ORIGIN, counts: ["1\t1"] });
+  const s = await createPr({ ...CREATE, push: true }, split.io);
+  assert.equal(s.status, "refused");
+  assert.match(s.err, /^juan\/fix-totals y origin\/juan\/fix-totals se separaron/);
+  const offline = createIo({ remote: "fail" });
+  const o = await createPr({ ...CREATE, push: true }, offline.io);
+  assert.equal(o.status, "failed");
+  assert.equal(o.err, "git no pudo leer origin (fatal: Could not read from remote repository.): no se creó el PR.");
+  const bad = createIo({ remote: null });
+  for (const req of [{ ...CREATE, seen: { ...CREATE_SEEN, branch: "-x" } }, { ...CREATE, title: " " }, { ...CREATE, base: "juan/fix-totals" }, { ...CREATE, project: "" }, { ...CREATE, path: null }]) {
+    assert.deepEqual(await createPr(req, bad.io), { status: "failed", err: "Faltan datos del PR: no se creó el PR.", pr: null, plan: null });
+  }
+  assert.equal(bad.log.length, 0);
+  for (const { log } of [moved, split, offline]) assert.equal(gitCalls(log, "push").length + posts(log).length, 0);
+  const broken = createIo();
+  broken.io.git = async () => {
+    throw new Error("spawn git ENOENT");
+  };
+  assert.equal((await createPr(CREATE, broken.io)).status, "failed");
+});
+
+test("S4 create outcome: GitHub refusing (422 a PR already there, 403, 404) created nothing, says GitHub's message, and isn't read again", async () => {
+  const exists = {
+    code: 1,
+    out: JSON.stringify({ message: "Validation Failed", errors: [{ resource: "PullRequest", code: "custom", message: "A pull request already exists for Arctic-Grey:juan/fix-totals." }], documentation_url: "https://docs.github.com/rest/pulls/pulls#create-a-pull-request", status: "422" }),
+    err: "gh: Validation Failed (HTTP 422)",
+  };
+  const dup = createIo({ remote: HEAD, post: exists });
+  assert.deepEqual(await createPr(CREATE, dup.io), { status: "refused", err: "GitHub no creó el PR: Validation Failed: A pull request already exists for Arctic-Grey:juan/fix-totals.", pr: null, plan: { ok: true, local: HEAD, remote: HEAD, push: false, why: null, ahead: 0, blocked: "" } });
+  assert.equal(dup.log.filter(([kind]) => kind === "gh").length, 1, "the POST, nothing after");
+  const noCode = { code: 1, out: JSON.stringify({ message: "Validation Failed", errors: [{ resource: "PullRequest", field: "base", code: "invalid" }], status: "422" }), err: "gh: Validation Failed (HTTP 422)" };
+  assert.equal((await createPr(CREATE, createIo({ remote: HEAD, post: noCode }).io)).err, "GitHub no creó el PR: Validation Failed: base invalid");
+  for (const [status, message] of [[403, "Resource not accessible by integration"], [404, "Not Found"]]) {
+    const { io } = createIo({ remote: HEAD, post: refusal(status, message) });
+    assert.equal((await createPr(CREATE, io)).err, `GitHub no creó el PR: ${message}`, String(status));
+  }
+  const pushed = createIo({ remote: null, post: exists });
+  assert.equal((await createPr({ ...CREATE, push: true }, pushed.io)).err, "GitHub no creó el PR: Validation Failed: A pull request already exists for Arctic-Grey:juan/fix-totals. juan/fix-totals ya quedó publicada en origin.", "what was published stays said");
+});
+
+test("S4 create outcome: no answer in time, or a server error, reads the branch again with the same account: a PR there is the one made, else it may be retried", async () => {
+  const made = createIo({ remote: HEAD, post: "reject", reads: [cardAnswer(prNode({ number: 162, isDraft: true }))] });
+  assert.deepEqual(await createPr(CREATE, made.io), {
+    status: "created", err: "", pr: { number: 162, url: URL162, draft: true }, plan: { ok: true, local: HEAD, remote: HEAD, push: false, why: null, ahead: 0, blocked: "" },
+  });
+  assert.deepEqual(made.log.filter(([kind]) => kind === "gh").map(([, who, args]) => [who, args.includes("POST") ? "post" : "read"]), [[null, "post"], [null, "read"]]);
+  assert.deepEqual(made.log.at(-1)[2], cardQueryArgs(REPO, "juan/fix-totals"), "the card's own query, by branch");
+  const none = createIo({ remote: HEAD, post: { code: 1, out: "", err: "gh: Server Error (HTTP 502)" } });
+  const r = await createPr(CREATE, none.io);
+  assert.equal(r.status, "unsure");
+  assert.equal(r.err, "GitHub no confirmó el PR y aún no aparece en juan/fix-totals. Puedes volver a intentar: GitHub no abre dos PR de juan/fix-totals a main.");
+  const old = { ...prNode({ number: 99, state: "MERGED" }) };
+  assert.equal((await createPr(CREATE, createIo({ remote: HEAD, post: "reject", reads: [cardAnswer(old)] }).io)).status, "unsure", "an old merged PR of the branch isn't the one asked for");
+  const other = { ...prNode({ number: 163 }), baseRefName: "release" };
+  assert.equal((await createPr(CREATE, createIo({ remote: HEAD, post: "reject", reads: [cardAnswer(other)] }).io)).status, "unsure", "one into another base isn't either");
+  assert.deepEqual(createOutcome({ call: { ok: true, rejected: false, out: "garbage", err: "" }, after: null, seen: CREATE_SEEN, base: "main" }).status, "unsure", "an answer that isn't a PR proves nothing");
+});
+
+test("S4 create report: created closes the dialog with a toast; anything else stays in the dialog, or is a toast once it closed", () => {
+  const created = { status: "created", err: "", pr: { number: 162, url: URL162, draft: true }, plan: null };
+  assert.deepEqual(createReport(created, { seen: CREATE_SEEN, base: "main", open: true }), {
+    close: true, error: "", toast: { title: "PR #162 creado", body: "juan/fix-totals → main · draft", level: "success" },
+  });
+  assert.equal(createReport({ ...created, pr: { ...created.pr, draft: false } }, { seen: CREATE_SEEN, base: "main", open: false }).toast.body, "juan/fix-totals → main");
+  assert.equal(createReport(created, { seen: CREATE_SEEN, base: "main", open: false }).close, false);
+  const err = "GitHub no creó el PR: Not Found";
+  assert.deepEqual(createReport({ status: "refused", err, pr: null, plan: null }, { seen: CREATE_SEEN, base: "main", open: true }), { close: false, error: err, toast: null });
+  assert.deepEqual(createReport({ status: "refused", err, pr: null, plan: null }, { seen: CREATE_SEEN, base: "main", open: false }), {
+    close: false, error: "", toast: { title: "PR sin crear", body: err, level: "warning" },
+  });
+  assert.equal(createReport({ status: "failed", err: "x", pr: null, plan: null }, { seen: CREATE_SEEN, base: "main", open: false }).toast.level, "error");
+  assert.deepEqual(createReport({ status: "unsure", err: "y", pr: null, plan: null }, { seen: CREATE_SEEN, base: "main", open: false }).toast, { title: "PR sin confirmar", body: "y", level: "warning" });
 });

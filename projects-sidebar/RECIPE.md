@@ -192,7 +192,8 @@ across repos.
     "Mergear ▾" (`solid`). When GitHub wouldn't merge it, "Mergear ▾" is
     drawn off (`raised`, `dim`), its hover saying why ("Es un draft",
     "Tiene conflictos con main", "Bloqueado por las reglas de main", …).
-  - Without one, centered: "Esta rama no tiene PR" and the branch under it.
+  - Without one, centered: "Esta rama no tiene PR", the branch under it, and
+    a 26 px "Crear PR" button (`solid`).
     A detached workspace says "Este workspace no está en una rama"; GitHub
     not answering, "GitHub no respondió", or "Ninguna cuenta de gh ve
     <owner>/<repo>" when no account you're logged into sees the repo.
@@ -206,6 +207,19 @@ across repos.
     puede deshacer. La rama queda: Delete workspace la borra."; footer
     Cancelar and Mergear (`solid`), "Mergeando…" while it runs. An outcome
     that isn't a merge stays in the dialog in `blocked`.
+  - Crear PR's dialog (480 × 540, modal): "Crear PR", "head → base" in
+    `muted`, then the New workspace dialog's fields: Base (a select with the
+    default marked "por defecto"), Título (an input), Descripción (a 96 px
+    multi-line box), a Draft checkbox ("GitHub lo abre como borrador"), the
+    account in `dim` ("Con la cuenta de gh de este repo", or "Con la cuenta
+    <login>"), and why it publishes first ("origin no tiene <branch>: se
+    publica primero.", "2 commits sin publicar: se publican primero.").
+    What git says against a PR now shows under them in `blocked` ("… se
+    separaron. Trae los commits de origin (git pull) antes de crear el PR.",
+    "git no pudo leer origin (…). Crear PR lo vuelve a comprobar."), and
+    what is left to fill in `dim` ("Escribe un título."). Footer Cancelar
+    and "Crear PR" or "Publicar y crear PR" (`solid`, ⌘↵, off only while
+    the base or the title is missing), "Creando…" while it runs.
 
 **How it behaves**
 
@@ -409,6 +423,41 @@ across repos.
     (`projects.refresh-prs`; one already running gets one more after it),
     and the card reads again as soon as the sidebar stores the new state,
     so both turn purple. Clicking "Mergear ▾" also reads the card again.
+- **Crear PR** (the card's "Crear PR", on a branch without a PR):
+  - Its dialog starts on the project's saved base (Default branch…) when
+    git has it, else the repo's default branch on GitHub; the list then has
+    origin's 30 most recent branches, never the PR's own. The title starts as
+    the branch's last commit's subject (a title typed meanwhile is kept).
+  - When it opens it asks origin about the branch (`git ls-remote`): if
+    origin doesn't have it, or lacks commits it has, the button says
+    "Publicar y crear PR" and the dialog says why. A branch that split from
+    origin's (each has commits the other lacks) is never pushed: nothing is
+    forced, and the dialog says to bring origin's commits first. Each click
+    checks again, so after a pull, or once origin answers, the same dialog
+    goes on.
+  - "Crear PR" (a click or ⌘↵):
+    1. checks that origin is still that repo, and the branch against origin
+       again: commits the button didn't say it publishes are never published
+       unseen ("Hay commits de <branch> sin publicar: ahora el botón los
+       publica antes de crear el PR.") and nothing is made;
+    2. publishes the branch when the button said so, `git push -u origin
+       <branch>` (your hooks run; up to 2 minutes);
+    3. creates the PR through GitHub's REST API with the account that read
+       the card, never another, as a draft when Draft is on. GitHub refusing
+       says GitHub's message ("GitHub no creó el PR: Validation Failed: A
+       pull request already exists for …"); a branch it published stays
+       published, and the message says so;
+    4. with no answer in time, or a server error, it reads the branch's PR
+       again: one there into that base is the one made; none yet says it can
+       be tried again (GitHub never opens a second PR from a branch to the
+       same base).
+  - The create finishes even when the dialog is closed with Esc; it then
+    reports with a toast. A create closes the dialog with a toast "PR #162
+    creado" ("<branch> → <base> · draft").
+  - Afterwards the sidebar asks GitHub for its colors again, and the card
+    reads again as soon as the sidebar stores the new PR, so both show it
+    (gray while it is a draft). Clicking "Crear PR" also reads the card
+    again.
 
 **Built from**
 
@@ -454,6 +503,7 @@ across repos.
   - `pr` = `pr-card.js` (the PR card, in the panel's `pr-card` block);
   - `merge-menu` and `merge-pr` = `merge-pr.js` (Mergear's methods popup
     and its confirm dialog);
+  - `create-pr` = `create-pr.js` (Crear PR's dialog);
   - `project-menu`, `workspace-menu`, `group-menu`, `group-form`.
   - `main.js` names the view a copy without props draws in one line,
     `const DEFAULT_VIEW = "tree";`, which `scripts/check-views.sh` rewrites
@@ -481,14 +531,14 @@ across repos.
 - **Commands:** `projects.add`, `projects.add-here`, `projects.new-workspace`,
   `projects.group1`..`projects.group3`, `projects.ping`, and
   `projects.refresh-prs` (a PR round now, or one more after the one
-  running: Mergear runs it after a merge). All run in the tree copy, the
-  only one that reads commands. `keys.json` binds F1–F3 in section
-  `layout:projects`.
+  running: Mergear and Crear PR run it after theirs). All run in the tree
+  copy, the only one that reads commands. `keys.json` binds F1–F3 in
+  section `layout:projects`.
 - **Herdr functions:** `spaces`, `panes`, `agents`, `focused`,
   `knownAgents`, `layout`, `window`, `home`, `pickFolder`, `watchFolder`,
   `exec`, `run` (`space.select`, `space.new`, `space.close`, `pane.focus`,
   the PR card's `layout.show` and `layout.hide` of its own block, and
-  Mergear's `projects.refresh-prs`),
+  Mergear's and Crear PR's `projects.refresh-prs`),
   `openOverlay`, `closeOverlay`, `shared`, `setShared`, `notify`, `theme`,
   `props`, `nextCommand`.
 - **Programs it runs:**
@@ -521,6 +571,15 @@ across repos.
     sha=<head>` (Mergear), after the card's query once more, both with the
     account that read the PR; the query again when GitHub gave no answer.
     Never `gh pr merge`, which from a worktree fails checking out the base.
+  - Crear PR, in the workspace: `git log -1 --format=%s` (the title),
+    `rev-parse --verify`, `ls-remote origin refs/heads/<branch>` (network),
+    `rev-list --left-right --count`, a `fetch` of that one branch when
+    origin's commit isn't here, and, when it publishes, `git push -u origin
+    refs/heads/<branch>:refs/heads/<branch>` (never forced; 2 minutes
+    instead of exec's 30 s, for your hooks). Then `gh api -X POST
+    repos/<o>/<r>/pulls -f title=… -f head=<branch> -f base=<base> -f
+    body=… -F draft=<true|false>` with the account that read the card, and
+    the card's query again when GitHub gave no answer. Never `gh pr create`.
   - Two GitHub accounts: gh runs in the project's folder, where a gh
     wrapper that picks the account by repo picks it, and plain gh uses its
     active account. When GitHub answers that it can't see the repo, the
@@ -638,9 +697,10 @@ against.
   you rename a pushed branch, and `gh api graphql` every minute for the PR
   colors while the window is in front (one GraphQL point per project with
   workspaces), plus one for the PR card every 30 s while Changes shows and
-  each time it shows another workspace. It reads repo folders outside its own and
-  writes worktrees under `~/orca/workspaces`. Change `WORKTREE_ROOT` in
-  `config.js` to put them elsewhere.
+  each time it shows another workspace. Crear PR's dialog asks origin with
+  `ls-remote` when it opens, and Crear PR may `push`. It reads repo
+  folders outside its own and writes worktrees under `~/orca/workspaces`.
+  Change `WORKTREE_ROOT` in `config.js` to put them elsewhere.
 - **Install by copying.** Herdr doesn't load a mod folder that is a
   symlink ("no mod folder …"). `scripts/install.sh` copies the files and
   lists them in `<home>/.herdr-plugins/projects-sidebar.txt`.
@@ -673,6 +733,11 @@ against.
 - **A merge with no answer may still finish.** exec gives up after 30 s;
   the dialog then reads the PR again and says what GitHub shows. Check the
   PR before trying again.
+- **Crear PR publishes your branch** when origin doesn't have it or lacks
+  its commits (the button then says "Publicar y crear PR"), with `git push
+  -u`, so the branch tracks `origin/<branch>` from then on. It never forces a
+  push. It creates the PR with the account that read the card, like Mergear.
+  A branch it published stays published when GitHub then refuses the PR.
 - **Rename can change GitHub:** it runs `gh` with your account, and GitHub
   closes a PR opened from the renamed branch. Without `gh` it pushes a copy;
   it never deletes the old branch.
@@ -695,8 +760,9 @@ against.
   applies in Project mode.
 - **`herdr-app check` draws only the tree view.** Check the other views
   from a copy whose `main.js` defaults to them: `scripts/check-views.sh
-  projects-sidebar/mods/projects pr merge-menu merge-pr` checks the PR
-  card and Mergear's popup and dialog. Outside Herdr there is no
+  projects-sidebar/mods/projects pr merge-menu merge-pr create-pr` checks
+  the PR card, Mergear's popup and dialog, and Crear PR's dialog. Outside
+  Herdr there is no
   workspace and no props, so that check draws their empty states only.
 - **The PR card hides by clicking:** its `layout.hide` / `layout.show` is a
   layout click, which Herdr saves in `layouts/.state/`. Moving between a
@@ -726,8 +792,8 @@ against.
 
 - `node --test 'test/*.test.js'` reports `fail 0`, and `herdr-app check`
   passes on `mods/projects`, and `scripts/check-views.sh
-  projects-sidebar/mods/projects pr merge-menu merge-pr` on the PR card
-  and Mergear's views.
+  projects-sidebar/mods/projects pr merge-menu merge-pr create-pr` on the
+  PR card, Mergear's and Crear PR's views.
 - After `scripts/install.sh` and `layout.switch {name: "projects"}`, the
   sidebar shows "Projects" with an empty state. The groups bar shows one
   highlighted code icon whose tooltip reads "Projects · F1".
@@ -774,3 +840,10 @@ against.
   one more commit pushed to the head after the card read it, Mergear says
   "El PR #<n> tiene commits nuevos: no se mergeó nada." and nothing is
   merged.
+- On a throwaway branch with commits origin doesn't have yet, into a
+  throwaway base (never `main`): the card says "Esta rama no tiene PR" →
+  "Crear PR" → the dialog starts on the base, the last commit's subject as
+  the title, and "Publicar y crear PR"; with Draft on, it publishes the
+  branch (`git ls-remote origin refs/heads/<branch>` lists it), the dialog
+  closes with "PR #<n> creado", and the card and the sidebar's branch icon
+  show the draft PR in gray. Close that PR on GitHub afterwards.

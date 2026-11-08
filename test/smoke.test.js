@@ -157,6 +157,35 @@ test("D8: after a merge the dialog asks the tree for a PR round; the tree runs o
   for (const f of ["pr-card.js", "merge-pr.js"]) assert.doesNotMatch(src(f), /savePrs\(/, `${f}: the tree is the only writer of projects.prs.v1`);
 });
 
+test("S4: the card's Crear PR, on a branch without one, opens a modal dialog, a view of the mod; the create outlives it and asks the tree for a round (D4, D7, D8)", () => {
+  const src = (f) => readFileSync(new URL(`../projects-sidebar/mods/projects/${f}`, import.meta.url), "utf8");
+  const main = src("main.js");
+  assert.match(main, /^\s+"create-pr":\s*CreatePr,$/m);
+  assert.match(main, /^import CreatePr from "\.\/create-pr\.js";$/m);
+  const dialog = src("create-pr.js");
+  assert.match(dialog, /export default class CreatePr\b/);
+  assert.match(dialog, /export function openCreatePr\(/);
+  assert.match(dialog, /kind:\s*"dialog",\s*modal:\s*true[\s\S]*?view:\s*"create-pr"/, "a click beside it doesn't close it");
+  assert.match(dialog, /\{\s*owner:\s*null\s*\}/, "the push and the create run in a task no view owns: Esc can't cut them");
+  assert.match(dialog, /createPullRequest\(/);
+  assert.match(dialog, /createReport\(/, "what it says comes from pr-card-model.js");
+  assert.match(dialog, /createSeenOf\(/, "the props are checked before anything is shown or sent");
+  assert.match(dialog, /run\("projects\.refresh-prs"\)/, "D8: the tree asks GitHub, so the sidebar and the card show the new PR");
+  assert.match(dialog, /G\.createPrFacts\(/, "the title and whether to publish first, read when it opens");
+  assert.match(dialog, /G\.baseExists\(/, "a saved base counts only when git has it (D37)");
+  assert.match(dialog, /TextareaState\.new\(/, "the description takes several lines");
+  assert.doesNotMatch(dialog, /savePrs\(/, "the tree is the only writer of projects.prs.v1");
+  assert.doesNotMatch(dialog, /"pr",\s*"create"|pr create|--force/, "GitHub's REST create, never `gh pr create`; never a forced push");
+  const git = src("git.js");
+  assert.match(git, /export const createPullRequest = [\s\S]*?createPr\(/, "git.js binds createPr to exec");
+  assert.match(git, /export const createPrFacts = [\s\S]*?readCreateFacts\(/, "and readCreateFacts");
+  assert.match(git, /exec\("git", args, timeout \? \{ cwd, timeout \} : \{ cwd \}\)/, "a push may take longer than exec's 30 s");
+  const card = src("pr-card.js");
+  assert.match(card, /createRequest\(/, "the card hands the dialog what it read");
+  assert.match(card, /openCreatePr\(/);
+  assert.match(card, /"Crear PR"/);
+});
+
 test("the workspace menu is a view of the mod (D20)", () => {
   const src = (f) => readFileSync(new URL(`../projects-sidebar/mods/projects/${f}`, import.meta.url), "utf8");
   assert.match(src("main.js"), /"workspace-menu":\s*WorkspaceMenu/);

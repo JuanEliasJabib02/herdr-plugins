@@ -18,6 +18,7 @@
 //                     PR of the branch Changes shows)
 //   merge-menu        the card's Mergear ▾ popup (the merge methods)
 //   merge-pr          the Mergear confirm dialog
+//   create-pr         the Crear PR dialog (the card's branch has no PR)
 // Copies never reach into each other: they share state through store.js
 // (setShared re-renders every copy) and act through herdr commands.
 
@@ -38,6 +39,7 @@ import DeleteTask from "./delete-task.js";
 import NewWorkspace, { commands as newWorkspaceCommands } from "./new-workspace.js";
 import PrCard from "./pr-card.js";
 import MergePr, { MergeMenu } from "./merge-pr.js";
+import CreatePr from "./create-pr.js";
 
 const VIEWS = {
   tree: Tree,
@@ -56,6 +58,7 @@ const VIEWS = {
   pr: PrCard,
   "merge-menu": MergeMenu,
   "merge-pr": MergePr,
+  "create-pr": CreatePr,
 };
 
 // The view of a copy given no props: the tree. scripts/check-views.sh
