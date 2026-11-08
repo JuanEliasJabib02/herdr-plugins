@@ -979,6 +979,32 @@ test("usage errors exit 2; continue and classify with nothing to act on", async 
   assert.match(classify.stdout, /Nothing to classify/);
 });
 
+test("D28: logs --repo <name> after the turn-off: a repo known only to settings, then one known only by its log file", async () => {
+  const w = makeWorld();
+  const lab = makeRepo(w, "lab", { pkg: DEV, tasks: ["AX-90"] });
+  w.settings({ repos: { [lab.root]: { enabled: true } } });
+  const ws = lab.ws["AX-90"];
+  assert.equal((await w.cli(["toggle", "--workspace", ws])).code, 0);
+  await w.until((s) => s.queue.lighting[`direct/${lab.root}`]?.phase === "done", { what: "lit" });
+  const logPath = w.state().repos[lab.root].logPath;
+  assert.equal((await w.cli(["toggle", "--workspace", ws])).code, 0);
+  await w.until((s) => !s.repos[lab.root], { what: "off" });
+
+  const byName = await w.cli(["logs", "--repo", "lab"]);
+  assert.equal(byName.code, 0, byName.stderr);
+  assert.match(byName.stdout, /fake server: npm run dev --/);
+  const path = await w.cli(["logs", "--path", "--repo", "lab"]);
+  assert.equal(path.stdout.trim(), logPath);
+
+  // Not in projects.v1, settings or state any more: the log file alone still answers.
+  w.settings({ repos: {} });
+  const fromFile = await w.cli(["logs", "--repo", "lab"]);
+  assert.equal(fromFile.code, 0, fromFile.stderr);
+  assert.match(fromFile.stdout, /fake server: npm run dev --/);
+  const unknown = await w.cli(["logs", "--repo", "nope"]);
+  assert.equal(unknown.code, 2);
+});
+
 test("logs --path, logs after the notes, peek, and env --variant checked before it is stored", async () => {
   const w = makeWorld();
   const app = makeRepo(w, "app", { pkg: DEV, tasks: ["AX-31"] });

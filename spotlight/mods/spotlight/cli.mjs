@@ -32,7 +32,7 @@ import { pidAlive, LockError } from "./locks.js";
 import { normRoot } from "./settings.js";
 import { isSafeVariant, isServerEnv, SERVER_ENVS } from "./server-plan.js";
 import { serverTerminalName, serverLogs, peekServer } from "./server.js";
-import { logPathFor, formatClock } from "./server-log.js";
+import { logPathFor, logDir, repoSlug, formatClock } from "./server-log.js";
 import {
   CLI_PATH, makeContext, terminalFacts, hcGet, repoRootOf, checkoutOf, branchOf, taskKeyOfWorkspace, registeredRoots,
   folderTask,
@@ -134,12 +134,32 @@ const usage = (text) => {
 const terminalOf = (opts) => (opts.terminal || process.env.HC_TERMINAL_ID || "").trim() || null;
 
 // A repo given as a path (a root or any checkout of it) or as its name
-// (projects.v1's, or the folder's, among the repos Spotlight knows).
+// (projects.v1's, or the folder's, among the repos Spotlight knows: state,
+// projects.v1 and settings, so a repo turned off and not in a space still
+// answers, D28).
 async function resolveRepo(cx, value) {
   if (!value) return null;
   if (value.includes("/")) return repoRootOf(path.resolve(value));
-  const known = [...new Set([...Object.keys(cx.store.readState().repos), ...registeredRoots(cx.shared)])];
+  const configured = Object.keys(cx.store.readSettings({ keepBackup: false }).settings.repos ?? {});
+  const known = [...new Set([...Object.keys(cx.store.readState().repos), ...registeredRoots(cx.shared), ...configured])];
   return known.find((root) => cx.nameOf(root) === value) ?? known.find((root) => path.basename(root) === value) ?? null;
+}
+
+// D28: a name Spotlight no longer knows still finds its server's log, when
+// exactly one log file carries that folder name (<slug>-<6 hex>.log; the
+// slug of "/<name>" gives the same folder part repoSlug builds). Null when
+// none or several match.
+function logFileByName(value) {
+  if (!value || value.includes("/")) return null;
+  const base = repoSlug(`/${value}`).slice(0, -7);
+  let names;
+  try {
+    names = fs.readdirSync(logDir());
+  } catch {
+    return null;
+  }
+  const matches = names.filter((n) => n.startsWith(`${base}-`) && /^-[0-9a-f]{6}\.log$/.test(n.slice(base.length)));
+  return matches.length === 1 ? path.join(logDir(), matches[0]) : null;
 }
 
 // The repo root of --repo, else of the folder the CLI runs in.
@@ -440,23 +460,23 @@ function portBusyLine(r) {
 
 async function verbLogs(cx, opts) {
   const root = await repoOrCwd(cx, opts);
-  if (!root) return usage("spotlight logs: --repo <path or name>, or run it inside the repo.");
   const state = cx.store.readState();
-  const record = state.repos[root] ?? null;
-  const logPath = record?.logPath ?? logPathFor(root);
+  const record = root ? (state.repos[root] ?? null) : null;
+  const logPath = root ? (record?.logPath ?? logPathFor(root)) : logFileByName(opts.repo);
+  if (!logPath) return usage("spotlight logs: --repo <path or name>, or run it inside the repo.");
   if (opts.path) {
     out(logPath);
     return 0;
   }
   // D11: the CLI's notes first, then the server's own output.
-  const notes = state.notes.filter((n) => n.repo === root).slice(-NOTES_SHOWN);
+  const notes = root ? state.notes.filter((n) => n.repo === root).slice(-NOTES_SHOWN) : [];
   if (notes.length > 0) {
     out("Spotlight notes:");
     for (const n of notes) out(`  ${formatClock(n.at)}  ${n.text}`);
     out("");
   }
   const r = await serverLogs({ logPath, terminal: record?.serverTerminal ?? null, lines: opts.lines }, cx.serverDeps);
-  if (r.source === null) out(`No server log yet for ${cx.nameOf(root)} (${logPath}).`);
+  if (r.source === null) out(`No server log yet for ${root ? cx.nameOf(root) : opts.repo} (${logPath}).`);
   else process.stdout.write(r.text);
   return 0;
 }
