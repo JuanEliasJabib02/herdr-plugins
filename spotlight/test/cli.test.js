@@ -13,7 +13,7 @@
 // state.json for it. Nothing here touches a real Herdr terminal.
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
-import { execFile, execFileSync, spawnSync } from "node:child_process";
+import { execFile, execFileSync, spawn, spawnSync } from "node:child_process";
 import {
   mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, realpathSync, rmSync, chmodSync, symlinkSync,
 } from "node:fs";
@@ -170,28 +170,43 @@ try {
 }
 `;
 
-// lsof -F pcn of the fake servers: a `script` foreground with listen ports.
+// lsof -F pcn of the fake servers: a `script` foreground with listen ports,
+// plus `foreign` listeners (real pids, listed while they live) outside every
+// terminal. `lsof -a -p <pid> -d cwd -F n` answers a foreign pid's cwd.
 const FAKE_LSOF = `#!${NODE}
 ${FAKE_LIB}
 const s = load();
-const lines = [];
-for (const t of Object.values(s.terminals)) {
-  if (t.state !== "live" || !t.foreground || t.foreground.name !== "script" || !t.serverPorts) continue;
-  lines.push("p" + t.foreground.pid, "cnode");
-  for (const p of t.serverPorts) lines.push("f20", "n*:" + p);
+const args = process.argv.slice(2);
+const alive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+const foreign = (s.foreign ?? []).filter((f) => alive(f.pid));
+if (args.includes("-d")) {
+  const pid = Number(args[args.indexOf("-p") + 1]);
+  const f = foreign.find((x) => x.pid === pid && x.cwd);
+  if (f) process.stdout.write("p" + pid + "\\nfcwd\\nn" + f.cwd + "\\n");
+  process.exitCode = f ? 0 : 1;
+} else {
+  const lines = [];
+  for (const t of Object.values(s.terminals)) {
+    if (t.state !== "live" || !t.foreground || t.foreground.name !== "script" || !t.serverPorts) continue;
+    lines.push("p" + t.foreground.pid, "cnode");
+    for (const p of t.serverPorts) lines.push("f20", "n*:" + p);
+  }
+  for (const f of foreign) lines.push("p" + f.pid, "cnode", "f21", "n*:" + f.port);
+  process.stdout.write(lines.length ? lines.join("\\n") + "\\n" : "");
+  process.exitCode = lines.length ? 0 : 1;
 }
-process.stdout.write(lines.length ? lines.join("\\n") + "\\n" : "");
-process.exitCode = lines.length ? 0 : 1;
 `;
 
-// pgrep -P <pid>: a fake terminal's foreground is its shell's child.
+// pgrep -P <pid>: a fake terminal's foreground is its shell's child; `children`
+// maps other pids (a foreign listener's tree) to theirs.
 const FAKE_PGREP = `#!${NODE}
 ${FAKE_LIB}
 const pid = Number(process.argv[3]);
 const s = load();
 const kids = Object.values(s.terminals)
   .filter((t) => t.state === "live" && t.pid === pid && t.foreground && t.foreground.pid !== pid)
-  .map((t) => t.foreground.pid);
+  .map((t) => t.foreground.pid)
+  .concat((s.children ?? {})[pid] ?? []);
 process.stdout.write(kids.map((k) => k + "\\n").join(""));
 process.exitCode = kids.length ? 0 : 1;
 `;
@@ -321,6 +336,13 @@ function makeWorld() {
     listen(root, ports) {
       w.hcUpdate((s) => {
         s.listen[root] = ports;
+      });
+    },
+    // Listeners outside every terminal: [{ pid, port, cwd }] (real pids).
+    foreign(list, children = {}) {
+      w.hcUpdate((s) => {
+        s.foreign = list;
+        s.children = children;
       });
     },
     serverTerminal(root) {
@@ -1438,4 +1460,155 @@ test("J-004, J-005: the pure rules (requestFgPid, classifyStep)", async () => {
   assert.deepEqual(classifyStep(req({ classifyPid: null, classifyAt: now - 10_000 }), 1, { now, pidAlive: dead }), { action: "spawn", spawns: 2 });
   assert.deepEqual(classifyStep(req({ classifySpawns: 1 + CLASSIFY_RESPAWNS }), 1, { now, pidAlive: dead }), { action: "fallback" });
   assert.deepEqual(classifyStep(req({ classifySpawns: 1 + CLASSIFY_RESPAWNS }), 1, { now, pidAlive: alive }), { action: "wait" });
+});
+
+// ── T13: a busy port before start, and Liberar puerto y arrancar (D23, D24) ─
+
+// speaking-english's scripts (S14): `pnpm dev` runs both halves in parallel,
+// and Next's half wants 3008.
+const SE_PKG = {
+  scripts: { dev: "npm-run-all --parallel dev:next dev:convex", "dev:next": "next dev -p 3008", "dev:convex": "convex dev" },
+};
+
+// Real processes stand in for whatever holds a port: `ps` reads their
+// command and `kill` reaches them. Every one is killed when the file ends.
+const procs = [];
+after(() => {
+  for (const p of procs) {
+    try {
+      process.kill(p.pid, "SIGKILL");
+    } catch {
+      // Already gone.
+    }
+  }
+});
+function spawnProc(file, args) {
+  const child = spawn(file, args, { stdio: "ignore" });
+  child.exited = new Promise((resolve) => child.on("exit", (code, signal) => resolve({ code, signal })));
+  procs.push(child);
+  return child;
+}
+const alive = (pid) => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+};
+const scriptLines = (w) => w.hc().sent.filter((x) => x.text.startsWith("script "));
+const serverNoteAction = (workspace) => ({ name: `spotlight.server.${sha1(workspace).slice(0, 12)}` });
+
+test("a listener outside the server terminal's tree on the expected port: port-busy with pid, command and cwd, no line typed, a toast that opens the popup; nothing is killed without --free-port", async () => {
+  const w = makeWorld();
+  const app = makeRepo(w, "speaking", { pkg: SE_PKG, tasks: ["AX-7"] });
+  w.register([{ id: "g1", repos: [app] }]);
+  const holder = spawnProc("sleep", ["300"]);
+  w.foreign([{ pid: holder.pid, port: 3008, cwd: "/Users/u/old/speaking-english" }]);
+  const ws = app.ws["AX-7"];
+  const t = w.agent(ws);
+
+  const on = await w.cli(["on", "--timeout-ms", "20000"], { terminal: t, cwd: ws });
+  assert.equal(on.code, 0, on.stderr + on.stdout);
+  const message = `El puerto 3008 lo tiene sleep 300 (pid ${holder.pid}, en /Users/u/old/speaking-english).`;
+  // Agents get the message (D24), at once: nothing will open that port.
+  assert.ok(on.stdout.includes(message), on.stdout);
+  assert.ok(on.ms < 12_000, `waited ${on.ms} ms for a server that never starts`);
+  const rec = w.state().repos[app.root];
+  const { at, ...error } = rec.lastError;
+  assert.deepEqual(error, { code: "port-busy", port: 3008, pid: holder.pid, command: "sleep 300", cwd: "/Users/u/old/speaking-english", message });
+  assert.ok(Number.isFinite(at));
+  assert.deepEqual(scriptLines(w), [], "no server line is typed over a busy port");
+  const toast = w.state().notes.find((n) => n.toast && n.text.includes(message));
+  assert.ok(toast, JSON.stringify(w.state().notes));
+  assert.deepEqual(toast.action, serverNoteAction(ws));
+
+  // Reiniciar alone checks again and kills nothing.
+  const again = await w.cli(["restart", "--repo", app.root]);
+  assert.equal(again.code, 1, again.stdout);
+  assert.ok(again.stderr.includes(`port-busy: ${message}`), again.stderr);
+  assert.equal(alive(holder.pid), true);
+  assert.deepEqual(scriptLines(w), []);
+
+  // An auto-sync of the holder keeps the error: the server is still not running.
+  write(ws, "page.txt", "edit\n");
+  const sync = await w.cli(["sync", "--repo", app.root]);
+  assert.equal(sync.code, 0, sync.stderr);
+  assert.equal(w.state().repos[app.root].lastError?.code, "port-busy");
+
+  // Another process took the port since the popup showed the first one:
+  // --free-port kills neither and shows the new holder instead.
+  const other = spawnProc("sleep", ["301"]);
+  w.foreign([{ pid: other.pid, port: 3008, cwd: "/tmp/other" }]);
+  const stale = await w.cli(["restart", "--repo", app.root, "--free-port"]);
+  assert.equal(stale.code, 1, stale.stdout);
+  assert.ok(stale.stderr.includes(`pid ${other.pid}`), stale.stderr);
+  assert.equal(alive(holder.pid), true);
+  assert.equal(alive(other.pid), true);
+  assert.equal(w.state().repos[app.root].lastError.pid, other.pid);
+  assert.deepEqual(scriptLines(w), []);
+});
+
+test("a listener inside the server terminal's tree on the expected port is Spotlight's own: the restart goes ahead", async () => {
+  const w = makeWorld();
+  const app = makeRepo(w, "own", { pkg: { scripts: { dev: "next dev -p 3008" } }, tasks: ["AX-8"] });
+  w.register([{ id: "g1", repos: [app] }]);
+  w.listen(app.root, [3008]);
+  const t = w.agent(app.ws["AX-8"]);
+  const on = await w.cli(["on"], { terminal: t, cwd: app.ws["AX-8"] });
+  assert.equal(on.code, 0, on.stderr + on.stdout);
+  assert.match(on.stdout, /own {2}http:\/\/localhost:3008 {2}listening/);
+  const r = await w.cli(["restart", "--repo", app.root]);
+  assert.equal(r.code, 0, r.stderr + r.stdout);
+  assert.match(r.stdout, /^Restarted own's server: npm run dev --$/m);
+  assert.equal(scriptLines(w).length, 2);
+  assert.equal(w.state().repos[app.root].lastError, null);
+});
+
+// Holds a port and ignores SIGTERM; its child (`sleep`) doesn't. Writes the
+// child's pid, then how the child ended, to the file in argv[1].
+const HOLDER_JS = `
+const fs = require("fs");
+process.on("SIGTERM", () => {});
+const c = require("child_process").spawn("sleep", ["300"], { stdio: "ignore" });
+c.on("exit", (code, sig) => fs.appendFileSync(process.argv[1], "child exited " + sig + "\\n"));
+fs.appendFileSync(process.argv[1], "child " + c.pid + "\\n");
+setInterval(() => {}, 1000);
+`;
+
+test("restart --free-port: TERM to the port's holder and its descendants, KILL after 5 s, nobody else; then the server starts", async () => {
+  const w = makeWorld();
+  const app = makeRepo(w, "freed", { pkg: SE_PKG, tasks: ["AX-9"] });
+  w.register([{ id: "g1", repos: [app] }]);
+  const report = join(w.dir, "holder.txt");
+  const holder = spawnProc(NODE, ["-e", HOLDER_JS, report]);
+  let childPid = null;
+  for (let i = 0; i < 100 && !childPid; i += 1) {
+    await sleep(50);
+    childPid = Number(/^child (\d+)$/m.exec(existsSync(report) ? readFileSync(report, "utf8") : "")?.[1]) || null;
+  }
+  assert.ok(childPid, "the holder's child started");
+  procs.push({ pid: childPid });
+  const bystander = spawnProc("sleep", ["302"]);
+  w.foreign([{ pid: holder.pid, port: 3008, cwd: "/Users/u/old" }], { [holder.pid]: [childPid] });
+  const ws = app.ws["AX-9"];
+  const t = w.agent(ws);
+  const on = await w.cli(["on", "--timeout-ms", "20000"], { terminal: t, cwd: ws });
+  assert.equal(on.code, 0, on.stderr + on.stdout);
+  assert.equal(w.state().repos[app.root].lastError?.pid, holder.pid);
+
+  // Once started, the server listens on the port it was after.
+  w.listen(app.root, [3008]);
+  const freed = await w.cli(["restart", "--repo", app.root, "--free-port"]);
+  assert.equal(freed.code, 0, freed.stderr + freed.stdout);
+  assert.match(freed.stdout, /^Restarted freed's server: npm run dev --$/m);
+  assert.ok(freed.ms >= 5_000, `KILL came before the 5 s grace (${freed.ms} ms)`);
+  assert.equal((await holder.exited).signal, "SIGKILL");
+  assert.match(readFileSync(report, "utf8"), /^child exited SIGTERM$/m);
+  assert.equal(alive(childPid), false);
+  assert.equal(alive(bystander.pid), true, "a process outside the holder's tree is never signalled");
+  assert.equal(scriptLines(w).length, 1);
+  const rec = w.state().repos[app.root];
+  assert.equal(rec.lastError, null);
+  assert.ok(w.state().notes.some((n) => n.repo === app.root && n.text.includes(`Puerto 3008 liberado`)), JSON.stringify(w.state().notes));
 });

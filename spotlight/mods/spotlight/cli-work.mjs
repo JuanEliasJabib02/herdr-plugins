@@ -15,11 +15,11 @@ import { emptyRepo, addNote, reconcileRepo, rememberVariant } from "./store.js";
 import { pidAlive, LockError } from "./locks.js";
 import { repoSettings, normRoot } from "./settings.js";
 import {
-  planServer, lockfileInstalls, missingInstalls, installsFor, chainInstall, detectServerScripts, commandTemplate,
+  planServer, lockfileInstalls, missingInstalls, installsFor, chainInstall, detectServerScripts, commandTemplate, expectedPort,
 } from "./server-plan.js";
 import { inspectServer, readServerState, startServer, restartServer, stopServer } from "./server.js";
 import { logPathFor, appendLogHeader, rotateLog } from "./server-log.js";
-import { portUrl } from "./ports.js";
+import { portUrl, foreignListener, stopProcessTree } from "./ports.js";
 import { release, pause, regrant, snapshot } from "./queue.js";
 import {
   decideTurnEnd, activityUpdate, lightingMarker, lightAlive, needsLight, memberLit, classifyStep,
@@ -31,8 +31,12 @@ const sha1 = (text) => crypto.createHash("sha1").update(text).digest("hex");
 // D17: the server badge's command id of a workspace's row.
 export const serverId = (workspace) => sha1(normRoot(workspace)).slice(0, 12);
 
-// Errors whose toast opens the server popup (Forzar sync, Apagar igual, D22).
-const POPUP_CODES = new Set(["root-diverged", "untracked-collision"]);
+// Errors whose toast opens the server popup (Forzar sync, Apagar igual, D22;
+// Liberar puerto y arrancar, D24).
+const POPUP_CODES = new Set(["root-diverged", "untracked-collision", "port-busy"]);
+// Errors about the server, not the root: a sync that goes through leaves
+// them, and only a start that goes through clears them (D24).
+const SERVER_ERRORS = new Set(["port-busy"]);
 
 const qctxOf = (cx) => ({ now: cx.now(), ...cx.settings.queue });
 
@@ -126,6 +130,7 @@ const SERVER_WORDS = {
   none: "sin server",
   pending: "server sin tocar",
   failed: "el server no arrancó",
+  "port-busy": "puerto ocupado",
 };
 
 // One repo of a lighting: activate (fresh or takeover), or sync when the
@@ -194,6 +199,9 @@ function serverFailure(r) {
 export const effectiveEnv = (cx, root, record) => record?.envOverride ?? repoSettings(cx.settings, root).env;
 
 const RUNNING = new Set(["starting", "listening"]);
+// What the server terminal holds (server.js inspectServer) when a start or
+// restart would type into it: a free prompt, none yet, Spotlight's server.
+const TYPES_INTO = new Set(["shell", "gone", "spotlight"]);
 
 // Spotlight's server runs in another env than the effective one, and that
 // env starts something: it restarts, as on a command change (D10, J-002).
@@ -215,7 +223,12 @@ export async function envDrift(cx, root, record) {
 //   keepVariant  reuse the running server's variant (a restart, a sync)
 //   restart      restart even when nothing changed (`spotlight restart`)
 //   ifRunning    touch only a server Spotlight runs now (a sync's installs)
-// → { state: started | running | needs-variant | none | pending | failed, … }
+//   freePort     Liberar puerto y arrancar: stop the process the recorded
+//                port-busy error names when it still holds the port (D24)
+// Nothing is typed while a process outside the server terminal's tree holds
+// the port the start takes (D23, D24): lastError port-busy, a toast that
+// opens the popup, and { state: "port-busy", error }.
+// → { state: started | running | needs-variant | none | pending | failed | port-busy, … }
 export async function ensureServer(cx, root, opts = {}) {
   const { workspace, branch = null, taskKey = null, envName, restart = false, ifRunning = false } = opts;
   const state = cx.store.readState();
@@ -247,18 +260,29 @@ export async function ensureServer(cx, root, opts = {}) {
   const seen = await inspectServer(args, cx.serverDeps);
   if (ifRunning && seen.kind !== "spotlight") return { state: "pending" };
   let r;
+  let freed = null;
   const same = record.serverCommand === plan.command && record.serverEnv === plan.env;
   if (seen.kind === "spotlight" && !restart && same && pending.length === 0) {
     r = { ok: true, started: false, reason: "already-running", terminal: seen.terminal, pid: seen.pid };
-  } else if (seen.kind === "spotlight") {
-    r = await restartServer(args, cx.serverDeps);
   } else {
-    r = await startServer(args, cx.serverDeps);
+    // Checked only where a line would be typed. A terminal hc can't read, or
+    // one running something Spotlight didn't start, refuses the start on its
+    // own; and without the terminal's pid, Spotlight's own server would read
+    // as a stranger holding the port.
+    if (TYPES_INTO.has(seen.kind)) {
+      const port = await checkPort(cx, root, {
+        command: plan.command, settings: repoSet, rootPid: seen.rootPid ?? null, freePort: opts.freePort, shown: record.lastError,
+      });
+      freed = port.freed;
+      if (port.busy) return refusePort(cx, root, { busy: port.busy, freed, plan, seen, logPath, workspace, branch, now });
+    }
+    r = seen.kind === "spotlight" ? await restartServer(args, cx.serverDeps) : await startServer(args, cx.serverDeps);
   }
   await cx.store.updateState((s) => {
     const rec = s.repos[root];
     if (!rec) return;
     rec.logPath = logPath;
+    if (freed?.ok) addNote(s, { repo: root, text: `${cx.nameOf(root)}: ${freedText(freed)}` }, now);
     if (r.terminal) rec.serverTerminal = r.terminal;
     if (r.ok && r.started) {
       // serverEnv says what runs now (J-002, J-008): written only when it starts.
@@ -268,6 +292,7 @@ export async function ensureServer(cx, root, opts = {}) {
       });
       delete rec.envFailed;
       delete rec.envFailedAt;
+      if (SERVER_ERRORS.has(rec.lastError?.code)) rec.lastError = null;
       if (taskKey && plan.variant && (plan.source === "inferred" || plan.source === "chosen")) {
         rememberVariant(s, `${taskKey}::${normRoot(root)}`, plan.variant);
       }
@@ -284,13 +309,75 @@ export async function ensureServer(cx, root, opts = {}) {
     }
   });
   const word = r.ok && r.started ? "started" : r.ok && r.reason === "already-running" ? "running" : "failed";
-  return { state: word, result: r, plan };
+  return { state: word, result: r, plan, freed };
+}
+
+// ── A busy port (D23, D24) ─────────────────────────────────────────────────
+
+// The port-busy error of a holder found by checkPort.
+export function portBusyError({ port, pid, command, cwd }) {
+  const where = cwd ? `pid ${pid}, en ${cwd}` : `pid ${pid}`;
+  return { code: "port-busy", port, pid, command, cwd, message: `El puerto ${port} lo tiene ${command ?? "otro proceso"} (${where}).` };
+}
+
+// Who holds the port this start takes, from outside the server terminal's
+// tree (rootPid; none when there's no terminal yet). With `freePort`, the
+// process the recorded port-busy error (`shown`) names is stopped first —
+// SIGTERM to it and its descendants, SIGKILL 5 s later — and only while it
+// is still the one holding that port: whatever took it since is shown, not
+// stopped. → { busy: { port, pid, command, cwd } | null, freed }.
+async function checkPort(cx, root, { command, settings, rootPid, freePort, shown }) {
+  const port = await expectedPort({ root, command, settings, io: cx.io });
+  if (port === null) return { busy: null, freed: null };
+  const holder = async () => {
+    const found = await foreignListener(port, rootPid, cx.serverDeps);
+    return found ? { port, ...found } : null;
+  };
+  let busy = await holder();
+  if (!busy || !freePort || shown?.code !== "port-busy" || shown.port !== port || shown.pid !== busy.pid) return { busy, freed: null };
+  const stopped = await stopProcessTree(
+    busy.pid,
+    { ...cx.serverDeps, kill: (pid, signal) => process.kill(pid, signal) },
+    { protect: [process.pid, rootPid].filter(Number.isInteger) },
+  );
+  const freed = { ...busy, ...stopped };
+  if (stopped.ok) busy = await holder();
+  return { busy, freed };
+}
+
+// What a stopped holder leaves in the notes.
+function freedText({ port, pid, command, killed }) {
+  const forced = killed?.length > 0 ? `; ${killed.length} no paró con SIGTERM y se mató con SIGKILL` : "";
+  return `Puerto ${port} liberado: se paró ${command ?? "el proceso"} (pid ${pid})${forced}.`;
+}
+
+// The start refused: lastError port-busy, one toast per new holder (it
+// opens the popup), a line in the server's log, nothing typed.
+async function refusePort(cx, root, { busy, freed, plan, seen, logPath, workspace, branch, now }) {
+  const error = portBusyError(busy);
+  const name = cx.nameOf(root);
+  await cx.store.updateState((s) => {
+    const rec = s.repos[root];
+    if (!rec) return;
+    const known = rec.lastError?.code === error.code && rec.lastError?.message === error.message;
+    rec.lastError = { ...error, at: now };
+    // A server Spotlight runs keeps its state: the restart didn't touch it.
+    if (seen.kind !== "spotlight") rec.serverState = "stopped";
+    if (freed?.ok) addNote(s, { repo: root, text: `${name}: ${freedText(freed)}` }, now);
+    if (!known) errorNote(s, { root, name, workspace, error, now });
+  });
+  appendLogHeader(logPath, {
+    workspace: workspace ? path.basename(workspace) : null, branch, at: now,
+    event: `Server not started — port ${busy.port} is held by ${busy.command ?? "another process"} (pid ${busy.pid})`,
+  });
+  return { state: "port-busy", error, plan, freed };
 }
 
 // ── sync ───────────────────────────────────────────────────────────────────
 
 // Why the restart a sync asked for didn't happen, for `spotlight sync`'s line.
-const restartFailure = (server) => (server?.state === "failed" ? server.result.reason : null);
+const restartFailure = (server) =>
+  server?.state === "failed" ? server.result.reason : server?.state === "port-busy" ? "port-busy" : null;
 
 // Brings the root in step with its holder (`spotlight sync`, auto-sync, and
 // `on` for each lit member). Under the repo lock; the holder is read inside
@@ -328,9 +415,9 @@ export async function syncRepo(cx, root, { force = false, onlyIf, lockTimeoutMs 
     const refreshServer = async () =>
       ensureServer(cx, root, { workspace: holder, branch: await branchOf(holder), keepVariant: true, ifRunning: true });
     if (result.skipped) {
-      if (record.lastError) {
+      if (record.lastError && !SERVER_ERRORS.has(record.lastError.code)) {
         await cx.store.updateState((s) => {
-          if (s.repos[root]) s.repos[root].lastError = null;
+          if (s.repos[root] && !SERVER_ERRORS.has(s.repos[root].lastError?.code)) s.repos[root].lastError = null;
         });
       }
       const server = (await envDrift(cx, root, record)) ? await refreshServer() : null;
@@ -341,7 +428,8 @@ export async function syncRepo(cx, root, { force = false, onlyIf, lockTimeoutMs 
     await cx.store.updateState((s) => {
       const r = s.repos[root];
       if (!r) return;
-      Object.assign(r, { lastSnapshotSha: result.snapshotSha, lastSyncAt: now, lastError: null });
+      Object.assign(r, { lastSnapshotSha: result.snapshotSha, lastSyncAt: now });
+      if (!SERVER_ERRORS.has(r.lastError?.code)) r.lastError = null;
       r.pendingInstalls = installsFor(r.pendingInstalls, installs);
     });
     let server = null;
@@ -453,6 +541,9 @@ export async function describeServer(cx, state, member, key, syncErrors = {}) {
     cx.serverDeps,
   );
   const running = live.state === "listening" || live.state === "starting";
+  // D24: a start refused over a busy port; nothing will open it, and the
+  // agent reads who holds it.
+  const busy = record.lastError?.code === "port-busy" && live.state !== "listening" ? { portBusy: true, error: record.lastError.message } : {};
   return {
     ...base,
     listening: live.state === "listening",
@@ -462,12 +553,14 @@ export async function describeServer(cx, state, member, key, syncErrors = {}) {
     port: live.port ?? configured,
     url: live.url ?? portUrl(configured),
     syncError,
+    ...busy,
   };
 }
 
 // Polls until every lit repo listens, or has no server (15 s after the wait
 // began), or the deadline passes (O/src/main/spotlight/spotlight-agent-servers.ts:96-132).
-// A repo waiting for a variant has nothing to wait for. → { servers, ready }.
+// A repo waiting for a variant, or whose start a busy port refused (D24),
+// has nothing to wait for. → { servers, ready }.
 export async function waitForTurnServers(cx, { members, key, deadline, syncErrors }) {
   const litAt = cx.now();
   for (;;) {
@@ -476,7 +569,7 @@ export async function waitForTurnServers(cx, { members, key, deadline, syncError
     const lit = servers.filter((s) => s.lit);
     const ready = lit.length > 0 && lit.every((s) => s.listening);
     const settled = lit.every(
-      (s) => s.listening || s.needsVariant || (s.server !== "running" && cx.now() - litAt >= cx.graceMs),
+      (s) => s.listening || s.needsVariant || s.portBusy || (s.server !== "running" && cx.now() - litAt >= cx.graceMs),
     );
     if (ready || settled || cx.now() >= deadline) return { servers, ready };
     await cx.sleep(Math.min(cx.portPollMs, Math.max(0, deadline - cx.now())));

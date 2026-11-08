@@ -217,3 +217,28 @@ test("modIo: T5a's detection over Herdr-style readTextFile and readdir", async (
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// T13 (D24): a port someone else holds. The popup offers "Liberar puerto y
+// arrancar", which stops that process and starts the server; only there.
+const PORT_BUSY = {
+  code: "port-busy", port: 3008, pid: 900, command: "next-server (v16.0.1)", cwd: "/Users/u/old",
+  message: "El puerto 3008 lo tiene next-server (v16.0.1) (pid 900, en /Users/u/old).", at: 3,
+};
+
+test("Liberar puerto y arrancar: only on port-busy, with its argv; never a force path there", () => {
+  const busy = model({ state: stateWith(repo({ serverState: "stopped", ports: [], lastError: PORT_BUSY })) });
+  assert.deepEqual(busy.force, [
+    { id: "free-port", label: "Liberar puerto y arrancar", argv: [BIN, "restart", "--repo", ROOT, "--free-port"], danger: true },
+  ]);
+  assert.equal(busy.error.message, PORT_BUSY.message);
+  // Reiniciar stays: it starts once the port is free, and says so when it isn't.
+  assert.deepEqual(ids(busy.actions), ["peek", "restart", "off"]);
+  // Not on any other error, nor without one.
+  for (const code of ["root-diverged", "untracked-collision", "git-failed", "orphan-refs"]) {
+    const m = model({ state: stateWith(repo({ lastError: { code, message: "m", at: 3 } })) });
+    assert.ok(!ids(m.force).includes("free-port"), code);
+  }
+  assert.deepEqual(model().force, []);
+  // Nothing holds the root (nothing to start): no button.
+  assert.deepEqual(model({ state: stateWith(repo({ holder: null, lastError: PORT_BUSY })) }).force, []);
+});

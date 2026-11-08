@@ -6,12 +6,17 @@
 //   off [--terminal t]                   give the turn back, nothing else
 //   toggle --workspace p [--force]       a human's on/off, outside the queue
 //   status [--json]                      read-only, no lock, no reap
-//   sync --repo r [--force] [--detach]   restart --repo r
+//   sync --repo r [--force] [--detach]   restart --repo r [--free-port]
 //   logs [--repo r] [--lines N] [--path] peek --workspace p | --repo r
 //   env --workspace p [--env e] [--variant v]   reap
 //   continue [--terminal t] [--account id]  Continuar on a paused or idle agent (T11)
 //   internal: light --task k [--force], classify --terminal t,
 //             continue --inline [--auto]
+//
+// `restart --free-port` is the server popup's "Liberar puerto y arrancar"
+// (D24): it stops the process the recorded port-busy error names, then
+// starts the server. Only that click ever stops a process Spotlight didn't
+// start, so USAGE and the agents' skill leave it out.
 //
 // The terminal is --terminal or $HC_TERMINAL_ID. Long work never runs in a
 // caller Herdr can kill (D18): toggle, reap, `sync --detach`, `continue` and
@@ -86,6 +91,7 @@ const FLAGS = {
   account: "string",
   inline: "bool",
   auto: "bool",
+  "free-port": "bool",
   help: "bool",
 };
 
@@ -404,10 +410,16 @@ async function verbRestart(cx, opts) {
   const r = await cx.store.withRepoLock(root, async () => {
     const record = cx.store.readState().repos[root];
     if (!record?.holder) return null;
-    return ensureServer(cx, root, { workspace: record.holder, branch: await branchOf(record.holder), keepVariant: true, restart: true });
+    return ensureServer(cx, root, {
+      workspace: record.holder, branch: await branchOf(record.holder), keepVariant: true, restart: true, freePort: Boolean(opts["free-port"]),
+    });
   });
   if (!r) {
     err(`not-active: Spotlight is not on in ${cx.nameOf(root)}.`);
+    return 1;
+  }
+  if (r.state === "port-busy") {
+    err(portBusyLine(r));
     return 1;
   }
   if (r.state === "started") out(`Restarted ${cx.nameOf(root)}'s server: ${r.plan.command}`);
@@ -418,6 +430,12 @@ async function verbRestart(cx, opts) {
     return 1;
   }
   return 0;
+}
+
+// A start refused over a busy port (D24), and why a --free-port didn't free it.
+function portBusyLine(r) {
+  const kept = r.freed?.ok === false ? " Spotlight no lo paró: de ese proceso dependen Herdr o el server." : "";
+  return `${r.error.code}: ${r.error.message}${kept}`;
 }
 
 async function verbLogs(cx, opts) {
@@ -492,7 +510,10 @@ async function verbEnv(cx, opts) {
   });
   const what = [opts.env && `env ${opts.env}`, opts.variant && `variant ${opts.variant}`].filter(Boolean).join(", ");
   if (r.state === "started") out(`${cx.nameOf(root)}: ${what}; the server restarted: ${r.plan.command}`);
-  else if (r.state === "failed") {
+  else if (r.state === "port-busy") {
+    err(`${cx.nameOf(root)}: ${what} saved; the server did not start. ${portBusyLine(r)}`);
+    return 1;
+  } else if (r.state === "failed") {
     err(`${cx.nameOf(root)}: ${what} saved; the server did not start (${r.result?.reason}).`);
     return 1;
   } else out(`${cx.nameOf(root)}: ${what} saved.`);

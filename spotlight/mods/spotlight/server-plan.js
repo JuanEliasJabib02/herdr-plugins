@@ -5,7 +5,9 @@
 // task, or inferred from the `apps/<V>/` folders its branch touched), and the
 // lockfile installs chained first. Ports Orca Pro Max's
 // spotlight-server-script-detection, -server-variant(-detection),
-// -variant-inference, -server-command and -lockfile-install.
+// -variant-inference, -server-command and -lockfile-install. Beyond Orca:
+// the port a start will take (D23), read from the scripts the command runs,
+// so a port someone else holds is caught before the line is typed (D24).
 //
 // Everything here ends up as a line typed into a shell, and a branch's
 // package.json and folder names feed it, so only exact `local`/`dev`/`prod`
@@ -271,6 +273,211 @@ export async function hasServerCommand(root, io, settings) {
   if (SERVER_ENVS.some((env) => normalizeCommand(settings?.envs?.[env]) !== null)) return true;
   const { detected } = await detectServerScripts(root, io);
   return serverEnvsWithCommand({ detected }).length > 0;
+}
+
+// ── The port a start will take (D23) ───────────────────────────────────────
+// Read before the server line is typed, so a port someone else already
+// holds is caught first (D24): settings' port when set (the command carries
+// it as `--port N`), else the first port the command's server line names,
+// found by following package.json's scripts. Unknown is null: no pre-check.
+
+// The dev servers whose port flags are read; anything else's -p is not a port.
+const PORT_SERVERS = new Set(["next", "vite", "astro", "nuxt", "remix", "react-router", "webpack-dev-server", "serve"]);
+// Script references followed: the command, then up to this many scripts deep.
+const MAX_SCRIPT_DEPTH = 3;
+const PACKAGE_RUNNERS = new Set(["pnpm", "npm", "yarn", "bun"]);
+const RUN_ALL = new Set(["npm-run-all", "run-p", "run-s"]);
+// Options of npm-run-all and concurrently that take the next word as their value.
+const RUN_ALL_VALUE_OPTIONS = new Set(["--max-parallel", "--npm-path"]);
+const CONCURRENTLY_VALUE_OPTIONS = new Set([
+  "-n", "--names", "-c", "--prefix-colors", "-p", "--prefix", "-l", "--prefix-length", "-m", "--max-processes",
+  "-t", "--timestamp-format", "-s", "--success", "--name-separator", "--restart-tries", "--restart-after",
+  "--kill-signal", "--default-input-target", "--hide",
+]);
+// `npm:dev:*` and its siblings: concurrently's shorthand for running scripts.
+const CONCURRENTLY_SCRIPT = /^(?:npm|pnpm|yarn|bun):(.+)$/;
+const ENV_ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
+const PLAIN_WORD = /^[A-Za-z0-9_@%+=:,./-]+$/;
+
+const wordBase = (word) => String(word).split("/").pop();
+const toPort = (text) => (/^\d{1,5}$/.test(text ?? "") ? normalizePort(Number(text)) : null);
+const quoteWord = (word) => (PLAIN_WORD.test(word) ? word : `'${word.replace(/'/g, `'\\''`)}'`);
+
+// A script line split as sh would, as far as package.json scripts go: '…',
+// "…" and \x quoting, and commands joined by && || ; | &. Each command is
+// its words, quotes removed.
+function shellCommands(line) {
+  const commands = [];
+  let words = [];
+  let word = null;
+  const endWord = () => {
+    if (word !== null) words.push(word);
+    word = null;
+  };
+  const endCommand = () => {
+    endWord();
+    if (words.length > 0) commands.push(words);
+    words = [];
+  };
+  for (let i = 0; i < line.length; i += 1) {
+    const c = line[i];
+    if (c === "'") {
+      const end = line.indexOf("'", i + 1);
+      const stop = end === -1 ? line.length : end;
+      word = (word ?? "") + line.slice(i + 1, stop);
+      i = stop;
+    } else if (c === '"') {
+      let j = i + 1;
+      let text = "";
+      while (j < line.length && line[j] !== '"') {
+        if (line[j] === "\\" && j + 1 < line.length) {
+          text += line[j + 1];
+          j += 2;
+        } else {
+          text += line[j];
+          j += 1;
+        }
+      }
+      word = (word ?? "") + text;
+      i = j;
+    } else if (c === "\\") {
+      word = (word ?? "") + (line[i + 1] ?? "");
+      i += 1;
+    } else if (c === " " || c === "\t" || c === "\n") {
+      endWord();
+    } else if (c === "&" || c === "|" || c === ";") {
+      endCommand();
+      if (c !== ";" && line[i + 1] === c) i += 1;
+    } else {
+      word = (word ?? "") + c;
+    }
+  }
+  endCommand();
+  return commands;
+}
+
+// The scripts a name or an npm-run-all glob names: `*` is one `:` segment,
+// `**` any number.
+function scriptsMatching(pattern, scripts) {
+  if (!pattern.includes("*")) return Object.hasOwn(scripts, pattern) ? [pattern] : [];
+  const source = pattern
+    .split(/(\*\*|\*)/)
+    .map((part) => (part === "**" ? ".*" : part === "*" ? "[^:]*" : part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")))
+    .join("");
+  const re = new RegExp(`^${source}$`);
+  return Object.keys(scripts).filter((name) => re.test(name));
+}
+
+// The port of a dev server's command: the first -p N, --port N or --port=N
+// after the server's word, else a PORT=N among its words (the flag wins, as
+// the servers read it). Not a server command: undefined.
+function serverLinePort(words) {
+  const at = words.findIndex((w) => PORT_SERVERS.has(wordBase(w)));
+  if (at === -1) return undefined;
+  for (let i = at + 1; i < words.length; i += 1) {
+    const w = words[i];
+    const port = w === "-p" || w === "--port" ? toPort(words[i + 1]) : w.startsWith("--port=") ? toPort(w.slice(7)) : null;
+    if (port !== null) return port;
+  }
+  for (const w of words) {
+    const port = w.startsWith("PORT=") ? toPort(w.slice(5)) : null;
+    if (port !== null) return port;
+  }
+  return null;
+}
+
+function portOfScript(name, extra, scripts, depth) {
+  if (depth >= MAX_SCRIPT_DEPTH || !Object.hasOwn(scripts, name) || typeof scripts[name] !== "string") return null;
+  // Extra args reach the script's end, as the package managers pass them.
+  const line = extra.length > 0 ? `${scripts[name]} ${extra.map(quoteWord).join(" ")}` : scripts[name];
+  return portOfLine(line, scripts, depth + 1);
+}
+
+function firstPort(names, scripts, depth) {
+  for (const name of names) {
+    const port = portOfScript(name, [], scripts, depth);
+    if (port !== null) return port;
+  }
+  return null;
+}
+
+function portOfCommand(words, scripts, depth) {
+  let i = 0;
+  while (i < words.length && ENV_ASSIGNMENT.test(words[i])) i += 1;
+  const tool = wordBase(words[i] ?? "");
+  const rest = words.slice(i + 1);
+  let script = null;
+  if (PACKAGE_RUNNERS.has(tool) && (rest[0] === "run" || rest[0] === "run-script") && rest[1]) script = [rest[1], rest.slice(2)];
+  // `pnpm dev`, `yarn dev`: a script by its bare name.
+  else if ((tool === "pnpm" || tool === "yarn") && rest[0] && Object.hasOwn(scripts, rest[0])) script = [rest[0], rest.slice(1)];
+  if (script) {
+    const [name, extra] = script;
+    return portOfScript(name, extra[0] === "--" ? extra.slice(1) : extra, scripts, depth);
+  }
+  if (RUN_ALL.has(tool)) {
+    const names = [];
+    for (let j = 0; j < rest.length; j += 1) {
+      if (RUN_ALL_VALUE_OPTIONS.has(rest[j])) j += 1;
+      else if (!rest[j].startsWith("-")) names.push(...scriptsMatching(rest[j].split(/\s+/)[0], scripts));
+    }
+    return firstPort(names, scripts, depth);
+  }
+  if (tool === "concurrently") {
+    for (let j = 0; j < rest.length; j += 1) {
+      const arg = rest[j];
+      if (CONCURRENTLY_VALUE_OPTIONS.has(arg)) {
+        j += 1;
+        continue;
+      }
+      if (arg.startsWith("-")) continue;
+      const shorthand = CONCURRENTLY_SCRIPT.exec(arg);
+      // A quoted command is a shorter line than this one, so this ends.
+      const port = shorthand ? firstPort(scriptsMatching(shorthand[1], scripts), scripts, depth) : portOfLine(arg, scripts, depth);
+      if (port !== null) return port;
+    }
+    return null;
+  }
+  return serverLinePort(words) ?? null;
+}
+
+function portOfLine(line, scripts, depth) {
+  for (const words of shellCommands(line)) {
+    const port = portOfCommand(words, scripts, depth);
+    if (port !== null) return port;
+  }
+  return null;
+}
+
+// The port `command` will listen on, from its own words and the package.json
+// `scripts` it runs (pnpm|npm|yarn|bun run <s>, pnpm|yarn <s>, npm-run-all,
+// run-p, run-s and concurrently, three scripts deep); null when no next,
+// vite, astro, nuxt, remix, react-router, webpack-dev-server or serve line
+// on the way names one.
+export function portFromCommand(command, scripts) {
+  const known = scripts !== null && typeof scripts === "object" && !Array.isArray(scripts) ? scripts : {};
+  if (typeof command !== "string" || command === "") return null;
+  return portOfLine(command, known, 0);
+}
+
+// A repo's package.json scripts ({} when unreadable).
+async function readScripts(root, io) {
+  try {
+    const text = await io.readText(join(root, PACKAGE_JSON), PACKAGE_JSON_MAX_BYTES);
+    const scripts = typeof text === "string" ? parseObject(text)?.scripts : null;
+    return scripts !== null && typeof scripts === "object" && !Array.isArray(scripts) ? scripts : {};
+  } catch {
+    return {};
+  }
+}
+
+// The port a start of `command` in `root` takes (D23): `settings.port` (the
+// repo's entry in settings.json) when set, else portFromCommand over the
+// root's package.json. null when unknown.
+export async function expectedPort({ root, command, settings, io } = {}) {
+  const configured = normalizePort(settings?.port);
+  if (configured !== null) return configured;
+  if (typeof command !== "string" || command === "") return null;
+  return portFromCommand(command, await readScripts(root, io));
 }
 
 // ── Variant inference from what the branch changed ─────────────────────────

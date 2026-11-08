@@ -14,7 +14,9 @@
 //   actions   Ver server, Reiniciar, Apagar
 //   force     on root-diverged / untracked-collision only: Forzar sync (the
 //             holder's tree over the root), Proyectar igual (a refused
-//             takeover or fresh activation, forced), Apagar igual
+//             takeover or fresh activation, forced), Apagar igual; on
+//             port-busy only: Liberar puerto y arrancar (D24: stops the
+//             process holding the server's port, then starts the server)
 // Changing env or variant runs `spotlight env`, which restarts only a server
 // whose command or env changes. The popup's props, D22's shape shared with T8's
 // board row and the toasts' action: { view: "server", repo, workspace }
@@ -117,6 +119,10 @@ export function serverViewModel({ state, settings, repo, workspace, detection, b
     // `light` runs inline in the CLI; the view detaches it (D18: exec dies at 30 s).
     if (key) force.push({ id: "project-anyway", label: "Proyectar igual", argv: [bin, "light", "--task", key, "--force"], detach: true });
     if (holder) force.push({ id: "off-anyway", label: "Apagar igual", argv: [bin, "toggle", "--workspace", holder, "--force"], danger: true });
+  }
+  // D24: the only path that stops a process Spotlight didn't start, a click.
+  if (error?.code === "port-busy" && holder) {
+    force.push({ id: "free-port", label: "Liberar puerto y arrancar", argv: [bin, "restart", "--repo", root, "--free-port"], danger: true });
   }
 
   return {
