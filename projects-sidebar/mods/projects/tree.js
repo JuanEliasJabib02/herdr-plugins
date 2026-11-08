@@ -72,10 +72,12 @@ export default class Tree {
     this.token = 0;
     this.failed = new Set(); // projects git couldn't list last time (folder gone)
     // PR status: which account sees each owner's repos, whether a round is
-    // running, when the last one started, and what the window and the active
-    // group were at the last tick.
+    // running, whether one more was asked for meanwhile (projects.refresh-prs),
+    // when the last one started, and what the window and the active group
+    // were at the last tick.
     this.prMemo = prMemo();
     this.prBusy = false;
+    this.prAgain = false;
     this.prAt = 0;
     this.wasActive = false;
     this.prGroup = null;
@@ -190,23 +192,45 @@ export default class Tree {
     if (Date.now() - this.prAt >= (back ? PR_AGAIN : PR_EVERY)) this.refreshPrs(cx);
   }
 
+  // projects.refresh-prs (D8): a round now, asked by Mergear after a merge.
+  // While one runs, one more is recorded and runs after it: a round that
+  // started before the merge read GitHub before it, so it is never the last
+  // word on the sidebar's colors.
+  askPrs(cx) {
+    if (this.prBusy) {
+      this.prAgain = true;
+      return;
+    }
+    this.refreshPrs(cx);
+  }
+
   // One round: each project of the active group asked once (pr-model.js
   // projectPrs), LISTERS at a time, then stored together (mergePrs: a project
   // that failed keeps what it showed). Stored only when a PR changed, which
-  // re-renders every copy.
+  // re-renders every copy. This copy is the only writer of projects.prs.v1
+  // (store.js); the card and Mergear only read it, and ask for a round.
   refreshPrs(cx) {
     if (this.prBusy) return;
     this.prBusy = true;
+    this.prAgain = false;
     this.prAt = Date.now();
     const projects = (activeGroup(store.registry())?.projects ?? []).map((p) => normPath(p.path));
     const lists = store.cache();
-    cx.spawn(async () => {
+    cx.spawn(async (cx) => {
       try {
         const results = await eachLimit(projects, LISTERS, (p) => workspacePrs(p, lists[p] ?? [], this.prMemo));
         const rounds = projects.map((project, i) => ({ project, ...(results[i].ok ? results[i].value : { ok: false, prs: {} }) }));
         store.savePrs(mergePrs(store.prs(), rounds, store.cache()));
       } finally {
         this.prBusy = false;
+        // Asked for while this one ran: one more, now.
+        if (this.prAgain) {
+          try {
+            this.refreshPrs(cx);
+          } catch {
+            // Reloaded meanwhile: the new build asks on its own.
+          }
+        }
       }
     });
   }
@@ -583,6 +607,9 @@ export const commands = {
   },
   // Add project: pick a folder.
   add: () => addFromPicker(),
+  // A PR round now, or one more after the one running (D8): Mergear asks
+  // for it after a merge. Run only here, the tree copy (main.js).
+  "refresh-prs": ({ cx, view }) => view?.askPrs?.(cx),
   // Add project: the focused space's live folder (S5, scriptable).
   "add-here": async () => {
     const at = liveFolder(focused(), spaces(), panes());

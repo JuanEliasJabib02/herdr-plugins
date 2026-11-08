@@ -118,6 +118,45 @@ test("S5: the card shows the workspace of the folder Changes shows, asks one at 
   assert.doesNotMatch(card, /open_url\(/);
 });
 
+test("S4: Mergear ▾ opens the methods popup, which opens a modal confirm dialog; both are views of the mod, and the merge outlives the dialog (D6)", () => {
+  const src = (f) => readFileSync(new URL(`../projects-sidebar/mods/projects/${f}`, import.meta.url), "utf8");
+  const main = src("main.js");
+  assert.match(main, /"merge-menu":\s*MergeMenu,/);
+  assert.match(main, /"merge-pr":\s*MergePr,/);
+  assert.match(main, /^import MergePr, \{ MergeMenu \} from "\.\/merge-pr\.js";$/m);
+  const merge = src("merge-pr.js");
+  assert.match(merge, /export default class MergePr\b/);
+  assert.match(merge, /export class MergeMenu\b/);
+  assert.match(merge, /kind:\s*"popup"[\s\S]*?view:\s*"merge-menu"/);
+  assert.match(merge, /kind:\s*"dialog",\s*modal:\s*true[\s\S]*?view:\s*"merge-pr"/, "a click beside it doesn't close it");
+  assert.match(merge, /\{\s*owner:\s*null\s*\}/, "the merge runs in a task no view owns: Esc can't cut it");
+  assert.match(merge, /mergePullRequest\(/);
+  assert.match(merge, /mergeReport\(/, "what it says comes from pr-card-model.js");
+  assert.match(merge, /seenOf\(/, "the props are checked before anything is shown or sent");
+  assert.doesNotMatch(merge, /"pr",\s*"merge"|pr merge|delete_branch|"DELETE"/, "never `gh pr merge` (it checks out the base), never a branch delete");
+  assert.match(src("git.js"), /export const mergePullRequest = [\s\S]*?mergePr\(/, "git.js binds mergePr to exec");
+  const card = src("pr-card.js");
+  assert.match(card, /mergeRequest\(/, "the card hands the popup what it read");
+  assert.match(card, /openMergeMenu\(/, "an enabled Mergear ▾ opens the popup");
+});
+
+test("D8: after a merge the dialog asks the tree for a PR round; the tree runs one, or one more after the one running; the card reads again when the tree's word changes", () => {
+  const src = (f) => readFileSync(new URL(`../projects-sidebar/mods/projects/${f}`, import.meta.url), "utf8");
+  const merge = src("merge-pr.js");
+  assert.match(merge, /run\("projects\.refresh-prs"\)/);
+  const tree = src("tree.js");
+  assert.match(tree, /"refresh-prs":\s*\(\{ cx, view \}\) => view\?\.askPrs\?\.\(cx\)/, "a key command, run only in the tree copy");
+  const ask = tree.slice(tree.indexOf("  askPrs("), tree.indexOf("\n  }\n", tree.indexOf("  askPrs(")));
+  assert.match(ask, /if \(this\.prBusy\) \{\s*this\.prAgain = true;/, "a round in flight gets one more after it");
+  const round = tree.slice(tree.indexOf("  refreshPrs("), tree.indexOf("\n  }\n", tree.indexOf("  refreshPrs(")));
+  assert.match(round, /this\.prAgain = false;/, "a round started now covers what was asked before it");
+  assert.match(round, /finally \{[\s\S]*?this\.prBusy = false;[\s\S]*?if \(this\.prAgain\)[\s\S]*?this\.refreshPrs\(/, "the queued round runs once this one ends");
+  assert.match(src("main.js"), /handler\(\{ cx, copy, view: this\.view \}\)/, "the tree's commands reach the tree");
+  const card = src("pr-card.js");
+  assert.match(card, /store\.prs\(\)/, "the card follows the tree's stored PR for its workspace");
+  for (const f of ["pr-card.js", "merge-pr.js"]) assert.doesNotMatch(src(f), /savePrs\(/, `${f}: the tree is the only writer of projects.prs.v1`);
+});
+
 test("the workspace menu is a view of the mod (D20)", () => {
   const src = (f) => readFileSync(new URL(`../projects-sidebar/mods/projects/${f}`, import.meta.url), "utf8");
   assert.match(src("main.js"), /"workspace-menu":\s*WorkspaceMenu/);

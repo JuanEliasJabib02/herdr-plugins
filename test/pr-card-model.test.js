@@ -9,7 +9,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { cardQueryArgs, parseCardAnswer, readCard, cardState } from "../projects-sidebar/mods/projects/pr-card-model.js";
+import {
+  cardQueryArgs, parseCardAnswer, readCard, cardState,
+  mergeArgs, mergeRequest, mergeMenuItems, seenOf, mergePrompt, mergePr, mergeOutcome, mergeReport,
+} from "../projects-sidebar/mods/projects/pr-card-model.js";
 import { prMemo, projectPrs } from "../projects-sidebar/mods/projects/pr-model.js";
 
 const SHA = "b60a9e0cb1af36bd6669e6cff2b2fbea75d09a84";
@@ -175,6 +178,7 @@ test("card: S5's PR, the header and its color, title, head → base, +/−, ↑�
     merge: { enabled: true, reason: null },
     methods: ["squash", "merge"],
     number: 161,
+    head: "juan/fix-totals",
     base: "main",
     headOid: SHA,
     repo: REPO,
@@ -402,4 +406,254 @@ test("account: the card's module shares pr-model.js's account path instead of co
   const src = readFileSync(new URL("../projects-sidebar/mods/projects/pr-card-model.js", import.meta.url), "utf8");
   assert.match(src, /import \{[^}]*\baskGitHub\b[^}]*\} from "\.\/pr-model\.js";/);
   assert.ok(!/io\.ghAs|io\.accounts|memo\.owners/.test(src), "no account logic of its own");
+});
+
+// ── Mergear (D6, S4, S5): the popup, the confirm dialog, the merge ─────────
+
+// What the card read and the confirm dialog carries (D6 `seen`), with the
+// method picked in the popup.
+const SEEN = Object.freeze({ owner: "Arctic-Grey", repo: "Target-Sports-USA", number: 161, head: "juan/fix-totals", headOid: SHA, base: "main", method: "squash", who: null });
+const MERGED = JSON.stringify({ sha: "c".repeat(40), merged: true, message: "Pull Request successfully merged" });
+// gh api's answer when GitHub refuses: the body on stdout, a line on stderr, exit 1.
+const refusal = (status, message) => ({
+  code: 1,
+  out: JSON.stringify({ message, documentation_url: "https://docs.github.com/rest/pulls/pulls#merge-a-pull-request", status: String(status) }),
+  err: `gh: ${message} (HTTP ${status})`,
+});
+
+// The project /p of SPACE: its origin is `url`; `sees` is the account that
+// sees the repo (null: gh in the project's folder). Each GraphQL read takes
+// the next of `reads` (the last one repeats); the PUT answers `put`, or
+// rejects as exec does at its 30 s limit when put is "reject". Every gh call
+// is recorded as [account|null, args]. A merge never lists accounts.
+function mergeIo({ url = "git@github.com:Arctic-Grey/Target-Sports-USA.git", sees = null, reads = [cardAnswer(prNode())], put = { code: 0, out: MERGED, err: "" }, readFails = false } = {}) {
+  const calls = [];
+  const reply = (who, cwd, args) => {
+    calls.push([who, args]);
+    assert.equal(cwd, "/p", "gh runs in the project's folder");
+    if (args.includes("PUT")) {
+      if (put === "reject") throw new Error("exec: gh timed out after 30000 ms");
+      return { ok: put.code === 0, ...put };
+    }
+    if (readFails) return { ok: false, code: 1, out: "", err: "gh: Server Error (HTTP 502)" };
+    if (who !== sees) return { ok: false, code: 1, out: NOT_FOUND, err: "gh: Could not resolve to a Repository" };
+    return { ok: true, code: 0, out: reads.length > 1 ? reads.shift() : reads[0], err: "" };
+  };
+  const io = {
+    git: async (_cwd, args) => (args.join(" ") === "remote get-url origin" ? { ok: true, out: url, err: "" } : { ok: false, out: "", err: "unexpected" }),
+    gh: async (cwd, args) => reply(null, cwd, args),
+    ghAs: async (login, cwd, args) => reply(login, cwd, args),
+    accounts: async () => {
+      throw new Error("a merge never goes through the accounts");
+    },
+    hostname: async () => null,
+  };
+  return { io, calls };
+}
+
+const PUT_161 = ["api", "-X", "PUT", "repos/Arctic-Grey/Target-Sports-USA/pulls/161/merge", "-f", "merge_method=squash", "-f", `sha=${SHA}`];
+const isPut = ([, args]) => args.includes("PUT");
+
+test("S4 merge argv: GitHub's REST merge of the PR, pinned to the head commit the card showed, byte for byte (D6)", () => {
+  const repo = { ...REPO, methods: ["squash", "merge"] };
+  assert.deepEqual(mergeArgs(repo, 161, "squash", SHA), PUT_161);
+  assert.deepEqual(mergeArgs(repo, 7, "merge", SHA), ["api", "-X", "PUT", "repos/Arctic-Grey/Target-Sports-USA/pulls/7/merge", "-f", "merge_method=merge", "-f", `sha=${SHA}`]);
+  assert.ok(!PUT_161.some((a) => /delete|branch/i.test(a)), "the branch is never deleted (Delete workspace does that)");
+});
+
+test("S4 merge argv: never built without a 40-hex sha, with a method the repo doesn't allow, or with a PR or repo that isn't one", () => {
+  const repo = { ...REPO, methods: ["squash", "merge"] };
+  for (const sha of [null, undefined, "", "main", SHA.slice(0, 39), `${SHA}0`, SHA.toUpperCase(), `-${SHA.slice(1)}`]) {
+    assert.equal(mergeArgs(repo, 161, "squash", sha), null, `sha ${sha}`);
+  }
+  assert.equal(mergeArgs(repo, 161, "rebase", SHA), null, "a method the repo doesn't allow");
+  assert.equal(mergeArgs({ ...REPO, methods: [] }, 161, "squash", SHA), null, "a repo that allows none");
+  assert.equal(mergeArgs({ ...REPO }, 161, "squash", SHA), null, "no methods known");
+  assert.equal(mergeArgs({ ...repo, methods: ["squash", "fast-forward"] }, 161, "fast-forward", SHA), null, "only GitHub's three methods");
+  for (const n of [0, -1, 1.5, "161", null]) assert.equal(mergeArgs(repo, n, "squash", SHA), null, `number ${n}`);
+  for (const bad of [{ owner: "../x" }, { repo: "a/b" }, { owner: "" }, { repo: undefined }]) {
+    assert.equal(mergeArgs({ ...repo, ...bad }, 161, "squash", SHA), null, JSON.stringify(bad));
+  }
+});
+
+test("S5 Mergear ▾: the popup lists only the methods the repo allows, squash first, each with its label", () => {
+  assert.deepEqual(mergeMenuItems(["squash", "merge", "rebase"]), [
+    { method: "squash", label: "Squash y mergear" },
+    { method: "merge", label: "Crear un merge commit" },
+    { method: "rebase", label: "Rebase y mergear" },
+  ]);
+  assert.deepEqual(mergeMenuItems(["rebase", "squash"]), [{ method: "squash", label: "Squash y mergear" }, { method: "rebase", label: "Rebase y mergear" }], "squash first, whatever order it came in");
+  assert.deepEqual(mergeMenuItems(["merge", "fast-forward"]), [{ method: "merge", label: "Crear un merge commit" }]);
+  assert.deepEqual(mergeMenuItems(null), []);
+});
+
+test("S2 Mergear: the card hands the popup the PR it read, its head commit, and the account that read it; nothing while Mergear is off", () => {
+  const card = cardOf(prNode());
+  assert.deepEqual(mergeRequest(card, "/p"), {
+    project: "/p",
+    seen: { owner: "Arctic-Grey", repo: "Target-Sports-USA", number: 161, head: "juan/fix-totals", headOid: SHA, base: "main", who: null },
+    title: "Fix checkout totals",
+    methods: ["squash", "merge"],
+  });
+  assert.equal(mergeRequest({ ...card, who: "JuanEliasJabib02" }, "/p").seen.who, "JuanEliasJabib02", "the fallback login that read it");
+  assert.equal(mergeRequest(cardOf(prNode({ isDraft: true })), "/p"), null, "a draft: Mergear is off");
+  assert.equal(mergeRequest(cardOf(prNode({ state: "MERGED" })), "/p"), null);
+  assert.equal(mergeRequest(cardState({ status: "none", repo: { ...REPO, defaultBranch: "main", methods: [] }, branch: "x", who: null }), "/p"), null, "no PR");
+  assert.equal(mergeRequest(card, ""), null, "no project to run gh in");
+});
+
+test("S5 confirm dialog: the props are checked before anything is shown or sent (seen)", () => {
+  assert.deepEqual(seenOf({ ...SEEN }), SEEN);
+  assert.deepEqual(seenOf({ ...SEEN, who: "JuanEliasJabib02", extra: 1 }), { ...SEEN, who: "JuanEliasJabib02" });
+  for (const bad of [
+    { headOid: "main" }, { number: "161" }, { number: 0 }, { method: "fast-forward" }, { method: undefined }, { who: "-x" }, { who: "" },
+    { who: undefined }, { owner: "a/b" }, { repo: "" }, { head: "" }, { base: null },
+  ]) {
+    assert.equal(seenOf({ ...SEEN, ...bad }), null, JSON.stringify(bad));
+  }
+  assert.equal(seenOf(null), null);
+  assert.equal(seenOf("x"), null);
+});
+
+test("S5 confirm dialog: it names the PR, its base and the method, and which account merges (S2)", () => {
+  assert.deepEqual(mergePrompt(SEEN, "Fix checkout totals"), {
+    header: "Mergear PR #161",
+    title: "Fix checkout totals",
+    branches: "juan/fix-totals → main",
+    method: "Squash y mergear",
+    account: "Con la cuenta de gh de este repo",
+    note: "No se puede deshacer. La rama queda: Delete workspace la borra.",
+  });
+  assert.equal(mergePrompt({ ...SEEN, who: "JuanEliasJabib02", method: "rebase" }, "").account, "Con la cuenta JuanEliasJabib02");
+  assert.equal(mergePrompt({ ...SEEN, method: "rebase" }, "").method, "Rebase y mergear");
+  assert.equal(mergePrompt(SEEN, undefined).title, "");
+});
+
+test("S4 merge: checks the PR again with the account that read it, then merges it pinned to the head the card showed", async () => {
+  const { io, calls } = mergeIo();
+  const r = await mergePr({ project: "/p", seen: SEEN }, io);
+  assert.deepEqual(r, { status: "merged", err: "", note: "" });
+  assert.deepEqual(calls.map(([who]) => who), [null, null], "the read again, then the PUT, both through gh in the project");
+  assert.deepEqual(calls[0][1], cardQueryArgs(REPO, "juan/fix-totals"), "the card's own query");
+  assert.deepEqual(calls[1][1], PUT_161);
+});
+
+test("S2 merge: a PR read through another account is merged with that account's credentials, and no other account is tried", async () => {
+  const { io, calls } = mergeIo({ sees: "JuanEliasJabib02" });
+  const r = await mergePr({ project: "/p", seen: { ...SEEN, who: "JuanEliasJabib02" } }, io);
+  assert.equal(r.status, "merged");
+  assert.deepEqual(calls.map(([who]) => who), ["JuanEliasJabib02", "JuanEliasJabib02"]);
+  assert.deepEqual(calls[1][1], PUT_161);
+});
+
+test("S2 merge: when the account that read the PR no longer sees the repo, nothing is sent and no other account is tried", async () => {
+  const { io, calls } = mergeIo({ sees: "juanjabibarcticgrey" });
+  const r = await mergePr({ project: "/p", seen: { ...SEEN, who: "JuanEliasJabib02" } }, io);
+  assert.deepEqual(r, { status: "refused", err: "JuanEliasJabib02 ya no ve Arctic-Grey/Target-Sports-USA: no se mergeó nada.", note: "" });
+  assert.deepEqual(calls.map(([who]) => who), ["JuanEliasJabib02"]);
+  const folder = mergeIo({ sees: "JuanEliasJabib02" });
+  const r2 = await mergePr({ project: "/p", seen: SEEN }, folder.io);
+  assert.equal(r2.err, "La cuenta de gh de este repo ya no ve Arctic-Grey/Target-Sports-USA: no se mergeó nada.");
+  assert.deepEqual(folder.calls.map(([who]) => who), [null]);
+});
+
+test("S4 merge: a PR that changed since the card read it (state, draft, base, head, another PR) is never merged", async () => {
+  const cases = [
+    [prNode({ headRefOid: "d".repeat(40) }), "El PR #161 tiene commits nuevos: no se mergeó nada."],
+    [{ ...prNode(), baseRefName: "release" }, "El PR #161 ahora va a release, no a main: no se mergeó nada."],
+    [prNode({ isDraft: true }), "El PR #161 volvió a draft: no se mergeó nada."],
+    [prNode({ state: "CLOSED" }), "El PR #161 está cerrado: no se mergeó nada."],
+    [prNode({ number: 162 }), "juan/fix-totals ya no tiene el PR #161: no se mergeó nada."],
+    [null, "juan/fix-totals ya no tiene el PR #161: no se mergeó nada."],
+  ];
+  for (const [node, err] of cases) {
+    const { io, calls } = mergeIo({ reads: [cardAnswer(node)] });
+    assert.deepEqual(await mergePr({ project: "/p", seen: SEEN }, io), { status: "changed", err, note: "" }, err);
+    assert.ok(!calls.some(isPut), `no PUT: ${err}`);
+  }
+});
+
+test("S4 merge: a PR someone merged meanwhile is merged: nothing is sent, and it says so", async () => {
+  const { io, calls } = mergeIo({ reads: [cardAnswer(prNode({ state: "MERGED" }))] });
+  assert.deepEqual(await mergePr({ project: "/p", seen: SEEN }, io), { status: "merged", err: "", note: "Ya estaba mergeado en GitHub." });
+  assert.ok(!calls.some(isPut));
+});
+
+test("S4 merge: a method the repo no longer allows, or an origin that is another repo now, sends nothing", async () => {
+  const off = mergeIo({ reads: [cardAnswer(prNode(), { squashMergeAllowed: false })] });
+  assert.deepEqual(await mergePr({ project: "/p", seen: SEEN }, off.io), { status: "refused", err: "El repo ya no permite \"Squash y mergear\": no se mergeó nada.", note: "" });
+  assert.ok(!off.calls.some(isPut));
+  const moved = mergeIo({ url: "git@github.com:Arctic-Grey/Other.git" });
+  assert.deepEqual(await mergePr({ project: "/p", seen: SEEN }, moved.io), { status: "changed", err: "El origin ya no es Arctic-Grey/Target-Sports-USA: no se mergeó nada.", note: "" });
+  assert.equal(moved.calls.length, 0);
+  const caseOnly = mergeIo({ url: "git@github.com:arctic-grey/target-sports-usa.git" });
+  assert.equal((await mergePr({ project: "/p", seen: SEEN }, caseOnly.io)).status, "merged", "GitHub's names ignore case");
+});
+
+test("S4 merge: GitHub not answering the check, or props that aren't a PR, send nothing; it never rejects", async () => {
+  const down = mergeIo({ readFails: true });
+  assert.deepEqual(await mergePr({ project: "/p", seen: SEEN }, down.io), { status: "failed", err: "GitHub no respondió: no se mergeó nada.", note: "" });
+  assert.ok(!down.calls.some(isPut));
+  const bad = mergeIo();
+  assert.deepEqual(await mergePr({ project: "/p", seen: { ...SEEN, headOid: "main" } }, bad.io), { status: "failed", err: "Faltan datos del PR: no se mergeó nada.", note: "" });
+  assert.deepEqual(await mergePr({ project: "", seen: SEEN }, bad.io), { status: "failed", err: "Faltan datos del PR: no se mergeó nada.", note: "" });
+  assert.equal(bad.calls.length, 0);
+  const broken = mergeIo();
+  broken.io.gh = async () => {
+    throw new Error("spawn gh ENOENT");
+  };
+  assert.equal((await mergePr({ project: "/p", seen: SEEN }, broken.io)).status, "failed");
+  broken.io.git = async () => {
+    throw new Error("spawn git ENOENT");
+  };
+  assert.equal((await mergePr({ project: "/p", seen: SEEN }, broken.io)).status, "failed");
+});
+
+test("S4 merge outcome: GitHub refusing (405, 409, 403, 404) merged nothing, says GitHub's message, and isn't read again", async () => {
+  for (const [status, message] of [
+    [405, "Pull Request is not mergeable"],
+    [409, "Head branch was modified. Review and try the merge again."],
+    [403, "Resource not accessible by integration"],
+    [404, "Not Found"],
+  ]) {
+    const { io, calls } = mergeIo({ put: refusal(status, message) });
+    assert.deepEqual(await mergePr({ project: "/p", seen: SEEN }, io), { status: "refused", err: `GitHub no lo mergeó: ${message}`, note: "" }, String(status));
+    assert.equal(calls.length, 2, "the check and the PUT, nothing after");
+  }
+  assert.deepEqual(mergeOutcome({ call: { ok: false, rejected: false, out: "", err: "gh: Validation Failed (HTTP 422)" }, after: null, seen: SEEN }), { status: "refused", err: "GitHub no lo mergeó: Validation Failed", note: "" }, "stderr alone");
+});
+
+test("S4 merge outcome: no answer in time (exec's 30 s limit) may still merge: the PR is read again and the card says what GitHub shows", async () => {
+  const done = mergeIo({ put: "reject", reads: [cardAnswer(prNode()), cardAnswer(prNode({ state: "MERGED" }))] });
+  assert.deepEqual(await mergePr({ project: "/p", seen: SEEN }, done.io), { status: "merged", err: "", note: "" });
+  assert.deepEqual(done.calls.map(([who, args]) => [who, args.includes("PUT") ? "put" : "read"]), [[null, "read"], [null, "put"], [null, "read"]], "read again with the same account");
+  const open = mergeIo({ put: "reject" });
+  assert.deepEqual(await mergePr({ project: "/p", seen: SEEN }, open.io), {
+    status: "unsure",
+    err: "GitHub no confirmó el merge y el PR sigue abierto: puede que aún se mergee. Revísalo en GitHub antes de volver a intentar.",
+    note: "",
+  });
+  const closed = mergeIo({ put: "reject", reads: [cardAnswer(prNode()), cardAnswer(prNode({ state: "CLOSED" }))] });
+  assert.deepEqual(await mergePr({ project: "/p", seen: SEEN }, closed.io), { status: "refused", err: "El PR #161 se cerró sin mergear.", note: "" });
+  const server = mergeIo({ put: { code: 1, out: "", err: "gh: Server Error (HTTP 502)" }, reads: [cardAnswer(prNode()), "garbage"] });
+  assert.deepEqual(await mergePr({ project: "/p", seen: SEEN }, server.io), {
+    status: "unsure",
+    err: "GitHub no confirmó el merge: puede que aún se mergee. Revísalo en GitHub antes de volver a intentar.",
+    note: "",
+  }, "a 5xx is no answer either; an unreadable read says only that");
+  assert.equal(server.calls.length, 3);
+});
+
+test("S4 merge report: merged closes the dialog with a toast; anything else stays in the dialog, or is a toast once it closed", () => {
+  assert.deepEqual(mergeReport({ status: "merged", err: "", note: "" }, { seen: SEEN, open: true }), {
+    close: true, error: "", toast: { title: "PR #161 mergeado", body: "juan/fix-totals → main (squash)", level: "success" },
+  });
+  assert.deepEqual(mergeReport({ status: "merged", err: "", note: "Ya estaba mergeado en GitHub." }, { seen: SEEN, open: false }), {
+    close: false, error: "", toast: { title: "PR #161 mergeado", body: "Ya estaba mergeado en GitHub.", level: "success" },
+  });
+  const err = "El PR #161 tiene commits nuevos: no se mergeó nada.";
+  assert.deepEqual(mergeReport({ status: "changed", err, note: "" }, { seen: SEEN, open: true }), { close: false, error: err, toast: null });
+  assert.deepEqual(mergeReport({ status: "changed", err, note: "" }, { seen: SEEN, open: false }), { close: false, error: "", toast: { title: "PR #161 sin mergear", body: err, level: "warning" } });
+  assert.deepEqual(mergeReport({ status: "failed", err: "x", note: "" }, { seen: SEEN, open: false }).toast.level, "error");
+  assert.deepEqual(mergeReport({ status: "unsure", err: "y", note: "" }, { seen: SEEN, open: false }).toast, { title: "PR #161 sin confirmar", body: "y", level: "warning" });
 });

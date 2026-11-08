@@ -189,14 +189,23 @@ across repos.
     (green), "✗ 1 falla" (red), "… 2 corriendo" (yellow) or "Sin checks";
     "Reviews" then "1 aprobado" (green), "Cambios pedidos" (red) or "Sin
     reviews"; then two 26 px buttons, "Abrir en GitHub" (outlined) and
-    "Mergear ▾", drawn off (`raised`, `dim`) until Mergear is built, its
-    hover saying why GitHub wouldn't merge it ("Es un draft", "Tiene
-    conflictos con main", "Bloqueado por las reglas de main", …).
+    "Mergear ▾" (`solid`). When GitHub wouldn't merge it, "Mergear ▾" is
+    drawn off (`raised`, `dim`), its hover saying why ("Es un draft",
+    "Tiene conflictos con main", "Bloqueado por las reglas de main", …).
   - Without one, centered: "Esta rama no tiene PR" and the branch under it.
     A detached workspace says "Este workspace no está en una rama"; GitHub
     not answering, "GitHub no respondió", or "Ninguna cuenta de gh ve
     <owner>/<repo>" when no account you're logged into sees the repo.
   - "Leyendo el PR…" while a workspace's first answer is read.
+  - Mergear's popup (240 px wide, at the pointer): "Mergear PR #161 en
+    main" in `dim`, then one 31 px row per method the repo allows, squash
+    first: "Squash y mergear", "Crear un merge commit", "Rebase y mergear".
+  - Mergear's confirm dialog (400 × 300, modal): "Mergear PR #161", the
+    title, "head → base" in `muted`, the method, the account in `dim` ("Con
+    la cuenta de gh de este repo", or "Con la cuenta <login>"), and "No se
+    puede deshacer. La rama queda: Delete workspace la borra."; footer
+    Cancelar and Mergear (`solid`), "Mergeando…" while it runs. An outcome
+    that isn't a merge stays in the dialog in `blocked`.
 
 **How it behaves**
 
@@ -371,6 +380,35 @@ across repos.
     PR opens in the Arc space of the workspace's group, where that group's
     GitHub account is signed in. Only a `https://github.com/` URL is
     opened; a failure is a toast.
+- **Mergear** (the card's "Mergear ▾"):
+  - It is on for an open PR GitHub would merge: off for a draft, a PR
+    with conflicts, one the base's rules block, one that isn't open, a
+    repo that allows no method, or when GitHub gave no head commit. GitHub
+    still computing, behind or unstable leaves it on: GitHub refuses those
+    itself.
+  - Its popup lists the methods the repo allows; picking one opens the
+    confirm dialog. Mergear there (a click; Enter doesn't merge):
+    1. checks that origin is still that repo, and reads the PR again with
+       the account that read it for the card; when it isn't the same PR
+       any more (another state, a draft again, another base, new commits,
+       or the branch's newest PR is another one) nothing is sent ("El PR
+       #161 tiene commits nuevos: no se mergeó nada.") and Mergear stays
+       off in the dialog. One merged meanwhile says "Ya estaba mergeado en
+       GitHub.";
+    2. merges it through GitHub's REST API with that same account, never
+       another, pinned to the head commit the card showed: if the branch
+       moved since, GitHub refuses. The branch is never deleted;
+    3. GitHub refusing says GitHub's message ("GitHub no lo mergeó: …").
+       No answer in time (exec's 30 s limit) or a server error reads the
+       PR again and says what it shows: merged, closed, or "GitHub no
+       confirmó el merge…: puede que aún se mergee."
+  - The merge finishes even when the dialog is closed with Esc; it then
+    reports with a toast. A merge closes the dialog with a toast "PR #161
+    mergeado".
+  - Afterwards the sidebar asks GitHub for its colors again
+    (`projects.refresh-prs`; one already running gets one more after it),
+    and the card reads again as soon as the sidebar stores the new state,
+    so both turn purple. Clicking "Mergear ▾" also reads the card again.
 
 **Built from**
 
@@ -414,6 +452,8 @@ across repos.
   - `task-menu` = `task-menu.js`, `task-note` = `task-note.js`,
     `delete-task` = `delete-task.js`;
   - `pr` = `pr-card.js` (the PR card, in the panel's `pr-card` block);
+  - `merge-menu` and `merge-pr` = `merge-pr.js` (Mergear's methods popup
+    and its confirm dialog);
   - `project-menu`, `workspace-menu`, `group-menu`, `group-form`.
   - `main.js` names the view a copy without props draws in one line,
     `const DEFAULT_VIEW = "tree";`, which `scripts/check-views.sh` rewrites
@@ -439,12 +479,16 @@ across repos.
   - `config.js` holds `MOD`, `WORKTREE_ROOT` (`~/orca/workspaces`) and
     `BADGE_KEYS`.
 - **Commands:** `projects.add`, `projects.add-here`, `projects.new-workspace`,
-  `projects.group1`..`projects.group3`, `projects.ping`. `keys.json` binds
-  F1–F3 in section `layout:projects`.
+  `projects.group1`..`projects.group3`, `projects.ping`, and
+  `projects.refresh-prs` (a PR round now, or one more after the one
+  running: Mergear runs it after a merge). All run in the tree copy, the
+  only one that reads commands. `keys.json` binds F1–F3 in section
+  `layout:projects`.
 - **Herdr functions:** `spaces`, `panes`, `agents`, `focused`,
   `knownAgents`, `layout`, `window`, `home`, `pickFolder`, `watchFolder`,
   `exec`, `run` (`space.select`, `space.new`, `space.close`, `pane.focus`,
-  and the PR card's `layout.show` and `layout.hide` of its own block),
+  the PR card's `layout.show` and `layout.hide` of its own block, and
+  Mergear's `projects.refresh-prs`),
   `openOverlay`, `closeOverlay`, `shared`, `setShared`, `notify`, `theme`,
   `props`, `nextCommand`.
 - **Programs it runs:**
@@ -473,6 +517,10 @@ across repos.
     methods, when that workspace changes and every 30 s while Changes
     shows; then `git rev-list --left-right --count origin/<base>...HEAD` in
     the workspace for ↑↓.
+  - `gh api -X PUT repos/<o>/<r>/pulls/<n>/merge -f merge_method=<m> -f
+    sha=<head>` (Mergear), after the card's query once more, both with the
+    account that read the PR; the query again when GitHub gave no answer.
+    Never `gh pr merge`, which from a worktree fails checking out the base.
   - Two GitHub accounts: gh runs in the project's folder, where a gh
     wrapper that picks the account by repo picks it, and plain gh uses its
     active account. When GitHub answers that it can't see the repo, the
@@ -618,6 +666,13 @@ against.
 - **`branch -d` keeps squash-merged branches.** A branch merged on GitHub by
   squash or rebase isn't merged for git, so it stays ("Kept branch <b>").
   Delete it yourself with `git branch -D` once you're sure.
+- **Mergear merges on GitHub, and that can't be undone** (only a revert
+  commit follows it). It merges with the account that read the PR for the
+  card: the folder's own gh account, or the other one you're logged into
+  when only that one sees the repo. It never deletes the branch.
+- **A merge with no answer may still finish.** exec gives up after 30 s;
+  the dialog then reads the PR again and says what GitHub shows. Check the
+  PR before trying again.
 - **Rename can change GitHub:** it runs `gh` with your account, and GitHub
   closes a PR opened from the renamed branch. Without `gh` it pushes a copy;
   it never deletes the old branch.
@@ -640,8 +695,9 @@ against.
   applies in Project mode.
 - **`herdr-app check` draws only the tree view.** Check the other views
   from a copy whose `main.js` defaults to them: `scripts/check-views.sh
-  projects-sidebar/mods/projects pr` checks the PR card. Outside Herdr it
-  has no workspace, so that check draws its empty state only.
+  projects-sidebar/mods/projects pr merge-menu merge-pr` checks the PR
+  card and Mergear's popup and dialog. Outside Herdr there is no
+  workspace and no props, so that check draws their empty states only.
 - **The PR card hides by clicking:** its `layout.hide` / `layout.show` is a
   layout click, which Herdr saves in `layouts/.state/`. Moving between a
   workspace the card shows and one it doesn't (a main checkout, a Bitbucket
@@ -670,7 +726,8 @@ against.
 
 - `node --test 'test/*.test.js'` reports `fail 0`, and `herdr-app check`
   passes on `mods/projects`, and `scripts/check-views.sh
-  projects-sidebar/mods/projects pr` on the PR card.
+  projects-sidebar/mods/projects pr merge-menu merge-pr` on the PR card
+  and Mergear's views.
 - After `scripts/install.sh` and `layout.switch {name: "projects"}`, the
   sidebar shows "Projects" with an empty state. The groups bar shows one
   highlighted code icon whose tooltip reads "Projects · F1".
@@ -711,3 +768,9 @@ against.
   PR". On the project's main checkout, or a repo whose origin isn't
   GitHub, the card is gone and Changes takes the whole panel. `cmd-l` and
   the header's icons still open, switch and close the panel.
+- On a throwaway PR into a throwaway base (never `main`): "Mergear ▾" →
+  "Squash y mergear" → Mergear merges it, the dialog closes with "PR #<n>
+  mergeado", and the card and the sidebar's branch icon turn purple. With
+  one more commit pushed to the head after the card read it, Mergear says
+  "El PR #<n> tiene commits nuevos: no se mergeó nada." and nothing is
+  merged.

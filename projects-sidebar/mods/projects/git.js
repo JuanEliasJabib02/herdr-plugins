@@ -11,7 +11,7 @@ import { fetchOrigin, defaultBaseOf, recentBasesOf, baseExistsIn, branchExistsIn
 import { removalCheck as checkRemoval, removeWorkspace as removeWith, removeTask as removeTaskWith } from "./remove-workspace-model.js";
 import { renameCheck as checkRename, renameWorkspace as renameWith, sshHostnameOf } from "./rename-workspace-model.js";
 import { projectPrs, accountsOf } from "./pr-model.js";
-import { readCard } from "./pr-card-model.js";
+import { readCard, mergePr } from "./pr-card-model.js";
 
 // { ok, out, err } (mods/worktree/main.js `git`). Rejects when git can't
 // start there: not installed, or the folder is gone.
@@ -166,3 +166,9 @@ export const workspacePrs = (project, checkouts, memo) => projectPrs(project, ch
 // through the same account path: space = { project, path, branch }; `memo`:
 // the card's own prMemo(). Never rejects.
 export const readPrCard = ({ project, path, branch }, memo) => readCard({ project, path, branch }, prIo, memo);
+
+// Mergear (D6, pr-card-model.js mergePr): checks the PR again, then merges it
+// through GitHub's REST API with the account that read it (`seen.who`: gh in
+// the project's folder, or that login through ghAs), pinned to the head
+// commit the card showed. Resolves { status, err, note }; never rejects.
+export const mergePullRequest = ({ project, seen }) => mergePr({ project, seen }, prIo);

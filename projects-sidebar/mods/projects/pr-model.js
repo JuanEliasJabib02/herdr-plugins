@@ -107,11 +107,18 @@ export function accountsOf(out) {
   }
 }
 
-// One call, never rejecting: who null is the project's folder (io.gh), else
-// that login (io.ghAs). A gh that can't start reads as a failure.
-async function ask(io, project, who, args, parse) {
+// gh as one account: who null is the project's folder (io.gh), else that
+// login (io.ghAs). Resolves gh's { ok, code, out, err }; rejects when gh
+// can't start. Every call here goes through it, and so does Mergear's merge
+// (pr-card-model.js mergePr), sent with the account that read the PR.
+export const ghBy = (io, project, who, args) => (who === null ? io.gh(project, args) : io.ghAs(who, project, args));
+
+// One call as `who` (ghBy), never rejecting: parse(out), or a failure when
+// gh can't start. Mergear's check reads the PR again through it, with the
+// account that read it and no other.
+export async function askAs(io, project, who, args, parse) {
   try {
-    const r = who === null ? await io.gh(project, args) : await io.ghAs(who, project, args);
+    const r = await ghBy(io, project, who, args);
     return parse(r.out);
   } catch {
     return { ok: false, notFound: false };
@@ -147,7 +154,7 @@ export async function askGitHub(io, project, repo, args, parse, memo) {
   const attempt = async (who) => {
     if (tried.has(who)) return null;
     tried.add(who);
-    const r = await ask(io, project, who, args, parse);
+    const r = await askAs(io, project, who, args, parse);
     if (r.ok) {
       if (who === null) memo.owners.delete(owner);
       else memo.owners.set(owner, who);

@@ -3,10 +3,11 @@
 // Control. Its block, `pr-card`, is the fixed-height top of the stack child
 // `changes` in layouts/projects.json (D3, D4): "PR #161 · Open" in the
 // sidebar icon's color with +/−, the title, head → base with ↑↓, the checks,
-// the reviews, then [Abrir en GitHub] and [Mergear ▾] (drawn off until
-// Mergear is built). A branch without a PR says so. The model is
-// pr-card-model.js (readCard, cardState); this file picks the workspace,
-// asks, and draws.
+// the reviews, then [Abrir en GitHub] and [Mergear ▾] (D6: the methods
+// popup and the confirm dialog of merge-pr.js; drawn off, with the reason as
+// its hover, when GitHub wouldn't take it). A branch without a PR says so.
+// The model is pr-card-model.js (readCard, cardState, mergeRequest); this
+// file picks the workspace, asks, and draws.
 //
 // Which workspace (D5): the folder Changes shows (Herdr's changes/main.js
 // `location`: the focused pane's live folder, then focused()'s, then the
@@ -14,7 +15,10 @@
 // the card and the diff below it are about the same repo.
 // When: keyed on that checkout's path and branch. A read starts when the key
 // changes, and again every EVERY while the same one shows in the window in
-// front, one at a time. An
+// front, one at a time; also at once when the tree stores another PR for
+// that workspace (D8: after a merge, Mergear asks the tree for a round, so
+// the purple shows here too; also a PR merged in the browser) and when
+// [Mergear ▾] is clicked. An
 // answer whose key moved on is never drawn: it is kept for its own
 // workspace, so switching back draws at once. Nothing is asked while the
 // panel is closed or on the Explorer (a hidden copy's timers keep running,
@@ -33,7 +37,8 @@ import { checkoutAt } from "./lib.js";
 import * as store from "./store.js";
 import { readPrCard } from "./git.js";
 import { prMemo } from "./pr-model.js";
-import { cardState } from "./pr-card-model.js";
+import { cardState, mergeRequest } from "./pr-card-model.js";
+import { openMergeMenu } from "./merge-pr.js";
 
 // The card's block in layouts/projects.json.
 const BLOCK = "pr-card";
@@ -45,6 +50,11 @@ const EVERY = 30000;
 const LOOK = 1000;
 // Answers kept for switching back, one per workspace, the oldest dropped.
 const KEPT = 50;
+
+// The tree's word on a workspace's PR: what it stored for that path in
+// projects.prs.v1 (the sidebar's color), as text to compare. The tree is
+// its only writer (D8); the card only reads it.
+const toldOf = (path) => JSON.stringify(store.prs()[path] ?? null);
 
 function find(node, id) {
   if (node?.id === id) return node;
@@ -92,6 +102,7 @@ export default class PrCard {
     this.at = 0; // when that answer came
     this.busy = false; // a read is running
     this.answers = new Map(); // workspace path → { key, state, at }: its last answer
+    this.told = null; // toldOf(the shown workspace) when its last read started
     cx.timer.every(LOOK, (cx) => this.tick(cx));
   }
 
@@ -104,6 +115,7 @@ export default class PrCard {
     const same = Boolean(kept) && kept.key === this.key;
     this.state = same ? kept.state : null;
     this.at = same ? kept.at : 0;
+    this.told = now ? toldOf(now.path) : null;
   }
 
   // Follows Changes to its workspace, shows or hides the block, and reads
@@ -119,7 +131,19 @@ export default class PrCard {
     // A shown answer is read again every EVERY only from the window in front,
     // as the sidebar's colors (D1): Juan keeps several windows open. A new
     // workspace is read in any window; coming back to the front reads at once.
-    if (this.state && (Date.now() - this.at < EVERY || !window().active)) return;
+    // The tree storing another PR for it (D8) reads it at once, in any window.
+    const told = toldOf(this.target.path);
+    if (this.state && told === this.told && (Date.now() - this.at < EVERY || !window().active)) return;
+    this.read(cx);
+  }
+
+  // [Mergear ▾] (D6): the methods popup, handed what the card read and the
+  // account that read it (mergeRequest), and a read now, so the card is
+  // fresh again by the time the dialog is done.
+  merge(cx) {
+    const req = mergeRequest(this.state, this.target?.project);
+    if (!req) return;
+    openMergeMenu(req);
     this.read(cx);
   }
 
@@ -130,6 +154,7 @@ export default class PrCard {
     if (this.busy) return;
     const { key, target: ws } = this;
     this.busy = true;
+    this.told = toldOf(ws.path);
     cx.spawn(async (cx) => {
       let data;
       try {
@@ -184,7 +209,7 @@ export default class PrCard {
       .bg(t.background).text_color(t.foreground).text_size(12.5);
     if (!s) return box.items_center().justify_center().child(div().text_color(t.dim).child("Leyendo el PR…"));
     if (s.kind !== "pr") return box.child(note(s, t));
-    return box.p(12).justify_between().children(prRows(s, t));
+    return box.p(12).justify_between().children(prRows(s, t, (cx) => this.merge(cx)));
   }
 }
 
@@ -199,8 +224,8 @@ function note(s, t) {
 }
 
 // S5's rows: the header in the PR's color with +/−, the title, head → base
-// with ↑↓, Checks, Reviews, then the buttons.
-function prRows(s, t) {
+// with ↑↓, Checks, Reviews, then the buttons. merge(cx): [Mergear ▾]'s click.
+function prRows(s, t, merge) {
   const color = t[s.color] ?? t.dim;
   return [
     h_flex().h(20).flex_none().gap(7).items_center()
@@ -220,9 +245,13 @@ function prRows(s, t) {
         .hover((st) => st.bg(t.hover))
         .on_click((_e, cx) => openPr(s.url, cx))
         .child("Abrir en GitHub"))
-      // Mergear (D6) isn't built yet: drawn off until it is, its hover
-      // saying why GitHub wouldn't take it, when it wouldn't.
-      .child(div().id("pr-merge").h(26).px(10).flex().items_center().rounded(6).bg(t.raised).text_size(12).text_color(t.dim)
+      // Mergear (D6): the methods popup while GitHub would take it; else
+      // drawn off, its hover saying why not.
+      .child(div().id("pr-merge").h(26).px(10).flex().items_center().rounded(6).text_size(12)
+        .when(Boolean(s.merge?.enabled), (el) => el.bg(t.solid).text_color(t.solid_foreground).cursor_pointer()
+          .hover((st) => st.opacity(0.88))
+          .on_click((_e, cx) => merge(cx)))
+        .when(!s.merge?.enabled, (el) => el.bg(t.raised).text_color(t.dim))
         .when(Boolean(s.merge?.reason), (el) => el.tooltip(s.merge.reason))
         .child("Mergear ▾")),
   ];
