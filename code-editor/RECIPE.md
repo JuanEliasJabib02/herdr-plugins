@@ -4,7 +4,8 @@ A code editor and Explorer for Herdr, built from how Orca does them. In the proj
 layout, `cmd-l` opens and closes a right panel with the Explorer: a file tree with
 git marks, `Names` to filter by path, `Contents` to search inside files, and file
 operations. Each file opens in its own tab, in Herdr's editor, with saving, conflicts,
-drafts and a Blame view. The whole window wears One Dark Pro, and files wear Material's
+drafts and a Blame view; Markdown opens rendered, with Source and Preview, and a PDF in
+a reader with zoom and find. The whole window wears One Dark Pro, and files wear Material's
 icons.
 
 **What you see**
@@ -563,3 +564,164 @@ say where the cursor is.
   and not saved says "sin commit" while the rest keep theirs.
 - In a file git doesn't know, Blame shows the toast and leaves the editor as it was.
 - Editar after Blame shows the typed text with the cursor where it was.
+
+### Markdown preview
+
+A `.md`, `.markdown`, `.mdown` or `.mkd` opens rendered, as in Orca, with a toggle in
+the header to see its source.
+
+**What you see**
+
+- **The toggle:** at the header's right end, in place of "Editar", two icon buttons
+  joined in a 1 px `input` border, 23 px high, radius 6: "Source" (code icon) and
+  "Preview" (eye icon), 14 px icons, the tooltip its name. The shown one is on
+  `selected` in `foreground`, the other `muted` with `hover` behind it.
+- **The page:** a vertical scroll with Herdr's scrollbar, padding 24 by 32, 14 px text
+  at line height 1.7, 14 px between blocks, no max width. Headings, lists, tasks,
+  tables, quotes and links are Herdr's `TextView.markdown`, selectable, in the system
+  font (Herdr's UI font has no bold or italic face).
+- **Front matter** (`---` or `+++` at the very top): a box on `surface`, 1 px
+  `border`, radius 4, "FRONT MATTER" at 10 px in `muted`, the text at 12 px in the
+  code font, up to 192 px high and then scrolling.
+- **Fenced code:** a box with radius 8, padding 14 by 18, 13 px at line height 1.55
+  in the code font, One Dark's colors, scrolling sideways when long. At its top right
+  the language chip (11 px, the fence's word) and "Copy code" (a copy icon); copying
+  turns it into a check with "Copied" for 1.5 s. A fence with no word, `text` or one
+  the editor doesn't color shows plain. Mermaid shows as its code, as in Orca.
+- **Callouts:** GitHub's `> [!NOTE]`, `[!TIP]`, `[!IMPORTANT]`, `[!WARNING]` and
+  `[!CAUTION]` get their title in bold on the quote's first line.
+- **Images:** a paragraph made only of images (badges in a row included) draws them,
+  at most the page's width, radius 6. While one loads, an image icon and its alt; one
+  that can't be drawn shows its alt.
+
+**How it behaves**
+
+- **Source** goes to the editor, with everything it does; **Preview** comes back and
+  shows the text as it is now, unsaved edits included. The mode is the tab's and is
+  forgotten when it closes.
+- **A file over 600 KiB** opens in Source. One opened at a line opens at that line,
+  and the toggle takes it to Source or Preview.
+- **Links:** `http(s)` opens the browser and `mailto:` the mail app. A relative path
+  resolves against the file's folder and opens in the editor as the Explorer opens a
+  file (a preview tab, reused while it has no changes). A path that isn't there says
+  "File not found: ~/…" and a folder "Cannot open directory: ~/…", both as toasts. A
+  `#heading` does nothing.
+- **Images** come from the file's folder or the web (`http(s)` only), up to 10 MiB; a
+  device, a pipe or an HTML page shows its alt. A regenerated image, or one whose URL
+  failed, shows the next time the preview shows: the tab back in view, or Source →
+  Preview.
+- **Code and images inside a list item** stay in the list, drawn by `TextView`: code there
+  has no colors and no Copy, and an image isn't drawn.
+
+**Commands,** for the live cases, since clicks can't be posted: `code-file.source`,
+`code-file.preview`, `code-file.link:<url>`, `code-file.copy-code:<n>` (the n-th code
+block, from 1).
+
+**Built from**
+
+- **`reader-model.js`:** which reader a path gets (`viewKind`), the mode it opens in,
+  the 600 KiB limit, and the command split.
+- **`markdown-model.js`:** `splitBlocks` cuts the text into what `TextView` draws and
+  what it can't (front matter, fenced code, paragraphs of images); `highlight` colors
+  code with the editor's tokenizer; `linkTarget` and `imageSource` say where a link
+  goes and where an image comes from; `titleCallouts` titles the callouts.
+- **`image-cache.js`:** `image()` draws only paths inside the Herdr home, so every
+  image is copied or downloaded (`curl`, no shell) to `<home>/data/code-file/img/`,
+  named by its content, and measured with `sips`.
+- **`open-model.js`:** a copy of the Explorer's opening, since Herdr refuses a module
+  outside the mod's folder. `test/code-file-markdown.test.js` runs both on the same
+  cases: change one, change the other.
+- **`preview-view.js`:** draws it in a plain scroll area: a virtual list's rows lose
+  their click handlers.
+
+**Watch out**
+
+- **No outline and no find in the preview:** only a virtual list can scroll to a place,
+  and its rows can't hold the links and the copy buttons. Herdr's editor has no find
+  either, so `cmd-f` does nothing outside a PDF.
+- **A path from the root** (`/docs/guide.md`, `/assets/logo.png`) is read from the
+  disk's root, not the repository's as GitHub does: the link says "File not found".
+- **What `TextView` doesn't draw stays as text:** HTML (`<img>`, `<details>`),
+  footnotes, math.
+- **The image cache is never pruned:** an image that changes leaves its old copy in
+  `<home>/data/code-file/img/`.
+
+**Done when**
+
+- `node --test test/code-file-markdown.test.js test/code-file-view.test.js` reports
+  `fail 0`.
+- A README with front matter, fenced code, badges and a local image opens rendered,
+  with colored code and the images, and Source/Preview switch between the two.
+- A relative link opens that file in a preview tab, and a missing one says "File not
+  found".
+
+### PDF reader
+
+A `.pdf` opens in a reader, as Orca's: the pages one under another, fit to the width,
+with zoom and find. It has no text model: nothing to edit or save.
+
+**What you see**
+
+- **Pages:** white, centered on `canvas`, 10 px apart, as wide as the pane minus 40 px
+  until you zoom; wider than the pane, they scroll sideways too.
+- **The bottom bar:** a 1 px `border` above, padding 8 by 16, 16 px gaps, 12 px text in
+  `muted`. "Zoom out", "Fit to width" and "Zoom in" (14 px icons, half see-through when
+  they can't go further), the zoom as `NN%`, "Find in PDF (⌘F)", the file's name
+  (truncated) and "PDF preview".
+- **Find:** a 300 px bar at the top right, on `popover` with a shadow: "Find in
+  page...", the count as "3 of 12" or "No matches", "Previous match", "Next match" and
+  "Close". Matches are tinted, the current one in another tint.
+- **Instead of the pages:** "Loading preview...", or an image icon with "This PDF is
+  password-protected" or "Failed to load PDF preview" and the file's name. Without
+  Apple's Swift compiler: "Showing PDFs needs Apple's Swift compiler: run
+  xcode-select --install".
+
+**How it behaves**
+
+- **Zoom** goes ×1.25 per step, from 25% to 500%, where 100% is a PDF point at 4/3 px
+  (pdf.js's). `cmd-=` and `cmd-+` zoom in, `cmd--` out, `cmd-0` fits to the width
+  again. The page being read stays in view.
+- **`cmd-f`** opens find. Enter goes to the next match, Shift-Enter to the previous,
+  Esc closes. It searches 250 ms after the last key, ignoring case and accents, and
+  stops counting at 5000 ("1 of 5000+"). While a search runs, Enter and the arrows wait
+  for it; a search that fails shows no count, and Enter tries again.
+- **Pages render as they scroll into view,** a few around them, sharp for a Retina
+  screen, and a page already rendered at that size is reused, in this tab or another.
+  A file that changes on disk shows its new pages at the same place. A symlink is read
+  through to its file, but only the link's folder is watched: a change to the file in
+  another folder shows when the tab opens again.
+- **Going to a page** puts its top at the top of the view.
+
+**Commands:** `code-file.zoom-in`, `zoom-out`, `zoom-fit`, `find[:text]`, `find-next`,
+`find-prev`, `find-close`, `page:<n>`. In a file that isn't a PDF, the zoom keys zoom
+the whole window, as before.
+
+**Built from**
+
+- **`pdfpages.swift`:** PDFKit, compiled with `/usr/bin/swiftc -O` the first time a
+  PDF opens, into `<home>/data/code-file/bin/pdfpages-<hash of the source>`. It answers
+  one JSON line: `info` (page sizes), `render` (PNGs), `find` (match boxes). `exec` is
+  text only, so pages go through files.
+- **`pdf-model.js`:** the zoom, the pages cut into 256 px strips as the list's rows, which
+  pages to render and at what scale, find's steps, the cache's names.
+- **`pdf-view.js`:** a `v_virtual_list` of strips, a timer that renders what the list
+  drew last, the find bar and the bottom bar. Pages are cached under
+  `<home>/data/code-file/pdf/<path>-<content>/`, and a file's older renders go when it
+  changes.
+
+**Watch out**
+
+- **The first PDF compiles the helper,** which takes a moment, and needs the Xcode
+  command line tools. A build that fails isn't tried again until the tab opens again.
+- **The text can't be selected and links don't open:** the pages are images.
+- **A PDF with a password** says so; there's no field to type it.
+- **Zoom keeps the page being read to within a strip** (256 px): the list says which row
+  is first on screen, not where inside it.
+- **The cache of a PDF that's gone** stays in `<home>/data/code-file/pdf/`.
+
+**Done when**
+
+- `node --test test/code-file-pdf.test.js` reports `fail 0`.
+- A long PDF opens at fit to width, zoom changes the percentage and keeps the page,
+  and find says "1 of N" and steps through the matches.
+- A locked PDF and a broken one show their messages.

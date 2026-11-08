@@ -14,13 +14,14 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { hashPath, parseDraft, serializeDraft, signature } from "../code-editor/mods/code-file/draft-model.js";
 
-const HERDR = ["theme", "props", "run", "notify", "exec", "readTextFile", "writeTextFile", "watchFolder", "shared", "setShared", "settings", "spaces", "panes", "appHome", "home", "nextCommand"];
+const HERDR = ["theme", "props", "run", "notify", "exec", "readTextFile", "writeTextFile", "watchFolder", "shared", "setShared", "settings", "spaces", "panes", "appHome", "home", "nextCommand", "focused", "layout"];
 const FS = ["readFile", "writeFile", "readdir", "unlink", "mkdir"];
 const FAKES = {
   herdr: HERDR.map((n) => `export const ${n} = (...a) => globalThis.__cf.${n}(...a);`).join("\n"),
   "fs/promises": FS.map((n) => `export const ${n} = (...a) => globalThis.__cf.fs.${n}(...a);`).join("\n"),
   "gpui-kit": `const k = (n) => (...a) => globalThis.__cf.el(n, ...a);
-    export const div = k("div");
+    export const div = k("div"), svg = k("svg"), image = k("image");
+    export const list = (id, count, getKey, render) => globalThis.__cf.el("list", { id, count, getKey, render });
     export class View {}`,
   "gpui-base": `const k = (n) => (...a) => globalThis.__cf.el(n, ...a);
     export const v_flex = k("v_flex"), h_flex = k("h_flex");
@@ -28,7 +29,13 @@ const FAKES = {
     export const Scrollbar = { vertical: (name) => globalThis.__cf.el("Scrollbar", name) };
     export const Editor = { new: (s) => globalThis.__cf.el("Editor", s) };
     export const EditorState = { new: (o) => globalThis.__cf.newEditor(o) };
-    export const VirtualListScrollHandle = { new: () => globalThis.__cf.newScroll() };`,
+    export const VirtualListScrollHandle = { new: () => globalThis.__cf.newScroll() };
+    export const TextView = { markdown: (id, text) => globalThis.__cf.el("TextView", { id, text }), html: (id, text) => globalThis.__cf.el("TextView", { id, html: text }) };
+    export const Input = { new: (s) => globalThis.__cf.el("Input", s) };
+    export const InputState = { new: (o) => {
+      const s = { opts: o, text: o?.value ?? "", handlers: {}, value: () => s.text, set_value: (v) => { s.text = v; }, on: (n, h) => { s.handlers[n] = h; return true; }, focus() {}, release() {} };
+      return s;
+    } };`,
 };
 registerHooks({
   resolve: (spec, ctx, next) => (Object.hasOwn(FAKES, spec) ? { url: `fake:${spec}`, shortCircuit: true } : next(spec, ctx)),
@@ -876,7 +883,7 @@ test("D22: a watch that rejects falls back to a 10 s timer", async () => {
   assert.equal(view.model.banner, "changed");
 });
 
-const NOTES = `${HOME}/notes.md`;
+const NOTES = `${HOME}/notes.txt`; // not .md: Markdown opens in the preview (lector-md D9)
 
 test("D22: a file directly in the home folder starts no watch of the whole home: the 10 s timer covers it", async () => {
   const w = await open({ props: { doc: "d1", file: NOTES }, disk: { [NOTES]: "one\n" } });
@@ -1902,6 +1909,108 @@ test("pin: the editor's header has no Editar, and nothing runs git until asked",
   const w = await blameWorld();
   assert.equal(headerOf(w).includes("Editar"), false);
   assert.deepEqual(w.blames, []);
+});
+
+// ── lector-md T1: the readers' place in the tab (D7, D9, D10) ─────────────────
+
+const MD = "/repo/docs/README.md";
+const PDF = "/repo/docs/book.pdf";
+const mdWorld = (over = {}) => open({ props: { doc: "d1", file: MD }, disk: { [MD]: "# Title\n\nText.\n" }, ...over });
+
+test("S5, D9: a .md opens rendered: the preview in the body, no editor, and the header's toggle on Preview with no Editar", async () => {
+  const w = await mdWorld();
+  assert.equal(w.view.mode, "preview");
+  assert.equal(w.editors.length, 0, "no editor until Source");
+  assert.ok(find(w.draw(), "view-toggle"));
+  assert.equal(find(w.draw(), "header-edit"), null);
+  assert.ok(find(w.draw(), "header-blame"), "Blame stays");
+  assert.equal(find(w.draw(), "toggle-preview").calls.bg?.[0], "#selected");
+  assert.equal(find(w.draw(), "toggle-preview").calls.text_color?.[0], "#foreground");
+  assert.equal(find(w.draw(), "toggle-source").calls.text_color?.[0], "#muted", "the other one only lights on hover");
+  assert.equal(find(w.draw(), "toggle-preview").calls.tooltip[0], "Preview");
+  assert.equal(find(w.draw(), "toggle-source").calls.tooltip[0], "Source");
+});
+
+for (const [name, source, preview] of [
+  ["the toggle", (w) => w.click("toggle-source"), (w) => w.click("toggle-preview")],
+  ["the commands", (w) => w.command("code-file.source"), (w) => w.command("preview")],
+]) {
+  test(`S5: ${name}: Source makes the editor with the file, Preview comes back with what was typed`, async () => {
+    const w = await mdWorld();
+    await source(w);
+    assert.equal(w.view.mode, "editor");
+    assert.equal(w.editors.length, 1);
+    assert.equal(w.editor().text, "# Title\n\nText.\n");
+    assert.ok(findKind(w.draw(), "Editor"));
+    await w.type("# Changed\n");
+    await preview(w);
+    assert.equal(w.view.mode, "preview");
+    assert.equal(w.view.host().text(), "# Changed\n", "the preview draws the buffer, unsaved edits included");
+    assert.equal(w.live().dirty, true, "and the tab keeps its dot");
+    await source(w);
+    assert.equal(w.editors.length, 1, "the same editor again");
+  });
+}
+
+test("R8: Source → Preview, or the tab back in view on the preview, asks the preview to look at its images again", async () => {
+  const w = await mdWorld();
+  let asked = 0;
+  w.view.preview.refresh = () => { asked++; };
+  w.draw();
+  const before = asked;
+  await w.click("toggle-source");
+  await w.click("toggle-preview");
+  assert.equal(asked, before + 1, "Source → Preview");
+  const shown = w.spaceList;
+  w.spaceList = [{ id: "s0", active: true, tabs: [{ id: "x", active: true, panes: 1 }] }, { id: "s1", active: false, tabs: [{ id: "t1", active: true, panes: 1 }] }];
+  w.draw();
+  assert.equal(asked, before + 1, "hidden: nothing");
+  w.spaceList = shown;
+  w.draw();
+  assert.equal(asked, before + 2, "back in view");
+  w.draw();
+  assert.equal(asked, before + 2, "once, not every frame");
+});
+
+test("D9: a .md over 600 KiB opens in Source; Preview is still a click", async () => {
+  const big = "x".repeat(600 * 1024 + 1);
+  const w = await mdWorld({ disk: { [MD]: big } });
+  assert.equal(w.view.mode, "editor");
+  await w.click("toggle-preview");
+  assert.equal(w.view.mode, "preview");
+});
+
+test("D9: a .md asked at a line opens the line view, and the toggle counts it as Source", async () => {
+  const w = await mdWorld({ props: { doc: "d1", file: MD, line: 2 } });
+  assert.equal(w.view.mode, "lines");
+  assert.equal(find(w.draw(), "toggle-source").calls.bg?.[0], "#selected");
+});
+
+test("D9: Preview means nothing for a file that isn't Markdown", async () => {
+  const w = await open();
+  await w.command("preview");
+  assert.equal(w.view.mode, "editor");
+  assert.equal(find(w.draw(), "view-toggle"), null);
+});
+
+test("D10: a .pdf reads nothing as text, makes no editor, and closes at once", async () => {
+  const w = await open({ props: { doc: "d1", file: PDF }, disk: { [PDF]: "%PDF-1.7\u0000" } });
+  assert.equal(w.view.kind, "pdf");
+  assert.ok(w.view.pdf, "the PDF reader draws the body");
+  assert.equal(w.editors.length, 0);
+  assert.deepEqual(w.execs.filter(([cmd]) => cmd === "/bin/realpath" || cmd === "/bin/sh"), [], "no realpath, no access check: open() never ran");
+  assert.ok(find(w.draw(), "file-body"));
+  await w.command("close");
+  assert.deepEqual(w.closes(), [["tab.close", { id: "t1" }]]);
+});
+
+test("D7: in a file that isn't a PDF the zoom keys are the window's", async () => {
+  const w = await open();
+  await w.command("code-file.zoom-in");
+  await w.command("zoom-out");
+  await w.command("code-file.zoom-reset");
+  await w.command("code-file.find");
+  assert.deepEqual(w.runs.map(([n]) => n), ["app.zoom_in", "app.zoom_out", "app.zoom_reset"]);
 });
 
 // ── The mod as Herdr gets it ─────────────────────────────────────────────────

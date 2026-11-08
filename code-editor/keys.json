@@ -4,6 +4,11 @@
   },
   "mod:code-file": {
     "cmd-s": "code-file.save",
-    "cmd-w": "code-file.close"
+    "cmd-w": "code-file.close",
+    "cmd-f": "code-file.find",
+    "cmd-=": "code-file.zoom-in",
+    "cmd-+": "code-file.zoom-in",
+    "cmd--": "code-file.zoom-out",
+    "cmd-0": "code-file.zoom-reset"
   }
 }
