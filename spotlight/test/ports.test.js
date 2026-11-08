@@ -9,6 +9,7 @@ import assert from "node:assert/strict";
 import {
   LSOF_ARGV, parseLsofListen, processTree, treePorts, pickPort, portLabel, portUrl,
   portListeners, parseLsofCwd, processCwd, processCommand, foreignListener, stopProcessTree, FREE_PORT_GRACE_MS,
+  childPids, insideRoot, serverSnapshot, serverLeftovers, stopLeftovers, LEFTOVER_GRACE_MS,
 } from "../mods/spotlight/ports.js";
 
 // Recorded from `lsof -nP -iTCP -sTCP:LISTEN -F pcn` on macOS (2026-11-06),
@@ -195,14 +196,30 @@ test("foreignListener: a listener outside the terminal's tree is reported with p
 
 // A process table with a fake clock: `kill(pid, 0)` throws ESRCH once a pid
 // died; SIGTERM kills those that don't ignore it, SIGKILL kills anything.
+// An entry's `ports` are its listening sockets (`lsof -F pcn`) and `cwd` its
+// folder (`lsof -a -p <pid> -d cwd`); `children` is read on every pgrep, so a
+// test reparents a process by editing the table.
 function processWorld(table) {
   let clock = 0;
   const alive = new Set(Object.keys(table).map(Number));
   const signals = [];
-  const children = Object.fromEntries(Object.entries(table).map(([pid, p]) => [pid, p.children ?? []]));
   const exec = async (file, args) => {
+    if (file === "lsof" && args.includes("-d")) {
+      const pid = Number(args[args.indexOf("-p") + 1]);
+      const cwd = alive.has(pid) ? table[pid]?.cwd : undefined;
+      return cwd ? { code: 0, stdout: `p${pid}\nfcwd\nn${cwd}\n`, stderr: "" } : { code: 1, stdout: "", stderr: "" };
+    }
+    if (file === "lsof") {
+      const lines = [];
+      for (const pid of alive) {
+        if (!table[pid].ports?.length) continue;
+        lines.push(`p${pid}`, "cnode");
+        for (const port of table[pid].ports) lines.push("f20", `n*:${port}`);
+      }
+      return { code: lines.length ? 0 : 1, stdout: lines.join("\n"), stderr: "" };
+    }
     assert.equal(file, "pgrep");
-    const kids = (children[Number(args[1])] ?? []).filter((k) => alive.has(k));
+    const kids = (table[Number(args[1])]?.children ?? []).filter((k) => alive.has(k));
     return kids.length ? { code: 0, stdout: kids.map((k) => `${k}\n`).join(""), stderr: "" } : { code: 1, stdout: "", stderr: "" };
   };
   const kill = (pid, sig) => {
@@ -214,7 +231,12 @@ function processWorld(table) {
   };
   return {
     deps: { exec, kill, now: () => clock, sleep: async (ms) => { clock += ms; } },
-    signals, alive,
+    signals, alive, table,
+    // A process that starts now (a restart typed into the terminal).
+    spawn(pid, entry = {}) {
+      table[pid] = entry;
+      alive.add(pid);
+    },
   };
 }
 
@@ -258,4 +280,114 @@ test("stopProcessTree: never signals pid 1, nor a tree holding a protected pid (
   assert.equal(r.ok, false);
   assert.equal(r.reason, "protected");
   assert.deepEqual(w.signals, []);
+});
+
+// ── What a turn-off's Ctrl-C leaves behind (T15, D26) ──────────────────────
+
+const APP = "/Users/demo/code/app";
+
+// A Spotlight server terminal at turn-off: zsh -l (100) → script (101) →
+// zsh -c (102) → next-server (103, on 3210, in apps/web). 600 listens on the
+// recorded port 8080 from a sibling folder that only shares the root's
+// prefix; 702 is a database nobody recorded.
+function serverWorld(over = {}) {
+  return processWorld({
+    100: { children: [101], cwd: APP },
+    101: { children: [102], cwd: APP },
+    102: { children: [103], cwd: APP },
+    103: { ports: [3210], cwd: `${APP}/apps/web` },
+    600: { ports: [8080], cwd: `${APP}-old` },
+    702: { ports: [5432], cwd: "/opt/homebrew/var/postgres" },
+    ...over,
+  });
+}
+
+test("insideRoot: the root itself or a folder under it; a sibling sharing its prefix, or a root of /, never", () => {
+  assert.equal(insideRoot(APP, APP), true);
+  assert.equal(insideRoot(`${APP}/apps/web`, `${APP}/`), true);
+  assert.equal(insideRoot(`${APP}-old`, APP), false);
+  assert.equal(insideRoot("/Users/demo/code", APP), false);
+  assert.equal(insideRoot("/Users/demo", "/"), false);
+  assert.equal(insideRoot(null, APP), false);
+  assert.equal(insideRoot(APP, null), false);
+  assert.equal(insideRoot("app/x", "app"), false);
+});
+
+test("childPids: the direct children only (pgrep -P); none, or no pid, is []", async () => {
+  const { exec } = fakeExec();
+  assert.deepEqual(await childPids(100, { exec }), [101]);
+  assert.deepEqual(await childPids(103, { exec }), []);
+  assert.deepEqual(await childPids(null, { exec }), []);
+});
+
+test("serverSnapshot: before the Ctrl-C, the tree under the shell, its ports plus the recorded ones, and who listens on them", async () => {
+  const w = serverWorld();
+  const snap = await serverSnapshot({ rootPid: 100, serverPid: 101, ports: [8080, 0, "x"] }, w.deps);
+  assert.equal(snap.rootPid, 100);
+  assert.deepEqual(snap.ports, [3210, 8080]);
+  // 600 holds a recorded port; 702's 5432 is nobody's.
+  assert.deepEqual([...snap.pids].sort(), [100, 101, 102, 103, 600]);
+  // No shell pid from hc: the foreground hc showed still counts.
+  const bare = await serverSnapshot({ rootPid: null, serverPid: 101, ports: [] }, w.deps);
+  assert.deepEqual([...bare.pids], [101]);
+  assert.deepEqual(bare.ports, []);
+});
+
+test("serverLeftovers: the shell's children from before the Ctrl-C, and a listener that escaped the tree with its cwd inside the root", async () => {
+  const w = serverWorld();
+  const snap = await serverSnapshot({ rootPid: 100, serverPid: 101, ports: [8080] }, w.deps);
+  // Nothing moved yet: the server is still the shell's child; 103 is in the tree.
+  assert.deepEqual(await serverLeftovers(snap, APP, w.deps), { children: [101], escaped: [] });
+
+  // The Ctrl-C took script and zsh -c; next-server lived on outside the tree.
+  w.alive.delete(101);
+  w.alive.delete(102);
+  assert.deepEqual(await serverLeftovers(snap, APP, w.deps), {
+    children: [], escaped: [{ pid: 103, port: 3210, cwd: `${APP}/apps/web` }],
+  });
+
+  // A restart typed during the wait (110, the shell's new child, on 3210 too)
+  // and a server started by hand in the root after the Ctrl-C (111): neither
+  // was there before it, so neither is a leftover.
+  w.spawn(110, { ports: [3210], cwd: APP });
+  w.table[100].children = [101, 110];
+  w.spawn(111, { ports: [8080], cwd: APP });
+  assert.deepEqual(await serverLeftovers(snap, APP, w.deps), {
+    children: [], escaped: [{ pid: 103, port: 3210, cwd: `${APP}/apps/web` }],
+  });
+
+  // No root to compare with: nothing outside the tree is ever a leftover.
+  assert.deepEqual(await serverLeftovers(snap, null, w.deps), { children: [], escaped: [] });
+});
+
+test("stopLeftovers: TERM to each leftover's tree, KILL 3 s later to those still alive; never the terminal's shell", async () => {
+  assert.equal(LEFTOVER_GRACE_MS, 3000);
+  // 101 ignores TERM; 103 escaped the tree and goes on TERM.
+  const w = serverWorld({ 101: { children: [102], cwd: APP, ignoresTerm: true } });
+  w.table[102].children = [];
+  const r = await stopLeftovers({ children: [101], escaped: [{ pid: 103, port: 3210, cwd: APP }] }, 100, w.deps);
+  assert.deepEqual([...r.pids].sort(), [101, 102, 103]);
+  assert.deepEqual(r.killed, [101]);
+  assert.deepEqual(r.refused, []);
+  const term = w.signals.filter((s) => s.sig === "SIGTERM");
+  assert.deepEqual(term.map((s) => s.pid).sort(), [101, 102, 103]);
+  assert.ok(term.every((s) => s.at === 0));
+  const kills = w.signals.filter((s) => s.sig === "SIGKILL");
+  assert.deepEqual(kills.map((s) => s.pid), [101]);
+  assert.ok(kills[0].at >= 3000, JSON.stringify(kills));
+  assert.ok(!w.signals.some((s) => s.pid === 100), "the shell is never signalled");
+  assert.deepEqual([...w.alive].sort(), [100, 600, 702]);
+
+  // The shell passed as a leftover, or a tree holding a protected pid (the
+  // CLI), is refused and nothing in it is signalled.
+  const v = serverWorld();
+  const refused = await stopLeftovers({ children: [100, 101], escaped: [] }, 100, v.deps, { protect: [103] });
+  assert.deepEqual(refused.pids, []);
+  assert.deepEqual(refused.refused.sort(), [100, 101]);
+  assert.deepEqual(v.signals, []);
+
+  // Nothing left: nothing signalled, no wait.
+  const quiet = serverWorld();
+  assert.deepEqual(await stopLeftovers({ children: [], escaped: [] }, 100, quiet.deps), { pids: [], killed: [], refused: [] });
+  assert.equal(quiet.deps.now(), 0);
 });

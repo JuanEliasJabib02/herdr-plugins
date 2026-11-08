@@ -87,6 +87,23 @@ Orca leaves such a server "stopped" with nothing said; here it is an error.
 - One toast per error, opening the server popup; the popup's first buttons read Ver log (the server terminal) and Reintentar (`restart`); the server badge is red with the message as tooltip. `spotlight on` stops waiting and prints the line.
 - Only a change into `listening` clears it; a sync keeps it.
 
+## Turning the server off
+
+Turn-off (`toggle` off, Apagar, Apagar igual) always leaves the server dead (D26). Orca stops at the Ctrl-C (`spotlight-server-turn-off.ts:48-65`). Here the Ctrl-C comes first too, and is usually all it takes: live on 2026-11-08, a Next server (script → sh pnpm → pnpm → next → next-server) died whole on it. The rest is a safety net for a child that ignores SIGINT, or one that leaves the tree when the Ctrl-C takes its parent.
+
+- Before the Ctrl-C, `server.js` `stopServer` reads the server: the process tree under the terminal's shell, the ports that tree listens on, and every listener on those ports.
+- After it, the stop waits up to 8 s for the prompt to come back and these leftovers to be gone:
+  - The shell's children read before the Ctrl-C, each with everything under it.
+  - A listener read before the Ctrl-C, still on one of those ports, now outside the tree, running inside the root (`lsof -a -p <pid> -d cwd`): a child that escaped the tree. One running outside the root is never a leftover, and neither is one in a folder that only shares the root's name as a prefix.
+- Leftovers still there after the 8 s are killed: SIGTERM, up to 3 s, then SIGKILL.
+- The server log says which: "Spotlight off — server stopped (interrupt sent)" or "Spotlight off — server stopped (forced: 2 processes)".
+- Never killed:
+  - The terminal and its shell. The terminal stays for the next start, as in Orca.
+  - The CLI itself: a leftover whose tree holds it is left alone.
+  - Anything that started after the Ctrl-C, such as a restart typed into the terminal during the wait or a server started by hand in the root. Only processes read before the Ctrl-C are ever leftovers. Spotlight's own starts and restarts can't land in the wait anyway: the stop runs under the repo's lock, which every start takes.
+- A free prompt, a process Spotlight didn't start, or no terminal: nothing is sent or killed.
+- The pieces are `ports.js` (`serverSnapshot`, `serverLeftovers`, `stopLeftovers` over T13's `stopProcessTree`) and `server.js` (`stopServer`).
+
 ## Continuar and auto-resume
 
 When an agent's turn ends in an error, a sign-in prompt or a usage limit, its request is paused in place (D13). Continuar picks it up again, like Orca. The rules are `resume.js` (pure, shared by the board and the CLI); the CLI side is `cli-resume.mjs`.

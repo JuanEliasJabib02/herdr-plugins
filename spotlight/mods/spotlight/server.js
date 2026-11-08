@@ -16,7 +16,8 @@
 // killed between typing and recording the pid); the recorded pid is only a
 // cross-check, used when the argv can't be read. Restart = `hc interrupt`,
 // wait for the prompt, type again. Stop (toggle off) interrupts only
-// Spotlight's own server and keeps the terminal for the next start. hc is
+// Spotlight's own server, kills what of it outlives the Ctrl-C (D26), and
+// keeps the terminal for the next start. hc is
 // reached through an injected `exec(file, args) → { code, stdout, stderr }`
 // and the clock through injected `now()` / `sleep(ms)`, so tests run on a
 // fake hc. The probe that pinned hc's shapes is in RECIPE.md "Server
@@ -25,7 +26,9 @@
 import {
   repoSlug, appendLogHeader, rotateLog, tailLog, stripTerminalSequences, DEFAULT_TAIL_LINES,
 } from "./server-log.js";
-import { treePorts, pickPort, portLabel, portUrl } from "./ports.js";
+import {
+  treePorts, pickPort, portLabel, portUrl, serverSnapshot, serverLeftovers, stopLeftovers,
+} from "./ports.js";
 
 // The label that ties a server terminal to its repo root.
 export const SERVER_LABEL = "spotlight.repo";
@@ -44,6 +47,10 @@ const SEEN_MS = 3000;
 const PROMPT_MS = 5000;
 // `hc interrupt --timeout`: seconds it watches for an effect.
 const INTERRUPT_WATCH_S = 5;
+// Turn-off (D26): how long after the Ctrl-C the server gets to be gone (the
+// prompt back, no process of it left, its ports free) before what's left of
+// it is killed.
+export const STOP_WAIT_MS = 8000;
 
 // Start decisions that typed nothing leave a line in the log, as Orca's
 // spotlight-server-start-notes.ts does.
@@ -385,21 +392,71 @@ export async function restartServer({ root, terminal, line, logPath, serverPid, 
   return r.started ? { ...r, restarted } : r;
 }
 
-// Stop (toggle off): interrupt Spotlight's own server and wait for the
-// prompt; the terminal stays for the next start. Nothing else is touched:
-// a free prompt is `not-running`, a foreign process `busy`, no terminal
-// `terminal-gone` (all ok: there's no Spotlight server running).
-export async function stopServer({ root, terminal, logPath, serverPid, workspace, branch } = {}, deps) {
+// The pre-Ctrl-C server still leads the terminal (its `script`, by pid).
+const oldInFront = (seen, snapshot) => seen.kind === "spotlight" && snapshot.pids.has(seen.pid);
+
+// Stop (toggle off), guaranteed (D26): Ctrl-C to Spotlight's own server, as
+// Orca does (spotlight-server-turn-off.ts:48-65), then up to STOP_WAIT_MS for
+// the prompt with none of the server's processes left under the terminal's
+// shell and its ports free. What's left then is killed (ports.js
+// stopLeftovers: SIGTERM, 3 s, SIGKILL): the shell's leftover children with
+// their trees, and a listener still on one of the server's ports (those its
+// tree held before the Ctrl-C, plus `ports`, the recorded ones) that left the
+// tree and runs inside `root`. The terminal and its shell are never killed;
+// the terminal stays for the next start.
+//
+// Only what ran before the Ctrl-C is ever killed: a server typed into the
+// terminal during the wait (a restart) is new, and stays. The CLI also
+// stops under the repo's lock, which every start and restart takes.
+//
+// Results: { ok: true, stopped: true, terminal, forced } (`forced`: how many
+// processes were signalled, 0 when the Ctrl-C was enough; the log says
+// which), or { ok: false, reason: "interrupt-failed" | "still-running", … }.
+// Nothing else is touched: a free prompt is `not-running`, a foreign process
+// `busy`, no terminal `terminal-gone` (all ok: no Spotlight server runs).
+// `deps.kill` (process.kill's shape) defaults to process.kill.
+export async function stopServer({ root, terminal, logPath, serverPid, workspace, branch, ports } = {}, deps) {
   const seen = await inspectServer({ root, terminal, logPath, serverPid }, deps);
   const t = seen.terminal ?? null;
   if (seen.kind === "gone") return { ok: true, stopped: false, reason: "terminal-gone", terminal: null };
   if (seen.kind === "unknown") return { ok: false, reason: "unreadable", terminal: t, message: seen.error ?? "no foreground" };
   if (seen.kind === "shell") return { ok: true, stopped: false, reason: "not-running", terminal: t };
   if (seen.kind === "foreign") return { ok: true, stopped: false, reason: "busy", terminal: t };
-  const stopped = await interruptAndWait(t, { logPath, serverPid }, deps);
-  if (!stopped.ok) return stopped;
-  note(logPath, { workspace, branch }, "stopped", deps);
-  return { ok: true, stopped: true, terminal: t };
+
+  const snapshot = await serverSnapshot({ rootPid: seen.rootPid, serverPid: seen.pid, ports }, deps);
+  const r = await hc(deps, ["interrupt", t, "--timeout", String(INTERRUPT_WATCH_S), "--json"]);
+  if (!r.ok) return { ok: false, reason: "interrupt-failed", terminal: t, message: r.error.message };
+
+  const look = { terminal: t, logPath, serverPid };
+  const until = nowOf(deps) + STOP_WAIT_MS;
+  let front;
+  let left;
+  for (;;) {
+    front = await inspectServer(look, deps);
+    left = await serverLeftovers(snapshot, root, deps);
+    const gone = !oldInFront(front, snapshot) && left.children.length === 0 && left.escaped.length === 0;
+    if (gone || nowOf(deps) >= until) break;
+    await sleepOf(deps, POLL_MS);
+  }
+
+  // The old `script` in front is a leftover even when pgrep can't see it.
+  const children = oldInFront(front, snapshot) ? [...new Set([...left.children, front.pid])] : left.children;
+  let forced = 0;
+  if (children.length > 0 || left.escaped.length > 0) {
+    const killDeps = {
+      ...deps,
+      kill: deps.kill ?? ((pid, signal) => process.kill(pid, signal)),
+      now: deps.now ?? Date.now,
+      sleep: deps.sleep ?? defaultSleep,
+    };
+    const killed = await stopLeftovers({ children, escaped: left.escaped }, snapshot.rootPid, killDeps, { protect: [process.pid] });
+    forced = killed.pids.length;
+    const after = await inspectUntil(look, deps, (s) => !oldInFront(s, snapshot), PROMPT_MS);
+    if (oldInFront(after, snapshot)) return { ok: false, reason: "still-running", terminal: t, forced };
+  }
+  const how = forced > 0 ? `forced: ${forced} processes` : "interrupt sent";
+  note(logPath, { workspace, branch }, `Spotlight off — server stopped (${how})`, deps);
+  return { ok: true, stopped: true, terminal: t, forced };
 }
 
 // ── Logs and peek ──────────────────────────────────────────────────────────

@@ -6,8 +6,9 @@
 // `pid` (the `zsh -l`): zsh → script → /bin/zsh -c → the dev server and its
 // children. Anything else listening on the machine (a database, another
 // repo's server) is not the server's. Also who holds the port a start will
-// take, and stopping that process's tree (D24): lsof, ps and pgrep through
-// the same `exec`, signals through an injected `kill`.
+// take, and stopping that process's tree (D24), and what a turn-off's Ctrl-C
+// left of the server (D26): lsof, ps and pgrep through the same `exec`,
+// signals through an injected `kill`.
 
 // Every TCP listener on the machine, one field per line (D10): `p<pid>`,
 // `c<command>`, then `f<fd>` + `n<address:port>` per socket.
@@ -47,37 +48,49 @@ export function parseLsofListen(text) {
   return out;
 }
 
+const validPid = (pid) => Number.isInteger(pid) && pid > 0;
+const validPort = (port) => Number.isInteger(port) && port >= 1 && port <= 65535;
+
+// The direct children of `pid` (`pgrep -P`, exit 1: none), in pgrep's order.
+// A pgrep that fails or can't run counts as no children.
+export async function childPids(pid, { exec }) {
+  if (!validPid(pid)) return [];
+  let r;
+  try {
+    r = await exec("pgrep", ["-P", String(pid)]);
+  } catch {
+    return [];
+  }
+  if (r?.code !== 0) return [];
+  const out = [];
+  for (const line of String(r.stdout ?? "").split("\n")) {
+    const child = Number.parseInt(line.trim(), 10);
+    if (validPid(child) && !out.includes(child)) out.push(child);
+  }
+  return out;
+}
+
 // The pids under `rootPid`, itself included, walked with `pgrep -P` (exit 1:
 // no children). A pgrep that fails or can't run counts as no children.
 export async function processTree(rootPid, { exec }) {
   const tree = new Set();
-  if (!Number.isInteger(rootPid) || rootPid <= 0) return tree;
+  if (!validPid(rootPid)) return tree;
   const queue = [rootPid];
   while (queue.length > 0 && tree.size < MAX_TREE) {
     const pid = queue.shift();
     if (tree.has(pid)) continue;
     tree.add(pid);
-    let r;
-    try {
-      r = await exec("pgrep", ["-P", String(pid)]);
-    } catch {
-      continue;
-    }
-    if (r?.code !== 0) continue;
-    for (const line of String(r.stdout ?? "").split("\n")) {
-      const child = Number.parseInt(line.trim(), 10);
-      if (Number.isInteger(child) && child > 0 && !tree.has(child)) queue.push(child);
+    for (const child of await childPids(pid, { exec })) {
+      if (!tree.has(child)) queue.push(child);
     }
   }
   return tree;
 }
 
-// The ports the tree under `rootPid` listens on, ascending and unique: []
-// when it listens on nothing (or there's no pid), null when lsof can't run or
-// fails (can't tell; never read as "not listening"). lsof exits 1 when no
-// socket matched at all.
-export async function treePorts(rootPid, { exec }) {
-  if (!Number.isInteger(rootPid) || rootPid <= 0) return [];
+// Every TCP listener on the machine ([{ pid, command, port }], lsof's order):
+// [] when none, null when lsof can't run or fails (can't tell). lsof exits 1
+// when no socket matched at all.
+export async function allListeners({ exec }) {
   let listing;
   try {
     listing = await exec(LSOF_ARGV[0], LSOF_ARGV.slice(1));
@@ -85,7 +98,16 @@ export async function treePorts(rootPid, { exec }) {
     return null;
   }
   if (listing?.code !== 0 && listing?.code !== 1) return null;
-  const sockets = parseLsofListen(listing.stdout);
+  return parseLsofListen(listing.stdout);
+}
+
+// The ports the tree under `rootPid` listens on, ascending and unique: []
+// when it listens on nothing (or there's no pid), null when lsof can't run or
+// fails (can't tell; never read as "not listening").
+export async function treePorts(rootPid, { exec }) {
+  if (!validPid(rootPid)) return [];
+  const sockets = await allListeners({ exec });
+  if (sockets === null) return null;
   if (sockets.length === 0) return [];
   const tree = await processTree(rootPid, { exec });
   const ports = new Set(sockets.filter((s) => tree.has(s.pid)).map((s) => s.port));
@@ -216,6 +238,91 @@ export async function stopProcessTree(pid, deps, { graceMs = FREE_PORT_GRACE_MS,
   for (const p of killed) signal(p, "SIGKILL");
   if (killed.length > 0) await waitGone(killed, deps, KILL_SETTLE_MS);
   return { ok: true, pids, killed };
+}
+
+// ── What a turn-off's Ctrl-C leaves behind (D26) ───────────────────────────
+// Turn-off interrupts the server first, as Orca does, and that is usually
+// all it takes. A child that ignores SIGINT stays in the terminal's tree; one
+// whose parent the Ctrl-C took leaves it (reparented to launchd) and keeps
+// its port. server.js stopServer reads the server before the Ctrl-C
+// (serverSnapshot), waits, and stops what of it is still there
+// (serverLeftovers, stopLeftovers) with stopProcessTree.
+
+// How long a leftover gets after SIGTERM before SIGKILL.
+export const LEFTOVER_GRACE_MS = 3000;
+
+// `dir` is `root` or a folder under it. A root of "/" (or a relative one)
+// holds nothing here: every folder would be inside it.
+export function insideRoot(dir, root) {
+  if (typeof dir !== "string" || typeof root !== "string") return false;
+  const base = root.replace(/\/+$/, "");
+  if (!base.startsWith("/")) return false;
+  return dir === base || dir.startsWith(`${base}/`);
+}
+
+// The server right before its Ctrl-C:
+//   pids  — the tree under the terminal's shell (`rootPid`), the foreground
+//           hc showed (`serverPid`), and every listener on `ports`
+//   ports — those the tree listens on, plus the `ports` recorded for it
+//   cwds  — each pid's folder, filled while the stop waits
+// Only a process the snapshot holds is ever a leftover: whatever starts
+// during the wait (a restart typed into the terminal, a server started by
+// hand) is new, and stays.
+export async function serverSnapshot({ rootPid, serverPid, ports: recorded } = {}, { exec }) {
+  const pids = await processTree(rootPid, { exec });
+  if (validPid(serverPid)) pids.add(serverPid);
+  const sockets = (await allListeners({ exec })) ?? [];
+  const ports = new Set((Array.isArray(recorded) ? recorded : []).filter(validPort));
+  for (const s of sockets) if (pids.has(s.pid)) ports.add(s.port);
+  for (const s of sockets) if (ports.has(s.port)) pids.add(s.pid);
+  return { rootPid: validPid(rootPid) ? rootPid : null, pids, ports: [...ports].sort((a, b) => a - b), cwds: new Map() };
+}
+
+// What of `snapshot` is still there now:
+//   children — the shell's direct children it holds (each goes with its tree)
+//   escaped  — its listeners still on its ports, outside the shell's tree
+//              now, whose folder is inside `root` ({ pid, port, cwd })
+// A listener running outside the root is never a leftover, and neither is
+// one lsof can't place (doubt never kills).
+export async function serverLeftovers(snapshot, root, { exec }) {
+  const { rootPid, pids, ports, cwds } = snapshot;
+  const children = (await childPids(rootPid, { exec })).filter((p) => pids.has(p));
+  if (ports.length === 0 || !insideRoot(root, root)) return { children, escaped: [] };
+  const tree = await processTree(rootPid, { exec });
+  const escaped = [];
+  for (const s of (await allListeners({ exec })) ?? []) {
+    if (!ports.includes(s.port) || !pids.has(s.pid) || tree.has(s.pid) || escaped.some((e) => e.pid === s.pid)) continue;
+    if (!cwds.has(s.pid)) {
+      const cwd = await processCwd(s.pid, { exec });
+      if (cwd) cwds.set(s.pid, cwd);
+    }
+    const cwd = cwds.get(s.pid) ?? null;
+    if (insideRoot(cwd, root)) escaped.push({ pid: s.pid, port: s.port, cwd });
+  }
+  return { children, escaped };
+}
+
+// Stops serverLeftovers' finds, each with its tree (stopProcessTree, all at
+// once so the grace runs once): SIGTERM, up to `graceMs`, SIGKILL. A leftover
+// whose tree holds the terminal's shell (`rootPid`) or a `protect`ed pid (the
+// CLI itself) is refused whole. → { pids: every pid signalled, killed: those
+// that needed SIGKILL, refused: the leftovers left untouched }.
+export async function stopLeftovers({ children = [], escaped = [] } = {}, rootPid, deps, { graceMs = LEFTOVER_GRACE_MS, protect = [] } = {}) {
+  const targets = [...new Set([...children, ...escaped.map((e) => e.pid)])];
+  const guard = [rootPid, ...protect].filter(validPid);
+  const results = await Promise.all(targets.map((pid) => stopProcessTree(pid, deps, { graceMs, protect: guard })));
+  const pids = new Set();
+  const killed = new Set();
+  const refused = [];
+  results.forEach((r, i) => {
+    if (!r.ok) {
+      refused.push(targets[i]);
+      return;
+    }
+    for (const p of r.pids) pids.add(p);
+    for (const p of r.killed) killed.add(p);
+  });
+  return { pids: [...pids], killed: [...killed], refused };
 }
 
 // The port to show and link to: the configured one when it listens, else the

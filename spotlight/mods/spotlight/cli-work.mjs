@@ -557,6 +557,9 @@ export async function deactivateRepo(cx, root, { force = false } = {}) {
       {
         root, terminal: record?.serverTerminal ?? null, logPath, serverPid: record?.serverPid ?? null,
         workspace: holder ? path.basename(holder) : null, branch: holder ? await branchOf(holder) : null,
+        // The ports the server was last seen on (D26): a child that left the
+        // server's tree before the turn-off still dies when it holds one.
+        ports: Array.isArray(record?.ports) ? record.ports : [],
       },
       cx.serverDeps,
     );
