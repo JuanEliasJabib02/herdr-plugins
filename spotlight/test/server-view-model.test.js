@@ -292,16 +292,44 @@ test("a server that didn't come up: Ver log and Reintentar on port-busy and serv
 // R7: a refused restart keeps its port-busy over a server that is still up
 // (D24). The popup says what the badge says: down only when the server is
 // stopped or gone.
-test("a server error over a server still up (a refused restart, D24): Ver server and Reiniciar; Ver log and Reintentar only once it is stopped or gone", () => {
+test("a server error over a server still up (a refused restart, D24): Ver server and Reiniciar; Reintentar only once it is stopped or gone, Ver log only while its terminal is there", () => {
   for (const serverState of ["listening", "starting"]) {
     const m = model({ state: stateWith(repo({ serverState, lastError: PORT_BUSY })) });
     assert.deepEqual(m.actions.map((a) => a.label), ["Ver server", "Reiniciar", "Apagar"], serverState);
     // The port's holder is still someone else's: Liberar puerto y arrancar stays.
     assert.deepEqual(ids(m.force), ["free-port"], serverState);
   }
-  for (const serverState of ["stopped", "gone", null]) {
+  for (const serverState of ["stopped", null]) {
     const m = model({ state: stateWith(repo({ serverState, ports: [], lastError: SERVER_EXITED })) });
     assert.deepEqual(m.actions.map((a) => a.label), ["Ver log", "Reintentar", "Apagar"], String(serverState));
+  }
+  // Gone, its terminal with it: nothing to peek (T24, D34).
+  const gone = model({ state: stateWith(repo({ serverState: "gone", ports: [], lastError: SERVER_EXITED })) });
+  assert.deepEqual(gone.actions.map((a) => a.label), ["Reintentar", "Apagar"]);
+});
+
+// T24 (D34, D38): closing the server's "Spotlight" tab (or its space) ends
+// its terminal; the reap reads `gone` and the toast opens this popup. Ver
+// server (and Ver log, the same peek) needs that terminal: hidden. Reiniciar
+// makes the tab again (ensureServerTerminal's rule) and Apagar turns the
+// root off, as on any other server state.
+test("a gone server (its tab closed): no Ver server nor Ver log, Reiniciar and Apagar kept with their argv; any other state keeps Ver server", () => {
+  const gone = model({ state: stateWith(repo({ serverState: "gone", ports: [] })) });
+  assert.deepEqual(gone.actions, [
+    { id: "restart", label: "Reiniciar", argv: [BIN, "restart", "--repo", ROOT] },
+    { id: "off", label: "Apagar", argv: [BIN, "toggle", "--workspace", H], danger: true },
+  ]);
+  assert.equal(gone.serverState, "gone");
+  // A port-busy kept over it: Reintentar, and Liberar puerto y arrancar stays.
+  const busy = model({ state: stateWith(repo({ serverState: "gone", ports: [], lastError: PORT_BUSY })) });
+  assert.deepEqual(ids(busy.actions), ["restart", "off"]);
+  assert.deepEqual(busy.actions.map((a) => a.label), ["Reintentar", "Apagar"]);
+  assert.deepEqual(ids(busy.force), ["free-port"]);
+  // Nobody holds it any more: no actions at all (Reiniciar and Apagar need a holder).
+  assert.deepEqual(model({ state: stateWith(repo({ holder: null, serverState: "gone", ports: [] })) }).actions, []);
+  for (const serverState of ["listening", "starting", "stopped", "needs-variant"]) {
+    const m = model({ state: stateWith(repo({ serverState })) });
+    assert.deepEqual(m.actions.map((a) => a.label), ["Ver server", "Reiniciar", "Apagar"], serverState);
   }
 });
 

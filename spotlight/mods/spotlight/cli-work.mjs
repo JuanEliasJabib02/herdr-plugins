@@ -1,7 +1,8 @@
-// The CLI's work on repos and the queue (D7, D8, D10–D13, D18, D19, D33):
-// lighting a task's repos, syncing a holder, turning a root off, the server
-// (start, restart on a lockfile or command change), waiting for the servers
-// to listen (port of Orca's waitForTurnServers), and the reap. Node-only.
+// The CLI's work on repos and the queue (D7, D8, D10–D13, D18, D19, D33,
+// D34): lighting a task's repos, syncing a holder, turning a root off, the
+// server (start, restart on a lockfile or command change, its end by hand),
+// waiting for the servers to listen (port of Orca's waitForTurnServers), and
+// the reap. Node-only.
 //
 // Every git step runs under the repo's lock and reads the holder inside it,
 // so the last one to take the lock sees the latest holder (a sync racing a
@@ -744,6 +745,68 @@ async function settleDeadStart(cx, root) {
   }
 }
 
+// ── A server that ended by hand (D34) ──────────────────────────────────────
+
+// What a lit repo's server that was listening ended in, by the state a look
+// read (server.js readServerState): its terminal gone (D38: its "Spotlight"
+// tab, or its space, closed; or `exit` typed there), or stopped (its shell
+// back at the prompt: a Ctrl-C typed there, or the server crashed). The
+// toast's words, by the repo's name.
+const SERVER_ENDS = {
+  gone: (name) => `Cerraste la terminal del server de ${name}: Spotlight sigue prendido.`,
+  stopped: (name) => `El server de ${name} se detuvo: Spotlight sigue prendido.`,
+};
+
+// Spotlight is on (a holder) and the record says its server listens, but the
+// look read it gone or stopped. `starting` → `stopped` is a dead start
+// (diedAtStart, D25), never this.
+const serverEnded = (record, liveState) =>
+  Boolean(record?.holder) && record.serverState === "listening" && Object.hasOwn(SERVER_ENDS, liveState ?? "");
+
+// Records a server that ended by hand under the repo's lock, where the
+// record and the terminal are read again, as settleDeadStart does: every
+// restart holds that lock (a light, a sync's installs, Reiniciar, an env or
+// a variant) and leaves the prompt free between its Ctrl-C and the line it
+// types, which is no stop; once it lets go, the record says `starting`. Only
+// while the record still says `listening` (and the same start), one write:
+// the state read now, no ports, and one toast that opens the server popup
+// (Reiniciar makes the tab again by ensureServerTerminal's rule; Apagar turns
+// the root off). The record keeps its serverProcs, for that turn-off (F1).
+// Every later look reads the record gone or stopped, so it toasts once until
+// the server listens again. A lock held past DEAD_START_LOCK_MS leaves it
+// `listening` for the next look. The reap and `on` (recordServers) both
+// settle through this. → the state written ("gone" | "stopped"), or null.
+async function settleServerEnd(cx, root) {
+  try {
+    return await cx.store.withRepoLock(
+      root,
+      async () => {
+        const record = cx.store.readState().repos[root];
+        if (!record?.serverTerminal || record.serverState !== "listening") return null;
+        const live = await serverOf(cx).readServerState(
+          { root, terminal: record.serverTerminal, logPath: record.logPath, serverPid: record.serverPid, port: repoSettings(cx.settings, root).port },
+          cx.serverDeps,
+        );
+        if (!serverEnded(record, live.state)) return null;
+        const now = cx.now();
+        const wrote = await cx.store.updateState((s) => {
+          const rec = s.repos[root];
+          if (!serverEnded(rec, live.state) || rec.serverStartedAt !== record.serverStartedAt) return false;
+          Object.assign(rec, { serverState: live.state, ports: [] });
+          const action = { name: `spotlight.server.${serverId(rec.holder)}` };
+          addNote(s, { repo: root, text: SERVER_ENDS[live.state](cx.nameOf(root)), toast: true, action }, now);
+          return true;
+        });
+        return wrote.result ? live.state : null;
+      },
+      { timeoutMs: DEAD_START_LOCK_MS },
+    );
+  } catch (e) {
+    if (e instanceof LockError && e.code === "lock-timeout") return null;
+    throw e;
+  }
+}
+
 // D38: a server lit before T29 runs in a terminal Herdr shows nowhere. The
 // reap makes it the root's "Spotlight" tab as it runs (server.js
 // showServerTerminal: no restart, no other terminal touched), under the
@@ -1191,10 +1254,15 @@ const merges = (sv, r) =>
 // and the write merges only a root the read picked (K6): a record that turned
 // mergeable between the two (a variant picked, a dead start settled) has no
 // ps behind it, so it waits for the next round. A record restarted since
-// describeServer looked is never merged (merges' sameStart, L4).
+// describeServer looked is never merged (merges' sameStart, L4). A lit
+// server `on` saw end by hand (its record `listening`, the look gone or
+// stopped) is settled under its repo lock instead (settleServerEnd, D34),
+// never merged here: one toast, whoever sees it first, `on` or the reap.
 export async function recordServers(cx, servers) {
   const repos = cx.store.readState().repos;
-  const looked = new Set(servers.filter((sv) => merges(sv, repos[sv.root])).map((sv) => sv.root));
+  const ended = servers.filter((sv) => sv.lit && serverEnded(repos[sv.root], sv.serverState)).map((sv) => sv.root);
+  for (const root of new Set(ended)) await settleServerEnd(cx, root);
+  const looked = new Set(servers.filter((sv) => !ended.includes(sv.root) && merges(sv, repos[sv.root])).map((sv) => sv.root));
   const gone = await goneOf(cx, repos, [...looked]);
   await cx.store.updateState((s) => {
     for (const sv of servers) {
@@ -1301,7 +1369,9 @@ export function applyTurnEnd(queue, cur, d, qctx) {
 // D13, D19, D10): refs win; each requesting terminal's turn end (release,
 // pause, or a detached `classify` when the usage is stale, spawned again
 // when it died: J-005); holders' activity; gone servers, servers that died
-// starting (D25), server errors a listen ends and the processes each server
+// starting (D25), listening servers that ended by hand (their tab closed, a
+// Ctrl-C: settleServerEnd's one toast, D34), server errors a listen ends
+// and the processes each server
 // is seen with (noteLive, F1; the remembered ones that died dropped, G3),
 // log rotation and a
 // detached sync for a server running another env than the effective one
@@ -1362,6 +1432,13 @@ export async function reap(cx, { full = true, skip = null } = {}) {
     // its state; until then it stays `starting`.
     if (diedAtStart(rec, live)) {
       await settleDeadStart(cx, root);
+      continue;
+    }
+    // D34: a listening server that ended (its tab closed, a Ctrl-C) is
+    // decided under the repo lock too, which writes its state and its one
+    // toast; until then it stays `listening`.
+    if (serverEnded(rec, live.state)) {
+      await settleServerEnd(cx, root);
       continue;
     }
     if (live.state && live.state !== "gone") await showHiddenServer(cx, root, live.terminal ?? rec.serverTerminal);

@@ -19,7 +19,9 @@
 //             and isn't up now (port-busy, server-exited, server-start-failed
 //             over a server stopped or gone: D24, D25, K3, server-errors.js
 //             serverDown) the first two read Ver log (the server terminal
-//             holds what it printed) and Reintentar
+//             holds what it printed) and Reintentar; on a server whose
+//             terminal is gone (its tab closed, D34) no Ver server nor Ver
+//             log: there is nothing to peek
 //   force     on root-diverged / untracked-collision only: Forzar sync (the
 //             holder's tree over the root), Proyectar igual (a refused
 //             takeover or fresh activation, forced), Apagar igual; on
@@ -135,8 +137,14 @@ export function serverViewModel({ state, settings, repo, workspace, detection, b
   // D25: same controls, named for a server that didn't come up; a refused
   // restart over a server still up keeps Ver server and Reiniciar (D24).
   const down = serverDown(record);
+  // D34: a server terminal that ended (its "Spotlight" tab or its space
+  // closed, D38) has nothing to peek: no Ver server, nor Ver log, the same
+  // peek. Reiniciar makes the tab again; Apagar turns the root off.
+  const gone = record?.serverState === "gone";
   const actions = [];
-  if (record?.serverTerminal || holder) actions.push({ id: "peek", label: down ? "Ver log" : "Ver server", argv: [bin, "peek", "--repo", root] });
+  if ((record?.serverTerminal || holder) && !gone) {
+    actions.push({ id: "peek", label: down ? "Ver log" : "Ver server", argv: [bin, "peek", "--repo", root] });
+  }
   if (holder) {
     actions.push({ id: "restart", label: down ? "Reintentar" : "Reiniciar", argv: [bin, "restart", "--repo", root] });
     actions.push({ id: "off", label: "Apagar", argv: [bin, "toggle", "--workspace", holder], danger: true });
