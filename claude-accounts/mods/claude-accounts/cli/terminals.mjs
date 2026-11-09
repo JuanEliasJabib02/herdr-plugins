@@ -31,16 +31,19 @@
 //   agents: the titles of the subagents Herdr lists as working or blocked
 //   (.records, keyed by agent id): a restart stops them with Claude.
 //
-// lastTurn(configDir, sessionId): how the conversation's last turn ended,
-// read from the end of its transcript (Orca's isClaudePaneMidTurn, which
-// reads the same moment from its Stop hook). { backgroundAgents } when the
-// last line that tells is Claude's end-of-turn line (type "system", subtype
-// "turn_duration", whose pendingBackgroundAgentCount says how many
-// background agents still ran) is the last line that isn't a subagent's or
-// about the session (QUIET_TYPES), null otherwise: a turn under way (a prompt, a queued message, a line
-// still being written, any other line) or a tail that doesn't tell. A Claude with background agents reads "busy" in its session file
-// and "working" in Herdr until they end (probe, Claude Code 2.1.319), so
-// this is what says its own turn is over. Never throws.
+// lastTurn(configDir, sessionId): whether the conversation's last turn is
+// over, read from the end of its transcript (Orca's isClaudePaneMidTurn
+// reads the same moment from its Stop hook). It's { backgroundAgents } when,
+// past the lines Claude writes while it waits (quiet: a subagent's, the
+// session's title or mode, a local command, an idle compaction, a queued
+// message taken back…), the last line is Claude's end-of-turn line (type
+// "system", subtype "turn_duration"; its pendingBackgroundAgentCount says
+// how many background agents still ran). It's null otherwise: a turn under
+// way (a prompt, a queued message taken up, a line still being written, a
+// kind of line it doesn't know) or a tail that doesn't tell. A Claude with
+// background agents reads "busy" in its session file and "working" in
+// Herdr until they end (probe, Claude Code 2.1.319), so this is what says
+// its own turn is over. Never throws.
 //
 // hasTranscript(configDir, sessionId): whether
 // <configDir>/projects/*/<sessionId>.jsonl exists, symlinks followed (every
@@ -225,9 +228,11 @@ export async function hasTranscript(configDir, sessionId) {
 // turn's end are short, so its end-of-turn line lies well inside.
 const TURN_CHUNK = 256 * 1024;
 
-// The lines Claude writes about the session rather than a turn (its title,
-// mode, cost, a PR link, an away summary…): they follow a turn's end while
-// Claude waits, so lastTurn looks past them. Seen in 150 transcripts of
+// The lines Claude writes while it waits rather than in a turn: about the
+// session (its title, mode, cost, a PR link, an away summary), a notice
+// (informational), a local command (`/model`, `!ls`: its system line and its
+// user lines), an idle compaction (its boundary and summary). They follow a
+// turn's end, so lastTurn looks past them. Seen in 200 transcripts of
 // Claude Code 2.1.x between a turn's end and the next turn. A turn's own
 // lines (a prompt, an API request, an attachment, a file snapshot) aren't
 // here, and neither is any kind this list doesn't know.
@@ -236,60 +241,84 @@ const QUIET_TYPES = new Set([
   "frame-link", "cost-state", "pr-link", "bridge-session", "history-suppression",
   "artifact-autoreact-ledger", "artifact-comment-monitor",
 ]);
-const QUIET_SYSTEM = new Set(["stop_hook_summary", "away_summary"]);
-const quiet = (row) => QUIET_TYPES.has(row.type) || (row.type === "system" && QUIET_SYSTEM.has(row.subtype));
+const QUIET_SYSTEM = new Set(["stop_hook_summary", "away_summary", "informational", "local_command", "compact_boundary"]);
+function userText(row) {
+  const content = row.message?.content;
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content.filter((part) => part?.type === "text" && typeof part.text === "string").map((part) => part.text).join(" ");
+}
+const quiet = (row) =>
+  QUIET_TYPES.has(row.type) ||
+  (row.type === "system" && QUIET_SYSTEM.has(row.subtype)) ||
+  (row.type === "user" && (row.isCompactSummary === true || COMMAND_TEXT.test(userText(row).trimStart())));
+
+// What a transcript's tail says, by its lines from the end (see lastTurn).
+// A queued message taken back (remove) cancels the enqueue before it; one
+// taken up (dequeue) starts a turn.
+function turnOfTail(text, cut) {
+  // The last line still being written: whatever it is, it's newer.
+  if (!text.endsWith("\n")) return null;
+  const lines = text.split("\n");
+  if (cut) lines.shift();
+  let takenBack = 0;
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (!lines[i].trim()) continue;
+    let row;
+    try {
+      row = JSON.parse(lines[i]);
+    } catch {
+      return null;
+    }
+    if (!row || typeof row !== "object") return null;
+    if (row.isSidechain || quiet(row)) continue;
+    if (row.type === "queue-operation" && row.operation === "remove") {
+      takenBack += 1;
+      continue;
+    }
+    if (row.type === "queue-operation" && row.operation === "enqueue" && takenBack > 0) {
+      takenBack -= 1;
+      continue;
+    }
+    if (row.type === "system" && row.subtype === "turn_duration") {
+      const n = row.pendingBackgroundAgentCount;
+      return { backgroundAgents: Number.isInteger(n) && n > 0 ? n : 0 };
+    }
+    return null;
+  }
+  return null;
+}
 
 // lastTurn runs on every poll of a busy terminal: a transcript's path is
-// kept once found, and found again when it no longer opens.
+// kept once found (found again when it no longer opens), with its size and
+// answer then, so a file that hasn't grown isn't read again. A runner lives
+// only while its items run, so this never grows past the sessions it saw.
 const turnFiles = new Map();
 
 export async function lastTurn(configDir, sessionId) {
   const key = `${configDir}\0${sessionId}`;
   try {
-    let file = turnFiles.get(key) ?? null;
-    let handle = file ? await open(file, "r").catch(() => null) : null;
+    let entry = turnFiles.get(key) ?? null;
+    let handle = entry ? await open(entry.file, "r").catch(() => null) : null;
     if (!handle) {
-      file = await findTranscript(configDir, sessionId);
+      const file = await findTranscript(configDir, sessionId);
       if (!file) {
         turnFiles.delete(key);
         return null;
       }
-      turnFiles.set(key, file);
+      entry = { file, size: -1, turn: null };
+      turnFiles.set(key, entry);
       handle = await open(file, "r");
     }
     try {
       const size = (await handle.stat()).size;
+      if (size === entry.size) return entry.turn;
       const start = Math.max(0, size - TURN_CHUNK);
       const chunk = Buffer.alloc(size - start);
       const { bytesRead } = await handle.read(chunk, 0, chunk.length, start);
-      const text = chunk.subarray(0, bytesRead).toString("utf8");
-      // The last line still being written: whatever it is, it's newer.
-      if (!text.endsWith("\n")) return null;
-      const lines = text.split("\n");
-      // The first line is cut by the chunk's start.
-      if (start > 0) lines.shift();
-      // From the end, the first line that isn't a subagent's or about the
-      // session decides: the turn is over only when it's the end-of-turn
-      // line itself. Anything else (a prompt, a queued message, a line a
-      // later Claude Code adds) reads as a turn under way, so a format
-      // change makes it wait.
-      for (let i = lines.length - 1; i >= 0; i--) {
-        if (!lines[i].trim()) continue;
-        let row;
-        try {
-          row = JSON.parse(lines[i]);
-        } catch {
-          return null;
-        }
-        if (!row || typeof row !== "object") return null;
-        if (row.isSidechain || quiet(row)) continue;
-        if (row.type === "system" && row.subtype === "turn_duration") {
-          const n = row.pendingBackgroundAgentCount;
-          return { backgroundAgents: Number.isInteger(n) && n > 0 ? n : 0 };
-        }
-        return null;
-      }
-      return null;
+      const turn = turnOfTail(chunk.subarray(0, bytesRead).toString("utf8"), start > 0);
+      Object.assign(entry, { size: start + bytesRead, turn });
+      return turn;
     } finally {
       await handle.close();
     }
