@@ -495,6 +495,31 @@ test("D32: envs keeps at most ENVS_MAX picks: a pick again is the newest, and th
   assert.equal(Object.keys(store.readState().envs)[0], "g1/T-5");
 });
 
+test("D46: a task named 2024 (fix/2024's) is stored as task:2024 and keeps its place in the order and the cap through a write", async () => {
+  const { envKeyOf } = await import(new URL("../mods/spotlight/task-env.js", import.meta.url).href);
+  const key = envKeyOf("g1/2024", "/code/app-wt");
+  assert.equal(key, "task:2024");
+  const dir = tmp();
+  const store = createStore({ stateDir: dir, hasServerCommand: noServer });
+  await store.updateState((s) => {
+    rememberEnv(s, "task:AX-1", "dev");
+    rememberEnv(s, key, "prod");
+    rememberEnv(s, "ws:/code/app-wt2", "local");
+  });
+  assert.deepEqual(Object.keys(store.readState().envs), ["task:AX-1", "task:2024", "ws:/code/app-wt2"], "insertion order, read back");
+  // Picked again it is the newest; the cap drops the oldest, never it.
+  await store.updateState((s) => {
+    rememberEnv(s, key, "dev");
+    for (let i = 0; i < ENVS_MAX - 1; i++) rememberEnv(s, `task:T-${i}`, "local");
+  });
+  const keys = Object.keys(store.readState().envs);
+  assert.equal(keys.length, ENVS_MAX);
+  assert.equal(keys[0], "task:2024", "the oldest left, in its place");
+  assert.equal(store.readState().envs[key], "dev");
+  await store.updateState((s) => rememberEnv(s, "task:T-new", "local"));
+  assert.equal(key in store.readState().envs, false, "the oldest goes first");
+});
+
 // ── D33: the busy mark; D31: the task batch marker ─────────────────────────
 
 const MARK = { op: "light", since: 10, pid: 4242, workspace: "/code/app-wt" };

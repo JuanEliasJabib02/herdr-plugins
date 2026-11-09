@@ -24,7 +24,7 @@ import {
 import { pidAlive, isStale, LockError } from "./locks.js";
 import { repoSettings, normRoot } from "./settings.js";
 import {
-  planServer, lockfileInstalls, missingInstalls, installsFor, chainInstall, detectServerScripts, commandTemplate, expectedPort,
+  planServer, lockfileInstalls, missingInstalls, installsFor, chainInstall, detectServerScripts, commandTemplate, expectedPort, variantKey,
 } from "./server-plan.js";
 import {
   inspectServer, readServerState, startServer, restartServer, stopServer, ensureServerTerminal, serverTerminalHidden, showServerTerminal,
@@ -37,7 +37,7 @@ import {
   decideTurnEnd, activityUpdate, lightingMarker, lightAlive, needsLight, memberLit, classifyStep,
 } from "./cli-turns.mjs";
 import { branchOf, hcGet, hcReadText, registeredRoots, taskKeyOfWorkspace } from "./cli-env.mjs";
-import { recordEnv, envKeyOf } from "./task-env.js";
+import { recordEnv, envKeyOf, entryKeys, sameEnvKey, taskEnvKey } from "./task-env.js";
 import {
   SERVER_ERRORS, PORT_BUSY, SERVER_EXITED, SERVER_START_FAILED, SERVER_SURVIVED, SERVER_NOT_STOPPED, isServerError, serverErrorOf,
   setRootError, setServerError, clearRootError, clearServerError, serverDown,
@@ -363,8 +363,9 @@ export function lightNote({ root, name, workspace, server, logPath }) {
 // workspace already holds it; then the server. The repo is busy all along,
 // its target `workspace` (D33); a fresh light's record is made for the mark,
 // and reads as no record until the light writes one. The record keeps the
-// holder's env key (D32: `taskKey`, the marker's `<lane>/<KEY>`, else
-// ws:<path>), so the server below runs the env picked for it.
+// holder's env key (D32, D46: `taskKey`, the marker's `<lane>/<KEY>`, as
+// task:<KEY>, the same in every space; else ws:<path>), so the server below
+// runs the env picked for it.
 async function lightMember(cx, member, { force, taskKey, quiet = false }) {
   const { root, workspace } = member;
   const envKey = envKeyOf(taskKey, workspace);
@@ -540,7 +541,8 @@ function serverBusyOp({ restart = false, envName, chosenVariant }) {
 // leaves it. Call under the repo's lock. Given `restart`, `envName` or
 // `chosenVariant`, the repo is busy while it works (serverBusyOp, D33), its
 // target `workspace`; a repo with no record is never marked. Options:
-//   taskKey      `<lane>/<taskKey>` whose remembered variant applies
+//   taskKey      `<lane>/<KEY>` or task:<KEY>, whose remembered variant
+//                applies (D46: either names it, server-plan.js variantKey)
 //   envName      the env to run (else effectiveEnv's): an env picked now
 //                (`spotlight env`, D32), which restarts Spotlight's server
 //                only when its command changes (Orca's restartIfDifferent):
@@ -769,7 +771,7 @@ async function planAndStart(cx, root, opts) {
       delete rec.restartStuck;
       clearServerError(rec);
       if (taskKey && plan.variant && (plan.source === "inferred" || plan.source === "chosen")) {
-        rememberVariant(s, `${taskKey}::${normRoot(root)}`, plan.variant);
+        rememberTaskVariant(s, taskKey, root, plan.variant);
       }
       // Herdr's own toast (D41): its words, byte for byte (server-view-model.js reads them), under a title.
       if (plan.note) addNote(s, { repo: root, text: plan.note, toast: true, title: herdrTitle(cx.nameOf(root)) }, now);
@@ -834,16 +836,33 @@ async function planAndStart(cx, root, opts) {
   return { state: word, result: r, plan, freed, ...(failure ? { error: failure } : {}) };
 }
 
-// ── The env per task (D32) ─────────────────────────────────────────────────
+// ── The env per task (D32, D46) ────────────────────────────────────────────
+
+// D46: remembers `variant` for a task in one repo as the newest entry, under
+// task:<KEY>::<root> (server-plan.js variantKey: a light's `<lane>/<KEY>` and
+// an `env --task` pick's task:<KEY> name the same one, in every space),
+// dropping the task's entries for that repo written before D46
+// (`<groupId>/<KEY>::<root>` of any space), which it replaces. Mutates `s`,
+// inside an updateState.
+export function rememberTaskVariant(s, taskKey, root, variant) {
+  const at = normRoot(root);
+  const key = variantKey(taskKey, at);
+  if (key === null) return;
+  for (const k of entryKeys(s.variants, taskEnvKey(taskKey), `::${at}`)) if (k !== key) delete s.variants[k];
+  rememberVariant(s, key, variant);
+}
 
 // Stores an env pick (`spotlight env`: the lane's pill, the server popup)
-// under `key` (task-env.js: `<groupId>/<KEY>` or ws:<path>) in state.json's
-// `envs`, which keeps the newest ENVS_MAX and survives the turn-off. In the
-// same write it adopts each lit record with no envKey (lit before T22) whose
-// holder's key this is: the record takes the key and drops its envOverride,
-// so the pick governs it from now on (applyEnv restarts it, the reap's drift
-// keeps it). The holders' keys are read before the write: git never runs
-// under the state lock (D7). → { adopted: [root] }
+// under `key` (D46's form, task-env.js: task:<KEY>, the same in every space,
+// or ws:<path>) in state.json's `envs`, which keeps the newest ENVS_MAX and
+// survives the turn-off. In the same write: the task's entries written
+// before D46 (`<groupId>/<KEY>` of any space) go, as `key` replaces them;
+// each lit record keyed the old way for it takes `key`; and each lit record
+// with no envKey (lit before T22) whose holder's key this is adopts it: the
+// record takes the key and drops its envOverride, so the pick governs it
+// from now on (applyEnv restarts it, the reap's drift keeps it). The
+// holders' keys are read before the write: git never runs under the state
+// lock (D7). → { adopted: [root] }
 export async function writeEnv(cx, key, env) {
   const unkeyed = Object.entries(cx.store.readState().repos).filter(([, r]) => r?.holder && !r.envKey);
   const keys = [];
@@ -852,10 +871,14 @@ export async function writeEnv(cx, key, env) {
   }
   const adopted = [];
   await cx.store.updateState((s) => {
+    for (const k of entryKeys(s.envs, key)) if (k !== key) delete s.envs[k];
     rememberEnv(s, key, env);
+    for (const r of Object.values(s.repos)) {
+      if (r?.holder && typeof r.envKey === "string" && r.envKey !== key && sameEnvKey(r.envKey, key)) r.envKey = key;
+    }
     for (const k of keys) {
       const r = s.repos[k.root];
-      if (k.key !== key || !r || r.holder !== k.holder || r.envKey) continue;
+      if (!sameEnvKey(k.key, key) || !r || r.holder !== k.holder || r.envKey) continue;
       r.envKey = key;
       delete r.envOverride;
       adopted.push(k.root);
@@ -865,7 +888,8 @@ export async function writeEnv(cx, key, env) {
 }
 
 // Runs the env stored for `key` on every lit repo whose holder has that key
-// (record.envKey), one after another, each under its repo lock and busy
+// (record.envKey, in any space: D46; one keyed before D46 for the same task
+// too, sameEnvKey), one after another, each under its repo lock and busy
 // while it works (D33, op "env"). An explicit request, as Reiniciar: a
 // failed start or an old server still running toasts. Spotlight's server
 // restarts only when its command changes (ensureServer's envName); an env
@@ -873,14 +897,14 @@ export async function writeEnv(cx, key, env) {
 // two picks in a row end in the last one. → { [root]: { env, server } |
 // { error } }, without the repos that stopped holding that key meanwhile.
 export async function applyEnv(cx, key) {
-  const roots = Object.entries(cx.store.readState().repos).filter(([, r]) => r?.holder && r.envKey === key).map(([root]) => root);
+  const roots = Object.entries(cx.store.readState().repos).filter(([, r]) => r?.holder && sameEnvKey(r.envKey, key)).map(([root]) => root);
   const results = {};
   for (const root of roots) {
     try {
       const r = await cx.store.withRepoLock(root, async () => {
         const state = cx.store.readState();
         const record = state.repos[root];
-        if (!record?.holder || record.envKey !== key) return null;
+        if (!record?.holder || !sameEnvKey(record.envKey, key)) return null;
         const env = effectiveEnv(cx, root, record, state.envs);
         const server = await ensureServer(cx, root, {
           workspace: record.holder,

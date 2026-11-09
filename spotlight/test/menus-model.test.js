@@ -63,17 +63,18 @@ function repo(fields) {
   };
 }
 
-// back is lit by AX-3447's B1, which runs the env stored for its task (dev).
+// back is lit by AX-3447's B1, which runs the env stored for its task (dev),
+// keyed by the task in any space (D46).
 function baseState({ back = {}, repos = {}, envs = {} } = {}) {
   return readState(JSON.stringify({
     version: 1,
     repos: {
-      [BACK]: repo({ holder: B1, envKey: "ax/AX-3447", serverEnv: "dev", serverState: "listening", ports: [3000], ...back }),
+      [BACK]: repo({ holder: B1, envKey: "task:AX-3447", serverEnv: "dev", serverState: "listening", ports: [3000], ...back }),
       ...repos,
     },
     queue: { requests: [], lighting: {} },
     notes: [],
-    envs: { "ax/AX-3447": "dev", ...envs },
+    envs: { "task:AX-3447": "dev", ...envs },
   }));
 }
 
@@ -112,20 +113,22 @@ test("an eligible unlit workspace: Proyectar este workspace, then Entorno de Spo
   // Nothing stored for AX-3500: the repo's settings env, local by default.
   assert.deepEqual(checkedOf(value[B2]), ["Local"]);
 
-  // Its task's pick in its space, `ax/AX-3500`.
-  assert.deepEqual(checkedOf(build({ state: baseState({ envs: { "ax/AX-3500": "prod" } }) })[B2]), ["Prod"]);
-  // The same task in another space is another key.
-  assert.deepEqual(checkedOf(build({ state: baseState({ envs: { "zz/AX-3500": "prod" } }) })[B2]), ["Local"]);
+  // Its task's pick, `task:AX-3500`.
+  assert.deepEqual(checkedOf(build({ state: baseState({ envs: { "task:AX-3500": "prod" } }) })[B2]), ["Prod"]);
+  // D46: the same task in another space is the same task: a pick stored
+  // before D46 under any space's `<groupId>/<KEY>` is this one's too.
+  assert.deepEqual(checkedOf(build({ state: baseState({ envs: { "zz/AX-3500": "prod" } }) })[B2]), ["Prod"]);
+  assert.deepEqual(checkedOf(build({ state: baseState({ envs: { "ax/AX-3500": "dev" } }) })[B2]), ["Dev"]);
   // The repo's settings env when nothing is stored.
   const devFront = settingsOf({ version: 1, repos: { [FRONT]: { enabled: true, env: "prod" } } });
-  const front = build({ state: baseState({ envs: { "ax/AX-3447": null } }), settings: devFront });
+  const front = build({ state: baseState({ envs: { "task:AX-3447": null } }), settings: devFront });
   assert.deepEqual(checkedOf(front[F1]), ["Prod"]);
   // One pick sets the env of the whole task: front's AX-3447 workspace reads the task's (dev).
   assert.deepEqual(checkedOf(build()[F1]), ["Dev"]);
 
   // A task-less workspace's key is ws:<path>; another workspace's pick isn't its own.
   assert.deepEqual(checkedOf(build({ state: baseState({ envs: { [`ws:${BN}`]: "prod" } }) })[BN]), ["Prod"]);
-  assert.deepEqual(checkedOf(build({ state: baseState({ envs: { "ax/AX-3500": "prod" } }) })[BN]), ["Local"]);
+  assert.deepEqual(checkedOf(build({ state: baseState({ envs: { "task:AX-3500": "prod" } }) })[BN]), ["Local"]);
   assert.deepEqual(ids(value[BN]), ["toggle", "env"]);
 });
 
@@ -141,9 +144,11 @@ test("the holder: Apagar Spotlight, and the env its server runs checked (D32)", 
   // A record lit before T22 (no envKey): its envOverride, until it turns off.
   const old = baseState({ back: { envKey: undefined, envOverride: "prod" } });
   assert.deepEqual(checkedOf(build({ state: old })[B1]), ["Prod"]);
+  // D46: a record keyed before D46 (`<groupId>/<KEY>`) reads the task's entry.
+  assert.deepEqual(checkedOf(build({ state: baseState({ back: { envKey: "ax/AX-3447" }, envs: { "task:AX-3447": "prod" } }) })[B1]), ["Prod"]);
   // Nothing stored for its key: the repo's settings env.
   const settings = settingsOf({ version: 1, repos: { [BACK]: { enabled: true, env: "dev" } } });
-  assert.deepEqual(checkedOf(build({ state: baseState({ envs: { "ax/AX-3447": null } }), settings })[B1]), ["Dev"]);
+  assert.deepEqual(checkedOf(build({ state: baseState({ envs: { "task:AX-3447": null } }), settings })[B1]), ["Dev"]);
 });
 
 test("the holder on a root-diverged root: Forzar sync too, danger, the popup's sync --force --detach; never elsewhere, nor for another error", () => {

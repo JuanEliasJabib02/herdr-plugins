@@ -7,8 +7,9 @@
 //             holder's key (record.envKey; a record lit before T22, its
 //             envOverride), else the settings' env; for a root nobody
 //             holds, the env stored for the workspace it was opened from
-//             (its task's `<lane>/<KEY>`, else ws:<path>, read from
-//             projects-sidebar's lists), else the settings' env; `running`
+//             (its task's task:<KEY>, the same in every space, D46, else
+//             ws:<path>, read from projects-sidebar's worktree list), else
+//             the settings' env; `running`
 //             on the env the server still runs when that differs
 //   envNote   the selected env couldn't start (the record's envFailed): what
 //             runs instead and how to try again; else null
@@ -101,9 +102,9 @@ function inferredVariant(state, root, record, variants) {
 // The popup's model. `state` and `settings`: board-model.js readState and
 // readSettings of the files; `repo`: the root; `workspace`: the row it was
 // opened from; `detection`: T5a's detectServerScripts(root, io), null while
-// it runs; `bin`: board-model.js cliPathOf(appHome()); `registry`, `cache`:
-// shared projects.v1 and projects.cache.v1 as Herdr returns them, which name
-// an unlit workspace's task (D32).
+// it runs; `bin`: board-model.js cliPathOf(appHome()); `cache`:
+// projects.cache.v1 as Herdr returns it, which names an unlit workspace's
+// task (D32); `registry` (projects.v1) is no longer read (D46).
 export function serverViewModel({ state, settings, repo, workspace, detection, bin, registry = null, cache = null }) {
   const root = normRoot(repo);
   const record = state?.repos?.[root] ?? null;

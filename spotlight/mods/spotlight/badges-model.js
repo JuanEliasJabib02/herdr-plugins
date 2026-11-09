@@ -124,7 +124,7 @@ import { positionOf } from "./queue.js";
 import { MOD } from "./board-model.js";
 import { serverDown, isServerError, PORT_BUSY, SERVER_EXITED, SERVER_START_FAILED } from "./server-errors.js";
 import { oneLine } from "./text.js";
-import { ENV_LABELS, recordEnv, storedEnv } from "./task-env.js";
+import { ENV_LABELS, recordEnv, storedEnv, taskEnvKey } from "./task-env.js";
 import { formatVariant, isSafeVariant } from "./server-plan.js";
 
 export const iconPath = (name) => `mods/${MOD}/icons/${name}.svg`;
@@ -614,8 +614,10 @@ function laneFlashlight({ group, key, members, skipped }, { state, bin }) {
 }
 
 // The env of a task's servers (D32), what its pill says and its popup
-// checks. `group`, `key`: the lane (its env key `<group>/<key>`); `members`:
-// taskLanes'; `state`, `settings`: board-model.js's. The basis is the
+// checks. `key`: the lane's task, whose env key is task:<key> in every
+// space (D46: a pick stored from any space's lane, before D46 its
+// `<groupId>/<KEY>` too, is this one's, so the lane's `group` isn't read);
+// `members`: taskLanes'; `state`, `settings`: board-model.js's. The basis is the
 // members held by a workspace of the task, each with the env its server
 // runs for it (task-env.js recordEnv: what is stored for its record's key,
 // else its settings env; a record lit before T22, its envOverride); with
@@ -624,10 +626,10 @@ function laneFlashlight({ group, key, members, skipped }, { state, bin }) {
 // for the task, else the basis' env when it agrees, else null (Mixto);
 // shown as Orca shows its pill, while a member holds or the stored env
 // isn't Local.
-export function laneEnv({ group, key, members, state, settings }) {
+export function laneEnv({ key, members, state, settings }) {
   const repos = isObject(state?.repos) ? state.repos : {};
   const list = Array.isArray(members) ? members : [];
-  const stored = storedEnv(state?.envs, `${group}/${key}`);
+  const stored = storedEnv(state?.envs, taskEnvKey(key));
   const held = list.filter((m) => taskLit([m], repos));
   const basis = (held.length > 0 ? held : list).map((m) => {
     const fallback = repoSettings(settings, m.root).env;

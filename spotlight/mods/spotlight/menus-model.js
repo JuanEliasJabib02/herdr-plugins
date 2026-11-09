@@ -101,8 +101,9 @@ const envMenu = (bin, workspace, env) => item({
 //   cache     badges-model.js parseCache(shared("projects.cache.v1"))
 //   enabled   { [root]: boolean }: whether Spotlight is on for each
 //             registered repo (D7, badges.js enabledRoots)
-//   registry  shared("projects.v1") as Herdr returns it: a workspace's task
-//             lane, for its env key (task-env.js checkoutEnvKey)
+//   registry  shared("projects.v1") as Herdr returns it; no longer read:
+//             a workspace's env key is its task's in any space (D46,
+//             task-env.js checkoutEnvKey)
 //   bin       board-model.js cliPathOf(appHome())
 // → { [path]: [item] } with its paths sorted, or null when no row has any.
 export function buildMenus({ state, settings, projects = [], cache = {}, enabled = {}, registry = null, bin }) {

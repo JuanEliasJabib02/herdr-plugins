@@ -337,3 +337,62 @@ test("against a real git: the root, the caller's worktree and branch from a subf
     ok: false, code: "no-task", message: "This workspace is not part of a task (main checkouts never are).",
   });
 });
+
+// ── D46: the env key of a task across spaces (M/task-env.js) ───────────────
+// Orca keys a task's env by the task alone (spotlight-env-key.ts): one key
+// in every space, `task:<KEY>`, never integer-like and never a `ws:` one.
+// Keys written before D46 (`<groupId>/<KEY>`) are still read, from any
+// space: the later position in the map wins.
+
+const TASK_ENV_URL = new URL("../mods/spotlight/task-env.js", import.meta.url).href;
+
+test("D46: a task's env key is task:<KEY> in every space, a bare 2024 included; a workspace with no task keeps ws:<path>", async () => {
+  const { envKeyOf, taskEnvKey, checkoutEnvKey } = await import(TASK_ENV_URL);
+  assert.equal(envKeyOf("ax/AX-3447", `${W}/back/ax-3447`), "task:AX-3447");
+  assert.equal(envKeyOf("zz/AX-3447", `${W}/front/ax-3447`), "task:AX-3447", "another space, the same key");
+  assert.equal(envKeyOf("task:AX-3447", "/x"), "task:AX-3447", "already in its form");
+  // fix/2024's task is "2024": stored as task:2024, never a bare integer-like key.
+  assert.equal(taskOf(wt("app", "x", "fix/2024")).key, "2024");
+  assert.equal(envKeyOf("spaceless/2024", `${W}/app/x`), "task:2024");
+  assert.equal(envKeyOf(null, `${W}/app/none/`), `ws:${W}/app/none`);
+  // A lane's key (bare) and nothing usable.
+  assert.equal(taskEnvKey("login"), "task:login");
+  for (const nothing of [null, undefined, "", "g1/", "task:"]) assert.equal(taskEnvKey(nothing), null, String(nothing));
+  // An unlit workspace's key needs no lane: the same in any group (the registry isn't read).
+  const cache = { [BACKEND]: [main(BACKEND), B_TASK, wt("backend-action", "none", "none")] };
+  const registry = { version: 1, groups: [{ id: "ax", name: "AX", projects: [{ path: BACKEND, name: "back" }] }] };
+  assert.equal(checkoutEnvKey({ registry, cache, root: BACKEND, workspace: B_TASK.path }), "task:AX-3447");
+  assert.equal(checkoutEnvKey({ cache, root: BACKEND, workspace: B_TASK.path }), "task:AX-3447");
+  assert.equal(checkoutEnvKey({ cache, root: BACKEND, workspace: `${W}/backend-action/none` }), `ws:${W}/backend-action/none`);
+});
+
+test("D46: a stored <groupId>/<KEY> of any space is read when no task:<KEY> exists; with both, the later position wins; a record's old envKey reads the same", async () => {
+  const { storedEnv, recordEnv } = await import(TASK_ENV_URL);
+  assert.equal(storedEnv({ "task:AX-1": "dev" }, "task:AX-1"), "dev");
+  assert.equal(storedEnv({ "g1/AX-1": "dev" }, "task:AX-1"), "dev", "its own space's old entry");
+  assert.equal(storedEnv({ "zz/AX-1": "prod" }, "task:AX-1"), "prod", "another space's old entry");
+  assert.equal(storedEnv({ "task:AX-1": "dev", "g1/AX-1": "prod" }, "task:AX-1"), "prod", "the later one");
+  assert.equal(storedEnv({ "g1/AX-1": "prod", "task:AX-1": "dev" }, "task:AX-1"), "dev", "the later one");
+  assert.equal(storedEnv({ "g1/AX-1": "prod", "g2/AX-1": "local" }, "task:AX-1"), "local");
+  // Asked with an old key, the task's entries of every space.
+  assert.equal(storedEnv({ "task:AX-1": "dev" }, "g2/AX-1"), "dev");
+  // Another task's never: a key ends at its own `/`.
+  assert.equal(storedEnv({ "g1/AX-2": "dev", "g1/AX-10": "dev", "g1/xAX-1": "dev" }, "task:AX-1"), null);
+  // A value that isn't an env doesn't count.
+  assert.equal(storedEnv({ "g1/AX-1": "dev", "task:AX-1": "staging" }, "task:AX-1"), "dev");
+  assert.equal(storedEnv(Object.create({ "task:AX-1": "dev" }), "task:AX-1"), null, "only own keys");
+  // A record keyed the old way reads the new entry, and the other way round.
+  assert.equal(recordEnv({ envKey: "g1/AX-1" }, { "task:AX-1": "prod" }, "local"), "prod");
+  assert.equal(recordEnv({ envKey: "task:AX-1" }, { "g2/AX-1": "dev" }, "local"), "dev");
+  assert.equal(recordEnv({ envKey: "task:AX-1" }, { "g2/AX-2": "dev" }, "local"), "local");
+});
+
+test("D46: a ws: key is never read as an old task entry, nor a task's as a workspace's (a worktree folder named after a task)", async () => {
+  const { storedEnv, envKeyOf } = await import(TASK_ENV_URL);
+  const folder = `${W}/app/AX-1`;
+  assert.equal(envKeyOf(null, folder), `ws:${folder}`);
+  assert.equal(storedEnv({ [`ws:${folder}`]: "prod" }, "task:AX-1"), null);
+  assert.equal(storedEnv({ [`ws:${folder}`]: "prod" }, "g1/AX-1"), null);
+  assert.equal(storedEnv({ "task:AX-1": "prod", "g1/AX-1": "dev" }, `ws:${folder}`), null);
+  assert.equal(storedEnv({ "task:AX-1": "prod", [`ws:${folder}`]: "dev" }, `ws:${folder}`), "dev");
+});

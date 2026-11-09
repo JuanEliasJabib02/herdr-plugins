@@ -901,9 +901,9 @@ test("D32: the env pill shows while a member holds: with nothing stored, the hel
   // The settings' env of the held repo, or a pick stored for the task (Local included), wins.
   const dev = buildLanes(baseState(), { settings: settingsOf({ version: 1, repos: { [BACK]: { env: "dev" } } }) }).value;
   assert.deepEqual(envOf(dev[laneKey("AX-3447")]), pill("AX-3447", "Dev"));
-  const stored = buildLanes(baseState({ envs: { "ax/AX-3447": "prod" } })).value;
+  const stored = buildLanes(baseState({ envs: { "task:AX-3447": "prod" } })).value;
   assert.deepEqual(envOf(stored[laneKey("AX-3447")]), pill("AX-3447", "Prod"));
-  const local = buildLanes(baseState({ envs: { "ax/AX-3447": "local" } }), { settings: settingsOf({ version: 1, repos: { [BACK]: { env: "dev" } } }) }).value;
+  const local = buildLanes(baseState({ envs: { "task:AX-3447": "local" } }), { settings: settingsOf({ version: 1, repos: { [BACK]: { env: "dev" } } }) }).value;
   assert.deepEqual(envOf(local[laneKey("AX-3447")]), pill("AX-3447", "Local"));
   // The ring while the batch runs keeps the pill beside it.
   const batch = baseState();
@@ -911,15 +911,19 @@ test("D32: the env pill shows while a member holds: with nothing stored, the hel
   assert.deepEqual(icons(buildLanes(batch).value[laneKey("AX-3447")]), ["spinner", "Probando", "Local ▾"]);
 });
 
-test("D32, D39: with nobody holding, the pill is always shown only for a stored env that isn't Local, else it grows in on hover; the same task in another space is another key", () => {
-  const s = baseState({ envs: { "ax/AX-3500": "dev", "ax/login": "local", "ag/AX-3447": "prod" } });
+test("D32, D39, D46: with nobody holding, the pill is always shown only for a stored env that isn't Local, else it grows in on hover; the same task in another space is the same task", () => {
+  const s = baseState({ envs: { "task:AX-3500": "dev", "task:login": "local", "ag/AX-3447": "prod" } });
   const { value } = buildLanes(s);
   assert.deepEqual(envOf(value[laneKey("AX-3500")]), pill("AX-3500", "Dev"));
   assert.deepEqual(envOf(value[laneKey("login")]), pill("login", "Local", { reveal: "grow" }), "Local stored, nothing held: on hover");
-  assert.deepEqual(envOf(value[laneKey("AX-3447")]), pill("AX-3447", "Local"), "another space's pick for AX-3447 isn't this one's");
+  // D46: another space's pick for AX-3447 (stored before D46 as `ag/AX-3447`) is this one's.
+  assert.deepEqual(envOf(value[laneKey("AX-3447")]), pill("AX-3447", "Prod"), "another space's pick for AX-3447 is this one's");
+  // Its own space's old key too, the later position winning over task:<KEY>.
+  const both = buildLanes(baseState({ envs: { "task:AX-3500": "prod", "ax/AX-3500": "dev" } })).value;
+  assert.deepEqual(envOf(both[laneKey("AX-3500")]), pill("AX-3500", "Dev"));
   // No flashlight (no member with Spotlight on), no pill: there is no server to run.
   const laneCache = { ...cache, [OTHER]: [...cache[OTHER], { path: `${WS}/other/ax-9`, branch: "juan/AX-9", main: false }] };
-  assert.equal(buildLanes(baseState({ envs: { "ax/AX-9": "dev" } }), { laneCache }).value[laneKey("AX-9")], undefined);
+  assert.equal(buildLanes(baseState({ envs: { "task:AX-9": "dev" } }), { laneCache }).value[laneKey("AX-9")], undefined);
   assertContract(value);
 });
 
@@ -954,7 +958,9 @@ test("D32: laneEnv, the pill's value: the stored env, else the held repos' env w
   delete idle.repos[BACK];
   assert.deepEqual(at(idle), { value: "local", shown: false, repos: [{ name: "back", env: "local" }, { name: "front", env: "local" }] });
   assert.deepEqual(at(idle, settingsOf({ version: 1, repos: { [FRONT]: { env: "prod" } } })).value, null);
-  assert.deepEqual(at({ ...idle, envs: { "ax/AX-3447": "prod" } }), { value: "prod", shown: true, repos: [{ name: "back", env: "local" }, { name: "front", env: "local" }] });
+  assert.deepEqual(at({ ...idle, envs: { "task:AX-3447": "prod" } }), { value: "prod", shown: true, repos: [{ name: "back", env: "local" }, { name: "front", env: "local" }] });
+  // D46: the group names the lane, not the key: a lane of another space reads the same pick.
+  assert.equal(laneEnv({ group: "ag", key: "AX-3447", members, state: { ...idle, envs: { "task:AX-3447": "prod" } }, settings: settingsOf() }).value, "prod");
   assert.equal(laneEnv({ group: "ax", key: "AX-3447", members: [], state: baseState(), settings: settingsOf() }).shown, false);
 });
 
@@ -975,9 +981,12 @@ test("D32: the server popup's selected env equals the pill's when they agree", (
   const cases = [
     [baseState(), settingsOf()],
     [baseState(), settingsOf({ version: 1, repos: { [BACK]: { env: "prod" } } })],
-    [baseState({ envs: { "ax/AX-3447": "dev" } }), settingsOf()],
+    [baseState({ envs: { "task:AX-3447": "dev" } }), settingsOf()],
+    // D46: a record keyed before D46 and an old entry of another space.
+    [baseState({ envs: { "ag/AX-3447": "prod" } }), settingsOf()],
   ];
-  cases[2][0].repos[BACK].envKey = "ax/AX-3447";
+  cases[2][0].repos[BACK].envKey = "task:AX-3447";
+  cases[3][0].repos[BACK].envKey = "ax/AX-3447";
   for (const [state, settings] of cases) {
     const shown = envOf(buildLanes(state, { settings }).value[laneKey("AX-3447")]).text;
     assert.equal(shown, `${{ local: "Local", dev: "Dev", prod: "Prod" }[popupEnv(state, settings)]} ▾`, JSON.stringify(state.envs ?? null));

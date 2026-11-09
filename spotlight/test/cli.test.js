@@ -1389,8 +1389,8 @@ test("J-002: the settings' env is the default and a change restarts the server o
   // The popup picks Dev: stored for the task (D32), over the settings' Prod.
   const pick = await w.cli(["env", "--workspace", ws, "--env", "dev"]);
   assert.equal(pick.code, 0, pick.stderr + pick.stdout);
-  assert.equal(w.state().envs["g1/AX-16"], "dev");
-  assert.equal(record().envKey, "g1/AX-16");
+  assert.equal(w.state().envs["task:AX-16"], "dev");
+  assert.equal(record().envKey, "task:AX-16");
   assert.equal(record().serverEnv, "dev");
   assert.match(typed().at(-1), runs("dev"));
   const sent = typed().length;
@@ -1403,14 +1403,14 @@ test("J-002: the settings' env is the default and a change restarts the server o
   // D32: the pick survives the turn-off: the next lighting runs it, not the settings' env.
   assert.equal((await w.cli(["toggle", "--workspace", ws])).code, 0);
   await w.until((s) => !s.repos[app.root], { what: "turned off" });
-  assert.equal(w.state().envs["g1/AX-16"], "dev");
+  assert.equal(w.state().envs["task:AX-16"], "dev");
   const offAt = typed().length;
   const back = await w.cli(["on"], { terminal: t, cwd: ws });
   assert.equal(back.code, 0, back.stderr + back.stdout);
   assert.ok(typed().length > offAt, "the light started the server again");
   assert.match(typed().at(-1), runs("dev"));
   assert.equal(record().serverEnv, "dev");
-  assert.equal(record().envKey, "g1/AX-16");
+  assert.equal(record().envKey, "task:AX-16");
 });
 
 test("J-008: a foreign process in the server terminal leaves the recorded env alone: nothing ran in the new one", async () => {
@@ -1432,7 +1432,7 @@ test("J-008: a foreign process in the server terminal leaves the recorded env al
   const sent = w.hc().sent.length;
   await w.cli(["env", "--workspace", ws, "--env", "dev"]);
   assert.equal(w.hc().sent.length, sent, "nothing typed over the foreign process");
-  assert.equal(w.state().envs["g1/AX-17"], "dev");
+  assert.equal(w.state().envs["task:AX-17"], "dev");
   assert.equal(record().serverEnv, "local", "serverEnv says what ran");
 });
 
@@ -2490,7 +2490,7 @@ test("D31: `toggle --task AX-70 --group g1` hands the batch to a detached copy: 
 const ENV_PKG = { scripts: { local: "vite", dev: "vite --mode dev", prod: "vite --mode prod" } };
 const runsEnv = (env) => new RegExp(`spotlight-serve 'npm run ${env} --'$`);
 
-test("D32: `env --task AX-50 --group g1 --env dev` stores envs[\"g1/AX-50\"] and restarts only the lit repos AX-50 holds whose command changes; detached it stores, answers at once and restarts after", async () => {
+test("D32: `env --task AX-50 --group g1 --env dev` stores envs[\"task:AX-50\"] (D46) and restarts only the lit repos AX-50 holds whose command changes; detached it stores, answers at once and restarts after", async () => {
   const w = makeWorld();
   const front = makeRepo(w, "front", { pkg: ENV_PKG, tasks: ["AX-50"] });
   // No Dev command: its server is left running.
@@ -2507,18 +2507,18 @@ test("D32: `env --task AX-50 --group g1 --env dev` stores envs[\"g1/AX-50\"] and
   const typedIn = (r) => w.hc().sent.filter((x) => x.terminal === w.serverTerminal(r.root).address).map((x) => x.text);
   const counts = () => [front, api, web, admin].map((r) => typedIn(r).length);
   assert.deepEqual(counts(), [1, 1, 1, 1]);
-  assert.deepEqual([front, api, web, admin].map((r) => w.state().repos[r.root].envKey), ["g1/AX-50", "g1/AX-50", "g1/AX-50", "g1/AX-51"]);
+  assert.deepEqual([front, api, web, admin].map((r) => w.state().repos[r.root].envKey), ["task:AX-50", "task:AX-50", "task:AX-50", "task:AX-51"]);
 
   const r = await w.cli(["env", "--task", "AX-50", "--group", "g1", "--env", "dev", "--inline"]);
   assert.equal(r.code, 0, r.stderr + r.stdout);
   assert.match(r.stdout, /^front: env dev; the server restarted: npm run dev --$/m);
   const s = w.state();
-  assert.deepEqual(s.envs, { "g1/AX-50": "dev" });
+  assert.deepEqual(s.envs, { "task:AX-50": "dev" });
   // front restarted into Dev; api and web typed nothing; admin is AX-51's.
   assert.deepEqual(counts(), [2, 1, 1, 1]);
   assert.match(typedIn(front).at(-1), runsEnv("dev"));
   assert.deepEqual([front, api, web, admin].map((x) => s.repos[x.root].serverEnv), ["dev", "local", "dev", "local"]);
-  assert.equal(s.repos[admin.root].envKey, "g1/AX-51");
+  assert.equal(s.repos[admin.root].envKey, "task:AX-51");
   // Nothing left for the reap to restart.
   assert.equal((await w.cli(["reap"])).code, 0);
   await sleep(1500);
@@ -2528,7 +2528,7 @@ test("D32: `env --task AX-50 --group g1 --env dev` stores envs[\"g1/AX-50\"] and
   const d = await w.cli(["env", "--task", "ax_50", "--group", "g1", "--env", "local"]);
   assert.equal(d.code, 0, d.stderr + d.stdout);
   assert.match(d.stdout, /AX-50/);
-  assert.equal(w.state().envs["g1/AX-50"], "local");
+  assert.equal(w.state().envs["task:AX-50"], "local");
   await w.until((x) => x.repos[front.root]?.serverEnv === "local" && x.repos[web.root]?.serverEnv === "local" && !x.repos[front.root].busy, {
     what: "AX-50's servers back in Local",
   });
@@ -2548,7 +2548,7 @@ test("D32: `env --task AX-50 --group g1 --env dev` stores envs[\"g1/AX-50\"] and
     const u = await w.cli(args);
     assert.equal(u.code, 2, `${args.join(" ")}: ${u.stderr}${u.stdout}`);
   }
-  assert.deepEqual(w.state().envs, { "g1/AX-50": "local" });
+  assert.deepEqual(w.state().envs, { "task:AX-50": "local" });
 });
 
 test("D32: repo settings env Dev, then Local picked on the pill: Local is stored and runs; the pick survives a turn-off and the next light starts with it", async () => {
@@ -2561,11 +2561,11 @@ test("D32: repo settings env Dev, then Local picked on the pill: Local is stored
   const typed = () => w.hc().sent.map((x) => x.text);
   assert.equal((await w.cli(["toggle", "--workspace", ws, "--inline"])).code, 0);
   assert.match(typed().at(-1), runsEnv("dev"));
-  assert.equal(w.state().repos[app.root].envKey, "g1/AX-60");
+  assert.equal(w.state().repos[app.root].envKey, "task:AX-60");
 
   const pick = await w.cli(["env", "--task", "AX-60", "--group", "g1", "--env", "local"]);
   assert.equal(pick.code, 0, pick.stderr + pick.stdout);
-  assert.equal(w.state().envs["g1/AX-60"], "local", "Local is stored too");
+  assert.equal(w.state().envs["task:AX-60"], "local", "Local is stored too");
   await w.until((s) => s.repos[app.root]?.serverEnv === "local" && !s.repos[app.root].busy, { what: "the server in Local" });
   assert.match(typed().at(-1), runsEnv("local"));
 
@@ -2573,7 +2573,7 @@ test("D32: repo settings env Dev, then Local picked on the pill: Local is stored
   const off = await w.cli(["toggle", "--workspace", ws, "--inline"]);
   assert.equal(off.code, 0, off.stderr + off.stdout);
   assert.equal(w.state().repos[app.root], undefined);
-  assert.deepEqual(w.state().envs, { "g1/AX-60": "local" });
+  assert.deepEqual(w.state().envs, { "task:AX-60": "local" });
   const n = typed().length;
   assert.equal((await w.cli(["toggle", "--workspace", ws, "--inline"])).code, 0);
   assert.equal(typed().length, n + 1);
@@ -2598,7 +2598,7 @@ test("D32: `env --workspace` writes its workspace's key: a task workspace's is t
   assert.equal((await w.cli(["toggle", "--workspace", ws80, "--inline"])).code, 0);
   const pick = await w.cli(["env", "--workspace", ws80, "--env", "prod"]);
   assert.equal(pick.code, 0, pick.stderr + pick.stdout);
-  assert.deepEqual(w.state().envs, { "g1/AX-80": "prod" });
+  assert.deepEqual(w.state().envs, { "task:AX-80": "prod" });
   assert.match(typed().at(-1), runsEnv("prod"));
 
   // AX-81 doesn't hold the root: its pick is stored, nothing restarts.
@@ -2606,12 +2606,12 @@ test("D32: `env --workspace` writes its workspace's key: a task workspace's is t
   const stored = await w.cli(["env", "--workspace", ws81, "--env", "dev"]);
   assert.equal(stored.code, 0, stored.stderr + stored.stdout);
   assert.match(stored.stdout, /^app: env dev saved\.$/m);
-  assert.equal(w.state().envs["g1/AX-81"], "dev");
+  assert.equal(w.state().envs["task:AX-81"], "dev");
   assert.equal(typed().length, n);
-  assert.deepEqual({ envKey: record().envKey, serverEnv: record().serverEnv }, { envKey: "g1/AX-80", serverEnv: "prod" });
+  assert.deepEqual({ envKey: record().envKey, serverEnv: record().serverEnv }, { envKey: "task:AX-80", serverEnv: "prod" });
   // Its light runs it.
   assert.equal((await w.cli(["toggle", "--workspace", ws81, "--inline"])).code, 0);
-  assert.equal(record().envKey, "g1/AX-81");
+  assert.equal(record().envKey, "task:AX-81");
   assert.match(typed().at(-1), runsEnv("dev"));
 
   // Task-less workspaces are keyed by their path.
@@ -2624,7 +2624,7 @@ test("D32: `env --workspace` writes its workspace's key: a task workspace's is t
   assert.equal((await w.cli(["toggle", "--workspace", bareB, "--inline"])).code, 0);
   assert.equal(record().envKey, `ws:${bareB}`);
   assert.match(typed().at(-1), runsEnv("local"), "bareB doesn't inherit bareA's pick");
-  assert.deepEqual(Object.keys(w.state().envs).sort(), ["g1/AX-80", "g1/AX-81", `ws:${bareA}`].sort());
+  assert.deepEqual(Object.keys(w.state().envs).sort(), ["task:AX-80", "task:AX-81", `ws:${bareA}`].sort());
 });
 
 test("D32: a record lit before T22 (envOverride, no envKey) keeps its env and restarts nothing; picked through `env --task` it gets envKey, restarts once, and the next reap leaves it alone", async () => {
@@ -2657,7 +2657,7 @@ test("D32: a record lit before T22 (envOverride, no envKey) keeps its env and re
   const pick = await w.cli(["env", "--task", "AX-90", "--group", "g1", "--env", "dev", "--inline"]);
   assert.equal(pick.code, 0, pick.stderr + pick.stdout);
   const rec = w.state().repos[app.root];
-  assert.equal(rec.envKey, "g1/AX-90");
+  assert.equal(rec.envKey, "task:AX-90");
   assert.equal("envOverride" in rec, false);
   assert.equal(typed().length, n + 1);
   assert.match(typed().at(-1), runsEnv("dev"));
@@ -2665,6 +2665,75 @@ test("D32: a record lit before T22 (envOverride, no envKey) keeps its env and re
   await sleep(1500);
   assert.equal(typed().length, n + 1, "the next reap leaves it alone");
   assert.equal(w.state().repos[app.root].serverEnv, "dev");
+});
+
+// ── T39 (D46): the env and the variant of a task across spaces ────────────
+// As Orca (spotlight-env-key.ts, "no space limit"): a task's env is keyed
+// task:<KEY> in every space, and a pick restarts every lit repo whose holder
+// has that key, in any space. Queue, lighting, taskBatch and lane badge keys
+// stay per space (D12).
+
+test("D46: the same task key in two spaces shares one env: `env --task` picked in one restarts the lit repos of both; the queue and lighting keys stay per space", async () => {
+  const w = makeWorld();
+  const front = makeRepo(w, "front", { pkg: ENV_PKG, tasks: ["AX-50"] });
+  const back = makeRepo(w, "back", { pkg: ENV_PKG, tasks: ["AX-50"] });
+  w.register([{ id: "g1", repos: [front] }, { id: "g2", repos: [back] }]);
+  w.listen(front.root, [3000]);
+  w.listen(back.root, [3001]);
+  const t = w.agent(front.ws["AX-50"]);
+  const on = await w.cli(["on"], { terminal: t, cwd: front.ws["AX-50"] });
+  assert.equal(on.code, 0, on.stderr + on.stdout);
+  const lit = await w.cli(["toggle", "--task", "AX-50", "--group", "g2", "--inline"]);
+  assert.equal(lit.code, 0, lit.stderr + lit.stdout);
+  let s = w.state();
+  assert.deepEqual([front, back].map((r) => s.repos[r.root].envKey), ["task:AX-50", "task:AX-50"]);
+  assert.deepEqual([front, back].map((r) => s.repos[r.root].serverEnv), ["local", "local"]);
+  // D12: the queue and the lighting keep the lane's key.
+  assert.equal(requestOf(s, t).taskKey, "g1/AX-50");
+  assert.ok("g1/AX-50" in s.queue.lighting, JSON.stringify(Object.keys(s.queue.lighting)));
+
+  const pick = await w.cli(["env", "--task", "AX-50", "--group", "g2", "--env", "dev", "--inline"]);
+  assert.equal(pick.code, 0, pick.stderr + pick.stdout);
+  assert.match(pick.stdout, /^front: env dev; the server restarted: npm run dev --$/m);
+  assert.match(pick.stdout, /^back: env dev; the server restarted: npm run dev --$/m);
+  s = w.state();
+  assert.deepEqual(s.envs, { "task:AX-50": "dev" });
+  assert.deepEqual([front, back].map((r) => s.repos[r.root].serverEnv), ["dev", "dev"]);
+  const typedIn = (r) => w.hc().sent.filter((x) => x.terminal === w.serverTerminal(r.root).address).map((x) => x.text);
+  assert.match(typedIn(front).at(-1), runsEnv("dev"));
+  assert.match(typedIn(back).at(-1), runsEnv("dev"));
+  assert.equal(requestOf(s, t).taskKey, "g1/AX-50", "the queue's key unchanged");
+});
+
+test("D46: an old <groupId>/<KEY> entry of any space is still read, the later position winning over task:<KEY>; the next pick writes task:<KEY>, drops the old ones and rewrites a lit record's old envKey", async () => {
+  const w = makeWorld();
+  const app = makeRepo(w, "app", { pkg: ENV_PKG, tasks: ["AX-50"] });
+  w.register([{ id: "g1", repos: [app] }]);
+  w.listen(app.root, [3000]);
+  const ws = app.ws["AX-50"];
+  const typed = () => w.hc().sent.map((x) => x.text);
+  assert.equal((await w.cli(["toggle", "--workspace", ws, "--inline"])).code, 0);
+  assert.equal(w.state().repos[app.root].serverEnv, "local");
+
+  // As a version before D46 left it: the record keyed by its lane, picks
+  // keyed by space, one in another space after this task's own.
+  const before = w.state();
+  before.repos[app.root].envKey = "g1/AX-50";
+  before.envs = { "g1/AX-50": "prod", "task:AX-50": "local", "zz/AX-50": "dev", "zz/AX-51": "prod", [`ws:${join(w.dir, "ws", "app", "AX-50")}`]: "prod" };
+  w.writeState(before);
+  // The reap finds the env in force (the latest: zz's Dev) isn't what runs.
+  assert.equal((await w.cli(["reap"])).code, 0);
+  const moved = await w.until((x) => (x.repos[app.root]?.serverEnv !== "local" && !x.repos[app.root].busy ? x : null), { what: "the reap's restart" });
+  assert.equal(moved.repos[app.root].serverEnv, "dev");
+  assert.match(typed().at(-1), runsEnv("dev"));
+
+  const pick = await w.cli(["env", "--task", "AX-50", "--group", "g1", "--env", "prod", "--inline"]);
+  assert.equal(pick.code, 0, pick.stderr + pick.stdout);
+  const s = w.state();
+  assert.deepEqual(s.envs, { "zz/AX-51": "prod", [`ws:${join(w.dir, "ws", "app", "AX-50")}`]: "prod", "task:AX-50": "prod" });
+  assert.equal(s.repos[app.root].envKey, "task:AX-50");
+  assert.equal(s.repos[app.root].serverEnv, "prod");
+  assert.match(typed().at(-1), runsEnv("prod"));
 });
 
 // ── D35: error toasts that name their popup button; D36: the variant ──────
@@ -2891,7 +2960,7 @@ test("D36: each light that needs a variant asks for it; `env --variant` picked f
   assert.equal(rec.serverCommand, null);
   assert.equal(rec.serverVariant, null);
   assert.equal(w.hc().sent.length, sent, "nothing typed");
-  assert.equal(w.state().variants[`g1/AX-1::${app.root}`], "co");
+  assert.equal(w.state().variants[`task:AX-1::${app.root}`], "co");
 
   const mine = await w.cli(["env", "--workspace", ws2, "--variant", "mx"]);
   assert.equal(mine.code, 0, mine.stdout + mine.stderr);
@@ -2899,6 +2968,43 @@ test("D36: each light that needs a variant asks for it; `env --variant` picked f
   assert.equal(lit.serverVariant, "mx");
   assert.match(lit.serverCommand, /dev:mx/);
   assert.equal(lit.serverState, "starting");
+});
+
+test("D46: the variant follows the task across spaces for the same repo: one remembered before D46 under another space is read by an `env --task` pick and by a light; a pick rewrites it as task:<KEY>::<root>", async () => {
+  const w = makeWorld();
+  const app = makeRepo(w, "multi", { pkg: VARIANT_PKG, files: VARIANT_APPS, tasks: ["AX-1"] });
+  // The repo is in g2 now; AX-1's variant was remembered while it was in g1.
+  w.register([{ id: "g2", repos: [app] }]);
+  const ws = app.ws["AX-1"];
+  const asks = () => w.state().notes.filter((n) => n.toast && n.text === ASK("multi"));
+  assert.equal((await w.cli(["toggle", "--workspace", ws, "--inline"])).code, 0);
+  assert.equal(w.state().repos[app.root].serverState, "needs-variant");
+  assert.equal(asks().length, 1);
+  const s = w.state();
+  s.variants = { [`g1/AX-1::${app.root}`]: "mx", [`g1/AX-2::${app.root}`]: "co" };
+  w.writeState(s);
+
+  // The lane's env pill (task:AX-1) reads it: Dev starts with mx.
+  const pick = await w.cli(["env", "--task", "AX-1", "--group", "g2", "--env", "dev", "--inline"]);
+  assert.equal(pick.code, 0, pick.stderr + pick.stdout);
+  let rec = w.state().repos[app.root];
+  assert.equal(rec.serverVariant, "mx");
+  assert.match(rec.serverCommand, /dev:mx/);
+
+  // Off and on again: the light (the marker's g2/AX-1) reads it too, and asks nothing.
+  assert.equal((await w.cli(["toggle", "--workspace", ws, "--inline"])).code, 0);
+  assert.equal(w.state().repos[app.root], undefined);
+  assert.equal((await w.cli(["toggle", "--workspace", ws, "--inline"])).code, 0);
+  rec = w.state().repos[app.root];
+  assert.equal(rec.serverVariant, "mx");
+  assert.match(rec.serverCommand, /dev:mx/);
+  assert.equal(asks().length, 1, "nothing asked");
+
+  // A pick: stored under the task alone, its old entry gone, another task's kept.
+  const chip = await w.cli(["env", "--workspace", ws, "--variant", "co"]);
+  assert.equal(chip.code, 0, chip.stdout + chip.stderr);
+  assert.deepEqual(w.state().variants, { [`g1/AX-2::${app.root}`]: "co", [`task:AX-1::${app.root}`]: "co" });
+  assert.equal(w.state().repos[app.root].serverVariant, "co");
 });
 
 // ── D41: toasts as Orca's ──────────────────────────────────────────────────

@@ -14,13 +14,16 @@
 // scripts or names matching SAFE_SCRIPT_NAME become commands, and only
 // variants matching ^[A-Za-z0-9_-]+$ are ever substituted.
 //
-// No herdr, gpui-kit or node imports, so the mod and the CLI share it and
-// `node --test` loads it. File reads and git are passed in:
+// No herdr, gpui-kit or node imports (only the plugin's pure task-env.js,
+// for a task's key, D46), so the mod and the CLI share it and `node --test`
+// loads it. File reads and git are passed in:
 //   io   { readText(path, maxBytes) → string | null,
 //          kind(path) → "file" | "dir" | "other" | "none" | null (couldn't tell),
 //          listDirs(path) → folder names | null }
 //        nodeIo(fs) builds one from `node:fs/promises`.
 //   git  (cwd, args) → stdout; rejects when git fails or can't start.
+
+import { taskEnvKey, entryKeys } from "./task-env.js";
 
 // ── Environments ───────────────────────────────────────────────────────────
 
@@ -592,25 +595,35 @@ export async function defaultBaseRef(git, cwd) {
 }
 
 // ── The variant remembered per task ────────────────────────────────────────
-// A plain map { "<task key>::<root>": variant }, oldest first, which the
-// caller persists; a hand-edited one is read defensively.
+// A plain map { "task:<KEY>::<root>": variant }, oldest first, which the
+// caller persists; a hand-edited one is read defensively. D46: the task in
+// any space (task-env.js taskEnvKey), so a light's `<lane>/<KEY>` and an
+// `env --task` pick's task:<KEY> name one entry; entries written before it,
+// `<groupId>/<KEY>::<root>` of any space, are still read.
 
 export const MAX_REMEMBERED_VARIANTS = 500;
 const MAX_TASK_KEY_LENGTH = 200;
 const MAX_ROOT_LENGTH = 4096;
 const UNSAFE_RECORD_KEYS = new Set(["__proto__", "constructor", "prototype"]);
 
+// A task's key in one repo, `task:<KEY>::<root>`, from `<lane>/<KEY>`,
+// task:<KEY> or a bare KEY alike; null for a key or root that can't be one.
 export function variantKey(taskKey, root) {
   if (typeof taskKey !== "string" || taskKey === "" || taskKey.length > MAX_TASK_KEY_LENGTH || UNSAFE_RECORD_KEYS.has(taskKey)) return null;
   if (typeof root !== "string" || root === "" || root.length > MAX_ROOT_LENGTH) return null;
-  return `${taskKey}::${root}`;
+  const task = taskEnvKey(taskKey);
+  return task === null ? null : `${task}::${root}`;
 }
 
-// The variant last chosen or inferred for this repo in this task; null when none.
+// The variant last chosen or inferred for this repo in this task; null when
+// none: the last of its entries (task-env.js entryKeys: task:<KEY>::<root>
+// and the old `<groupId>/<KEY>::<root>` of any space; a pick moves its key
+// to the end) that holds a safe one.
 export function rememberedVariant(map, taskKey, root) {
-  const key = variantKey(taskKey, root);
-  if (key === null || map === null || typeof map !== "object" || !Object.hasOwn(map, key)) return null;
-  return isSafeVariant(map[key]) ? map[key] : null;
+  if (variantKey(taskKey, root) === null) return null;
+  let found = null;
+  for (const k of entryKeys(map, taskEnvKey(taskKey), `::${root}`)) if (isSafeVariant(map[k])) found = map[k];
+  return found;
 }
 
 // A new map with `variant` stored for the task's repo, re-added last; the

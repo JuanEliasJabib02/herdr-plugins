@@ -2243,7 +2243,7 @@ test("D32: a light keys its record with the holder's env key: the task's (the ma
   delete state.repos[root].envOverride;
   state.queue.lighting[key] = markerFor(wt, "g1/AX-1");
   assert.deepEqual((await lightTask(fullCx(), key)).errors, {});
-  assert.equal(state.repos[root].envKey, "g1/AX-1");
+  assert.equal(state.repos[root].envKey, "task:AX-1");
   // A takeover by a workspace with no task: keyed by its path; envOverride goes.
   state.repos[root].envOverride = "prod";
   const wt2 = await lightOnto({ "b.txt": "two\n" });

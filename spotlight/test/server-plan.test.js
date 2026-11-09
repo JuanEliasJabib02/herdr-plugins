@@ -581,11 +581,12 @@ test("rememberVariant: per task and repo, safe variants only, newest last", () =
   assert.equal(rememberedVariant(m, "AX-1", "/r/other"), "mx");
   assert.equal(rememberedVariant(m, "AX-2", "/r/landing"), "pt");
   assert.equal(rememberedVariant(m, "AX-3", "/r/landing"), null);
-  assert.equal(variantKey("AX-1", "/r/landing"), "AX-1::/r/landing");
+  // D46: keyed by the task alone, in any space.
+  assert.equal(variantKey("AX-1", "/r/landing"), "task:AX-1::/r/landing");
   const again = rememberVariant(m, "AX-1", "/r/landing", "co");
   assert.equal(again, m, "an unchanged choice returns the same map");
   const moved = rememberVariant(m, "AX-1", "/r/landing", "br");
-  assert.deepEqual(Object.keys(moved).at(-1), "AX-1::/r/landing", "a new choice moves last");
+  assert.deepEqual(Object.keys(moved).at(-1), "task:AX-1::/r/landing", "a new choice moves last");
   assert.equal(rememberVariant(m, "AX-1", "/r/landing", "a b"), m, "an unsafe variant is never stored");
   for (const key of ["", "__proto__", "constructor", "x".repeat(201)]) {
     assert.equal(variantKey(key, "/r"), null, key);
@@ -598,9 +599,25 @@ test("rememberVariant: per task and repo, safe variants only, newest last", () =
 
 test("rememberedVariant: tolerates a hand-edited map", () => {
   assert.equal(rememberedVariant(null, "AX-1", "/r"), null);
-  assert.equal(rememberedVariant({ "AX-1::/r": "a b" }, "AX-1", "/r"), null);
-  assert.equal(rememberedVariant({ "AX-1::/r": 7 }, "AX-1", "/r"), null);
-  assert.equal(rememberedVariant(Object.create({ "AX-1::/r": "co" }), "AX-1", "/r"), null, "only own keys");
+  assert.equal(rememberedVariant({ "task:AX-1::/r": "a b" }, "AX-1", "/r"), null);
+  assert.equal(rememberedVariant({ "task:AX-1::/r": 7 }, "AX-1", "/r"), null);
+  assert.equal(rememberedVariant(Object.create({ "task:AX-1::/r": "co" }), "AX-1", "/r"), null, "only own keys");
+});
+
+test("D46: a light's <lane>/<KEY>, an `env --task` pick's task:<KEY> and any space's lane name one variant, task:<KEY>::<root>; an old <g>/<KEY>::<root> is still read, the later one winning", () => {
+  for (const taskKey of ["g1/AX-1", "zz/AX-1", "task:AX-1"]) assert.equal(variantKey(taskKey, "/r"), "task:AX-1::/r", taskKey);
+  const m = rememberVariant({}, "g1/AX-1", "/r", "co");
+  assert.deepEqual(m, { "task:AX-1::/r": "co" });
+  for (const taskKey of ["g1/AX-1", "g2/AX-1", "task:AX-1"]) assert.equal(rememberedVariant(m, taskKey, "/r"), "co", taskKey);
+  // Written before D46, in any space: read until the next pick rewrites it.
+  assert.equal(rememberedVariant({ "g1/AX-1::/r": "mx" }, "task:AX-1", "/r"), "mx");
+  assert.equal(rememberedVariant({ "g1/AX-1::/r": "mx" }, "g2/AX-1", "/r"), "mx");
+  assert.equal(rememberedVariant({ "task:AX-1::/r": "co", "g1/AX-1::/r": "mx" }, "task:AX-1", "/r"), "mx", "the later one");
+  assert.equal(rememberedVariant({ "g1/AX-1::/r": "mx", "task:AX-1::/r": "co" }, "task:AX-1", "/r"), "co", "the later one");
+  assert.equal(rememberedVariant({ "g1/AX-1::/r": "mx", "task:AX-1::/r": "a b" }, "task:AX-1", "/r"), "mx", "an unsafe value doesn't count");
+  // Another repo's, another task's, a workspace's: never.
+  const others = { "g1/AX-1::/r2": "mx", "g1/AX-1::/x/r": "mx", "g1/AX-2::/r": "mx", "g1/AX-10::/r": "mx", "ws:/w/AX-1::/r": "mx" };
+  assert.equal(rememberedVariant(others, "task:AX-1", "/r"), null);
 });
 
 test("rememberVariant: keeps at most MAX_REMEMBERED_VARIANTS, dropping the oldest", () => {
