@@ -2819,6 +2819,16 @@ test("D41: errorNote's title says what was refused (a light, a sync, a turn-off)
   // A refused turn-off whose server didn't stop either (G4): Orca's description, then that.
   const both = noteOf({ error: { code: "root-diverged", message: "diverged. Además, el server no paró: hc no pudo leer su terminal." }, op: "off", also: "hc no pudo leer su terminal" });
   assert.equal(both.body, `${DESCRIPTIONS["root-diverged"]} Además, el server no paró: hc no pudo leer su terminal.`);
+  // A refused turn-off that saved untracked files (sync.js deactivate's
+  // message names the rescued ref): Orca's description, then that sentence,
+  // so the toast's body still names the ref; with a server that didn't stop
+  // either, that last.
+  const SAVED = "Tus archivos sin seguimiento que estorbaban están a salvo en refs/herdr-spotlight/rescued/2026-11-09T10-00-00-000Z-abc1234.";
+  const rescued = noteOf({ error: { code: "restore-conflict", message: `Restoring the root's original uncommitted changes conflicted: CONFLICT (content).\nerror: could not apply. ${SAVED}` }, op: "off" });
+  assert.equal(rescued.body, `${DESCRIPTIONS["restore-conflict"]} ${SAVED}`);
+  assert.equal(rescued.text, `app: Restoring the root's original uncommitted changes conflicted: CONFLICT (content).\nerror: could not apply. ${SAVED}`);
+  const rescuedBoth = noteOf({ error: { code: "restore-conflict", message: `conflicted. ${SAVED} Además, el server no paró: hc no pudo leer su terminal.` }, op: "off", also: "hc no pudo leer su terminal" });
+  assert.equal(rescuedBoth.body, `${DESCRIPTIONS["restore-conflict"]} ${SAVED} Además, el server no paró: hc no pudo leer su terminal.`);
   // Server errors (a busy port, a dead or failed start): Herdr's own words under "Spotlight · app".
   const BUSY = portBusyError({ port: 3000, pid: 900, command: "node", cwd: "/x" });
   const busy = noteOf({ error: BUSY, top: BUSY }, { lastError: BUSY });
@@ -3439,6 +3449,12 @@ test("D43: deactivateRepo reads onlyIf under its own repo lock, before any busy 
   assert.equal(added.length, 1, JSON.stringify(added));
   assert.equal(added[0].level, "error");
   assert.match(added[0].text, /^app: .*a salvo en refs\/herdr-spotlight\/rescued\/\S+\.$/s);
+  // The toast's body names the ref too: Orca's description, then where the files went.
+  const ref = /(refs\/herdr-spotlight\/rescued\/\S+)\.$/.exec(conflict.message)[1];
+  assert.equal(
+    added[0].body,
+    `Restaurar los cambios originales del root dio conflicto. Resuélvelo en el root del proyecto y vuelve a intentar. Tus archivos sin seguimiento que estorbaban están a salvo en ${ref}.`,
+  );
 });
 
 test("D43: deactivateRepo's purge runs inside its own repo lock: one lock, the stop once (by the purge when the refusal came first), every git step under it; one warning note names the recovery refs", async () => {

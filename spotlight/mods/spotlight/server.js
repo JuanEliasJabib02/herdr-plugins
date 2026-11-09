@@ -11,8 +11,9 @@
 // "Ver server" selects that tab (showServer); Herdr's peek is the fallback
 // for a terminal in no tab. The server line is typed into its shell through
 // the spotlight-serve helper (bin/spotlight-serve, installed beside
-// `spotlight`), after a `cd` to the root when the shell is elsewhere:
-//   [cd '<root>' && ]spotlight-serve '<line>'
+// `spotlight`), always after a `cd` to the root (hc's folder for a
+// terminal is where it started, not where its shell is now):
+//   cd '<root>' && spotlight-serve '<line>'
 // The helper asks `spotlight logs --path` for the repo's log and execs the
 // line wrapped for it (D11):
 //   script -F -q -a <logPath> /bin/zsh -c <line>
@@ -129,17 +130,18 @@ export function shellQuote(s) {
 }
 
 // The line typed into the server terminal (D10, D40): the helper with the
-// command as one word, `spotlight-serve '<line>'`, after `cd '<root>' && `
-// unless the terminal's shell is in the root (`cwd`; one hc didn't say may
-// be anywhere): the helper asks `spotlight logs --path` there, and the
-// server runs in the root. null for a line that isn't one safe line, or a
-// root with control bytes to cd to. Without a `root`, no cd.
-export function wrapServerLine(line, { root = null, cwd = null } = {}) {
+// command as one word, `spotlight-serve '<line>'`, always after
+// `cd '<root>' && `: the helper asks `spotlight logs --path` there, and the
+// server runs in the root. Whatever folder hc reports: `hc get`'s own `cwd`
+// is where the terminal started and doesn't follow a `cd` (J-002), so a
+// shell said to be in the root may be anywhere. null for a line that isn't
+// one safe line, or a root with control bytes to cd to. Without a `root`,
+// no cd.
+export function wrapServerLine(line, { root = null } = {}) {
   const command = normalizeServerLine(line);
   if (!command) return null;
   const served = `${SERVE_COMMAND} ${shellQuote(command)}`;
   if (typeof root !== "string" || !root) return served;
-  if (typeof cwd === "string" && cwd && normRoot(cwd) === normRoot(root)) return served;
   // eslint-disable-next-line no-control-regex
   if (/[\u0000-\u001f\u007f]/.test(root)) return null;
   return `cd ${shellQuote(root)} && ${served}`;
@@ -589,8 +591,8 @@ function notStarted(logPath, head, r, deps) {
 }
 
 // Types the helper line for `command` (wrapServerLine, a `cd` to `root`
-// first when the shell is elsewhere) into `terminal` when its shell owns the
-// foreground, after rotating the log and writing the header; then waits
+// first) into `terminal` when its shell owns the foreground, after
+// rotating the log and writing the header; then waits
 // briefly to see the `script` in front and reports its pid (null when it
 // already ended or hasn't forked yet). A terminal that runs anything else is
 // left alone (D40): nothing typed, no Ctrl-C, terminal-busy and its line in
@@ -614,7 +616,7 @@ async function typeWhenIdle(a, deps) {
     note(logPath, head, NOTES["terminal-busy"], deps);
     return { ok: true, started: false, reason: "terminal-busy", terminal, created };
   }
-  const line = wrapServerLine(command, { root, cwd: seen.cwd });
+  const line = wrapServerLine(command, { root });
   if (!line) return { ok: false, reason: "invalid-command" };
   rotateLog(logPath);
   note(logPath, head, `${event}: ${command}`, deps);

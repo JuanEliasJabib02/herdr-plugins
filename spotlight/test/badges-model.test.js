@@ -822,8 +822,10 @@ test("D31, D33: a member's repo busy for one of the task's own workspaces, or th
 
 // D42: a lane's queue badge is Orca's test-turn badge (TaskTestTurnBadge), a
 // text pill with no tooltip: "Probando" filled, "En cola #<n>" and "Pausado"
-// outlined.
-const PROBANDO = { text: "Probando", tone: "working", pill: true, look: "secondary" };
+// outlined. Each is published `dim` (projects-sidebar RECIPE: a pill with a
+// `look` is drawn by its look, so a reader that doesn't know `look` draws a
+// dim chip, never an amber one).
+const PROBANDO = { text: "Probando", tone: "dim", pill: true, look: "secondary" };
 const queuedPill = (n) => ({ text: `En cola #${n}`, tone: "dim", pill: true, look: "outline" });
 const PAUSADO = { text: "Pausado", tone: "dim", pill: true, look: "outline" };
 

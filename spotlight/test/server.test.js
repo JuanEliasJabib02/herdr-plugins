@@ -1,6 +1,6 @@
 // T5b: the repo's server terminal (D10). M/server.js drives the repo's hc
 // terminal through an injected exec: the root's own terminal (D40), else
-// one it creates in the root; it types `spotlight-serve '<line>'` (the
+// one it creates in the root; it types `cd '<root>' && spotlight-serve '<line>'` (the
 // helper execs `script -F -q -a <logPath> /bin/zsh -c '<line>'`) only when
 // the shell owns the foreground, never over a process Spotlight didn't start
 // (ownership by the foreground's argv: `script` plus this repo's logPath; the
@@ -389,7 +389,7 @@ test("spotlight-serve (D40): the line wrapServerLine types runs `script -F -q -a
   const logPath = join(dir, "it's logs", "app.log");
   const line = `printf '%s|%s\\n' "it's" '$HOME'; echo "a;b" $((1+2)) \`echo tick\` 'q"q' \\!`;
   // The terminal's shell is elsewhere: the line goes to the root first.
-  const typed = wrapServerLine(line, { root, cwd: elsewhere });
+  const typed = wrapServerLine(line, { root });
   assert.ok(typed.startsWith(`cd ${shellQuote(root)} && spotlight-serve `), typed);
   const out = execFileSync("/bin/zsh", ["-f", "-c", typed], { cwd: elsewhere, encoding: "utf8", env: bench.env({ SL_LOG: logPath }) });
   const argv = bench.argv();
@@ -421,17 +421,18 @@ test("spotlight-serve (D40): no log path (spotlight logs fails) or no command ru
   rmSync(dir, { recursive: true, force: true });
 });
 
-test("wrapServerLine (D40): `spotlight-serve '<line>'`, after `cd '<root>' && ` unless the terminal's folder is the root; shellQuote escapes ' as '\\''", () => {
+test("wrapServerLine (D40): `cd '<root>' && spotlight-serve '<line>'`, the cd always, whatever folder hc reports (its terminal's `cwd` is where it started, not where its shell is now); shellQuote escapes ' as '\\''", () => {
   assert.equal(shellQuote("it's"), `'it'\\''s'`);
-  assert.equal(wrapServerLine("pnpm dev --port 3000", { root: ROOT, cwd: ROOT }), "spotlight-serve 'pnpm dev --port 3000'");
-  assert.equal(wrapServerLine("pnpm dev", { root: ROOT, cwd: `${ROOT}/` }), "spotlight-serve 'pnpm dev'");
+  assert.equal(wrapServerLine("pnpm dev --port 3000", { root: ROOT }), `cd '${ROOT}' && spotlight-serve 'pnpm dev --port 3000'`);
+  // A folder hc reports as the root is no proof the shell is there: the cd all the same.
+  assert.equal(wrapServerLine("pnpm dev", { root: ROOT, cwd: ROOT }), `cd '${ROOT}' && spotlight-serve 'pnpm dev'`);
+  assert.equal(wrapServerLine("pnpm dev", { root: ROOT, cwd: `${ROOT}/` }), `cd '${ROOT}' && spotlight-serve 'pnpm dev'`);
   assert.equal(wrapServerLine("pnpm dev", { root: ROOT, cwd: `${ROOT}/apps/web` }), `cd '${ROOT}' && spotlight-serve 'pnpm dev'`);
-  // A folder hc didn't say: the root may not be where it is.
-  assert.equal(wrapServerLine("pnpm dev", { root: ROOT, cwd: null }), `cd '${ROOT}' && spotlight-serve 'pnpm dev'`);
-  assert.equal(wrapServerLine("pnpm dev", { root: ROOT }), `cd '${ROOT}' && spotlight-serve 'pnpm dev'`);
-  assert.equal(wrapServerLine("pnpm dev", { root: "/x/it's", cwd: "/y" }), `cd '/x/it'\\''s' && spotlight-serve 'pnpm dev'`);
+  assert.equal(wrapServerLine("pnpm dev", { root: "/x/it's" }), `cd '/x/it'\\''s' && spotlight-serve 'pnpm dev'`);
+  // Without a root, no cd.
+  assert.equal(wrapServerLine("pnpm dev"), "spotlight-serve 'pnpm dev'");
   // A root with control bytes is never typed.
-  assert.equal(wrapServerLine("pnpm dev", { root: "/x/a\nb", cwd: "/y" }), null);
+  assert.equal(wrapServerLine("pnpm dev", { root: "/x/a\nb" }), null);
 });
 
 test("normalizeServerLine: one non-empty line with no control bytes, trimmed (Orca's rule); anything else is never typed", () => {
@@ -440,7 +441,7 @@ test("normalizeServerLine: one non-empty line with no control bytes, trimmed (Or
   assert.equal(normalizeServerLine("pnpm dev\r\n"), "pnpm dev");
   for (const bad of ["", "   ", "pnpm dev\nrm -rf ~", "pnpm\rdev", "a\u0003b", "a\u007fb", "a\u001b[Ab", null, 3, undefined]) {
     assert.equal(normalizeServerLine(bad), null, JSON.stringify(bad));
-    assert.equal(wrapServerLine(bad, { root: ROOT, cwd: ROOT }), null, JSON.stringify(bad));
+    assert.equal(wrapServerLine(bad, { root: ROOT }), null, JSON.stringify(bad));
   }
 });
 
@@ -618,7 +619,7 @@ test("findRootSpace (D38): the root's space is the one whose first pane lives in
   assert.equal((await findRootSpace(ROOT, { exec: fakeHc().exec })).ok, false);
 });
 
-test("startServer (D40): the root's idle plain terminal (the active tab's) is labeled for the root, its tab renamed Spotlight, and gets `spotlight-serve '<command>'` typed: no terminal made, killed or moved, no focus asked", async () => {
+test("startServer (D40): the root's idle plain terminal (the active tab's) is labeled for the root, its tab renamed Spotlight, and gets `cd '<root>' && spotlight-serve '<command>'` typed: no terminal made, killed or moved, no focus asked", async () => {
   const dir = tmp();
   const logPath = join(dir, "app.log");
   const hc = fakeHc({ herdr: true });
@@ -630,8 +631,8 @@ test("startServer (D40): the root's idle plain terminal (the active tab's) is la
   assert.equal(hc.terms.get(mine).labels[SERVER_LABEL], ROOT);
   assert.deepEqual(didOf(hc, "tab.rename"), [{ id: "spRoot-tb2", name: "Spotlight" }]);
   assert.deepEqual(hc.world[0].tabs.map((t) => t.name), ["1", "Spotlight", "3"]);
-  // Its folder is the root: no cd.
-  assert.deepEqual(hc.sent, [{ terminal: mine, text: "spotlight-serve 'pnpm dev'" }]);
+  // Its folder is the root: the cd all the same (hc's folder may be stale).
+  assert.deepEqual(hc.sent, [{ terminal: mine, text: `cd '${ROOT}' && spotlight-serve 'pnpm dev'` }]);
   for (const verb of ["run", "kill", "interrupt", "rm"]) assert.equal(hc.verbs().includes(verb), false, verb);
   assert.deepEqual([...didOf(hc, "tab.move"), ...didOf(hc, "space.select"), ...didOf(hc, "tab.select")], []);
   // The script the helper leaves in front is Spotlight's own server, writing this log.
@@ -833,7 +834,7 @@ test("startServer: in a fresh terminal (made in the root) it types the helper li
   assert.equal(r.terminal, "t1");
   assert.equal(r.command, "pnpm dev");
   assert.ok(Number.isInteger(r.pid));
-  assert.deepEqual(hc.sent, [{ terminal: "t1", text: "spotlight-serve 'pnpm dev'" }]);
+  assert.deepEqual(hc.sent, [{ terminal: "t1", text: `cd '${ROOT}' && spotlight-serve 'pnpm dev'` }]);
   assert.equal(readFileSync(logPath, "utf8"), "\n── Spotlight: login (feat/login) · started: pnpm dev · 22:58:04 ──\n");
   // A second start finds Spotlight's own server and types nothing.
   const again = await startServer({ root: ROOT, terminal: "t1", line: "pnpm dev", logPath, serverPid: r.pid }, { exec: hc.exec, ...fakeClock() });
@@ -848,7 +849,7 @@ test("startServer: waits for a new terminal's shell before typing (hc shows no f
   const hc = fakeHc({ shellReads: 3 });
   const r = await startServer({ root: ROOT, line: "pnpm dev", logPath }, { exec: hc.exec, ...fakeClock() });
   assert.deepEqual({ ok: r.ok, started: r.started, created: r.created }, { ok: true, started: true, created: true });
-  assert.deepEqual(hc.sent, [{ terminal: "t1", text: "spotlight-serve 'pnpm dev'" }]);
+  assert.deepEqual(hc.sent, [{ terminal: "t1", text: `cd '${ROOT}' && spotlight-serve 'pnpm dev'` }]);
   rmSync(dir, { recursive: true, force: true });
 });
 
@@ -954,7 +955,7 @@ test("restartServer (D40): Spotlight's own server (its `script` writing this rep
   assert.notEqual(r.pid, s.pid);
   const verbs = hc.verbs();
   assert.deepEqual(verbs.slice(verbs.indexOf("interrupt")).filter((v) => v !== "get"), ["interrupt", "send"]);
-  assert.deepEqual(hc.sent.map((x) => x.text), ["spotlight-serve 'pnpm dev'", "spotlight-serve 'pnpm install --frozen-lockfile && pnpm dev'"]);
+  assert.deepEqual(hc.sent.map((x) => x.text), [`cd '${ROOT}' && spotlight-serve 'pnpm dev'`, `cd '${ROOT}' && spotlight-serve 'pnpm install --frozen-lockfile && pnpm dev'`]);
   assert.equal(hc.terms.get(r.terminal).foreground.argv.at(-1), "pnpm install --frozen-lockfile && pnpm dev");
   assert.equal(r.terminal, s.terminal);
   assert.match(readFileSync(logPath, "utf8"), /── Spotlight: restarted: pnpm install --frozen-lockfile && pnpm dev · \d\d:\d\d:\d\d ──\n$/);

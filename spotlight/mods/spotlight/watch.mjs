@@ -33,7 +33,10 @@
 //         once, so a closed tab or a stopped server toasts within one tick;
 //       - the full reap every 30 s with nothing changing, and at start;
 //       - exits once no repo is lit, the queue is empty and no light is at
-//         work (watchIdle), letting its record go under the lock, so an
+//         work (watchIdle), after one last full reap unless one ran since
+//         it last saw something lit or queued (a light that died unfinished
+//         leaves its busy mark or lighting marker for a reap), letting its
+//         record go under the lock, so an
 //         ensure racing it either sees the record (and the watcher, re-reading
 //         state under the lock, stays) or starts a new one. The next light or
 //         `on` starts it again.
@@ -310,6 +313,21 @@ export async function runWatcher(deps) {
   const bounce = debouncer(deps.after, SYNC_DEBOUNCE_MS);
   let lastPrint = null;
   let lastReapAt = null;
+  // Whether a full reap ran since the loop last saw something lit or queued
+  // (J-003): a light that died unfinished leaves its busy mark or lighting
+  // marker for a reap, and an idle watcher reaps once more before it goes.
+  let reapedSinceBusy = false;
+
+  // `spotlight reap`, awaited; a failure is logged, never the loop's end.
+  const fullReap = async () => {
+    lastReapAt = deps.now();
+    reapedSinceBusy = true;
+    try {
+      await deps.reap();
+    } catch (e) {
+      log(`reap: ${e?.message ?? e}`);
+    }
+  };
 
   const forget = (holder, entry) => {
     if (watches.get(holder) !== entry) return;
@@ -363,14 +381,7 @@ export async function runWatcher(deps) {
         const print = await watchFingerprint(targetsOf(state), deps.look);
         const changed = lastPrint !== null && print !== lastPrint;
         lastPrint = print;
-        if (changed || lastReapAt === null || deps.now() - lastReapAt >= WATCH_FULL_REAP_MS) {
-          lastReapAt = deps.now();
-          try {
-            await deps.reap();
-          } catch (e) {
-            log(`reap: ${e?.message ?? e}`);
-          }
-        }
+        if (changed || lastReapAt === null || deps.now() - lastReapAt >= WATCH_FULL_REAP_MS) await fullReap();
         if (deps.stopped()) return { reason: "stopped" };
         let idle = false;
         try {
@@ -378,9 +389,18 @@ export async function runWatcher(deps) {
         } catch {
           // Unreadable: not idle, look again next tick.
         }
-        if (idle) {
+        if (!idle) reapedSinceBusy = false;
+        else {
+          // The last full reap first, unless one ran since it last saw
+          // something lit or queued; the release re-checks idle under the lock.
+          if (!reapedSinceBusy) {
+            await fullReap();
+            if (deps.stopped()) return { reason: "stopped" };
+          }
           const released = await deps.release();
           if (released) return { reason: released };
+          // Lit or queued again under the lock.
+          reapedSinceBusy = false;
         }
       }
       await deps.sleep(WATCH_TICK_MS);

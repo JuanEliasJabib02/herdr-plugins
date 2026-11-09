@@ -2097,7 +2097,7 @@ const NEXT_3008 = JSON.stringify({ scripts: { local: "next dev -p 3008" } });
 // The calls of `verb` (hc's, by its first word) in a world's trace.
 const callsOf = (w, verb) => w.trace.filter((l) => l.startsWith(`hc ${verb} `));
 
-test("D40: lighting a root whose own terminal is at its prompt types the server there: t5 labeled for the root and its tab renamed Spotlight, the port checked, then `spotlight-serve '<command>'` typed; no terminal made, killed or moved", async () => {
+test("D40: lighting a root whose own terminal is at its prompt types the server there: t5 labeled for the root and its tab renamed Spotlight, the port checked, then `cd '<root>' && spotlight-serve '<command>'` typed (the cd always: hc's folder may be stale); no terminal made, killed or moved", async () => {
   const w = rootWorld();
   await lightOnto({ "package.json": NEXT_3008 }, { serverDeps: { exec: w.exec, ...fakeClock() } });
   const rec = state.repos[root];
@@ -2108,7 +2108,7 @@ test("D40: lighting a root whose own terminal is at its prompt types the server 
   assert.equal("serverReason" in rec, false);
   assert.equal(w.terms.t5.labels["spotlight.repo"], root);
   assert.deepEqual(w.space.tabs.map((x) => x.name), ["Spotlight"]);
-  assert.deepEqual(callsOf(w, "send"), [`hc send t5 spotlight-serve '${rec.serverCommand}' --json`]);
+  assert.deepEqual(callsOf(w, "send"), [`hc send t5 cd '${root}' && spotlight-serve '${rec.serverCommand}' --json`]);
   for (const verb of ["run", "kill", "interrupt"]) assert.deepEqual(callsOf(w, verb), [], verb);
   assert.equal(w.first("herdr-app do tab.move"), -1);
   const order = [`hc label t5 spotlight.repo=${root}`, "herdr-app do tab.rename", "lsof -nP -iTCP:3008", "hc send t5"].map(w.first);
@@ -2164,10 +2164,39 @@ test("D40: a root whose own terminal runs something is left alone: nothing typed
   w.terms.t5.foreground = { pid: 500, name: "zsh", argv: ["/bin/zsh", "-l"], cwd: root };
   const r = await ensureServer(fullCx({ serverDeps: { exec: w.exec, ...fakeClock() } }), root, { workspace: rec.holder, restart: true });
   assert.equal(r.state, "started", JSON.stringify(r));
-  assert.deepEqual(callsOf(w, "send"), [`hc send t5 spotlight-serve '${r.plan.command}' --json`]);
+  assert.deepEqual(callsOf(w, "send"), [`hc send t5 cd '${root}' && spotlight-serve '${r.plan.command}' --json`]);
   assert.equal(callsOf(w, "interrupt").length, 0);
   assert.equal("serverReason" in state.repos[root], false);
   assert.equal(serverViewModel({ state, settings: readSettings(JSON.stringify({ version: 1 })), repo: root, workspace: rec.holder, detection: null, bin: cliPathOf("/app") }).serverNote, null);
+});
+
+test("D40: once the program Spotlight left alone ends (its shell free again, nothing listening), the next look drops terminal-busy, the reap's and `on`'s alike; while the terminal still runs it, the reason stays", async () => {
+  const w = rootWorld({ busy: true });
+  const holder = await lightOnto({ "package.json": NEXT_3008 }, { serverDeps: { exec: w.exec, ...fakeClock() } });
+  assert.equal(state.repos[root].serverReason, "terminal-busy");
+  const noteOf = () => serverViewModel({ state, settings: readSettings(JSON.stringify({ version: 1 })), repo: root, workspace: holder, detection: null, bin: cliPathOf("/app") }).serverNote;
+  const look = { terminal: "t5", ports: [], procs: [], port: null, url: null, label: "", state: "stopped" };
+  const juans = { ...look, owner: "foreign", pid: 7000 };
+  const free = { ...look, owner: null, pid: 500 };
+  const member = { root, name: "root", workspace: holder, workspaces: [holder] };
+  const reapReading = (live) => reap(fullCx({ serverDeps: { exec: w.exec }, server: { readServerState: async () => live } }));
+  const onReading = async (live) => {
+    const ox = fullCx({ serverDeps: { exec: w.exec }, server: { readServerState: async () => live } });
+    await recordServers(ox, [await describeServer(ox, ox.store.readState(), member, "g1/AX-1")]);
+  };
+
+  for (const [what, read] of [["the reap", reapReading], ["on", onReading]]) {
+    state.repos[root].serverReason = "terminal-busy";
+    // His program still runs there, no port open: the reason stays.
+    await read(juans);
+    assert.equal(state.repos[root].serverReason, "terminal-busy", what);
+    assert.equal(noteOf(), "Su terminal está ocupada: no se tocó.", what);
+    // It ended: the shell leads again. Stopped, and no longer busy.
+    await read(free);
+    assert.equal("serverReason" in state.repos[root], false, what);
+    assert.equal(state.repos[root].serverState, "stopped", what);
+    assert.equal(noteOf(), null, what);
+  }
 });
 
 test("D38: the reap shows a server lit before T29 (its terminal hidden) as the root's Spotlight tab, once: no restart, no kill, no other terminal touched", async () => {

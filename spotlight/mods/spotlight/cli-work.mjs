@@ -130,11 +130,12 @@ const ORCA_DESCRIPTIONS = {
 // `op`: what was refused, "light", "sync" or "off" (a server error's
 // callers pass none).
 // D41: refused (`op`), its title says what was (ERROR_TITLES) and its body
-// is Orca's description of the code, else the message; `also`, why the
-// server didn't stop either, follows a description (a message says it
-// already, alsoNotStopped). A server error (no `op`) is Herdr's own:
-// herdrTitle over its words. The note's `text` stays "<repo>: <message>",
-// the log's line.
+// is Orca's description of the code, else the message; the message's
+// sentence naming a rescued ref (rescuedSentence) follows a description, so
+// the toast still says where the untracked files went; `also`, why the
+// server didn't stop either, comes last (a message says it already,
+// alsoNotStopped). A server error (no `op`) is Herdr's own: herdrTitle over
+// its words. The note's `text` stays "<repo>: <message>", the log's line.
 export function errorNote(s, { root, name, workspace, error, now, top = null, op = null, also = null }) {
   const shown = top ?? error;
   const opens = POPUP_CODES.has(shown.code) && workspace;
@@ -145,7 +146,9 @@ export function errorNote(s, { root, name, workspace, error, now, top = null, op
   const titled = ERROR_TITLES[op];
   const said = ORCA_DESCRIPTIONS[error.code];
   let body = `${error.message}${under}`;
-  if (titled && said) body = also ? `${said} Además, el server no paró: ${also}.` : said;
+  if (titled && said) {
+    body = [said, rescuedSentence(error.message), also ? `Además, el server no paró: ${also}.` : null].filter(Boolean).join(" ");
+  }
   addNote(s, {
     repo: root, text: `${name}: ${error.message}${under}`, toast: true, level: "error", ...popup,
     title: titled ? titled(name) : herdrTitle(name), body,
@@ -1205,11 +1208,14 @@ export function rememberProcs(known, seen, gone = new Set()) {
 // child that left the server's tree holding a port, or a server pushed to
 // another port by an old child, is no longer in the live tree by the
 // turn-off; stopServer kills such an escaped listener only when its pid and
-// start time are one of these (D26). A server seen anything but stopped
-// drops why it was left stopped (serverReason, D40): that stands no more.
-function noteLive(record, { state, ports, procs }, gone) {
+// start time are one of these (D26). A server seen anything but stopped, or
+// a terminal no longer run by a program Spotlight didn't start (`owner`,
+// readServerState's: null, its shell leads again; J-004), drops why it was
+// left stopped (serverReason, D40): that stands no more. A look that doesn't
+// say its owner keeps it.
+function noteLive(record, { state, ports, procs, owner }, gone) {
   clearOnListen(record, state);
-  if (state !== "stopped") delete record.serverReason;
+  if (state !== "stopped" || owner === null) delete record.serverReason;
   record.serverState = state;
   record.ports = ports;
   record.serverProcs = rememberProcs(record.serverProcs, procs, gone);
@@ -1498,6 +1504,19 @@ export async function deactivateRepo(cx, root, { force = false, quiet = false, s
 // "… a salvo en refs/herdr-spotlight/rescued/…" once it saved untracked
 // files): the one refusal a silent turn-off still toasts.
 const namesRescued = (message) => String(message ?? "").includes(RESCUED_PREFIX);
+
+// The sentence of a message that namesRescued: from the end of the sentence
+// before it ("." "!" or "?") through the ref and what sticks to it (its
+// period), whatever words it has. A message with nothing before the ref
+// gives the ref alone.
+const RESCUED_SENTENCE = new RegExp(`(?:[^.!?\\s][^.!?]*)?${RESCUED_PREFIX.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\S*`);
+
+// J-001: a refused turn-off's toast body keeps the message's rescued-ref
+// sentence after Orca's description (errorNote); null when it names none.
+function rescuedSentence(message) {
+  if (!namesRescued(message)) return null;
+  return RESCUED_SENTENCE.exec(String(message))?.[0] ?? null;
+}
 
 // D43: what a purge says, a sentence each, in its note and in teardown's
 // output: why the root wasn't restored (the refusal as told, with a server
@@ -1790,6 +1809,10 @@ export async function describeServer(cx, state, member, key, syncErrors = {}) {
     ports: live.ports,
     // F1: the processes seen, for recordServers' serverProcs.
     procs: live.procs ?? [],
+    // Who leads its terminal (readServerState's owner), for recordServers:
+    // a terminal Spotlight left alone that its shell leads again is no
+    // longer busy (J-004).
+    owner: live.owner,
     // The start this look is of (L4): recordServers merges it only into a
     // record still on that start.
     serverStartedAt: record.serverStartedAt ?? null,
@@ -1863,7 +1886,7 @@ export async function recordServers(cx, servers) {
   await cx.store.updateState((s) => {
     for (const sv of servers) {
       const r = s.repos[sv.root];
-      if (looked.has(sv.root) && merges(sv, r)) noteLive(r, { state: sv.serverState, ports: sv.ports, procs: sv.procs }, gone);
+      if (looked.has(sv.root) && merges(sv, r)) noteLive(r, { state: sv.serverState, ports: sv.ports, procs: sv.procs, owner: sv.owner }, gone);
     }
   });
 }
@@ -2039,7 +2062,7 @@ export async function reap(cx, { full = true, skip = null } = {}) {
     }
     if (live.state && live.state !== "gone") await showHiddenServer(cx, root, live.terminal ?? rec.serverTerminal);
     // With the start it is a look at, for the write (sameStart, L4).
-    if (live.state) servers.push({ root, state: live.state, ports: live.ports, procs: live.procs, serverStartedAt: rec.serverStartedAt ?? null });
+    if (live.state) servers.push({ root, state: live.state, ports: live.ports, procs: live.procs, owner: live.owner, serverStartedAt: rec.serverStartedAt ?? null });
     // J-002: a server in another env than the effective one restarts through
     // a detached sync (D18: a restart outlasts the reap's second). Only
     // Spotlight's own server, never a foreign process holding a port. A root

@@ -530,7 +530,9 @@ function queueBadges(state, qctx) {
     let pill;
     if (t.requests.some((r) => r.state === "holding")) {
       b = badge({ icon: "flask", tone: "working", tooltip: "Probando" });
-      pill = badge({ text: "Probando", tone: "working", pill: true, look: "secondary" });
+      // dim, as every pill with a `look` (projects-sidebar RECIPE): a reader
+      // that doesn't know `look` draws a dim chip, never an amber one.
+      pill = badge({ text: "Probando", tone: "dim", pill: true, look: "secondary" });
     } else {
       const places = t.requests
         .filter((r) => r.state !== "paused")

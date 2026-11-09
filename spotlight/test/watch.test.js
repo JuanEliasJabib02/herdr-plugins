@@ -355,6 +355,40 @@ test("nothing lit and the queue empty: the watcher reaps once, lets its record g
   await v.tick();
   assert.equal(v.result?.reason, "idle");
   assert.ok(v.watches.every((x) => x.closed));
+  // That tick's reap (its terminals changed) ran after it last saw the repo lit: no second one.
+  assert.deepEqual(v.reaps, [0, 3000]);
+});
+
+test("idle with no reap since it last saw something lit or queued (a light that died unfinished): one full reap first, then the release; a release refused (lit again under the lock) earns another", async () => {
+  // A light at work, its holder not written yet: no terminal to look at, so
+  // its death changes no fingerprint.
+  const lighting = (pid) => ({ ...EMPTY, queue: { requests: [], lighting: { [`direct/${ROOT}`]: { phase: "running", pid, startedAt: 1 } } } });
+  const w = loopWorld(lighting(777));
+  const order = [];
+  let refuse = false;
+  w.onReap = () => order.push(`reap@${w.now}`);
+  w.deps.release = async () => {
+    w.releases += 1;
+    order.push(`release@${w.now}`);
+    return refuse ? null : "idle";
+  };
+  await w.start();
+  await w.tick();
+  assert.deepEqual(w.reaps, [0], "at work, nothing changing: no reap");
+  assert.equal(w.releases, 0);
+
+  // The light dies before it finishes: its marker and busy mark stay for the reap.
+  w.state = lighting(4242);
+  refuse = true;
+  await w.tick();
+  assert.equal(w.result, null);
+  assert.deepEqual(order, ["reap@0", "reap@6000", "release@6000"], "the reap before the release");
+
+  // Refused under the lock (something lit again): the next idle tick reaps again first.
+  refuse = false;
+  await w.tick();
+  assert.equal(w.result?.reason, "idle");
+  assert.deepEqual(order, ["reap@0", "reap@6000", "release@6000", "reap@9000", "release@9000"]);
 });
 
 test("a release refused (lit again under the lock) keeps it running", async () => {
