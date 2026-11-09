@@ -1560,6 +1560,93 @@ test("stopServer (F8): without an injected kill it throws before doing anything,
   rmSync(dir, { recursive: true, force: true });
 });
 
+// ── L1, L2: a start that didn't go through says why in the log ────────────
+
+// An exec whose hc answers `verb` with hc's error, the rest as `hc`'s.
+const failing = (hc, verb, code, kind, message) => async (file, args) =>
+  file === "hc" && args[0] === verb ? { code, stdout: "", stderr: JSON.stringify({ error: { kind, message } }) } : hc.exec(file, args);
+
+test("startServer, restartServer (L2): a start that didn't go through leaves one note with its reason and hc's own words, which the CLI's Spanish error never carries; an invalid command, which touched no terminal, leaves none", async () => {
+  const dir = tmp();
+  const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const noteOf = (text) => new RegExp(`^── Spotlight: login \\(feat/login\\) · ${esc(text)} · \\d\\d:\\d\\d:\\d\\d ──$`);
+  const notes = (path) => readFileSync(path, "utf8").split("\n").filter((l) => /Server not (re)?started/.test(l)).length;
+  const logOf = (name) => join(dir, `${name}.log`);
+  const check = (name, r, reason, text) => {
+    assert.equal(r.reason, reason, name);
+    assert.match(lastLine(logOf(name)), noteOf(text), name);
+    assert.equal(notes(logOf(name)), 1, name);
+  };
+
+  // name-taken: a live terminal that isn't Spotlight's holds sl-<slug>.
+  const taken = fakeHc();
+  taken.add({ name: serverTerminalName(ROOT), labels: { [SERVER_LABEL]: "/somewhere/else" } });
+  const r1 = await startServer({ root: ROOT, line: "pnpm dev", logPath: logOf("taken"), ...HEAD }, { exec: taken.exec, ...fakeClock() });
+  check("taken", r1, "name-taken", `Server not started — the server terminal's name is taken (${r1.message})`);
+
+  // terminal-failed: hc couldn't make it.
+  const made = fakeHc();
+  const r2 = await startServer(
+    { root: ROOT, line: "pnpm dev", logPath: logOf("made"), ...HEAD }, { exec: failing(made, "run", 1, "io", "hc: no route to core"), ...fakeClock() },
+  );
+  check("made", r2, "terminal-failed", "Server not started — hc could not make the server terminal (hc: no route to core)");
+
+  // unreadable: hc can't read the terminal, before typing or as it would type.
+  const blind = fakeHc();
+  const bt = blind.add({ name: serverTerminalName(ROOT), labels: { [SERVER_LABEL]: ROOT } });
+  const r3 = await startServer(
+    { root: ROOT, terminal: bt.address, line: "pnpm dev", logPath: logOf("blind"), ...HEAD }, { exec: failing(blind, "get", 1, "io", "core restarting"), ...fakeClock() },
+  );
+  check("blind", r3, "unreadable", "Server not started — the Spotlight terminal's state could not be read (core restarting)");
+  let gets = 0;
+  const flaky = async (file, args) => (file === "hc" && args[0] === "get" && ++gets > 1 ? { code: 1, stdout: "", stderr: "core restarting" } : blind.exec(file, args));
+  const r4 = await startServer({ root: ROOT, terminal: bt.address, line: "pnpm dev", logPath: logOf("flaky"), ...HEAD }, { exec: flaky, ...fakeClock() });
+  check("flaky", r4, "unreadable", "Server not started — the Spotlight terminal's state could not be read (core restarting)");
+
+  // terminal-gone: it closed between its check and the line.
+  const closing = fakeHc();
+  const ct = closing.add({ name: serverTerminalName(ROOT), labels: { [SERVER_LABEL]: ROOT } });
+  let seen = 0;
+  const closes = async (file, args) =>
+    file === "hc" && args[0] === "get" && ++seen > 1
+      ? { code: 3, stdout: "", stderr: JSON.stringify({ error: { kind: "not_found", message: "no terminal" } }) }
+      : closing.exec(file, args);
+  const r5 = await startServer({ root: ROOT, terminal: ct.address, line: "pnpm dev", logPath: logOf("gone"), ...HEAD }, { exec: closes, ...fakeClock() });
+  check("gone", r5, "terminal-gone", "Server not started — the Spotlight terminal closed");
+
+  // send-failed: hc couldn't type the line.
+  const mute = fakeHc();
+  const r6 = await startServer(
+    { root: ROOT, line: "pnpm dev", logPath: logOf("mute"), ...HEAD }, { exec: failing(mute, "send", 11, "finished", "t1 has finished"), ...fakeClock() },
+  );
+  check("mute", r6, "send-failed", "Server not started — hc could not type into the Spotlight terminal (t1 has finished)");
+  assert.equal(r6.oldServerRuns, undefined, "no server of before in a new terminal");
+
+  // A restart whose old server never stopped (L1): hc couldn't send the
+  // Ctrl-C, or the server ignored it. Either way it still runs.
+  const up = fakeHc();
+  const deps = { exec: up.exec, ...fakeClock() };
+  const s = await startServer({ root: ROOT, line: "pnpm dev", logPath: logOf("interrupt"), ...HEAD }, deps);
+  const r7 = await restartServer(
+    { root: ROOT, terminal: s.terminal, line: "pnpm dev", logPath: logOf("interrupt"), serverPid: s.pid, ...HEAD },
+    { ...deps, exec: failing(up, "interrupt", 1, "io", "hc: no route to core") },
+  );
+  check("interrupt", r7, "interrupt-failed", "Server not restarted — the Ctrl-C could not be sent: the old server still runs (hc: no route to core)");
+  assert.equal(r7.oldServerRuns, true);
+  const stuck = fakeHc({ lingers: Infinity });
+  const sd = { exec: stuck.exec, ...fakeClock() };
+  const s2 = await startServer({ root: ROOT, line: "pnpm dev", logPath: logOf("stuck"), ...HEAD }, sd);
+  const r8 = await restartServer({ root: ROOT, terminal: s2.terminal, line: "pnpm dev", logPath: logOf("stuck"), serverPid: s2.pid, ...HEAD }, sd);
+  check("stuck", r8, "still-running", "Server not restarted — the old server did not stop on Ctrl-C and still runs");
+  assert.equal(r8.oldServerRuns, true);
+
+  // invalid-command: nothing touched, nothing logged.
+  const r9 = await startServer({ root: ROOT, line: "pnpm dev\nrm -rf ~", logPath: logOf("invalid"), ...HEAD }, { exec: fakeHc().exec, ...fakeClock() });
+  assert.deepEqual(r9, { ok: false, reason: "invalid-command" });
+  assert.equal(existsSync(logOf("invalid")), false);
+  rmSync(dir, { recursive: true, force: true });
+});
+
 // ── Logs and peek ────────────────────────────────────────────────────────
 
 test("serverLogs: the log file's plain tail; hc read is the fallback when the file is missing", async () => {

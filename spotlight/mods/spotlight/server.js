@@ -73,7 +73,21 @@ const KILLED_MS = 5000;
 const NOTES = {
   busy: "Server left alone — the Spotlight terminal runs something Spotlight didn't start",
   "already-running": "Server left alone — Spotlight's server already runs there",
+};
+
+// A start or restart that didn't go through (an ok: false of startServer or
+// restartServer) leaves one line in the log by its reason, with hc's own
+// words when it gave some (L2): the CLI's error and toast say why in Spanish
+// only, and `spotlight logs` reads this. An invalid command touched no
+// terminal and leaves none.
+const NOT_STARTED = {
+  "name-taken": "Server not started — the server terminal's name is taken",
+  "terminal-failed": "Server not started — hc could not make the server terminal",
   unreadable: "Server not started — the Spotlight terminal's state could not be read",
+  "terminal-gone": "Server not started — the Spotlight terminal closed",
+  "send-failed": "Server not started — hc could not type into the Spotlight terminal",
+  "interrupt-failed": "Server not restarted — the Ctrl-C could not be sent: the old server still runs",
+  "still-running": "Server not restarted — the old server did not stop on Ctrl-C and still runs",
 };
 
 const SHELL_NAMES = new Set(
@@ -554,10 +568,20 @@ function note(logPath, { workspace, branch }, event, deps) {
   appendLogHeader(logPath, { workspace, branch, event, at: nowOf(deps) });
 }
 
+// A start that didn't go through, `r`: its line in the log (NOT_STARTED; a
+// reason this doesn't know yet is named as it came), then `r` as it came.
+function notStarted(logPath, head, r, deps) {
+  if (r.reason === "invalid-command") return r;
+  const words = typeof r.message === "string" && r.message.trim() ? ` (${r.message.trim()})` : "";
+  note(logPath, head, `${NOT_STARTED[r.reason] ?? `Server not started (${r.reason ?? "no reason"})`}${words}`, deps);
+  return r;
+}
+
 // Types `wrapped` into `terminal` when its shell owns the foreground, after
 // rotating the log and writing the header; then waits briefly to see the
 // `script` in front and reports its pid (null when it already ended or
-// hasn't forked yet).
+// hasn't forked yet). Its ok: false answers are its caller's to log
+// (notStarted).
 async function typeWhenIdle(a, deps) {
   const { terminal, created, command, wrapped, logPath, serverPid, event } = a;
   const head = { workspace: a.workspace, branch: a.branch };
@@ -568,10 +592,7 @@ async function typeWhenIdle(a, deps) {
     ? await inspectUntil(args, deps, (s) => s.kind !== "unknown" && s.kind !== "foreign", SHELL_MS)
     : await inspectServer(args, deps);
   if (seen.kind === "gone") return { ok: false, reason: "terminal-gone", terminal };
-  if (seen.kind === "unknown") {
-    note(logPath, head, NOTES.unreadable, deps);
-    return { ok: false, reason: "unreadable", terminal, message: seen.error ?? "no foreground" };
-  }
+  if (seen.kind === "unknown") return { ok: false, reason: "unreadable", terminal, message: seen.error ?? "no foreground" };
   if (seen.kind === "spotlight") {
     note(logPath, head, NOTES["already-running"], deps);
     return { ok: true, started: false, reason: "already-running", terminal, created, pid: seen.pid };
@@ -590,12 +611,14 @@ async function typeWhenIdle(a, deps) {
   };
 }
 
-// Interrupts Spotlight's server and waits for the prompt.
+// Interrupts Spotlight's server and waits for the prompt. A server that
+// never let go of it, because hc couldn't send the Ctrl-C or it ignored it,
+// still runs: `oldServerRuns` (L1).
 async function interruptAndWait(terminal, { logPath, serverPid }, deps) {
   const r = await hc(deps, ["interrupt", terminal, "--timeout", String(INTERRUPT_WATCH_S), "--json"]);
-  if (!r.ok) return { ok: false, reason: "interrupt-failed", terminal, message: r.error.message };
+  if (!r.ok) return { ok: false, reason: "interrupt-failed", terminal, message: r.error.message, oldServerRuns: true };
   const seen = await inspectUntil({ terminal, logPath, serverPid }, deps, (s) => s.kind !== "spotlight", PROMPT_MS);
-  if (seen.kind === "spotlight") return { ok: false, reason: "still-running", terminal };
+  if (seen.kind === "spotlight") return { ok: false, reason: "still-running", terminal, oldServerRuns: true };
   return { ok: true, seen };
 }
 
@@ -604,43 +627,53 @@ async function interruptAndWait(terminal, { logPath, serverPid }, deps) {
 //   { ok: true, started: true, terminal, created, pid, command, line }
 //   { ok: true, started: false, reason: "already-running" | "busy", terminal, … }
 //   { ok: false, reason: "invalid-command" | "name-taken" | "terminal-failed"
-//     | "unreadable" | "terminal-gone" | "send-failed", … }
-// `workspace` / `branch` label the log header. `ensured`: the caller's
-// ensureServerTerminal answer, when it ensured the terminal first (the CLI
-// does, so an adopted terminal dies before its port check, D38).
+//     | "unreadable" | "terminal-gone" | "send-failed", message?, … }
+// Every ok: false but invalid-command leaves its line in the log, hc's words
+// (`message`) in it (notStarted, L2). `workspace` / `branch` label the log
+// header. `ensured`: the caller's ensureServerTerminal answer, when it
+// ensured the terminal first (the CLI does, so an adopted terminal dies
+// before its port check, D38); one that failed is answered and logged as
+// this start's own.
 export async function startServer({ root, terminal, line, logPath, serverPid, workspace, branch, ensured: given } = {}, deps) {
   const wrapped = wrapServerLine(line, logPath);
   if (!wrapped) return { ok: false, reason: "invalid-command" };
+  const head = { workspace, branch };
   const ensured = given ?? (await ensureServerTerminal({ root, terminal }, deps));
-  if (!ensured.ok) return ensured;
-  return typeWhenIdle({
+  if (!ensured.ok) return notStarted(logPath, head, ensured, deps);
+  const r = await typeWhenIdle({
     terminal: ensured.terminal, created: ensured.created, command: normalizeServerLine(line), wrapped,
     logPath, serverPid, workspace, branch, event: "started",
   }, deps);
+  return r.ok ? r : notStarted(logPath, head, r, deps);
 }
 
 // Restart (Reiniciar, `spotlight restart`, a lockfile or command change):
 // interrupt Spotlight's own server, wait for the prompt, type `line`. A gone
 // terminal is recreated and started; a foreign foreground is left alone.
-// `restarted: true` when a running server was interrupted and replaced.
-// `ensured`: as startServer's.
+// `restarted: true` when a running server was interrupted and replaced. Its
+// answers are startServer's, plus { ok: false, reason: "interrupt-failed" |
+// "still-running", oldServerRuns: true, … }: the old server never let go of
+// the prompt and still runs (L1). Each ok: false is logged as startServer's
+// (notStarted). `ensured`: as startServer's.
 export async function restartServer({ root, terminal, line, logPath, serverPid, workspace, branch, ensured: given } = {}, deps) {
   const wrapped = wrapServerLine(line, logPath);
   if (!wrapped) return { ok: false, reason: "invalid-command" };
+  const head = { workspace, branch };
   const ensured = given ?? (await ensureServerTerminal({ root, terminal }, deps));
-  if (!ensured.ok) return ensured;
+  if (!ensured.ok) return notStarted(logPath, head, ensured, deps);
   const t = ensured.terminal;
   const seen = await inspectServer({ terminal: t, logPath, serverPid }, deps);
   let restarted = false;
   if (seen.kind === "spotlight") {
     const stopped = await interruptAndWait(t, { logPath, serverPid }, deps);
-    if (!stopped.ok) return stopped;
+    if (!stopped.ok) return notStarted(logPath, head, stopped, deps);
     restarted = true;
   }
   const r = await typeWhenIdle({
     terminal: t, created: ensured.created, command: normalizeServerLine(line), wrapped,
     logPath, serverPid, workspace, branch, event: "restarted",
   }, deps);
+  if (!r.ok) return notStarted(logPath, head, r, deps);
   return r.started ? { ...r, restarted } : r;
 }
 
@@ -666,6 +699,11 @@ const refusedOf = (done) => (done.refused.length > 0 ? { refused: done.refused }
 
 // A Ctrl-C hc couldn't send, as the stop's notes say it (K5).
 const ctrlCFailed = (interruptError) => (interruptError ? `the Ctrl-C could not be sent: ${interruptError}` : null);
+
+// stopServer's ok: false reasons. Each writes its own NOT stopped note
+// (stopNote, notStoppedNote; K4, K5), so the CLI's turn-off adds a line only
+// for an answer outside these (L7).
+export const NOTED_STOP_FAILURES = new Set(["survived", "unreadable", "interrupt-failed", "still-running"]);
 
 // The stop's line in the log: stopped, by the Ctrl-C or after signalling
 // `forced` processes, or NOT stopped when some lived through the SIGKILL or
@@ -752,7 +790,8 @@ async function stopEscaped({ root, rootPid, ports, procs, logPath, head, termina
 // stopped (interrupt sent)" or "(forced: <n> processes)", a Ctrl-C hc
 // couldn't send in the same parentheses; "server NOT stopped: <n> processes
 // survived (pids …)"; "server NOT stopped (<reason>): <message>" for the
-// other ok: false (K4, K5). The CLI writes no stop line of its own.
+// other ok: false (K4, K5). The CLI writes a stop line of its own only for an
+// answer whose reason isn't one of NOTED_STOP_FAILURES (L7).
 //
 // Results. `ok: false` always means the server may still be up:
 //   { ok: true, stopped: true, terminal, forced } — `forced`: how many

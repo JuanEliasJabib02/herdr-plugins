@@ -616,16 +616,18 @@ test("G2: every ps read that records or checks an identity runs with LC_ALL=C an
   for (const c of reads) assert.deepEqual({ env: c.env, opts: c.opts }, PINNED, c.args.join(" "));
 });
 
-// K9: the real ps runs under a caller's own TZ and locale handed to a child
-// process (execFile's `env`), never written into this test process's env;
-// the locales must be installed (`locale -a`), else those checks are skipped
-// with the reason.
-const CALLER_ENVS = [["Pacific/Kiritimati", "es_ES.UTF-8"], ["America/Bogota", "fr_FR.UTF-8"]];
+// K9, L8: the real ps runs under a caller's own TZ and locale handed to a
+// child process (execFile's `env`), never written into this test process's
+// env. The time zones are checked under LC_ALL=C always (TZ_ENVS); the
+// locales (LOCALE_ENVS) only where `locale -a` has them, else those cases
+// are skipped with the reason.
+const TZ_ENVS = [["Pacific/Kiritimati", "C"], ["America/Bogota", "C"]];
+const LOCALE_ENVS = [["Pacific/Kiritimati", "es_ES.UTF-8"], ["America/Bogota", "fr_FR.UTF-8"]];
 const callerEnv = (tz, lc) => ({ ...process.env, TZ: tz, LC_ALL: lc, LANG: lc });
 function missingLocales() {
   try {
     const have = new Set(execFileSync("locale", ["-a"], { encoding: "utf8" }).split("\n").map((l) => l.trim()));
-    const missing = CALLER_ENVS.map(([, lc]) => lc).filter((lc) => !have.has(lc));
+    const missing = LOCALE_ENVS.map(([, lc]) => lc).filter((lc) => !have.has(lc));
     return missing.length > 0 ? `locale -a lacks ${missing.join(", ")}` : false;
   } catch (e) {
     return `locale -a failed: ${e.message}`;
@@ -635,10 +637,14 @@ const LOCALES_SKIP = missingLocales();
 // ps's lstart of `pid` under `env`, spaces folded.
 const lstartUnder = (pid, env) =>
   execFileSync("ps", ["-o", "lstart=", "-p", String(pid)], { encoding: "utf8", env }).replace(/\s+/g, " ").trim();
+// The env words this test process had, which no case may change.
+const ownEnv = () => ({ TZ: process.env.TZ, LC_ALL: process.env.LC_ALL, LANG: process.env.LANG });
 
-test("G2, K9: an identity reads the same whatever the caller's TZ and locale: the real ps through the CLI's exec, in a CLI process started with that env", { skip: LOCALES_SKIP }, () => {
+// G2, K9: a CLI process started with each of `envs` reads an identity the
+// same as C/UTC, through the CLI's exec (which passes no env: its children
+// inherit the CLI process's).
+function cliReadsPinned(envs) {
   const url = (rel) => JSON.stringify(new URL(rel, import.meta.url).href);
-  // The CLI's exec passes no env: its children inherit the CLI process's.
   const script = `
     import { execFileSync } from "node:child_process";
     import { exec } from ${url("../mods/spotlight/cli-env.mjs")};
@@ -651,14 +657,22 @@ test("G2, K9: an identity reads the same whatever the caller's TZ and locale: th
       own: read(process.env),
     }));
   `;
-  const before = { TZ: process.env.TZ, LC_ALL: process.env.LC_ALL, LANG: process.env.LANG };
-  for (const [tz, lc] of CALLER_ENVS) {
+  const before = ownEnv();
+  for (const [tz, lc] of envs) {
     const out = JSON.parse(execFileSync(process.execPath, ["--input-type=module", "-e", script], { encoding: "utf8", env: callerEnv(tz, lc) }));
     // The child really ran under that env: its own words differ from C/UTC's.
     assert.notEqual(out.own, out.pinned, `${tz} ${lc}`);
     assert.equal(out.start, out.pinned, `${tz} ${lc}`);
   }
-  assert.deepEqual({ TZ: process.env.TZ, LC_ALL: process.env.LC_ALL, LANG: process.env.LANG }, before, "this process's env untouched");
+  assert.deepEqual(ownEnv(), before, "this process's env untouched");
+}
+
+test("G2, K9, L8: an identity reads the same whatever the caller's time zone (under LC_ALL=C): the real ps through the CLI's exec, in a CLI process started with that env", () => {
+  cliReadsPinned(TZ_ENVS);
+});
+
+test("G2, K9: an identity reads the same whatever the caller's locale and time zone: the real ps through the CLI's exec, in a CLI process started with that env", { skip: LOCALES_SKIP }, () => {
+  cliReadsPinned(LOCALE_ENVS);
 });
 
 test("H7: the pinned locale and time zone ride in ps's argv (/usr/bin/env LC_ALL=C TZ=UTC ps …), so an exec of Herdr's shape, which takes no env, reads C/UTC too", async () => {
@@ -672,10 +686,12 @@ test("H7: the pinned locale and time zone ride in ps's argv (/usr/bin/env LC_ALL
   assert.deepEqual(calls, [["/usr/bin/env", ["LC_ALL=C", "TZ=UTC", "ps", "-o", "pid=,ppid=,stat=,lstart=", "-p", "101,103"]]]);
 });
 
-test("H7, K9: the real ps through an exec that adds no env of its own reads C/UTC under any caller's TZ and locale (the child's env, never this process's)", { skip: LOCALES_SKIP }, async () => {
+// H7, K9: the real ps through an exec that adds no env of its own reads
+// C/UTC under each of `envs` (the child's env, never this process's).
+async function bareExecReadsPinned(envs) {
   const pinned = lstartUnder(process.pid, { ...process.env, LC_ALL: "C", TZ: "UTC" });
-  const before = { TZ: process.env.TZ, LC_ALL: process.env.LC_ALL, LANG: process.env.LANG };
-  for (const [tz, lc] of CALLER_ENVS) {
+  const before = ownEnv();
+  for (const [tz, lc] of envs) {
     const env = callerEnv(tz, lc);
     // That env reaches the child: ps's own words under it differ from C/UTC's.
     assert.notEqual(lstartUnder(process.pid, env), pinned, `${tz} ${lc}`);
@@ -690,7 +706,15 @@ test("H7, K9: the real ps through an exec that adds no env of its own reads C/UT
     const states = await processStates([process.pid], { exec: bare });
     assert.equal(states?.get(process.pid)?.start, pinned, `${tz} ${lc}`);
   }
-  assert.deepEqual({ TZ: process.env.TZ, LC_ALL: process.env.LC_ALL, LANG: process.env.LANG }, before, "this process's env untouched");
+  assert.deepEqual(ownEnv(), before, "this process's env untouched");
+}
+
+test("H7, K9, L8: the real ps through an exec that adds no env of its own reads C/UTC under any caller's time zone (under LC_ALL=C)", async () => {
+  await bareExecReadsPinned(TZ_ENVS);
+});
+
+test("H7, K9: the real ps through an exec that adds no env of its own reads C/UTC under any caller's locale and time zone", { skip: LOCALES_SKIP }, async () => {
+  await bareExecReadsPinned(LOCALE_ENVS);
 });
 
 test("G3: goneIdentities names the identities that no longer run as that process, from one ps with the pinned env; doubt forgets none", async () => {

@@ -527,8 +527,8 @@ test("H5, K4/K5: a turn-off whose server didn't stop leaves the cause to stopSer
   assert.doesNotMatch(refused.message, /still leads|herdr-core/);
   assert.equal(readLog(), "");
 
-  // Every other answer, a survivor whose Ctrl-C failed and an answer that
-  // says nothing included: nothing from the turn-off either.
+  // Every other answer stopServer gives, a survivor whose Ctrl-C failed
+  // included: nothing from the turn-off either.
   const ok = { ok: true, stopped: true, terminal: "t1", forced: 0 };
   assert.equal((await deactivateRepo(fullCx({ server: { stopServer: async () => ok } }), root, { force: true })).ok, true);
   const answers = [
@@ -536,14 +536,40 @@ test("H5, K4/K5: a turn-off whose server didn't stop leaves the cause to stopSer
     { ok: true, stopped: true, terminal: "t1", forced: 2, interruptError: "herdr-core unreachable" },
     { ok: false, reason: "survived", terminal: "t1", forced: 1, survivors: [50013], interruptError: "herdr-core unreachable" },
     { ok: false, reason: "interrupt-failed", terminal: "t1", forced: 0, message: "the Ctrl-C could not be sent (x): the server may still be running" },
-    undefined,
   ];
-  for (const stopped of answers) {
+  const relit = () => {
     rmSync(logPath, { force: true });
-    snapshot = (await activate(gitContext(), root, wt)).snapshotSha;
-    state.repos[root] = { ...emptyRepo(), holder: wt, lastSnapshotSha: snapshot, serverTerminal: "t1", logPath };
+    return activate(gitContext(), root, wt).then((a) => {
+      state.repos[root] = { ...emptyRepo(), holder: wt, lastSnapshotSha: a.snapshotSha, serverTerminal: "t1", logPath };
+    });
+  };
+  for (const stopped of answers) {
+    await relit();
     await deactivateRepo(fullCx({ server: { stopServer: async () => stopped } }), root);
     assert.equal(readLog(), "", stopped?.reason ?? "ok");
+  }
+
+  // L7: an answer stopServer wrote no note for (none at all, or a reason it
+  // never gives) gets the turn-off's own line, once: the reason, or "no
+  // answer", and the answer's own words when it has some.
+  const fallback = (said) =>
+    new RegExp(`^\\n── Spotlight: wt \\(feature\\) · Spotlight off — server NOT stopped ${said} · \\d\\d:\\d\\d:\\d\\d ──\\n$`);
+  const unwritten = [
+    [undefined, "\\(no answer\\)"],
+    [null, "\\(no answer\\)"],
+    [{ ok: false, terminal: "t1" }, "\\(no answer\\)"],
+    [
+      { ok: false, reason: "a-new-reason", terminal: "t1", message: "something new:\nthe server may still be running" },
+      "\\(a-new-reason\\): something new: the server may still be running",
+    ],
+  ];
+  for (const [stopped, said] of unwritten) {
+    await relit();
+    const r = await deactivateRepo(fullCx({ server: { stopServer: async () => stopped } }), root);
+    assert.equal(r.code, "server-not-stopped", String(stopped?.reason));
+    assert.match(readLog(), fallback(said), String(stopped?.reason));
+    // The toast stays Spanish only.
+    assert.ok(state.notes.filter((n) => n.toast).every((n) => !/something new|no answer/.test(n.text)), JSON.stringify(state.notes));
   }
 });
 
@@ -691,9 +717,10 @@ const unreadableExec = async (file) =>
     ? { code: 1, stdout: "", stderr: JSON.stringify({ error: { kind: "io", message: "hc: no route to core" } }) }
     : { code: 1, stdout: "", stderr: `no fake ${file}` };
 
-// The server error a start hc couldn't read leaves (K3).
+// The server error a start hc couldn't read leaves (K3), in Spanish only:
+// hc's own words go to the server log (L2).
 const UNREADABLE_START = {
-  code: "server-start-failed", message: "El server no arrancó: hc no pudo leer su terminal (hc: no route to core)",
+  code: "server-start-failed", message: "El server no arrancó: hc no pudo leer su terminal",
 };
 
 const PKG = JSON.stringify({ packageManager: "pnpm@9.0.0", scripts: { local: "vite" } });
@@ -725,7 +752,7 @@ test("K3, H2: a takeover whose start fails records its own server error, replaci
   assert.deepEqual({ tone: server.tone, tooltip: server.tooltip }, { tone: "blocked", tooltip: UNREADABLE_START.message });
 });
 
-test("K3, H2: the same holder lit again whose start fails records its own server error over the one it had, under a root error too; one toast per new error", async () => {
+test("K3, H2, L3: the same holder lit again whose start fails records its own server error over the one it had, under a root error too; a light toasts it every time", async () => {
   write(wt, "package.json", PKG);
   state.repos[root].logPath = join(base, "root.log");
   const key = `direct/${root}`;
@@ -740,12 +767,12 @@ test("K3, H2: the same holder lit again whose start fails records its own server
     assert.deepEqual(error, UNREADABLE_START, lastError.code);
     assert.deepEqual(state.notes.filter((n) => n.toast).map((n) => n.text), [`root: ${UNREADABLE_START.message}`], lastError.code);
   }
-  // The same failure again: no new toast.
+  // The same failure again: a light always says how its start went (L3).
   state.notes = [];
   state.queue.lighting[key] = markerFor(wt);
   assert.deepEqual((await lightTask(fullCx({ serverDeps: { exec: unreadableExec } }), key)).errors, {});
   assert.equal(state.repos[root].lastError.code, "server-start-failed");
-  assert.deepEqual(state.notes.filter((n) => n.toast), []);
+  assert.deepEqual(state.notes.filter((n) => n.toast).map((n) => n.text), [`root: ${UNREADABLE_START.message}`]);
   // Under a root error a sync left meanwhile, the failed start goes under it.
   state.repos[root].lastError = { ...DIVERGED };
   const r = await ensureServer(fullCx({ serverDeps: { exec: unreadableExec } }), root, { workspace: wt, restart: true });
@@ -827,6 +854,258 @@ test("K2: a fresh activation by the workspace the record already names is a take
   assert.equal(state.repos[root].holder, wt);
   assert.equal(state.repos[root].serverState, "listening");
   assert.equal(state.repos[root].lastError, null);
+});
+
+// ── Review r6: L1–L6, L9 ───────────────────────────────────────────────────
+
+// A clock the server's waits advance instead of sleeping.
+function fakeClock() {
+  let t = 0;
+  return { now: () => t, sleep: async (ms) => { t += ms; } };
+}
+
+// The toasts' texts, in order.
+const toastTexts = () => state.notes.filter((n) => n.toast).map((n) => n.text);
+
+test("L1: a restart whose Ctrl-C hc couldn't send leaves the old server running: no failed start, no server error of its own, its state kept; the toast says so every time, and hc's words go to the log", async () => {
+  const logPath = join(base, "root.log");
+  const ps = psExec(new Map());
+  const exec = async (file, args, opts) => {
+    if (file === "hc" && args[0] === "get") {
+      const term = {
+        address: "t1", pid: 100, state: "live", labels: { "spotlight.repo": root },
+        foreground: { pid: 101, name: "script", argv: ["script", "-F", "-q", "-a", logPath, "/bin/zsh", "-c", "pnpm old"] },
+      };
+      return { code: 0, stdout: JSON.stringify(term), stderr: "" };
+    }
+    if (file === "hc" && args[0] === "interrupt") {
+      return { code: 1, stdout: "", stderr: JSON.stringify({ error: { kind: "io", message: "hc: no route to core" } }) };
+    }
+    return ps.exec(file, args, opts);
+  };
+  const ox = () => fullCx({ serverDeps: { exec, ...fakeClock() } });
+  const running = { serverTerminal: "t1", serverPid: 101, serverState: "listening", serverCommand: "pnpm old", serverEnv: "local", ports: [3000], logPath };
+  const still = "root: el server sigue corriendo: hc no pudo mandarle Ctrl-C y no se reinició";
+
+  // The same holder lit again, then Reiniciar: its server error stays (H1),
+  // none of its own, and each says the server still runs.
+  write(wt, "package.json", PKG);
+  Object.assign(state.repos[root], { ...running, lastError: { ...REFUSED } });
+  const key = `direct/${root}`;
+  state.queue.lighting[key] = markerFor(wt);
+  assert.deepEqual((await lightTask(ox(), key)).errors, {});
+  const r = await ensureServer(ox(), root, { workspace: wt, keepVariant: true, restart: true });
+  assert.deepEqual({ state: r.state, reason: r.result?.reason, error: r.error }, { state: "failed", reason: "interrupt-failed", error: undefined });
+  assert.deepEqual(state.repos[root].lastError, REFUSED);
+  assert.equal(state.repos[root].serverState, "listening");
+  assert.deepEqual(toastTexts(), [still, still]);
+  // No Reintentar: the server is up (server-errors.js serverDown).
+  const popup = serverViewModel({ state, settings: readSettings(JSON.stringify({ version: 1 })), repo: root, workspace: wt, detection: null, bin: cliPathOf("/app") });
+  assert.ok(popup.actions.some((a) => a.label === "Reiniciar") && !popup.actions.some((a) => a.label === "Reintentar"), JSON.stringify(popup.actions));
+  // hc's words are server.js's note, never a toast's.
+  assert.ok(toastTexts().every((t) => !t.includes("no route to core")));
+  const noted = readFileSync(logPath, "utf8").split("\n").filter((l) => l.includes("the Ctrl-C could not be sent"));
+  assert.equal(noted.length, 2, JSON.stringify(noted));
+  assert.match(noted[0], /\(hc: no route to core\)/);
+
+  // A takeover: the last holder's server error goes, none of its own.
+  state.notes = [];
+  await lightOnto({ "package.json": PKG }, { serverDeps: { exec, ...fakeClock() } });
+  assert.equal(state.repos[root].lastError, null);
+  assert.equal(state.repos[root].serverState, "listening");
+  assert.ok(toastTexts().includes(still), JSON.stringify(state.notes));
+});
+
+test("L2, L9: a start that didn't go through says why in Spanish only, in its error and its toast, by its reason; hc's own words go to the server log", async () => {
+  const { startFailedError } = work;
+  const cases = [
+    [{ ok: true, started: false, reason: "busy", terminal: "t1" }, "su terminal corre algo que Spotlight no arrancó (no se tocó)"],
+    [{ ok: false, reason: "send-failed", terminal: "t1", message: "t1 has finished" }, "hc no pudo escribir en su terminal"],
+    [{ ok: false, reason: "terminal-failed", message: "hc: spawn failed\nexit 1" }, "hc no pudo crear su terminal"],
+    [{ ok: false, reason: "name-taken", message: "a live terminal named sl-x isn't Spotlight's for /x" }, "otra terminal viva tiene el nombre de la suya"],
+    [{ ok: false, reason: "unreadable", terminal: "t1", message: "hc: no route to core" }, "hc no pudo leer su terminal"],
+  ];
+  for (const [answer, why] of cases) {
+    assert.deepEqual(startFailedError(answer), { code: "server-start-failed", message: `El server no arrancó: ${why}` }, answer.reason);
+  }
+
+  // Through ensureServer (the plan reads the root): the record, the toast and
+  // the answer say the same, and the log has hc's words.
+  write(root, "package.json", PKG);
+  const logPath = join(base, "root.log");
+  state.repos[root].logPath = logPath;
+  const r = await ensureServer(fullCx({ serverDeps: { exec: unreadableExec } }), root, { workspace: wt, restart: true });
+  assert.equal(r.state, "failed");
+  assert.deepEqual({ code: r.error.code, message: r.error.message }, UNREADABLE_START);
+  const { at, ...stored } = state.repos[root].lastError;
+  assert.deepEqual(stored, UNREADABLE_START);
+  assert.deepEqual(toastTexts(), [`root: ${UNREADABLE_START.message}`]);
+  assert.match(readFileSync(logPath, "utf8"), /Server not started — the Spotlight terminal's state could not be read \(hc: no route to core\)/);
+});
+
+// Spotlight's server (`command`, writing `logPath`) in front of t1 until a
+// Ctrl-C hands the prompt back, and an `hc send` that always fails, with
+// other words each time while `vary`: every restart fails as send-failed.
+// `front` is the test's to put the server back.
+function sendFailsWorld(logPath, command) {
+  const ps = psExec(new Map());
+  const world = { front: "spotlight", sends: 0, vary: true };
+  world.exec = async (file, args, opts) => {
+    if (file === "hc" && args[0] === "get") {
+      const fg = world.front === "spotlight"
+        ? { pid: 101, name: "script", argv: ["script", "-F", "-q", "-a", logPath, "/bin/zsh", "-c", command] }
+        : { pid: 100, name: "zsh", argv: ["/bin/zsh", "-l"] };
+      return { code: 0, stdout: JSON.stringify({ address: "t1", pid: 100, state: "live", labels: { "spotlight.repo": root }, foreground: fg }), stderr: "" };
+    }
+    if (file === "hc" && args[0] === "interrupt") {
+      world.front = "shell";
+      return { code: 0, stdout: JSON.stringify({ key: "ctrl+c", outcome: "stopped" }), stderr: "" };
+    }
+    if (file === "hc" && args[0] === "send") {
+      world.sends += 1;
+      const message = world.vary ? `t1 has finished (#${world.sends})` : "t1 has finished";
+      return { code: 11, stdout: "", stderr: JSON.stringify({ error: { kind: "finished", message } }) };
+    }
+    return ps.exec(file, args, opts);
+  };
+  return world;
+}
+
+test("L3: Reintentar, a restart or a light always toasts its failed start, the same failure too; a sync's repeat of it doesn't, whatever words hc gave each time", async () => {
+  const plan = await plannedFor(PKG);
+  write(wt, "package.json", PKG);
+  const logPath = join(base, "root.log");
+  const world = sendFailsWorld(logPath, plan.command);
+  const ox = fullCx({ serverDeps: { exec: world.exec, ...fakeClock() } });
+  // Spotlight's server runs another env than the effective one: a sync
+  // restarts it (J-002).
+  Object.assign(state.repos[root], {
+    serverTerminal: "t1", serverPid: 101, serverState: "listening", serverCommand: plan.command, serverEnv: "dev", ports: [3000], logPath,
+  });
+  const failed = "root: El server no arrancó: hc no pudo escribir en su terminal";
+  // Spotlight's server in front again, as the reap would see it.
+  const upAgain = () => {
+    world.front = "spotlight";
+    state.repos[root].serverState = "listening";
+  };
+
+  for (let i = 0; i < 3; i += 1) {
+    upAgain();
+    const r = await syncRepo(ox, root);
+    assert.equal(r.restartFailed, "send-failed", JSON.stringify(r));
+  }
+  assert.deepEqual(toastTexts(), [failed]);
+
+  // Reintentar (`spotlight restart`), the same words each time: toasted each time.
+  world.vary = false;
+  state.notes = [];
+  for (let i = 0; i < 2; i += 1) {
+    upAgain();
+    assert.equal((await ensureServer(ox, root, { workspace: wt, keepVariant: true, restart: true })).state, "failed");
+  }
+  assert.deepEqual(toastTexts(), [failed, failed]);
+  // A light of the same holder: toasted too.
+  state.notes = [];
+  upAgain();
+  const key = `direct/${root}`;
+  state.queue.lighting[key] = markerFor(wt);
+  assert.deepEqual((await lightTask(ox, key)).errors, {});
+  assert.deepEqual(toastTexts(), [failed]);
+  assert.equal(state.repos[root].lastError.code, "server-start-failed");
+  // Each failed start's own words are in the log, never in a toast.
+  const noted = readFileSync(logPath, "utf8").split("\n").filter((l) => l.includes("hc could not type into"));
+  assert.equal(noted.length, 6, JSON.stringify(noted));
+  assert.match(noted[0], /\(t1 has finished \(#1\)\)/);
+});
+
+test("L4: a look at a server restarted before its write (Reiniciar: `starting` again, a new serverStartedAt) is never merged over it, by `on` or the reap; a look at the record as it is still is", async () => {
+  const before = { serverState: "listening", serverStartedAt: 5, serverPid: 50010, ports: [3000] };
+  const restarted = { serverState: "starting", serverStartedAt: 9, serverPid: 50020, ports: [] };
+  Object.assign(state.repos[root], { serverTerminal: "t1", serverProcs: [], ...before });
+  let restartMeanwhile = true;
+  // The look runs while a Reiniciar restarts the server: it saw the old one listening.
+  const look = async () => {
+    if (restartMeanwhile) Object.assign(state.repos[root], restarted);
+    return { terminal: "t1", owner: "spotlight", pid: 50010, state: "listening", ports: [3000], procs: [P3000], port: 3000, url: null, label: "" };
+  };
+  const pick = (r) => ({ serverState: r.serverState, serverStartedAt: r.serverStartedAt, serverPid: r.serverPid, ports: r.ports, serverProcs: r.serverProcs });
+  const member = { root, name: "root", workspace: wt, workspaces: [wt] };
+  const ox = fullCx({ server: { readServerState: look } });
+
+  // `on`: describeServer, then recordServers.
+  const seen = await describeServer(ox, ox.store.readState(), member, "g1/AX-1");
+  await recordServers(ox, [seen]);
+  assert.deepEqual(pick(state.repos[root]), { ...restarted, serverProcs: [] });
+
+  // The reap.
+  Object.assign(state.repos[root], before);
+  await reap(ox);
+  assert.deepEqual(pick(state.repos[root]), { ...restarted, serverProcs: [] });
+
+  // No restart meanwhile: merged, as ever (F1).
+  restartMeanwhile = false;
+  Object.assign(state.repos[root], before);
+  await recordServers(ox, [await describeServer(ox, ox.store.readState(), member, "g1/AX-1")]);
+  assert.deepEqual(pick(state.repos[root]), { ...before, serverProcs: [P3000] });
+  state.repos[root].serverProcs = [];
+  await reap(ox);
+  assert.deepEqual(pick(state.repos[root]), { ...before, serverProcs: [P3000] });
+});
+
+// An exec whose hc shows t1 at its prompt (its shell in front); ps answers as
+// psExec's.
+function promptExec() {
+  const ps = psExec(new Map());
+  return async (file, args, opts) => {
+    if (file === "hc" && args[0] === "get") {
+      const term = { address: "t1", pid: 100, state: "live", labels: { "spotlight.repo": root }, foreground: { pid: 100, name: "zsh", argv: ["/bin/zsh", "-l"] } };
+      return { code: 0, stdout: JSON.stringify(term), stderr: "" };
+    }
+    return ps.exec(file, args, opts);
+  };
+}
+
+test("L5: with no command, the same holder's server error stays while a server of Spotlight's may still run there (in front of its terminal, or hc can't say), and goes once none does (K1)", async () => {
+  // wt has no package.json: the plan has no command (as an env with none),
+  // and Spotlight's server of before still runs in t1.
+  const logPath = join(base, "root.log");
+  Object.assign(state.repos[root], {
+    serverTerminal: "t1", serverPid: 101, serverState: "listening", serverCommand: "pnpm dev", serverEnv: "local", ports: [3000], logPath,
+    lastError: { ...REFUSED },
+  });
+  const key = `direct/${root}`;
+  state.queue.lighting[key] = markerFor(wt);
+  assert.deepEqual((await lightTask(fullCx({ serverDeps: { exec: ownServerExec(logPath, "pnpm dev") } }), key)).errors, {});
+  assert.deepEqual(state.repos[root].lastError, REFUSED);
+  // The popup still explains the busy port and offers to free it.
+  const popup = serverViewModel({ state, settings: readSettings(JSON.stringify({ version: 1 })), repo: root, workspace: wt, detection: null, bin: cliPathOf("/app") });
+  assert.ok(popup.force.some((a) => a.label === "Liberar puerto y arrancar"), JSON.stringify(popup.force));
+  // Reiniciar with hc unable to read the terminal: doubt keeps it.
+  assert.equal((await ensureServer(fullCx({ serverDeps: { exec: unreadableExec } }), root, { workspace: wt, restart: true })).state, "none");
+  assert.deepEqual(state.repos[root].lastError, REFUSED);
+  // Its terminal back at its prompt: no server of Spotlight's runs, the error goes.
+  assert.equal((await ensureServer(fullCx({ serverDeps: { exec: promptExec() } }), root, { workspace: wt, restart: true })).state, "none");
+  assert.equal(state.repos[root].lastError, null);
+});
+
+test("L6: a fresh activation by the workspace the record already names (its refs gone) is a holder switch all through the light: the 'Spotlight on · … ←' toast, the D11 header, and installs counted from the root's own HEAD", async () => {
+  const logPath = join(base, "root.log");
+  await deactivate(gitContext(), root);
+  const head = run(root, "rev-parse", "HEAD");
+  state.repos[root].logPath = logPath;
+  assert.notEqual(state.repos[root].lastSnapshotSha, head, "the record keeps the snapshot of before");
+  const froms = [];
+  const spyGit = async (cwd, args) => {
+    if (args[0] === "diff-tree") froms.push(args[2]);
+    return planGit(cwd, args);
+  };
+  const key = `direct/${root}`;
+  state.queue.lighting[key] = markerFor(wt);
+  assert.deepEqual((await lightTask(fullCx({ planGit: spyGit }), key)).errors, {});
+  assert.equal(state.repos[root].holder, wt);
+  assert.deepEqual(froms, [head], "the lockfiles are compared from what the root had");
+  assert.deepEqual(toastTexts(), ["Spotlight on · root ← wt · sin server"]);
+  assert.match(readFileSync(logPath, "utf8"), /^\n── Spotlight: wt \(feature\) · \d\d:\d\d:\d\d ──\n$/);
 });
 
 // ── G3: the identities the reap and `on` keep are the live ones ────────────
