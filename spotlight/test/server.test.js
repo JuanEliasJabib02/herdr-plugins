@@ -596,6 +596,14 @@ function stopDeps(hc, clock = fakeClock()) {
   };
 }
 
+// The identities readServerState recorded for listeners that were Spotlight's
+// server's children (stopServer's `procs`): 7002 on 3210 and 7003 on 8080,
+// started at the fake ps's one fixed time.
+const KNOWN_7002_7003 = [
+  { pid: 7002, start: "Sun Nov 8 22:00:00 2026", port: 3210 },
+  { pid: 7003, start: "Sun Nov 8 22:00:00 2026", port: 8080 },
+];
+
 // The stop's line at the end of the log.
 const stopNote = (text) => new RegExp(`── Spotlight: login \\(feat/login\\) · Spotlight off — server stopped \\(${text}\\) · \\d\\d:\\d\\d:\\d\\d ──\\n$`);
 const HEAD = { workspace: "login", branch: "feat/login" };
@@ -672,7 +680,7 @@ test("stopServer (D26): a listener on a recorded port outside the tree is killed
   const s = await startServer({ root: ROOT, line: "pnpm dev", logPath, ...HEAD }, sd.deps);
   const shell = hc.terms.get(s.terminal).pid;
   sd.mark();
-  const r = await stopServer({ root: ROOT, terminal: s.terminal, logPath, serverPid: s.pid, ports: [3210, 8080], ...HEAD }, sd.deps);
+  const r = await stopServer({ root: ROOT, terminal: s.terminal, logPath, serverPid: s.pid, ports: [3210, 8080], procs: KNOWN_7002_7003, ...HEAD }, sd.deps);
   assert.deepEqual(r, { ok: true, stopped: true, terminal: s.terminal, forced: 1 });
   assert.deepEqual(sd.signals.map(({ pid, sig }) => [pid, sig]), [[7002, "SIGTERM"]]);
   assert.equal(hc.dead.has(7003), false);
@@ -683,7 +691,7 @@ test("stopServer (D26): a listener on a recorded port outside the tree is killed
   const od = stopDeps(only);
   const s2 = await startServer({ root: ROOT, line: "pnpm dev", logPath, ...HEAD }, od.deps);
   od.mark();
-  const r2 = await stopServer({ root: ROOT, terminal: s2.terminal, logPath, serverPid: s2.pid, ports: [8080], ...HEAD }, od.deps);
+  const r2 = await stopServer({ root: ROOT, terminal: s2.terminal, logPath, serverPid: s2.pid, ports: [8080], procs: KNOWN_7002_7003, ...HEAD }, od.deps);
   assert.deepEqual(r2, { ok: true, stopped: true, terminal: s2.terminal, forced: 0 });
   assert.deepEqual(only.signals, []);
   assert.ok(od.elapsed() < 1000, `waited ${od.elapsed()} ms`);
@@ -800,7 +808,7 @@ test("stopServer (R3): at a free prompt, a listener on a recorded port with its 
   const sd = stopDeps(hc);
   const t = hc.add({ name: serverTerminalName(ROOT), labels: { [SERVER_LABEL]: ROOT } });
   sd.mark();
-  const r = await stopServer({ root: ROOT, terminal: t.address, logPath, ports: [3210, 8080], ...HEAD }, sd.deps);
+  const r = await stopServer({ root: ROOT, terminal: t.address, logPath, ports: [3210, 8080], procs: KNOWN_7002_7003, ...HEAD }, sd.deps);
   assert.deepEqual(r, {
     ok: true, stopped: false, reason: "not-running", terminal: t.address, forced: 1,
     escaped: [{ pid: 7002, port: 3210, cwd: `${ROOT}/apps/web` }],
@@ -817,7 +825,7 @@ test("stopServer (R3): at a free prompt, a listener on a recorded port with its 
   const busy = fakeHc({ procs, ports: { 7002: [3210] } });
   const bd = stopDeps(busy);
   const v = busy.add({ name: serverTerminalName(ROOT), labels: { [SERVER_LABEL]: ROOT }, fg: VIM_FG });
-  const r2 = await stopServer({ root: ROOT, terminal: v.address, logPath: join(dir, "busy.log"), ports: [3210], ...HEAD }, bd.deps);
+  const r2 = await stopServer({ root: ROOT, terminal: v.address, logPath: join(dir, "busy.log"), ports: [3210], procs: KNOWN_7002_7003, ...HEAD }, bd.deps);
   assert.deepEqual(r2, { ok: true, stopped: false, reason: "busy", terminal: v.address });
   assert.deepEqual(busy.signals, []);
   assert.equal(existsSync(join(dir, "busy.log")), false);
@@ -848,7 +856,7 @@ test("stopServer (S17): a process of the server that lives through SIGKILL fails
   const id = stopDeps(idle);
   const t = idle.add({ name: serverTerminalName(ROOT), labels: { [SERVER_LABEL]: ROOT } });
   const idleLog = join(dir, "idle.log");
-  const r2 = await stopServer({ root: ROOT, terminal: t.address, logPath: idleLog, ports: [3210], ...HEAD }, id.deps);
+  const r2 = await stopServer({ root: ROOT, terminal: t.address, logPath: idleLog, ports: [3210], procs: KNOWN_7002_7003, ...HEAD }, id.deps);
   assert.deepEqual(r2, {
     ok: false, reason: "survived", terminal: t.address, forced: 1, survivors: [7002],
     escaped: [{ pid: 7002, port: 3210, cwd: ROOT }],
@@ -864,7 +872,7 @@ test("stopServer: with no terminal at all, a listener on a recorded port with it
   const hc = fakeHc({ procs, ports: { 7002: [3210], 7003: [8080] } });
   const sd = stopDeps(hc);
   sd.mark();
-  const r = await stopServer({ root: ROOT, terminal: "t9", logPath, ports: [3210, 8080], ...HEAD }, sd.deps);
+  const r = await stopServer({ root: ROOT, terminal: "t9", logPath, ports: [3210, 8080], procs: KNOWN_7002_7003, ...HEAD }, sd.deps);
   assert.deepEqual(r, {
     ok: true, stopped: false, reason: "terminal-gone", terminal: null, forced: 1,
     escaped: [{ pid: 7002, port: 3210, cwd: `${ROOT}/apps/web` }],
@@ -878,10 +886,238 @@ test("stopServer: with no terminal at all, a listener on a recorded port with it
   // Nothing of it on the recorded ports: nothing signalled, nothing logged.
   const quiet = fakeHc({ procs, ports: { 7003: [8080] } });
   const quietLog = join(dir, "quiet.log");
-  const r2 = await stopServer({ root: ROOT, terminal: "t9", logPath: quietLog, ports: [8080], ...HEAD }, stopDeps(quiet).deps);
+  const r2 = await stopServer({ root: ROOT, terminal: "t9", logPath: quietLog, ports: [8080], procs: KNOWN_7002_7003, ...HEAD }, stopDeps(quiet).deps);
   assert.deepEqual(r2, { ok: true, stopped: false, reason: "terminal-gone", terminal: null, forced: 0, escaped: [] });
   assert.deepEqual(quiet.signals, []);
   assert.equal(existsSync(quietLog), false);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+// ── Who a listener is (F2), a Ctrl-C that fails (F3), a refused leftover
+// (F4), no injected kill (F8) ─────────────────────────────────────────────
+
+test("readServerState (F2): `procs` names each listener under Spotlight's own server by pid, start time (ps's, spaces folded) and port; the shell's own job, a foreign foreground or a ps that can't say give none", async () => {
+  const hc = fakeHc({ ports: { 5002: [3001, 3000], 5003: [8080], 9999: [5432] } });
+  const t = hc.add({ name: "sl-app", labels: { [SERVER_LABEL]: ROOT }, fg: { ...SCRIPT_FG } });
+  const script = t.foreground.pid;
+  // script → next-server (5002, on 3000 and 3001); 5003 is the shell's own
+  // job in the background, on 8080; 9999 is a database outside the terminal.
+  hc.children[script] = [5002];
+  hc.children[t.pid] = [5003];
+  hc.starts[5002] = "Sun Nov  8 22:00:05 2026";
+  const got = await readServerState({ terminal: t.address, logPath: LOG }, { exec: hc.exec });
+  assert.deepEqual({ state: got.state, ports: got.ports }, { state: "listening", ports: [3000, 3001, 8080] });
+  assert.deepEqual(got.procs, [
+    { pid: 5002, start: "Sun Nov 8 22:00:05 2026", port: 3000 },
+    { pid: 5002, start: "Sun Nov 8 22:00:05 2026", port: 3001 },
+  ]);
+
+  // ps can't say who they are: the ports still read, no identity is made up.
+  const blind = async (file, args) => (file === "ps" ? { code: 2, stdout: "", stderr: "ps: bad" } : hc.exec(file, args));
+  const unsure = await readServerState({ terminal: t.address, logPath: LOG }, { exec: blind });
+  assert.deepEqual({ ports: unsure.ports, procs: unsure.procs }, { ports: [3000, 3001, 8080], procs: [] });
+
+  // A foreground Spotlight didn't start, with a listener under it.
+  t.foreground = { ...VIM_FG };
+  hc.children[VIM_FG.pid] = [5002];
+  const foreign = await readServerState({ terminal: t.address, logPath: LOG }, { exec: hc.exec });
+  assert.deepEqual({ owner: foreign.owner, procs: foreign.procs }, { owner: "foreign", procs: [] });
+
+  // The prompt free, the shell's job still on 8080.
+  t.foreground = { argv: ["/bin/zsh", "-l"], cwd: ROOT, name: "zsh", pid: t.pid };
+  const idle = await readServerState({ terminal: t.address, logPath: LOG }, { exec: hc.exec });
+  assert.deepEqual({ ports: idle.ports, procs: idle.procs }, { ports: [8080], procs: [] });
+
+  // Gone, or hc can't say: none either.
+  assert.deepEqual((await readServerState({ terminal: "sl-nope", logPath: LOG }, { exec: hc.exec })).procs, []);
+  assert.deepEqual((await readServerState({ terminal: "t1", logPath: LOG }, { exec: async () => ({ code: 1, stdout: "", stderr: "down" }) })).procs, []);
+});
+
+test("stopServer (F2, D24): a listener on a recorded port with its cwd in the root is killed only when its pid and start time match `procs`; a server started by hand there is never signalled, with the server running, at a free prompt or with no terminal", async () => {
+  const dir = tmp();
+  const logPath = join(dir, "app.log");
+  const ROOT_PROCS = { 7001: { cwd: `${ROOT}/apps/web` }, 7005: { cwd: ROOT, command: "next dev --port 8080" }, 7006: { cwd: ROOT } };
+
+  // Running: next-server (7001) under the script, on 3210, read by a reap.
+  const hc = fakeHc({ procs: ROOT_PROCS });
+  const sd = stopDeps(hc);
+  const s = await startServer({ root: ROOT, line: "pnpm dev", logPath, ...HEAD }, sd.deps);
+  hc.children[s.pid] = [7001];
+  hc.ports[7001] = [3210];
+  const { procs } = await readServerState({ terminal: s.terminal, logPath, serverPid: s.pid }, sd.deps);
+  assert.deepEqual(procs, [{ pid: 7001, start: "Sun Nov 8 22:00:00 2026", port: 3210 }]);
+  // Then a server started by hand in the root, on 8080, a port the record holds.
+  hc.ports[7005] = [8080];
+  sd.mark();
+  const r = await stopServer({ root: ROOT, terminal: s.terminal, logPath, serverPid: s.pid, ports: [3210, 8080], procs, ...HEAD }, sd.deps);
+  assert.deepEqual(r, { ok: true, stopped: true, terminal: s.terminal, forced: 1 });
+  assert.deepEqual(sd.signals.map(({ pid, sig }) => [pid, sig]), [[7001, "SIGTERM"]]);
+  assert.equal(hc.dead.has(7005), false, "the hand-started server lives");
+
+  // Free prompt and no terminal: 7001 escaped the tree earlier (its parent
+  // died) and is still on 3210; 7005 was started by hand on 8080; pid 7006
+  // was recorded on 3211, but the process on it now started later (a pid
+  // reused by a server started by hand).
+  const known = [...procs, { pid: 7006, start: "Sun Nov 8 22:00:00 2026", port: 3211 }];
+  for (const where of ["prompt", "gone"]) {
+    const w = fakeHc({ procs: ROOT_PROCS, ports: { 7001: [3210], 7005: [8080], 7006: [3211] }, starts: { 7006: "Sun Nov  8 22:00:09 2026" } });
+    const wd = stopDeps(w);
+    const t = where === "prompt" ? w.add({ name: serverTerminalName(ROOT), labels: { [SERVER_LABEL]: ROOT } }).address : "t9";
+    const r2 = await stopServer({ root: ROOT, terminal: t, logPath: join(dir, `${where}.log`), ports: [3210, 3211, 8080], procs: known, ...HEAD }, wd.deps);
+    assert.deepEqual(r2, {
+      ok: true, stopped: false, reason: where === "prompt" ? "not-running" : "terminal-gone", terminal: where === "prompt" ? t : null,
+      forced: 1, escaped: [{ pid: 7001, port: 3210, cwd: `${ROOT}/apps/web` }],
+    }, where);
+    assert.deepEqual(wd.signals.map(({ pid, sig }) => [pid, sig]), [[7001, "SIGTERM"]], where);
+    assert.ok(!w.dead.has(7005) && !w.dead.has(7006), where);
+  }
+
+  // No `procs` (a record from before identities): no listener is killed on any path.
+  const old = fakeHc({ procs: ROOT_PROCS, ports: { 7001: [3210], 7005: [8080] } });
+  const oldT = old.add({ name: serverTerminalName(ROOT), labels: { [SERVER_LABEL]: ROOT } });
+  const r3 = await stopServer({ root: ROOT, terminal: oldT.address, logPath: join(dir, "old.log"), ports: [3210, 8080], ...HEAD }, stopDeps(old).deps);
+  assert.deepEqual(r3, { ok: true, stopped: false, reason: "not-running", terminal: oldT.address, forced: 0, escaped: [] });
+  assert.deepEqual(old.signals, []);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+// An hc whose `interrupt` fails (the core unreachable, say), on top of `hc`.
+const interruptFails = (hc) => async (file, args) =>
+  file === "hc" && args[0] === "interrupt"
+    ? { code: 1, stdout: "", stderr: JSON.stringify({ error: { kind: "failed", message: "herdr-core unreachable" } }) }
+    : hc.exec(file, args);
+
+test("stopServer (F3): a Ctrl-C hc couldn't send is no reason to leave the server up: its tree is killed at once, with no 8 s wait", async () => {
+  const dir = tmp();
+  const logPath = join(dir, "app.log");
+  const hc = fakeHc({ procs: { 7001: { cwd: ROOT } } });
+  const sd = stopDeps(hc);
+  const s = await startServer({ root: ROOT, line: "pnpm dev", logPath, ...HEAD }, sd.deps);
+  hc.children[s.pid] = [7001];
+  const shell = hc.terms.get(s.terminal).pid;
+  sd.mark();
+  const r = await stopServer({ root: ROOT, terminal: s.terminal, logPath, serverPid: s.pid, ...HEAD }, { ...sd.deps, exec: interruptFails(hc) });
+  assert.deepEqual(r, { ok: true, stopped: true, terminal: s.terminal, forced: 2, interruptError: "herdr-core unreachable" });
+  assert.deepEqual(sd.signals.map(({ pid, sig }) => [pid, sig]).sort(), [[7001, "SIGTERM"], [s.pid, "SIGTERM"]].sort());
+  assert.ok(sd.elapsed() < 1000, `waited ${sd.elapsed()} ms`);
+  assert.ok(!hc.signals.some((x) => x.pid === shell), "the terminal's shell is never signalled");
+  assert.match(readFileSync(logPath, "utf8"), stopNote("forced: 2 processes"));
+  assert.equal(hc.terms.get(s.terminal).foreground.pid, shell, "the prompt is back");
+
+  // Nothing could be read after it either (hc down, ps can't say): nothing
+  // proves the server died, so the stop says it may still run.
+  const down = fakeHc();
+  const dd = stopDeps(down);
+  const s2 = await startServer({ root: ROOT, line: "pnpm dev", logPath, ...HEAD }, dd.deps);
+  let sent = false;
+  const exec = async (file, args) => {
+    if (file === "ps") return { code: 2, stdout: "", stderr: "ps: bad" };
+    if (file === "hc" && args[0] === "interrupt") sent = true;
+    if (sent && file === "hc" && args[0] === "get") return { code: 1, stdout: "", stderr: "hc: can't reach herdr-core" };
+    return interruptFails(down)(file, args);
+  };
+  const r2 = await stopServer({ root: ROOT, terminal: s2.terminal, logPath, serverPid: s2.pid, ...HEAD }, { ...dd.deps, exec });
+  assert.deepEqual(r2, {
+    ok: false, reason: "interrupt-failed", terminal: s2.terminal, forced: 0,
+    message: "the Ctrl-C could not be sent (herdr-core unreachable) and the terminal can't be read: the server may still be running",
+  });
+  assert.deepEqual(down.signals, []);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("stopServer (F3): an unreadable terminal, or a server still in front after its processes were killed, fails saying the server may still be running", async () => {
+  const dir = tmp();
+  const logPath = join(dir, "app.log");
+  // hc shows the terminal live with no foreground: no server pid to read, nothing signalled.
+  const hc = fakeHc({ procs: { 7002: { cwd: ROOT } }, ports: { 7002: [3210] } });
+  const t = hc.add({ name: serverTerminalName(ROOT), labels: { [SERVER_LABEL]: ROOT } });
+  t.foreground = null;
+  const r = await stopServer({ root: ROOT, terminal: t.address, logPath, ports: [3210], procs: KNOWN_7002_7003, ...HEAD }, stopDeps(hc).deps);
+  assert.deepEqual(r, {
+    ok: false, reason: "unreadable", terminal: t.address,
+    message: "the Spotlight terminal could not be read (no foreground): the server may still be running",
+  });
+  assert.deepEqual(hc.signals, []);
+  assert.equal(hc.verbs().includes("interrupt"), false);
+
+  // hc keeps showing the old script in front after it was killed (a stale read).
+  const stale = fakeHc({ lingers: Infinity });
+  const sd = stopDeps(stale);
+  const s = await startServer({ root: ROOT, line: "pnpm dev", logPath, ...HEAD }, sd.deps);
+  const before = JSON.parse((await stale.exec("hc", ["get", s.terminal, "--json"])).stdout);
+  const exec = async (file, args) =>
+    file === "hc" && args[0] === "get" && stale.verbs().includes("interrupt")
+      ? { code: 0, stdout: JSON.stringify(before), stderr: "" }
+      : stale.exec(file, args);
+  const r2 = await stopServer({ root: ROOT, terminal: s.terminal, logPath, serverPid: s.pid, ...HEAD }, { ...sd.deps, exec });
+  assert.deepEqual(r2, {
+    ok: false, reason: "still-running", terminal: s.terminal, forced: 1,
+    message: `Spotlight's server (pid ${s.pid}) still leads the terminal after it was killed: the server may still be running`,
+  });
+  assert.deepEqual(sd.signals.map(({ pid, sig }) => [pid, sig]), [[s.pid, "SIGTERM"]]);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+// The note of a stop that refused to signal some of the server.
+const refusedNote = (n, pids, refused) =>
+  new RegExp(`── Spotlight: login \\(feat/login\\) · Spotlight off — server NOT stopped: ${n} processes survived \\(pids ${pids}; not signalled: ${refused}\\) · \\d\\d:\\d\\d:\\d\\d ──\\n$`);
+
+test("stopServer (F4): a leftover stopLeftovers refuses (its tree holds the CLI itself) is not stopped: the stop fails as survived, with the refused pids and the NOT stopped note", async () => {
+  const dir = tmp();
+  const logPath = join(dir, "app.log");
+  // At a free prompt: 7002 escaped earlier and is still on 3210 in the root,
+  // but the CLI runs under it.
+  const idle = fakeHc({ procs: { 7002: { cwd: ROOT } }, ports: { 7002: [3210] } });
+  idle.children[7002] = [process.pid];
+  const id = stopDeps(idle);
+  const t = idle.add({ name: serverTerminalName(ROOT), labels: { [SERVER_LABEL]: ROOT } });
+  const r = await stopServer({ root: ROOT, terminal: t.address, logPath, ports: [3210], procs: KNOWN_7002_7003, ...HEAD }, id.deps);
+  assert.deepEqual(r, { ok: false, reason: "survived", terminal: t.address, forced: 0, survivors: [7002], refused: [7002], escaped: [] });
+  assert.deepEqual(idle.signals, []);
+  assert.match(readFileSync(logPath, "utf8"), refusedNote(1, "7002", "7002"));
+
+  // With the server running: its child 7001 ignores the Ctrl-C, and the CLI
+  // ends up under it during the wait.
+  const runLog = join(dir, "run.log");
+  const hc = fakeHc({ procs: { 7001: { cwd: ROOT } } });
+  const sd = stopDeps(hc);
+  const s = await startServer({ root: ROOT, line: "pnpm dev", logPath: runLog, ...HEAD }, sd.deps);
+  hc.children[s.pid] = [7001];
+  const exec = async (file, args) => {
+    if (file === "hc" && args[0] === "interrupt") hc.children[7001] = [process.pid];
+    return hc.exec(file, args);
+  };
+  const r2 = await stopServer({ root: ROOT, terminal: s.terminal, logPath: runLog, serverPid: s.pid, ...HEAD }, { ...sd.deps, exec });
+  assert.deepEqual(r2, { ok: false, reason: "survived", terminal: s.terminal, forced: 0, survivors: [7001], refused: [7001] });
+  assert.deepEqual(sd.signals, []);
+  const log = readFileSync(runLog, "utf8");
+  assert.match(log, refusedNote(1, "7001", "7001"));
+  assert.doesNotMatch(log, /server stopped/);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("stopServer (F8): without an injected kill it throws before doing anything, and never falls back to the real process.kill", async () => {
+  const dir = tmp();
+  const logPath = join(dir, "app.log");
+  const hc = fakeHc({ procs: { 7001: { cwd: ROOT, ignoresTerm: true } } });
+  const clock = fakeClock();
+  const s = await startServer({ root: ROOT, line: "pnpm dev", logPath, ...HEAD }, { exec: hc.exec, ...clock });
+  hc.children[s.pid] = [7001];
+  // For this test only, the real process.kill is a stand-in that records and
+  // signals nobody: a fallback to it shows up here, and reaches no process.
+  const real = process.kill;
+  const used = [];
+  process.kill = (pid, sig) => {
+    used.push([pid, sig]);
+    throw Object.assign(new Error("ESRCH"), { code: "ESRCH" });
+  };
+  try {
+    await assert.rejects(stopServer({ root: ROOT, terminal: s.terminal, logPath, serverPid: s.pid, ...HEAD }, { exec: hc.exec, ...clock }), /deps\.kill/);
+  } finally {
+    process.kill = real;
+  }
+  assert.deepEqual(used, []);
+  assert.equal(hc.verbs().includes("interrupt"), false, "no Ctrl-C either");
   rmSync(dir, { recursive: true, force: true });
 });
 

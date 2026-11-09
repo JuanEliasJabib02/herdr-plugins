@@ -340,6 +340,13 @@ test("stopProcessTree (R4): a process still alive after SIGKILL makes it fail wi
 // ── What a turn-off's Ctrl-C leaves behind (T15, D26) ──────────────────────
 
 const APP = "/Users/demo/code/app";
+// The identities Spotlight recorded while its server ran (readServerState's
+// `procs`, the start time as ps reads it with its spaces folded): 600 and
+// 610, each on 8080. stopServer gets them back as its `procs`.
+const KNOWN = [
+  { pid: 600, start: "Sun Nov 8 10:00:00 2026", port: 8080 },
+  { pid: 610, start: "Sun Nov 8 10:00:00 2026", port: 8080 },
+];
 
 // A Spotlight server terminal at turn-off: zsh -l (100) → script (101) →
 // zsh -c (102) → next-server (103, on 3210, in apps/web) and a `sleep` (104)
@@ -387,7 +394,7 @@ test("childPids: the direct children only (pgrep -P); none, or no pid, is []", a
 
 test("serverSnapshot (R1): before the Ctrl-C, the server's own tree from its pid, each process with its start time and command; never the terminal's shell nor its helpers", async () => {
   const w = serverWorld();
-  const snap = await serverSnapshot({ rootPid: 100, serverPid: 101, ports: [8080, 0, "x"] }, w.deps);
+  const snap = await serverSnapshot({ rootPid: 100, serverPid: 101, ports: [8080, 0, "x"], procs: KNOWN }, w.deps);
   assert.equal(snap.rootPid, 100);
   assert.equal(snap.serverPid, 101);
   // The ports the server listens on, plus the recorded ones.
@@ -411,7 +418,7 @@ test("serverSnapshot (R1): before the Ctrl-C, the server's own tree from its pid
   assert.deepEqual([...bare.procs.keys()].sort(), [101, 102, 103, 104]);
   assert.deepEqual(bare.ports, [3210]);
   // The prompt is free (no server): only who listens on the recorded ports.
-  const idle = await serverSnapshot({ rootPid: 100, serverPid: null, ports: [8080] }, w.deps);
+  const idle = await serverSnapshot({ rootPid: 100, serverPid: null, ports: [8080], procs: KNOWN }, w.deps);
   assert.equal(idle.procs.size, 0);
   assert.deepEqual([...idle.listeners.keys()].sort(), [600, 610]);
   // No server and no recorded port: nothing to read.
@@ -422,7 +429,7 @@ test("serverSnapshot (R1): before the Ctrl-C, the server's own tree from its pid
 
 test("serverLeftovers (R1, C7): each process of the server still alive as the same process, wherever it was reparented; a reused pid is not; a listener on its ports runs inside the root", async () => {
   const w = serverWorld();
-  const snap = await serverSnapshot({ rootPid: 100, serverPid: 101, ports: [8080] }, w.deps);
+  const snap = await serverSnapshot({ rootPid: 100, serverPid: 101, ports: [8080], procs: KNOWN }, w.deps);
   const escaped = [{ pid: 610, port: 8080, cwd: `${APP}/apps/api` }];
   // Nothing moved yet: the whole server, and 610 (on the recorded 8080, in
   // the root). Never the shell's gitstatusd or its job; never 600, whose
@@ -494,4 +501,76 @@ test("stopLeftovers: TERM once to every process of the leftovers' trees, KILL 3 
   const quiet = serverWorld();
   assert.deepEqual(await stopLeftovers({ procs: [], escaped: [] }, 100, quiet.deps), { pids: [], killed: [], refused: [], survivors: [] });
   assert.equal(quiet.deps.now(), 0);
+});
+
+test("serverSnapshot and serverLeftovers (F2): a listener outside the server's tree counts only when its pid and start time match an identity Spotlight recorded while its server ran; none recorded, none watched", async () => {
+  const w = serverWorld();
+  // An old record (no identities): neither 600 nor 610 is watched, on the
+  // running path or at a free prompt; the server's own tree still is.
+  const snap = await serverSnapshot({ rootPid: 100, serverPid: 101, ports: [8080] }, w.deps);
+  assert.equal(snap.listeners.size, 0);
+  assert.deepEqual([...snap.procs.keys()].sort(), [101, 102, 103, 104]);
+  assert.deepEqual(await serverLeftovers(snap, APP, w.deps), { procs: [101, 102, 103, 104], escaped: [] });
+  const idle = await serverSnapshot({ rootPid: 100, serverPid: null, ports: [8080] }, w.deps);
+  assert.equal(idle.listeners.size, 0);
+  assert.deepEqual(await serverLeftovers(idle, APP, w.deps), { procs: [], escaped: [] });
+
+  // 610 recorded as readServerState reads it (spaces folded) or as ps prints
+  // it (raw): the same. 600's pid was recorded with another start time: the
+  // process on it now (a server started by hand) is someone else.
+  for (const start of ["Sun Nov 8 10:00:00 2026", "Sun Nov  8 10:00:00 2026"]) {
+    const procs = [{ pid: 610, start, port: 8080 }, { pid: 600, start: "Sun Nov 8 09:59:00 2026", port: 8080 }];
+    const known = await serverSnapshot({ rootPid: 100, serverPid: null, ports: [8080], procs }, w.deps);
+    assert.deepEqual([...known.listeners.keys()], [610], start);
+    assert.deepEqual(await serverLeftovers(known, APP, w.deps), { procs: [], escaped: [{ pid: 610, port: 8080, cwd: `${APP}/apps/api` }] });
+  }
+  // An identity brings its port: with no ports recorded, 610 on 8080 is found.
+  const byId = await serverSnapshot({ rootPid: 100, serverPid: null, ports: [], procs: [KNOWN[1]] }, w.deps);
+  assert.deepEqual({ listeners: [...byId.listeners.keys()], ports: byId.ports }, { listeners: [610], ports: [8080] });
+  // Malformed identities (no pid, no start) count for nothing.
+  const junk = await serverSnapshot({ rootPid: 100, serverPid: null, ports: [8080], procs: [{ pid: 610 }, { start: KNOWN[1].start, port: 8080 }, null, "x"] }, w.deps);
+  assert.equal(junk.listeners.size, 0);
+
+  // Ports recorded but no server and no identity: nothing to read at all.
+  const calls = [];
+  const exec = async (...a) => {
+    calls.push(a);
+    return w.deps.exec(...a);
+  };
+  const none = await serverSnapshot({ rootPid: 100, serverPid: null, ports: [8080] }, { exec });
+  assert.deepEqual({ listeners: none.listeners.size, calls }, { listeners: 0, calls: [] });
+});
+
+test("stopLeftovers (F5): each process's children are read once, however the leftovers' trees overlap or are ordered", async () => {
+  // A chain 201 → 202 → … → 206, every one a leftover, listed deepest first
+  // (the costliest order for one walk per pid), and 610 escaped.
+  const table = { 610: { ports: [8080] } };
+  for (let p = 201; p <= 206; p++) table[p] = { children: p < 206 ? [p + 1] : [] };
+  for (const order of [[206, 205, 204, 203, 202, 201], [201, 202, 203, 204, 205, 206]]) {
+    const w = processWorld(structuredClone(table));
+    const calls = [];
+    const deps = {
+      ...w.deps,
+      exec: async (file, args) => {
+        calls.push([file, ...args]);
+        return w.deps.exec(file, args);
+      },
+    };
+    const r = await stopLeftovers({ procs: order, escaped: [{ pid: 610, port: 8080, cwd: `${APP}/apps/api` }] }, 100, deps);
+    assert.deepEqual([...r.pids].sort(), [201, 202, 203, 204, 205, 206, 610]);
+    assert.deepEqual(r.refused, []);
+    const pgreps = calls.filter((c) => c[0] === "pgrep").map((c) => Number(c[2]));
+    assert.deepEqual(pgreps.sort(), [201, 202, 203, 204, 205, 206, 610], `order ${order}: one pgrep per pid`);
+  }
+});
+
+test("F8: stopProcessTree and stopLeftovers need an injected kill: without one they throw and signal nobody", async () => {
+  const w = processWorld({ 900: { children: [901] }, 901: {} });
+  const { kill, ...noKill } = w.deps;
+  assert.equal(typeof kill, "function");
+  await assert.rejects(stopProcessTree(900, noKill), /deps\.kill/);
+  await assert.rejects(stopLeftovers({ procs: [900] }, 100, noKill), /deps\.kill/);
+  await assert.rejects(stopLeftovers({ procs: [900] }, 100, { ...noKill, kill: "process.kill" }), /deps\.kill/);
+  assert.deepEqual(w.signals, []);
+  assert.deepEqual([...w.alive].sort(), [900, 901]);
 });

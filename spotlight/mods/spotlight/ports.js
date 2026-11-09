@@ -6,9 +6,10 @@
 // `pid` (the `zsh -l`): zsh → script → /bin/zsh -c → the dev server and its
 // children. Anything else listening on the machine (a database, another
 // repo's server) is not the server's. Also who holds the port a start will
-// take, and stopping that process's tree (D24), and what a turn-off's Ctrl-C
-// left of the server (D26): lsof, ps and pgrep through the same `exec`,
-// signals through an injected `kill`.
+// take, and stopping that process's tree (D24), who each of the server's
+// listeners is (pid and start time, F2), and what a turn-off's Ctrl-C left of
+// the server (D26): lsof, ps and pgrep through the same `exec`, signals only
+// through an injected `kill` (requireKill).
 
 // Every TCP listener on the machine, one field per line (D10): `p<pid>`,
 // `c<command>`, then `f<fd>` + `n<address:port>` per socket.
@@ -73,10 +74,22 @@ export async function childPids(pid, { exec }) {
   return out;
 }
 
+// childPids behind a cache: each pid's children are read once, however many
+// walks share the cache (stopLeftovers walks a tree per leftover, and those
+// trees overlap).
+function cachedChildren({ exec }) {
+  const seen = new Map();
+  return (pid) => {
+    if (!seen.has(pid)) seen.set(pid, childPids(pid, { exec }));
+    return seen.get(pid);
+  };
+}
+
 // The tree under `rootPid` walked with `pgrep -P`, breadth first: pid → the
 // pid it was found under (null for the root), parents before their
-// children.
-async function walkTree(rootPid, { exec }) {
+// children. `childrenOf(pid)` reads a pid's children (childPids, or a
+// cachedChildren shared across walks).
+async function walkTree(rootPid, { exec }, childrenOf = (pid) => childPids(pid, { exec })) {
   const parents = new Map();
   if (!validPid(rootPid)) return parents;
   const queue = [[rootPid, null]];
@@ -84,11 +97,37 @@ async function walkTree(rootPid, { exec }) {
     const [pid, parent] = queue.shift();
     if (parents.has(pid)) continue;
     parents.set(pid, parent);
-    for (const child of await childPids(pid, { exec })) {
+    for (const child of await childrenOf(pid)) {
       if (!parents.has(child)) queue.push([child, pid]);
     }
   }
   return parents;
+}
+
+// The pids of a walk (walkTree's map) under `top`, `top` included. Relies on
+// the walk's order: a parent comes before its children.
+function subtreeOf(parents, top) {
+  const out = new Set();
+  if (!parents.has(top)) return out;
+  out.add(top);
+  for (const [pid, parent] of parents) if (out.has(parent)) out.add(pid);
+  return out;
+}
+
+// The part of a walk under `top` that ps confirms (`states`, processStates):
+// pid → its state, for each one still alive and not a zombie whose parent as
+// ps reads it is the one the walk found it under, all the way up to `top`,
+// itself the child of `topParent` when that is given. A pid that changed
+// hands between the reads is no part of it, nor anything under it.
+function confirmedSubtree(parents, top, topParent, states) {
+  const out = new Map();
+  for (const [pid, parent] of parents) {
+    const st = states?.get(pid);
+    if (!st || st.zombie) continue;
+    const fits = pid === top ? topParent === null || st.ppid === topParent : out.has(parent) && st.ppid === parent;
+    if (fits) out.set(pid, st);
+  }
+  return out;
 }
 
 // The pids under `rootPid`, itself included, walked with `pgrep -P` (exit 1:
@@ -108,14 +147,17 @@ export async function processTree(rootPid, { exec }) {
 // whatever its words, the rest of the line is it.
 export const psStatesArgv = (pids) => ["ps", "-o", "pid=,ppid=,stat=,lstart=", "-p", pids.join(",")];
 
-// psStatesArgv's output → Map pid → { ppid, zombie, start } (start with its
-// runs of spaces folded).
+// A start time in the one form it is compared in: as ps printed it, runs of
+// spaces folded, trimmed ("Sun Nov  8 …" → "Sun Nov 8 …").
+export const foldStart = (start) => String(start ?? "").replace(/\s+/g, " ").trim();
+
+// psStatesArgv's output → Map pid → { ppid, zombie, start } (start folded).
 export function parsePsStates(text) {
   const out = new Map();
   for (const line of String(text ?? "").split("\n")) {
     const m = /^\s*(\d+)\s+(\d+)\s+(\S+)\s+(\S.*?)\s*$/.exec(line);
     if (!m) continue;
-    out.set(Number(m[1]), { ppid: Number(m[2]), zombie: m[3].startsWith("Z"), start: m[4].replace(/\s+/g, " ") });
+    out.set(Number(m[1]), { ppid: Number(m[2]), zombie: m[3].startsWith("Z"), start: foldStart(m[4]) });
   }
   return out;
 }
@@ -184,13 +226,42 @@ export async function allListeners({ exec }) {
 // when it listens on nothing (or there's no pid), null when lsof can't run or
 // fails (can't tell; never read as "not listening").
 export async function treePorts(rootPid, { exec }) {
-  if (!validPid(rootPid)) return [];
+  const found = await treeListening(rootPid, null, { exec });
+  return found === null ? null : found.ports;
+}
+
+// What the server terminal's tree listens on, and who (F2):
+//   ports — treePorts: the ports of the tree under `rootPid` (the terminal's
+//           shell), ascending and unique
+//   procs — one identity per listener under `serverPid` (Spotlight's own
+//           `script` in front; null: none): [{ pid, start, port }], `start`
+//           as ps prints it, folded (foldStart): the form serverSnapshot
+//           compares. Sorted by port, then pid.
+// Only Spotlight's own server gets identities: never the shell's helpers or a
+// job put in the background there, nor anything when ps can't say or a pid
+// changed hands between the reads (confirmedSubtree). The CLI keeps these
+// on the repo's record and hands them back to stopServer as its `procs`, so a
+// child that leaves the tree later is still known for Spotlight's (D26).
+// → { ports, procs }, or null when lsof can't tell.
+export async function treeListening(rootPid, serverPid, { exec }) {
+  if (!validPid(rootPid)) return { ports: [], procs: [] };
   const sockets = await allListeners({ exec });
   if (sockets === null) return null;
-  if (sockets.length === 0) return [];
-  const tree = await processTree(rootPid, { exec });
-  const ports = new Set(sockets.filter((s) => tree.has(s.pid)).map((s) => s.port));
-  return [...ports].sort((a, b) => a - b);
+  if (sockets.length === 0) return { ports: [], procs: [] };
+  const parents = await walkTree(rootPid, { exec });
+  const mine = sockets.filter((s) => parents.has(s.pid));
+  const ports = [...new Set(mine.map((s) => s.port))].sort((a, b) => a - b);
+  const server = validPid(serverPid) && serverPid !== rootPid ? serverPid : null;
+  const under = server === null ? new Set() : subtreeOf(parents, server);
+  const listening = mine.filter((s) => under.has(s.pid));
+  if (listening.length === 0) return { ports, procs: [] };
+  const states = await processStates([...under], { exec });
+  const confirmed = confirmedSubtree(parents, server, rootPid, states);
+  const procs = listening
+    .filter((s) => confirmed.has(s.pid))
+    .map((s) => ({ pid: s.pid, start: confirmed.get(s.pid).start, port: s.port }))
+    .sort((a, b) => a.port - b.port || a.pid - b.pid);
+  return { ports, procs };
 }
 
 // ── Who holds a port, and freeing it (D24) ─────────────────────────────────
@@ -271,6 +342,17 @@ export async function foreignListener(port, rootPid, { exec }) {
   return { pid: other.pid, command: command ?? (other.command || null), cwd };
 }
 
+// Every signal goes through the caller's `deps.kill` (process.kill's
+// shape): nothing here, nor in server.js, ever falls back to the real
+// process.kill, so a test's fake pids can never reach a real process (R5,
+// F8). A kill path called without one throws before it reads or sends
+// anything.
+export function requireKill(deps, who) {
+  if (typeof deps?.kill !== "function") {
+    throw new TypeError(`${who}: deps.kill(pid, signal) is required (process.kill's shape); Spotlight never signals without an injected kill`);
+  }
+}
+
 const isAlive = (kill, pid) => {
   try {
     kill(pid, 0);
@@ -323,10 +405,11 @@ async function termThenKill(pids, deps, graceMs) {
 
 // The tree under `pid` when it may be stopped: never pid 1 or below, nor a
 // tree holding a `protect`ed pid, nor one whose walk hit its bound (no small
-// server's tree). → { ok: true, tree } or { ok: false, pids }.
-async function stoppableTree(pid, deps, protect) {
+// server's tree). `childrenOf`: walkTree's, to share one cache across trees.
+// → { ok: true, tree } or { ok: false, pids }.
+async function stoppableTree(pid, deps, protect, childrenOf) {
   if (!Number.isInteger(pid) || pid <= 1) return { ok: false, pids: [] };
-  const tree = await processTree(pid, deps);
+  const tree = new Set((await walkTree(pid, deps, childrenOf)).keys());
   if (tree.size >= MAX_TREE || protect.some((p) => tree.has(p))) return { ok: false, pids: [...tree] };
   return { ok: true, tree };
 }
@@ -335,11 +418,13 @@ async function stoppableTree(pid, deps, protect) {
 // them to go, then SIGKILL to the ones left. Never pid 1 or below, nor a
 // tree holding a `protect`ed pid (the CLI itself, the server terminal's
 // shell: a port held by one of their ancestors). `deps`: `exec` (pgrep,
-// ps), `kill(pid, signal)` with process.kill's shape, `now()`, `sleep(ms)`.
+// ps), `kill(pid, signal)` with process.kill's shape (required: requireKill),
+// `now()`, `sleep(ms)`.
 // → { ok: true, pids, killed }, { ok: false, reason: "protected", pids }, or
 // { ok: false, reason: "survived", pids, killed, survivors } when some are
 // still alive after the SIGKILL (a zombie counts as gone).
 export async function stopProcessTree(pid, deps, { graceMs = FREE_PORT_GRACE_MS, protect = [] } = {}) {
+  requireKill(deps, "stopProcessTree");
   const found = await stoppableTree(pid, deps, protect);
   if (!found.ok) return { ok: false, reason: "protected", pids: found.pids };
   const pids = [...found.tree];
@@ -371,6 +456,23 @@ export function insideRoot(dir, root) {
   return dir === base || dir.startsWith(`${base}/`);
 }
 
+// stopServer's `procs`, the identities treeListening read while Spotlight's
+// server ran: pid → the start times recorded for it (folded), and the ports
+// they were on. An entry without a valid pid and a start counts for nothing;
+// one without a valid port still names its process.
+function knownIdentities(list) {
+  const byPid = new Map();
+  const ports = new Set();
+  for (const p of Array.isArray(list) ? list : []) {
+    const start = typeof p?.start === "string" ? foldStart(p.start) : "";
+    if (!validPid(p?.pid) || !start) continue;
+    if (!byPid.has(p.pid)) byPid.set(p.pid, new Set());
+    byPid.get(p.pid).add(start);
+    if (validPort(p.port)) ports.add(p.port);
+  }
+  return { byPid, ports };
+}
+
 // The server right before its Ctrl-C:
 //   rootPid   — the terminal's shell (never part of the server)
 //   serverPid — the server's own process (Spotlight's `script` in front)
@@ -378,42 +480,49 @@ export function insideRoot(dir, root) {
 //               command }. The server's process must be the shell's child
 //               and each other one its walk parent's (ps says so): a pid that
 //               changed hands between the reads is no part of it.
-//   listeners — who else listened on `ports`, outside the terminal's tree
-//               (a server child that escaped an earlier run): pid → { start,
+//   listeners — who else listened on `ports`, outside the terminal's tree,
+//               and is a process Spotlight recorded while its server ran
+//               (`known`, stopServer's `procs`: same pid, same start time): a
+//               server child that escaped an earlier run. pid → { start,
 //               command }
 //   ports     — those the server listens on, plus the `ports` recorded for it
+//               and those of `known`
 //   cwds      — each listener's folder, filled while the stop waits
 // Only a process the snapshot holds is ever a leftover: whatever starts
 // during the wait (a restart typed into the terminal, a server started by
-// hand) is new, and stays. With no server (`serverPid` null: the prompt is
-// free) it holds only the listeners on the recorded ports.
-export async function serverSnapshot({ rootPid, serverPid, ports: recorded } = {}, { exec }) {
+// hand) is new, and stays. A listener Spotlight never recorded (a server
+// started by hand, or one on a pid since reused) is never in it, on any path
+// (D24, F2); with no `known` (an old record) it holds no listener at all. With
+// no server (`serverPid` null: the prompt is free) it holds only the
+// recorded listeners still on those ports.
+export async function serverSnapshot({ rootPid, serverPid, ports: recorded, procs: known } = {}, { exec }) {
   const shell = validPid(rootPid) ? rootPid : null;
   const server = validPid(serverPid) && serverPid !== shell ? serverPid : null;
   const parents = await walkTree(server, { exec });
   // The shell under its own child: a pid cycle from reuse, no server's tree.
   if (shell !== null && parents.has(shell)) parents.clear();
-  const wanted = new Set((Array.isArray(recorded) ? recorded : []).filter(validPort));
-  const sockets = parents.size > 0 || wanted.size > 0 ? ((await allListeners({ exec })) ?? []) : [];
+  const ids = knownIdentities(known);
+  const given = [...(Array.isArray(recorded) ? recorded : []).filter(validPort), ...ids.ports];
+  const wanted = new Set(given);
+  const sockets = parents.size > 0 || ids.byPid.size > 0 ? ((await allListeners({ exec })) ?? []) : [];
   for (const s of sockets) if (parents.has(s.pid)) wanted.add(s.port);
-  let outside = [...new Set(sockets.filter((s) => wanted.has(s.port) && !parents.has(s.pid)).map((s) => s.pid))];
+  let outside = [
+    ...new Set(sockets.filter((s) => wanted.has(s.port) && !parents.has(s.pid) && ids.byPid.has(s.pid)).map((s) => s.pid)),
+  ];
   if (outside.length > 0) {
     const terminal = await processTree(shell, { exec });
     outside = outside.filter((p) => !terminal.has(p) && p !== shell);
   }
   const states = await processStates([...parents.keys(), ...outside], { exec });
   const procs = new Map();
-  for (const [pid, parent] of parents) {
-    const st = states?.get(pid);
-    const fits = parent === null ? shell === null || st?.ppid === shell : procs.has(parent) && st?.ppid === parent;
-    if (st && !st.zombie && fits) procs.set(pid, { start: st.start, command: null });
-  }
-  const ports = new Set((Array.isArray(recorded) ? recorded : []).filter(validPort));
+  for (const [pid, st] of confirmedSubtree(parents, server, shell, states)) procs.set(pid, { start: st.start, command: null });
+  const ports = new Set(given);
   for (const s of sockets) if (procs.has(s.pid)) ports.add(s.port);
   const listeners = new Map();
   for (const pid of outside) {
     const st = states?.get(pid);
-    if (st && !st.zombie && sockets.some((s) => s.pid === pid && ports.has(s.port))) listeners.set(pid, { start: st.start, command: null });
+    const same = Boolean(st) && !st.zombie && ids.byPid.get(pid).has(st.start);
+    if (same && sockets.some((s) => s.pid === pid && ports.has(s.port))) listeners.set(pid, { start: st.start, command: null });
   }
   const kept = [...procs, ...listeners];
   const commands = kept.length > 0 ? await processCommands(kept.map(([pid]) => pid), { exec }) : null;
@@ -458,16 +567,23 @@ export async function serverLeftovers(snapshot, root, { exec }) {
 // Stops serverLeftovers' finds, each with what runs under it now: SIGTERM
 // once to every process of those trees, up to `graceMs`, SIGKILL to the ones
 // left. A leftover whose tree holds the terminal's shell (`rootPid`) or a
-// `protect`ed pid (the CLI itself) is refused whole. → { pids: every pid
+// `protect`ed pid (the CLI itself), or that hits the walk's bound, is refused
+// whole: never signalled, and the caller counts it as not stopped. Each
+// pid's children are read once (one pgrep per pid, F5): the trees share a
+// cache, and a leftover already inside a tree that is stopped whole adds
+// nothing. `deps.kill` is required (requireKill). → { pids: every pid
 // signalled, killed: those that needed SIGKILL, refused: the leftovers left
 // untouched, survivors: those still alive after the SIGKILL }.
 export async function stopLeftovers({ procs = [], escaped = [] } = {}, rootPid, deps, { graceMs = LEFTOVER_GRACE_MS, protect = [] } = {}) {
+  requireKill(deps, "stopLeftovers");
   const targets = [...new Set([...procs, ...escaped.map((e) => e.pid)])];
   const guard = [rootPid, ...protect].filter(validPid);
+  const childrenOf = cachedChildren(deps);
   const pids = new Set();
   const refused = [];
   for (const pid of targets) {
-    const found = await stoppableTree(pid, deps, guard);
+    if (pids.has(pid)) continue;
+    const found = await stoppableTree(pid, deps, guard, childrenOf);
     if (!found.ok) refused.push(pid);
     else for (const p of found.tree) pids.add(p);
   }
