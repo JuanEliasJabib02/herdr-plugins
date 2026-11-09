@@ -34,7 +34,7 @@ import {
 import { buildTaskTree } from "./task-model.js";
 import {
   badgeTooltip, badgeRun, laneBadgeKey, execFailure, startFailure,
-  badgeLayout, badgeHover, pillStyle, dotStyle, hasReveal, BADGE_MOTION, BADGE_BOX,
+  badgeLayout, badgeHover, pillStyle, dotStyle, hasReveal, badgeLines, rowBar, BADGE_MOTION, BADGE_BOX,
 } from "./badges-model.js";
 import { openNewWorkspace } from "./new-workspace.js";
 import { openProjectMenu } from "./project-menu.js";
@@ -91,6 +91,9 @@ const BADGE_SPIN = 900;
 // A badge's icon, in px; a pill's is smaller (Orca's `size-2.5`).
 const BADGE_ICON = 12;
 const PILL_ICON = 10;
+// Spotlight's D42: the space under a two-line row's second line, in px, so
+// its badges don't touch the row's rounded edge.
+const LINE2_BOTTOM = 2;
 
 // Spotlight's D39: the row the pointer is on, by its element id (`w:<path>`,
 // `t:<lane>`), when that row holds a badge that waits for its hover
@@ -464,15 +467,19 @@ function row(r, t, notes, badges, prs, group) {
 // row's badge room like a workspace row's; No task and Servers never have
 // any (badges-model.js takes no lane key for them). A header holding a
 // badge that waits for its hover (`reveal`, Spotlight's D39: Orca's env
-// pill) tracks its hover; its fold moves the rows below it, not itself.
+// pill) tracks its hover; its fold moves the rows below it, not itself. A
+// header has one line (Spotlight's D42): a badge asking for line 2 joins
+// its end, and it stays 28 px; a badge's `bar` draws at its left edge.
 // `group`: the active group's id; `badges`: the ones published for
 // `<group>/<lane>`.
 function taskRow(l, t, notes, group, badges) {
   const key = noteKeyOf(l.lane);
   const note = noteOf(notes, key);
   const id = `t:${l.lane}`;
-  const layout = badgeLayout(badges, { hovered: hovered === id, measured: badges.map((b) => grown.get(laneBadgeId(l, b)) ?? null) });
-  return h_flex().id(id).h(28).flex_none().px(8).gap(7).items_center().rounded(8)
+  const lines = badgeLines(badges, { lane: true });
+  const layout = lineLayout(lines.line1, id, (b) => laneBadgeId(l, b));
+  const bar = rowBar(badges, t);
+  return h_flex().id(id).relative().h(lines.height).flex_none().px(8).gap(7).items_center().rounded(8)
     .cursor_pointer()
     .hover((s) => s.bg(t.hover))
     .when(hasReveal(badges), (el) => el.on_hover((on, cx) => hoverRow(id, on, cx)))
@@ -485,11 +492,26 @@ function taskRow(l, t, notes, group, badges) {
       cx.stop_propagation(); // or on_click runs too (ClickEvent carries no button)
       openTaskMenu(l.lane, l.label);
     }))
+    .when(Boolean(bar), (el) => el.child(barMark(bar)))
     .child(svg(chrome(l.collapsed ? "chevron-right" : "chevron-down")).size(11).flex_none().text_color(t.dim))
     .child(div().flex_1().min_w(0).truncate().font_semibold().text_color(t.foreground).child(l.label))
     .when(l.collapsed && Boolean(l.status) && l.status !== "idle", (el) => el.child(statusMark(l.status, t)))
-    .when(badges.length > 0, (el) => el.child(badgeStrip(badges, layout, (b) => laneBadgeId(l, b), (b, slot) => laneBadge(group, l, b, slot, t))))
+    .when(lines.line1.length > 0, (el) => el.child(badgeStrip(lines.line1, layout, (b) => laneBadgeId(l, b), (b, slot) => laneBadge(group, l, b, slot, t))))
     .when(l.count > 0, (el) => el.child(div().flex_none().text_size(11.5).text_color(t.dim).child(String(l.count))));
+}
+
+// One line of a row's badges laid out (badgeLayout, its own BADGE_ROOM,
+// Spotlight's D42), with the row's hover (`rowId`, the row's element id)
+// and each grow badge's width as last drawn (`idOf(b)`, its element id).
+function lineLayout(list, rowId, idOf) {
+  return badgeLayout(list, { hovered: hovered === rowId, measured: list.map((b) => grown.get(idOf(b)) ?? null) });
+}
+
+// A row's bar (rowBar, Spotlight's D42: Orca's amber root bar), at its left
+// edge, inset top and bottom, rounded; in a `relative()` row. It has no id
+// and no handler, so it takes no hover or click.
+function barMark(bar) {
+  return div().absolute().left(0).top(bar.inset).bottom(bar.inset).w(bar.width).rounded(bar.width / 2).bg(bar.color);
 }
 
 // The element ids of a badge on a lane header and on a workspace row: its
@@ -604,10 +626,16 @@ function projectRow(p, t) {
 // a badge that waits for its hover (`reveal`, Spotlight's D39) tracks its
 // hover. When the row runs out of width, the label gives way first, then
 // (Task mode) the project name; the badges' strip never shrinks (its text
-// badges are already cut to their share, badgeLayout).
+// badges are already cut to their share, badgeLayout). As Orca's card
+// (Spotlight's D42): a badge asking for line 2 goes on a second line under
+// the label, at the row's right, with its own badge room, and the row grows
+// to 42 px (badgeLines); a badge's `bar` draws at the row's left edge. The
+// row's hover, click and highlight cover both lines.
 function workspaceRow(w, t, badges, pr) {
   const id = `w:${w.path}`;
-  const layout = badgeLayout(badges, { hovered: hovered === id, measured: badges.map((b) => grown.get(badgeId(w, b)) ?? null) });
+  const lines = badgeLines(badges);
+  const layout = lineLayout(lines.line1, id, (b) => badgeId(w, b));
+  const bar = rowBar(badges, t);
   const busy = Boolean(w.status) && w.status !== "idle";
   const moon = w.asleep && !busy;
   const shown = !busy && !moon && !w.main && pr ? pr : null;
@@ -615,7 +643,7 @@ function workspaceRow(w, t, badges, pr) {
   const lead = busy ? statusMark(w.status, t)
     : moon ? div().id(`m:${w.path}`).flex_none().tooltip("Sleeping").child(svg(icon("moon")).size(13).text_color(t.dim))
     : svg(icon(w.main ? "home" : "branch")).size(13).flex_none().text_color(tone);
-  return h_flex().id(id).h(28).flex_none().pl(26).pr(8).gap(8).items_center().rounded(8)
+  return v_flex().id(id).relative().h(lines.height).flex_none().pl(26).pr(8).rounded(8)
     .cursor_pointer()
     .when(w.selected, (el) => el.bg(t.selected))
     .when(!w.selected, (el) => el.hover((s) => s.bg(t.hover)))
@@ -627,16 +655,22 @@ function workspaceRow(w, t, badges, pr) {
       cx.stop_propagation();
       openWorkspaceMenu(w.project, w.path);
     })
-    .child(h_flex().id(`lead:${w.path}`).w(14).flex_none().items_center().justify_center()
-      .when(Boolean(shown), (el) => el.tooltip(prLabel(shown)))
-      .child(lead))
-    .child(div().flex_1().min_w(0).truncate().text_color(w.asleep ? t.dim : w.open ? t.foreground : t.muted).child(w.label))
-    .when(moon && w.main, (el) => el.child(svg(icon("home")).size(12).flex_none().text_color(t.dim)))
-    .when(badges.length > 0, (el) => el.child(badgeStrip(badges, layout, (b) => badgeId(w, b), (b, slot) => badge(w, b, slot, t))))
-    // Task mode: no project row above names it (Orca's project label). It
-    // gives way after the label (D39).
-    .when(Boolean(w.projectName), (el) => el.child(div().flex_shrink(1).min_w(0).max_w(110).truncate().text_size(11.5).text_color(t.dim).child(w.projectName)))
-    .when(w.open && !w.asleep, (el) => el.child(div().size(6).flex_none().rounded(3).bg(w.selected ? t.accent : t.muted)));
+    .when(Boolean(bar), (el) => el.child(barMark(bar)))
+    // Line 1: what the row always had. It takes the height line 2 leaves.
+    .child(h_flex().flex_1().min_h(0).gap(8).items_center()
+      .child(h_flex().id(`lead:${w.path}`).w(14).flex_none().items_center().justify_center()
+        .when(Boolean(shown), (el) => el.tooltip(prLabel(shown)))
+        .child(lead))
+      .child(div().flex_1().min_w(0).truncate().text_color(w.asleep ? t.dim : w.open ? t.foreground : t.muted).child(w.label))
+      .when(moon && w.main, (el) => el.child(svg(icon("home")).size(12).flex_none().text_color(t.dim)))
+      .when(lines.line1.length > 0, (el) => el.child(badgeStrip(lines.line1, layout, (b) => badgeId(w, b), (b, slot) => badge(w, b, slot, t))))
+      // Task mode: no project row above names it (Orca's project label). It
+      // gives way after the label (D39).
+      .when(Boolean(w.projectName), (el) => el.child(div().flex_shrink(1).min_w(0).max_w(110).truncate().text_size(11.5).text_color(t.dim).child(w.projectName)))
+      .when(w.open && !w.asleep, (el) => el.child(div().size(6).flex_none().rounded(3).bg(w.selected ? t.accent : t.muted))))
+    // Line 2 (Orca's details row): its badges at the row's right.
+    .when(lines.line2.length > 0, (el) => el.child(h_flex().h(BADGE_BOX).flex_none().justify_end().items_center().mb(LINE2_BOTTOM)
+      .child(badgeStrip(lines.line2, lineLayout(lines.line2, id, (b) => badgeId(w, b)), (b) => badgeId(w, b), (b, slot) => badge(w, b, slot, t)))));
 }
 
 // Another plugin's badge on a workspace row (D38), drawn as Orca's button
@@ -644,7 +678,9 @@ function workspaceRow(w, t, badges, pr) {
 // right-click opens the workspace menu, as on the row, and never runs the
 // action. With an action, a click runs it while the badge shows
 // (`slot.clickable`: a reveal badge at opacity 0 does nothing) and never
-// also opens the workspace; without one, a click is the row's.
+// also opens the workspace; without one, a click is the row's. A disabled
+// badge (Spotlight's D42, which has no action) is inert: its click does
+// nothing, the row's neither, as Orca's disabled button.
 function badge(w, b, slot, t) {
   const tip = badgeTooltip(b);
   const id = badgeId(w, b);
@@ -657,7 +693,8 @@ function badge(w, b, slot, t) {
     .when(Boolean(b.action), (el) => el.on_mouse_down("left", () => armBadge(id, slot)).on_click((_e, cx) => {
       cx.stop_propagation(); // like the project's "+": the row doesn't open the workspace too
       if (clickRuns(id, slot)) runBadge({ path: w.path }, b, cx);
-    }));
+    }))
+    .when(Boolean(b.disabled), (el) => el.on_click((_e, cx) => cx.stop_propagation()));
 }
 
 // A press on a badge (D39): it arms the click when the badge shows. GPUI
@@ -714,10 +751,13 @@ function measure(id, width, cx) {
 // (`slot.maxW`) with "…", a pill never cut. With an action, its hover shows
 // the chip and lifts a dim icon (badgeHover; at once: Herdr's transition
 // can't move colors), and the pointer shows while it can be clicked. A pill
-// gets its border, fill and uppercase 10 px text (pillStyle); the server dot
-// sits at the icon's corner or after the text (dotStyle); a "hover" reveal
-// fades its opacity at BADGE_MOTION (a "grow" one fades in badgeStrip's
-// clip). A badge with no icon draws no icon slot.
+// gets its border, fill and uppercase 10 px text (pillStyle); a look pill
+// (Spotlight's D42: Orca's secondary and outline badges) keeps its text's
+// case and has round ends. The server dot sits at the icon's corner or
+// after the text (dotStyle); a "hover" reveal fades its opacity at
+// BADGE_MOTION (a "grow" one fades in badgeStrip's clip). A disabled badge
+// (D42) is drawn at its layout's half opacity, with the default cursor over
+// it, not its row's pointer. A badge with no icon draws no icon slot.
 function badgeButton(id, b, slot, t) {
   const hover = badgeHover(b, t);
   const pill = pillStyle(b, t);
@@ -733,15 +773,17 @@ function badgeButton(id, b, slot, t) {
     .when(Boolean(pill), (el) => el.gap(2).px(pill.px).border(1).border_color(pill.border)
       .when(pill.weight === "medium", (e) => e.font_medium())
       .when(pill.weight === "semibold", (e) => e.font_semibold())
-      .when(Boolean(pill.bg), (e) => e.bg(pill.bg)))
+      .when(Boolean(pill.bg), (e) => e.bg(pill.bg))
+      .when(Boolean(pill.radius), (e) => e.rounded(pill.radius)))
     .when(Boolean(hover), (el) => el.hover((s) => s.bg(hover.bg).text_color(hover.color)))
     .when(Boolean(b.action) && slot.clickable, (el) => el.cursor_pointer())
-    .when(b.reveal === "hover", (el) => el.opacity(slot.opacity).transition("opacity", BADGE_MOTION))
+    .when(Boolean(b.disabled), (el) => el.cursor_default())
+    .when(b.reveal === "hover" || (Boolean(b.disabled) && b.reveal !== "grow"), (el) => el.opacity(slot.opacity).transition("opacity", BADGE_MOTION))
     .when(Boolean(b.icon), (el) => el.child(corner && !iconOnly
       ? h_flex().relative().flex_none().child(badgeIcon(b, BADGE_ICON)).child(dotMark(dot).absolute().bottom(-1).right(-1))
       : badgeIcon(b, pill ? PILL_ICON : BADGE_ICON)))
     .when(corner && iconOnly, (el) => el.child(dotMark(dot).absolute().bottom(-1).right(-1)))
-    .when(Boolean(b.text), (el) => el.child(div().min_w(0).truncate().child(pill ? b.text.toUpperCase() : b.text)))
+    .when(Boolean(b.text), (el) => el.child(div().min_w(0).truncate().child(pill && !pill.keepCase ? b.text.toUpperCase() : b.text)))
     .when(dot?.place === "after", (el) => el.child(dotMark(dot).when(Boolean(pill), (d) => d.ml(2))));
 }
 

@@ -27,7 +27,8 @@ across repos.
   - Project rows: 28 px with rounded 8 corners. Each has a chevron (collapse),
     a folder icon, the repo name in `foreground` semibold, and a "+" (New
     workspace) that brightens on hover.
-  - Workspace rows: 28 px, indented 26 px.
+  - Workspace rows: 28 px, indented 26 px; 42 px when another plugin's
+    badge asks for a second line (see Badges from other plugins).
     - Leading icon: the agent's status mark while one of its spaces is
       working, blocked or done; otherwise a moon when the workspace is
       asleep, a home icon on the main checkout and a branch icon on the
@@ -768,7 +769,7 @@ contract a publisher codes against.
   - A value that isn't an object (`null`, a string, a list) is no badges.
   - A path or lane whose value isn't a list draws nothing there.
 - **A badge:** `{ icon?, text?, tone?, tooltip?, action?, spin?, reveal?,
-  pill?, dot?, hover? }`.
+  pill?, dot?, hover?, bar?, line?, disabled?, look? }`.
   - `icon`: an SVG under Herdr's home (`~/.config/herdr-app`),
     `mods/<mod>/…/<name>.svg` at any depth, with no `..`, empty segment or
     backslash. Drawn 12 px (10 px in a pill), tinted: draw it with
@@ -810,6 +811,33 @@ contract a publisher codes against.
     instead of its own (Orca's X: `dim`, amber on hover, so `"tone": "dim",
     "hover": "working"`). Only a badge with an action has a hover look.
     Anything but a tone is dropped alone.
+  - `bar`: a tone (as `tone`): the row draws Orca's bar at its left edge,
+    3 px wide, inset 4 px top and bottom, rounded, in that tone's color
+    (Orca's amber root bar: `"bar": "working"`), on a workspace row or a
+    lane header. The row's first badge carrying one wins, in key order; a
+    badge the limits drop gives none. Anything but a tone is dropped alone.
+  - `line`: `2` puts the badge on a second line under the workspace row's
+    label, at the row's right (Orca's details row, its port label); a row
+    with one grows from 28 to 42 px, the others stay 28. A lane header has
+    one line: its line-2 badges join the end of it and it stays 28 px.
+    Absent: the first line. Anything else (`1` included) is dropped alone.
+  - `disabled`: `true` draws the badge at 50 % opacity (Orca's disabled
+    button), inert: no hover look, the default cursor, a click does
+    nothing (on a workspace row the row doesn't open either), and its
+    hover shows the tooltip without "· runs …". Publish it with no
+    `action`, so an older reader draws it inert too; one that comes with an
+    action loses it. `false` or absent: enabled. Any other value is dropped
+    alone.
+  - `look`: `"secondary"` or `"outline"`, beside `pill: true` (Orca's
+    Badge variants, its test-turn badge): the text in its own case, 10 px
+    medium, 6 px each side, round ends, colored by the look whatever the
+    tone. `"secondary"` is filled and neutral: the foreground text on the
+    foreground at 10 %, which still shows on a hovered row. `"outline"` is
+    outlined and dim: the theme's border, no fill, the `dim` text. With an
+    action, its hover shows a neutral chip (the foreground at 15 %) and
+    lifts the text to the foreground, or both take the `hover` tone.
+    Without `look`, `pill: true` is the uppercase pill above. A look
+    without `pill: true`, or any other value, is dropped alone.
   - A badge needs an icon or a text; one with neither is dropped. A text
     with no icon is a text badge: just the text in its tone, with no icon
     slot (Orca's port label, its env pill).
@@ -845,7 +873,8 @@ contract a publisher codes against.
     titled with the program's name: stderr's first line, else "exited with
     code N". While a badge's program runs, more clicks on it are ignored.
 - **Limits:** at most 4 badges per plugin on a row, and 5 per row in all,
-  in key order; the rest aren't drawn. A lane header is a row of its own,
+  in key order, both lines counted: a `line: 2` badge takes a place like
+  any other. The rest aren't drawn. A lane header is a row of its own,
   with the same limits. The cap leaves a place; the row's width may run
   out first (see Drawing).
 - **Drawing:** after the workspace row's label, in Project and Task modes,
@@ -854,6 +883,15 @@ contract a publisher codes against.
   the task's buttons), before its count, folded or not. The icon, then the
   text (11.5 px), in the tone's color, 4 px apart. Drawn as Orca's sidebar
   buttons:
+  - Lines: a workspace row draws its line-1 badges after its label, and
+    its line-2 badges on a second line under it, at the row's right,
+    16 px tall, 2 px above the row's bottom edge; the row is 42 px then.
+    The row's hover, click, highlight and its reveal badges' hover cover
+    both lines. A lane header draws all its badges on its one line.
+  - The bar (`bar`) sits at the row's left edge, under nothing it covers,
+    and takes no hover or click.
+  - A disabled badge is drawn at 50 % opacity (a `reveal` one: 0 until its
+    row is hovered, then 50 %), with the default cursor and no hover look.
   - A badge with an action is a 16 px tall rounded button (4 px corners;
     one with text gets 4 px on each side), and the pointer shows over it.
     On hover a chip shows behind it: the `working` tone at 10 % (Orca's
@@ -863,15 +901,14 @@ contract a publisher codes against.
     take the badge's `hover` tone). Colors change at once: Herdr's
     transitions move only opacity, width, height, left and top. A badge
     without an action has no hover look.
-  - Widths: a pill is never cut. An icon-only badge takes 16 px. The text
-    badges share what is left of 128 px after the icon-only badges and the
-    4 px gaps (a text badge up to 72 px; five text badges up to 22 px
-    each), and a long text ends in "…". When the row runs out of width,
-    its name gives way first, then, in Task mode, the project name drawn
-    after the badges (up to 110 px); the badges never shrink. A lit
-    Spotlight root (its pill, port, logs icon and X, about 170 px) leaves
-    the name a few px in Project mode, and the name and the project name
-    about 48 px between them in Task mode.
+  - Widths: a pill is never cut. An icon-only badge takes 16 px. Each
+    line's text badges share what is left of that line's own 128 px after
+    its icon-only badges and the 4 px gaps (a text badge up to 72 px; five
+    text badges up to 22 px each), and a long text ends in "…". When line
+    1 runs out of width, the row's name gives way first, then, in Task
+    mode, the project name drawn after the badges (up to 110 px); the
+    badges never shrink. A badge moved to line 2 gives its room on line 1
+    back to the name (Spotlight's lit root puts its port there).
   - The hover shows the tooltip, then what a click runs: "· runs
     <argv[0]>" or "· <command>".
 - **Clicks:** on a workspace row, a click runs the action and doesn't open
@@ -881,15 +918,22 @@ contract a publisher codes against.
   badge without an action swallows the click (it doesn't fold the lane
   either); a right-click opens the task menu, as on the header, and never
   runs the action. On either row, a `reveal` badge pressed while it
-  doesn't show (its row not hovered) does nothing on its click.
+  doesn't show (its row not hovered) does nothing on its click. A
+  `disabled` badge does nothing on a click: on a workspace row the row
+  doesn't open, on a lane header the lane doesn't fold.
 - **Lifetime:** the format only grows; a breaking change gets a new key
-  (e.g. `badges.spotlight.v2`). Lane keys, `spin`, `reveal`, `pill`, `dot`
-  and `hover` were added this way: an older projects-sidebar drops a lane
-  key (it isn't absolute), ignores the other fields (a `reveal` badge then
-  always shows, a pill is plain text, no dot) and draws the rest, at most
-  3 per plugin and 4 per row. A publisher clears its own paths and lanes,
-  and its key (`setShared(key, null)`), when they no longer apply: a stale
-  badge stays until it does.
+  (e.g. `badges.spotlight.v2`). Lane keys, `spin`, `reveal`, `pill`, `dot`,
+  `hover`, `bar`, `line`, `disabled` and `look` were added this way: an
+  older projects-sidebar drops a lane key (it isn't absolute), ignores the
+  other fields and draws the rest: a `reveal` badge then always shows, a
+  pill is plain text, no dot, no bar; a `line: 2` badge stays on the one
+  line, in its place, and the row stays 28 px; a `disabled` badge,
+  published with no action, draws at full opacity and clicks like its row;
+  a pill with a `look` draws as the uppercase pill of its tone (so publish
+  it `dim`). The oldest ones draw at most 3 per plugin and 4 per row. A
+  publisher clears its own paths and lanes, and its key
+  (`setShared(key, null)`), when they no longer apply: a stale badge stays
+  until it does.
 - **Example:** this `badges.spotlight` value draws a "live" badge in the
   `working` color on one workspace. Its hover reads "Spotlight is on · runs
   /usr/local/bin/spotlight", and a click runs that program with the three
@@ -935,10 +979,10 @@ contract a publisher codes against.
   ```
 
 - **Example, Orca's look:** on a project's main checkout, this value draws
-  an amber "SPOTLIGHT" pill with a filled dot after its text, then
-  ":3000" in the dim color, then an X that shows only while the row is
-  hovered, dim and amber on hover. A click on the X while it is hidden does
-  nothing:
+  the amber bar at the row's left, an amber "SPOTLIGHT" pill with a filled
+  dot after its text, then an X that shows only while the row is hovered,
+  at half opacity and inert (a turn-off in progress); under the label, at
+  the row's right, ":3000" in the dim color. The row is 42 px:
 
   ```json
   {
@@ -949,19 +993,31 @@ contract a publisher codes against.
         "tone": "working",
         "pill": true,
         "dot": "on",
+        "bar": "working",
         "tooltip": "The root mirrors login.",
         "action": { "exec": ["/usr/local/bin/spotlight", "peek", "--repo", "/Users/you/code/app"] }
       },
-      { "text": ":3000", "tone": "dim", "action": { "command": "spotlight.server.app" } },
+      { "text": ":3000", "tone": "dim", "line": 2, "action": { "command": "spotlight.server.app" } },
       {
         "icon": "mods/spotlight/icons/x.svg",
         "tone": "dim",
         "hover": "working",
         "reveal": "hover",
-        "tooltip": "Turn off Spotlight and restore the root",
-        "action": { "exec": ["/usr/local/bin/spotlight", "toggle", "--workspace", "/Users/you/code/app"] }
+        "disabled": true,
+        "tooltip": "Turning Spotlight off…"
       }
     ]
+  }
+  ```
+
+- **Example, a lane's queue:** in group `g1`, this value draws Orca's
+  "Probando" badge (filled, neutral) on the AX-3653 lane's header, and on
+  AX-3700's an outlined, dim "En cola #2", both in their own case:
+
+  ```json
+  {
+    "g1/task:AX-3653": [{ "text": "Probando", "pill": true, "look": "secondary" }],
+    "g1/task:AX-3700": [{ "text": "En cola #2", "tone": "dim", "pill": true, "look": "outline" }]
   }
   ```
 
