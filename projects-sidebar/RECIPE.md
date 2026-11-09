@@ -1073,6 +1073,73 @@ items. This section is the contract a publisher codes against.
   }
   ```
 
+**Remove hooks from other plugins**
+
+Other plugins can run a program before a workspace is deleted or a project
+leaves the list, the Spotlight plugin first (Orca turns Spotlight off before
+it removes a worktree or a repo). This plugin knows none of them: it reads
+what they publish, runs it, then goes on with its own work. This section is
+the contract a publisher codes against.
+
+- **Keys:** `removeHooks.spotlight`, read in that order (`config.js`
+  `REMOVE_HOOK_KEYS`). As with badges and menu items: a plugin writes only
+  its own key, with `setShared(key, value)`, each write replaces the whole
+  value, and adding a plugin is one line in that list.
+- **Value:** `{ workspace?: argv, project?: argv }`, at most one hook of each
+  kind per plugin.
+  - `workspace`: runs before a workspace is deleted (Delete…, and each
+    workspace of Delete task…).
+  - `project`: runs before a project leaves the list (Remove from list).
+  - An argv is a badge's `exec` (see Badges from other plugins):
+    `[program, ...args]`, 1 to 20 strings of at most 500 characters each, no
+    NUL; the program an absolute path or a bare name looked up on Herdr's
+    PATH, never a relative one.
+  - `{path}`: an argument that is exactly `"{path}"` becomes the path, as one
+    argument, absolute and without a trailing slash: the workspace's folder
+    for `workspace`, the project's main checkout for `project`. It replaces a
+    whole argument, never a substring (`--at={path}` stays as written), and
+    never the program.
+  - A bad argv is dropped alone and the plugin's other one is kept. Unknown
+    fields are ignored. A value that isn't an object is no hooks.
+- **When:**
+  - Delete: once Delete is confirmed and git's check passes again (a delete
+    the check stops runs no hook), before the workspace's spaces close; then
+    the spaces close, git removes the worktree and its branch. Delete task:
+    the same for each of its workspaces, one after another, each running the
+    hooks just before its own spaces close; a workspace the run skips (the
+    plugin was reloaded) runs none.
+  - Remove from list: the menu closes, the hooks run, then the project
+    leaves the list (its files, worktrees and spaces stay, as before). It
+    stays in the list while they run.
+  - A delete can still fail after your hook ran (a space that won't close,
+    git refusing): what your hook did isn't undone.
+- **Running:** every plugin's hooks of that kind, in key order, one after
+  another, each awaited; through exec, argv only, never a shell, with
+  Herdr's environment, in the home folder (the workspace's folder is about
+  to go), for at most 120 s each (exec's timeout, past which it rejects).
+  What a hook answers is ignored: a non-zero exit, a timeout or a program
+  that can't start shows nothing, and the next hook, then the delete, goes
+  on. A hook never stops a delete.
+  - So finish well under 120 s and report what you did yourself (Spotlight's
+    `teardown` gives up waiting at 80 s, always exits 0, and writes its own
+    note when there is something to recover).
+  - The run belongs to no view: a dialog or menu closed meanwhile doesn't
+    stop it.
+- **Lifetime:** the format only grows; a breaking change gets a new key
+  (e.g. `removeHooks.spotlight.v2`). A publisher clears its key
+  (`setShared(key, null)`) when its hooks no longer apply. An older
+  projects-sidebar ignores the key: its deletes run as before, with no
+  hooks.
+
+  Spotlight's value:
+
+  ```json
+  {
+    "workspace": ["/usr/local/bin/spotlight", "teardown", "--workspace", "{path}"],
+    "project": ["/usr/local/bin/spotlight", "teardown", "--repo", "{path}"]
+  }
+  ```
+
 **Watch out**
 
 - **This mod runs git and reaches the network:** `git fetch origin` in

@@ -5,13 +5,14 @@
 // registry, or notes value, that didn't read back as itself is copied to its
 // backup key before the first write over it. Never write from render().
 // It also reads, and never writes, other plugins' badge keys (config.js
-// BADGE_KEYS, D38) and workspace menu keys (config.js MENU_KEYS, Spotlight's
-// D30).
+// BADGE_KEYS, D38), workspace menu keys (config.js MENU_KEYS, Spotlight's
+// D30) and remove hook keys (config.js REMOVE_HOOK_KEYS, Spotlight's D43).
 
 import { shared, setShared } from "herdr";
-import { BADGE_KEYS, MENU_KEYS } from "./config.js";
+import { BADGE_KEYS, MENU_KEYS, REMOVE_HOOK_KEYS } from "./config.js";
 import { parseBadges } from "./badges-model.js";
 import { parseMenus } from "./menus-model.js";
+import { parseRemoveHooks } from "./remove-workspace-model.js";
 import { parsePrs } from "./pr-model.js";
 import {
   KEYS, changed, normPath,
@@ -167,6 +168,14 @@ export const badges = () => parseBadges(BADGE_KEYS.map((k) => shared(k)));
 // workspace-menu.js reads it when it opens and on every render.
 
 export const menus = () => parseMenus(MENU_KEYS.map((k) => shared(k)));
+
+// ── removeHooks.*: other plugins' remove hooks (Spotlight's D43) ──────────
+// Read only, like menus.*: each key belongs to the plugin that publishes it.
+// { workspace: [argv], project: [argv] }, validated by
+// remove-workspace-model.js parseRemoveHooks; Delete, Delete task and
+// Remove from list read it when they run.
+
+export const removeHooks = () => parseRemoveHooks(REMOVE_HOOK_KEYS.map((k) => shared(k)));
 
 // ── projects.inicio.v1: Inicio's space (workspace-sleep D6) ─────────────────
 // Written only by the keeper (keeper.js), from a spawned task: the id it

@@ -3,7 +3,9 @@
 // group ▸, Remove from list. `move`: the Move to group submenu (the other
 // groups), reopened at the pointer.
 // ↑/↓ move, Enter (→ on Move to group) runs, Esc closes. Remove from list
-// never touches files, worktrees or spaces (D11).
+// never touches files, worktrees or spaces itself (D11): it first runs other
+// plugins' project hooks (Spotlight's D43: Spotlight turns the project's root
+// off), then takes the project off the list.
 
 import { div, svg } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
@@ -11,6 +13,8 @@ import { theme, props, run, openOverlay, closeOverlay, spaces, panes, home } fro
 import { MOD, icon } from "./config.js";
 import { findProject, moveProject, removeProject } from "./lib.js";
 import * as store from "./store.js";
+import { runRemoveHooks } from "./git.js";
+import { removeProjectWith } from "./remove-workspace-model.js";
 import { projectMenuItems, openMainAction, withoutProject } from "./tree-model.js";
 import { openNewWorkspace } from "./new-workspace.js";
 import { openBaseMenu } from "./base-menu.js";
@@ -47,7 +51,8 @@ export default class ProjectMenu {
     closeOverlay(props()?.overlay);
   }
 
-  choose(item) {
+  // `cx`: the click's or the key's, for Remove from list's task.
+  choose(item, cx) {
     if (!item || item.disabled) return;
     const path = this.project;
     this.close();
@@ -69,10 +74,22 @@ export default class ProjectMenu {
       case "move-to":
         store.updateRegistry((r) => moveProject(r, path, item.group));
         break;
-      case "remove":
-        store.updateRegistry((r) => removeProject(r, path));
-        store.saveCache(withoutProject(store.cache(), path));
+      case "remove": {
+        // The project hooks run first (each up to 120 s), then the project
+        // leaves the list, in a task no view owns: this popup has just
+        // closed, and a closed popup's tasks are cancelled after 250 ms.
+        const hooks = store.removeHooks().project;
+        cx.spawn(async () => {
+          await removeProjectWith({ project: path }, {
+            beforeRemove: (p) => runRemoveHooks(hooks, p),
+            remove: (p) => {
+              store.updateRegistry((r) => removeProject(r, p));
+              store.saveCache(withoutProject(store.cache(), p));
+            },
+          });
+        }, { owner: null });
         break;
+      }
     }
   }
 
@@ -82,7 +99,7 @@ export default class ProjectMenu {
     if (!n) return;
     if (e.key === "down") this.at = (this.at + 1) % n;
     else if (e.key === "up") this.at = (this.at + n - 1) % n;
-    else if (e.key === "enter" || (e.key === "right" && list[this.at]?.id === "move")) return this.choose(list[this.at]);
+    else if (e.key === "enter" || (e.key === "right" && list[this.at]?.id === "move")) return this.choose(list[this.at], cx);
     else return;
     cx.notify();
   }
@@ -115,7 +132,7 @@ export default class ProjectMenu {
             .items_center()
             .text_color(it.disabled ? t.dim : t.foreground)
             .when(i === this.at && !it.disabled, (el) => el.bg(t.selected))
-            .when(!it.disabled, (el) => el.cursor_pointer().hover((s) => s.bg(t.hover)).on_click(() => this.choose(it)))
+            .when(!it.disabled, (el) => el.cursor_pointer().hover((s) => s.bg(t.hover)).on_click((_e, cx) => this.choose(it, cx)))
             .child(svg(ICONS[it.id]).size(14).flex_none().text_color(t.muted))
             .child(div().flex_1().min_w(0).truncate().child(it.label))
             .when(it.id === "move", (el) => el.child(svg("mods/workspace-chrome/chevron-right.svg").size(11).flex_none().text_color(t.dim))))));
