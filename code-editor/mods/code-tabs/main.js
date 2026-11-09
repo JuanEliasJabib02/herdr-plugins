@@ -3,8 +3,9 @@
 // Changed from Herdr's version: a file's tab draws its Material icon, its name in
 // italics while it's a preview, and a dot for unsaved changes; its X and a double
 // click go to the file; the panels' buttons left the bar for the panel's own header,
-// drawn by a second copy (`props.view: "panel"`), as in Orca, and the panel's
-// per-space memory knows `explorer`; the look follows the code editor's design.
+// drawn by a second copy (`props.view: "panel"`), as in Orca, and the panel is one
+// for the whole window (Herdr's layout click), with no per-space memory; the look
+// follows the code editor's design.
 // The decisions moved to tabs-model.js so they can be tested. Herdr never updates
 // this copy.
 
@@ -26,7 +27,6 @@ import {
   barToggle,
   openPanel,
   closePanel,
-  syncPanel,
 } from "./tabs-model.js";
 
 function find(node, id) {
@@ -42,12 +42,11 @@ const runAll = (commands) => { for (const [name, args] of commands) run(name, ar
 
 export default class Tabs extends View {
   init(_props, cx) {
-    // The panel's header copy only draws its icons: the memory and the file icons
-    // belong to the bar's copy.
+    // The panel's header copy only draws its icons: the file icons belong to the
+    // bar's copy.
     this.header = props()?.view === "panel";
     if (this.header) return;
     this.pressed = null;
-    this.memory = { panels: JSON.parse(localStorage.getItem("panels") ?? "{}"), space: undefined, pending: null };
     this.icons = null;
     cx.spawn(async (cx) => {
       try {
@@ -57,12 +56,6 @@ export default class Tabs extends View {
         // Every file keeps the plain icon.
       }
     });
-  }
-
-  syncPanel(space, panel, body, enabled) {
-    const { commands, save } = syncPanel(this.memory, { space, panel, body, enabled, at: Date.now() });
-    if (save) localStorage.setItem("panels", JSON.stringify(this.memory.panels));
-    runAll(commands);
   }
 
   // The panel's header: an icon per panel with a bar under the shown one, and the
@@ -131,7 +124,6 @@ export default class Tabs extends View {
       : 10;
     const panel = find(root, "panel"), body = find(root, "panel-body");
     const enabled = enabledPanels(shared("workspace.panels"));
-    this.syncPanel(space, panel, body, enabled);
     const toggle = barToggle(panel);
     return h_flex().size_full().min_w(0).px(10).pl(lightsPadding).gap(3).items_center().bg(t.chrome).border_b(1).border_color(t.border)
       .on_mouse_up("left", () => { this.pressed = null; })

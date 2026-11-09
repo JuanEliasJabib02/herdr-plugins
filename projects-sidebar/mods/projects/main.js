@@ -13,6 +13,11 @@
 //   task-menu         a task lane's right-click menu (Task mode)
 //   task-note         a task's note
 //   delete-task       the Delete task dialog (a task lane's workspaces)
+//   pr                the PR card, above Changes in the right panel (the
+//                     PR of the branch Changes shows)
+//   merge-menu        the card's Mergear ▾ popup (the merge methods)
+//   merge-pr          the Mergear confirm dialog
+//   create-pr         the Crear PR dialog (the card's branch has no PR)
 //   keeper            the status row's 1 px cell: makes Inicio and keeps it
 //                     right after the shown space (workspace-sleep D6, D7).
 //                     The only copy that reads key commands: it runs them
@@ -37,6 +42,9 @@ import TaskMenu from "./task-menu.js";
 import TaskNote from "./task-note.js";
 import DeleteTask from "./delete-task.js";
 import NewWorkspace, { commands as newWorkspaceCommands } from "./new-workspace.js";
+import PrCard from "./pr-card.js";
+import MergePr, { MergeMenu } from "./merge-pr.js";
+import CreatePr from "./create-pr.js";
 import Inicio from "./inicio.js";
 import Keeper, { commands as keeperCommands } from "./keeper.js";
 
@@ -60,12 +68,17 @@ const VIEWS = {
   "task-menu": TaskMenu,
   "task-note": TaskNote,
   "delete-task": DeleteTask,
+  pr: PrCard,
+  "merge-menu": MergeMenu,
+  "merge-pr": MergePr,
+  "create-pr": CreatePr,
 };
 
-// Every key command of the mod ("projects.<name>" in keys.json, or
-// `herdr-app do projects.<name>`), by name. A handler gets { cx, copy }.
-// They all run in the keeper's copy (keeper.js listen), so none may rely on
-// the state of the copy that defines it: only the shared keys and herdr.
+// Every key command of the mod ("projects.<name>" in keys.json, `herdr-app
+// do projects.<name>`, or run() from another copy), by name. A handler gets
+// { cx, copy }. They all run in the keeper's copy (keeper.js listen), so none
+// may rely on the state of the copy that defines it: only the shared keys
+// and herdr.
 const COMMANDS = { ...treeCommands, ...groupsCommands, ...newWorkspaceCommands, ...keeperCommands };
 
 export default class Projects extends View {

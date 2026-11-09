@@ -91,10 +91,11 @@ export function doubleClickCommand(tab, view) {
   return view.preview ? [`${FILE_MOD}.pin-${view.doc}`] : null;
 }
 
-// Which panels are on offer, in the panel's header and the bar's memory. The
-// Explorer always: cmd-l opens it whatever the person picked in Herdr's welcome
-// (its first look leaves an empty list), and a panel not on offer closes at the
-// next change of space. Changes as they picked.
+// Which panels are on offer in the panel's header. The Explorer always: cmd-l
+// opens it whatever the person picked in Herdr's welcome (its first look leaves
+// an empty list), and the header would otherwise lack the icon of the panel it
+// shows. Changes as they picked. Whether the panel is open, and on which child,
+// is Herdr's: a click of the layout, the same in every space, as in Orca.
 export function enabledPanels(chosen) {
   const offersChanges = Array.isArray(chosen) ? chosen.includes("changes") : true;
   return offersChanges ? ["explorer", "changes"] : ["explorer"];
@@ -131,35 +132,4 @@ export function barToggle(panel) {
 // Opening goes back to the child the panel had, if it's still on offer.
 export function openPanel(body, enabled) {
   return showPanel(enabled.includes(body?.active) ? body.active : "explorer");
-}
-
-// The side panel is remembered per space: switching shows that space's choice
-// (closed if it never had one), and opening or closing it records it. Herdr's
-// logic, on a `memory` of { panels: { [spaceId]: panel | null }, space, pending }
-// that it updates; `at` is the time now. Returns the commands to run, and whether
-// `memory.panels` changed and needs saving.
-export function syncPanel(memory, { space, panel, body, enabled, at }) {
-  if (!space || !panel) return { commands: [], save: false };
-  const now = panel.hidden ? null : body?.active ?? null;
-  if (space.id !== memory.space) {
-    const first = memory.space === undefined;
-    memory.space = space.id;
-    memory.pending = null;
-    if (!(first && !(space.id in memory.panels))) {
-      const stored = memory.panels[space.id] ?? null;
-      const want = enabled.includes(stored) ? stored : null;
-      if (want !== now) {
-        memory.pending = { want, until: at + 1000 };
-        return { commands: want ? showPanel(want) : closePanel(), save: false };
-      }
-    }
-  }
-  // Until the restore lands (or something else won), the old state isn't a choice.
-  if (memory.pending) {
-    if (memory.pending.want !== now && at < memory.pending.until) return { commands: [], save: false };
-    memory.pending = null;
-  }
-  if (memory.panels[space.id] === now) return { commands: [], save: false };
-  memory.panels[space.id] = now;
-  return { commands: [], save: true };
 }

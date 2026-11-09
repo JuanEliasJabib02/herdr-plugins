@@ -1,7 +1,7 @@
 // The code-tabs bar's decisions, with no Herdr running: each file is its own tab
 // in the bar with its Material icon (S5, S6), a preview in italics and a dot for
-// unsaved changes (D11), one way to close a file (D18), and an Explorer button
-// whose per-space memory keeps the panel open across spaces (S2).
+// unsaved changes (D11), one way to close a file (D18), and one right panel for
+// the whole window that stays open or closed across spaces (S2).
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
@@ -23,8 +23,8 @@ import {
   barToggle,
   openPanel,
   closePanel,
-  syncPanel,
 } from "../code-editor/mods/code-tabs/tabs-model.js";
+import * as tabsModel from "../code-editor/mods/code-tabs/tabs-model.js";
 
 const repo = fileURLToPath(new URL("..", import.meta.url));
 const plugin = (p) => join(repo, "code-editor", p);
@@ -61,77 +61,19 @@ test("S2: the Explorer is always on offer, whatever Herdr's welcome picked; Chan
   assert.deepEqual(enabledPanels("nonsense"), ["explorer", "changes"]);
 });
 
-const panelState = (active) => ({ panel: { hidden: active === null }, body: { active: active ?? "explorer" } });
-const sync = (memory, spaceId, active, at = 0, chosen = undefined) =>
-  syncPanel(memory, { space: { id: spaceId }, ...panelState(active), enabled: enabledPanels(chosen), at });
-const memoryWith = (panels = {}) => ({ panels, space: undefined, pending: null });
 const SHOW_EXPLORER = [
   ["layout.select", { stack: "panel-body", child: "explorer" }],
   ["layout.show", { id: "panel" }],
 ];
 
-test("S2: switching spaces and back brings an open Explorer back instead of closing it", () => {
-  const memory = memoryWith();
-  assert.deepEqual(sync(memory, "a", "explorer"), { commands: [], save: true });
-  assert.equal(memory.panels.a, "explorer", "opened with cmd-l: remembered for this space");
-
-  assert.deepEqual(sync(memory, "b", "explorer"), { commands: [["layout.hide", { id: "panel" }]], save: false }, "b never had one");
-  sync(memory, "b", null);
-  assert.equal(memory.panels.b, null);
-
-  assert.deepEqual(sync(memory, "a", null), { commands: SHOW_EXPLORER, save: false });
-  assert.deepEqual(sync(memory, "a", "explorer"), { commands: [], save: false }, "the restore landed");
-  assert.equal(memory.panels.a, "explorer");
-});
-
-test("S2: the memory holds with Herdr's welcome having left an empty panel list", () => {
-  const memory = memoryWith({ a: "explorer", b: null });
-  sync(memory, "b", null, 0, []);
-  assert.deepEqual(sync(memory, "a", null, 0, []), { commands: SHOW_EXPLORER, save: false });
-});
-
-test("S2: closing the panel with cmd-l is remembered, and the space comes back closed", () => {
-  const memory = memoryWith({ a: "explorer", b: null });
-  sync(memory, "a", "explorer");
-  assert.deepEqual(sync(memory, "a", null), { commands: [], save: true });
-  assert.equal(memory.panels.a, null);
-  sync(memory, "b", null);
-  assert.deepEqual(sync(memory, "a", null), { commands: [], save: false });
-});
-
-test("stock behavior kept: Changes is remembered per space like the Explorer", () => {
-  const memory = memoryWith({ a: "changes", b: null });
-  sync(memory, "b", null);
-  assert.deepEqual(sync(memory, "a", null), {
-    commands: [["layout.select", { stack: "panel-body", child: "changes" }], ["layout.show", { id: "panel" }]],
-    save: false,
-  });
-});
-
-test("stock behavior kept: a space never seen, at the very first draw, keeps the panel as it is", () => {
-  const memory = memoryWith();
-  assert.deepEqual(sync(memory, "a", null), { commands: [], save: true });
-  assert.equal(memory.panels.a, null);
-});
-
-test("stock behavior kept: until a restore lands or a second passes, the old state isn't taken for a choice", () => {
-  const memory = memoryWith({ a: "explorer", b: null });
-  sync(memory, "b", null, 0);
-  sync(memory, "a", null, 0);
-  assert.deepEqual(sync(memory, "a", null, 500), { commands: [], save: false });
-  assert.equal(memory.panels.a, "explorer");
-  assert.deepEqual(sync(memory, "a", null, 1000), { commands: [], save: true }, "something else won");
-  assert.equal(memory.panels.a, null);
-});
-
-test("stock behavior kept: a stored panel that is no longer on offer closes, and a layout without a panel asks nothing", () => {
-  const memory = memoryWith({ a: "files", b: null });
-  sync(memory, "b", null);
-  assert.deepEqual(sync(memory, "a", null), { commands: [], save: true }, "files is gone: closed is what it wants");
-  const none = memoryWith();
-  assert.deepEqual(syncPanel(none, { space: { id: "a" }, panel: null, body: null, enabled: ["explorer"], at: 0 }), { commands: [], save: false });
-  assert.deepEqual(syncPanel(none, { space: null, panel: {}, body: {}, enabled: ["explorer"], at: 0 }), { commands: [], save: false });
-  assert.equal(none.space, undefined);
+test("S2: the panel is one for the whole window, as in Orca: switching spaces leaves it open or closed, on the panel it showed", () => {
+  // Herdr keeps shown/hidden and the stack's child with the layout's other clicks, one
+  // set for every space and across restarts. The bar remembers nothing per space, so
+  // drawing another space sends nothing that opens, closes or changes the panel.
+  assert.equal(tabsModel.syncPanel, undefined, "no per-space memory to restore from");
+  const main = readFileSync(plugin("mods/code-tabs/main.js"), "utf8");
+  assert.ok(!/syncPanel/.test(main), "the draw doesn't sync the panel to the space");
+  assert.ok(!/localStorage/.test(main), "nothing kept per space");
 });
 
 test("S2: the panel's own header offers Explorer, then Changes when picked, as icons like Orca's", () => {

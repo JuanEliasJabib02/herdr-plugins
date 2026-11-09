@@ -10,6 +10,7 @@
 import { shared, setShared } from "herdr";
 import { BADGE_KEYS } from "./config.js";
 import { parseBadges } from "./badges-model.js";
+import { parsePrs } from "./pr-model.js";
 import {
   KEYS, changed, normPath,
   parseRegistry, registryWrites, parseUi, withCollapsed, withTaskCollapsed, parseCache, parseAgents,
@@ -111,6 +112,30 @@ export const agents = () => parseAgents(shared(KEYS.agents));
 
 export function saveAgents(list) {
   return write(KEYS.agents, parseAgents(list));
+}
+
+// ── projects.prs.v1: the PR of each workspace's branch ─────────────────────
+// Written by the tree copy in the window in front, after asking GitHub
+// (pr-model.js mergePrs), only when a PR changed; read once per render.
+
+export const prs = () => parsePrs(shared(KEYS.prs));
+
+export function savePrs(next) {
+  return write(KEYS.prs, next);
+}
+
+// projects.prs-ask.v1: a round asked for (`projects.refresh-prs`, run by
+// Mergear and Crear PR). Commands run in the keeper's copy (workspace-sleep
+// D7), never the tree's, so the ask waits here for the tree's next tick
+// (tree.js prTick), which stays the only writer of projects.prs.v1. Each ask
+// is larger than the last, even within the same millisecond.
+export const prsAsked = () => {
+  const v = shared(KEYS.prsAsk);
+  return Number.isFinite(v) ? v : 0;
+};
+
+export function askPrs() {
+  setShared(KEYS.prsAsk, Math.max(Date.now(), prsAsked() + 1));
 }
 
 // ── badges.*: other plugins' indicators (D38) ──────────────────────────────

@@ -15,7 +15,7 @@ import {
   parseUi, withCollapsed, withTaskCollapsed, parseCache, parseAgents,
   noteKeyOf, noteOf, normalizeNote, parseNotes, withNote, notesFull, notesWrites,
   resolveProject, parseWorktrees, listCheckouts,
-  matchSpaces, attentionByGroup,
+  matchSpaces, checkoutAt, attentionByGroup,
 } from "../projects-sidebar/mods/projects/lib.js";
 
 // A registry with two groups, built only through the public operations.
@@ -32,7 +32,7 @@ const pathsOf = (r, i) => r.groups[i].projects.map((p) => p.path);
 
 // ── Persisted keys ─────────────────────────────────────────────────────────
 
-test("persisted keys: the four versioned names of D3, plus the registry's backup, the task notes with theirs (D34), and Inicio's space (workspace-sleep D6)", () => {
+test("persisted keys: the four versioned names of D3, plus the registry's backup, the task notes with theirs (D34), the PRs and their asked rounds, and Inicio's space (workspace-sleep D6, D7)", () => {
   assert.deepEqual(KEYS, {
     registry: "projects.v1",
     registryBackup: "projects.v1.backup",
@@ -41,6 +41,8 @@ test("persisted keys: the four versioned names of D3, plus the registry's backup
     agents: "projects.agents.v1",
     notes: "projects.notes.v1",
     notesBackup: "projects.notes.v1.backup",
+    prs: "projects.prs.v1",
+    prsAsk: "projects.prs-ask.v1",
     inicio: "projects.inicio.v1",
   });
 });
@@ -707,6 +709,47 @@ test("match: a space on another machine, or outside every project, matches nothi
   ];
   assert.deepEqual(matchSpaces(cache, spaces, [], HOME), {});
   assert.deepEqual(matchSpaces(undefined, spaces, undefined, HOME), {});
+});
+
+// ── The checkout a folder is in (the PR card, D5) ──────────────────────────
+
+test("checkoutAt: a folder in a workspace gives that checkout, with its project, branch and whether it is the main one", () => {
+  assert.deepEqual(checkoutAt(cache, "/Users/me/orca/workspaces/app/feat/src/lib", HOME), {
+    project: "/Users/me/code/app", path: "/Users/me/orca/workspaces/app/feat", branch: "feat", main: false,
+  });
+  assert.deepEqual(checkoutAt(cache, "/Users/me/code/api", HOME), { project: "/Users/me/code/api", path: "/Users/me/code/api", branch: "main", main: true });
+});
+
+test("checkoutAt: the deepest checkout wins, so a worktree inside the main checkout is the worktree", () => {
+  assert.equal(checkoutAt(cache, "/Users/me/code/app/.worktrees/fix/deep", HOME).path, "/Users/me/code/app/.worktrees/fix");
+  assert.equal(checkoutAt(cache, "/Users/me/code/app/.worktrees", HOME).path, "/Users/me/code/app");
+  assert.equal(checkoutAt(cache, "/Users/me/code/app/src", HOME).main, true);
+});
+
+test("checkoutAt: ~ is expanded and trailing slashes don't matter, on either side", () => {
+  const withSlash = { "/Users/me/code/api/": [{ path: "/Users/me/code/api/", branch: null, main: false }] };
+  assert.equal(checkoutAt(cache, "~/orca/workspaces/app/feat/", HOME).branch, "feat");
+  assert.deepEqual(checkoutAt(withSlash, "/Users/me/code/api", `${HOME}/`), { project: "/Users/me/code/api", path: "/Users/me/code/api", branch: null, main: false });
+});
+
+test("checkoutAt: a folder outside every project, beside one, relative, empty or missing is in none", () => {
+  for (const folder of ["/Users/me/Downloads", "/Users/me/code/api-old", "code/api", "", null, undefined]) {
+    assert.equal(checkoutAt(cache, folder, HOME), null, String(folder));
+  }
+  assert.equal(checkoutAt(undefined, "/Users/me/code/api", HOME), null);
+  assert.equal(checkoutAt({ "/Users/me/code/api": "not a list" }, "/Users/me/code/api", HOME), null);
+});
+
+test("checkoutAt and matchSpaces place a folder in the same checkout: the card and the sidebar never disagree", () => {
+  const folders = [
+    "/Users/me/code/app", "/Users/me/code/app/src", "/Users/me/code/app/.worktrees/fix/a", "~/orca/workspaces/app/feat",
+    "/Users/me/code/api/", "/Users/me/code/api-old", "/Users/me/Downloads",
+  ];
+  for (const folder of folders) {
+    const c = checkoutAt(cache, folder, HOME);
+    const m = matchSpaces(cache, [space("s", folder)], [], HOME).s;
+    assert.deepEqual(c && { project: c.project, path: c.path }, m ?? null, folder);
+  }
 });
 
 // ── Attention dot per group (D9) ───────────────────────────────────────────

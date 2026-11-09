@@ -306,8 +306,9 @@ async function publishedAs(project, branch, git) {
 }
 
 // The GitHub repo origin is, or null: `git remote get-url origin`, and for
-// an ssh host that isn't github.com, the host `ssh -G` says it is.
-async function githubOf(project, io, git) {
+// an ssh host that isn't github.com, the host `ssh -G` says it is. Also
+// pr-model.js's, for the PR of each workspace's branch.
+export async function githubOf(project, io, git) {
   const r = await git(project, GIT.url);
   const url = r.ok ? firstLine(r.out) : "";
   const u = parseRemoteUrl(url);

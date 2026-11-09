@@ -247,7 +247,7 @@ test("tree.js draws a row's badges after its label and runs their actions (D38)"
 
   // render reads the badges once, and the wide tree hands each workspace row its own.
   assert.equal(tree.split("store.badges()").length - 1, 1, "store.badges() is read once, in render");
-  assert.match(body("row"), /workspaceRow\(r, t, badges\[r\.path\] \?\? \[\]\)/);
+  assert.match(body("row"), /workspaceRow\(r, t, badges\[r\.path\] \?\? \[\], prs\[r\.path\] \?\? null\)/);
 
   const row = body("workspaceRow");
   const label = row.indexOf(".child(w.label)");

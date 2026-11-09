@@ -196,10 +196,34 @@
                     },
                     {
                       "id": "changes",
-                      "type": "block",
-                      "content": {
-                        "mod": "changes"
-                      }
+                      "type": "column",
+                      "resizable": false,
+                      "gap": 8,
+                      "children": [
+                        {
+                          "id": "pr-card",
+                          "type": "block",
+                          "size": {
+                            "px": 176
+                          },
+                          "content": {
+                            "mod": "projects",
+                            "props": {
+                              "view": "pr"
+                            }
+                          }
+                        },
+                        {
+                          "id": "changes-diff",
+                          "type": "block",
+                          "size": {
+                            "weight": 1
+                          },
+                          "content": {
+                            "mod": "changes"
+                          }
+                        }
+                      ]
                     }
                   ]
                 }
