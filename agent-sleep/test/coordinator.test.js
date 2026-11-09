@@ -812,6 +812,22 @@ test("full terminals(): no hc get on ticks, and the popup says terminals()", asy
   assert.equal(co.model().debug, "fields: terminals()");
 });
 
+test("terminals() with status_ms null (live Herdr): the Claude's idle clock comes from hc get, and it sleeps", async () => {
+  const { w, co } = setup();
+  w.statusMsNull = true;
+  await at(co, w, NOW);
+  assert.ok(w.calls.some((c) => c[0] === "get" && c[1] === "t1"), "a Claude with no status time is completed");
+  assert.ok(!w.calls.some((c) => c[0] === "get" && c[1] === "t9"), "a shell's null status_ms is complete");
+  assert.match(co.model().debug, /^fields: hc get ×1 /);
+  // Idle since NOW - 60 min (Core's status_ms): due 30 min after the first sighting, not 30 min after each tick.
+  assert.equal(co.model().next, "Next: app in 30 min");
+  await at(co, w, NOW + 10 * MIN);
+  assert.equal(co.model().next, "Next: app in 20 min");
+  await at(co, w, NOW + 30 * MIN);
+  await at(co, w, NOW + 31 * MIN);
+  assert.equal(exits(w).length, 1);
+});
+
 test("summary shape: the child check before a stop asks Core for every terminal's parent", async () => {
   const { w, co } = setup();
   w.summary = true;
