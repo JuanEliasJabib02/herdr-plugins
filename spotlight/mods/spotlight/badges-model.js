@@ -33,6 +33,7 @@ import { portLabel, pickPort, portUrl } from "./ports.js";
 import { positionOf } from "./queue.js";
 import { MOD } from "./board-model.js";
 import { serverDown } from "./server-errors.js";
+import { oneLine } from "./text.js";
 
 export const iconPath = (name) => `mods/${MOD}/icons/${name}.svg`;
 
@@ -43,8 +44,6 @@ const PER_ROW = 3;
 const isObject = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
 const isAbsolute = (p) => typeof p === "string" && p.startsWith("/");
 const baseName = (p) => normRoot(p).split("/").filter(Boolean).pop() ?? p;
-// Text on one line, every run of whitespace one space (the popup's too).
-export const oneLine = (s) => String(s).replace(/\s+/g, " ").trim();
 const cut = (s, max) => {
   const chars = [...s];
   return chars.length <= max ? s : `${chars.slice(0, max - 1).join("")}…`;

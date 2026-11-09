@@ -323,11 +323,11 @@ test("a server error under a root error: the popup follows the root error on top
   }
 });
 
-// F9: one oneLine, badges-model's.
-test("the popup flattens text with badges-model's oneLine, not one of its own", () => {
+// F9, G6: one oneLine, text.js's.
+test("the popup flattens text with text.js's oneLine, not one of its own", () => {
   const src = fs.readFileSync(new URL("../mods/spotlight/server-view-model.js", import.meta.url), "utf8");
   assert.doesNotMatch(src, /const oneLine\s*=/);
-  assert.match(src, /import \{[^}]*\boneLine\b[^}]*\} from "\.\/badges-model\.js";/);
+  assert.match(src, /import \{[^}]*\boneLine\b[^}]*\} from "\.\/text\.js";/);
 });
 
 // T2 (live test): the popup showed the error twice, a red "Spotlight: <msg>"

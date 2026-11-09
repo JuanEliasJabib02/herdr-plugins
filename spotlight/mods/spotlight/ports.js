@@ -1,7 +1,8 @@
 // The listening ports of a repo's Spotlight server (D10). Pure: shared by
-// the mod and the CLI, it imports nothing and reaches lsof, ps and pgrep
-// only through an injected `exec(file, args) → { code, stdout, stderr }` (the
-// shape of Herdr's exec). The server runs in its own hc terminal, so its
+// the mod and the CLI, it imports only text.js and reaches lsof, ps and pgrep
+// only through an injected `exec(file, args[, { env }]) → { code, stdout,
+// stderr }` (the shape of Herdr's exec; the CLI's merges `env` over its own,
+// cli-env.mjs). The server runs in its own hc terminal, so its
 // ports are the TCP listeners of the process tree under that terminal's
 // `pid` (the `zsh -l`): zsh → script → /bin/zsh -c → the dev server and its
 // children. Anything else listening on the machine (a database, another
@@ -10,6 +11,8 @@
 // listeners is (pid and start time, F2), and what a turn-off's Ctrl-C left of
 // the server (D26): lsof, ps and pgrep through the same `exec`, signals only
 // through an injected `kill` (requireKill).
+
+import { oneLine } from "./text.js";
 
 // Every TCP listener on the machine, one field per line (D10): `p<pid>`,
 // `c<command>`, then `f<fd>` + `n<address:port>` per socket.
@@ -136,42 +139,47 @@ export async function processTree(rootPid, { exec }) {
   return new Set((await walkTree(rootPid, { exec })).keys());
 }
 
-// ── Who a pid is (R1, R4) ──────────────────────────────────────────────────
+// ── Who a pid is (R1, R4, G2) ──────────────────────────────────────────────
 // A pid alone can be anyone's by the time it is signalled: a process is the
-// same one only while its start time (`ps -o lstart=`) is. lstart's words
-// follow the locale ("Sun Nov  8 …", "dom  8 nov …"), so it is compared as
-// read, never parsed. A zombie (state Z) has died and only waits for its
-// parent to reap it: kill 0 still answers for it, but it is gone.
+// same one only while its start time (`ps -o lstart=`) is. lstart is printed
+// in the caller's time zone, with words of its locale ("Sun Nov  8 …", "dom
+// 8 nov …"), and an identity is recorded by one process (the reap, `on`) and
+// checked by another (the detached turn-off): every read that records or
+// checks one runs ps with PS_ENV, so all of them print the same string. It
+// is still compared as read, never parsed. A zombie (state Z) has died and
+// only waits for its parent to reap it: kill 0 still answers for it, but it
+// is gone.
+
+// The env of every ps read of a start time: the C locale, UTC (G2; locks.js
+// pins LC_ALL=C the same way for its own lstart).
+export const PS_ENV = Object.freeze({ LC_ALL: "C", TZ: "UTC" });
 
 // `ps` for the parent, state and start time of `pids`; lstart goes last, so
 // whatever its words, the rest of the line is it.
 export const psStatesArgv = (pids) => ["ps", "-o", "pid=,ppid=,stat=,lstart=", "-p", pids.join(",")];
 
-// A start time in the one form it is compared in: as ps printed it, runs of
-// spaces folded, trimmed ("Sun Nov  8 …" → "Sun Nov 8 …").
-export const foldStart = (start) => String(start ?? "").replace(/\s+/g, " ").trim();
-
-// psStatesArgv's output → Map pid → { ppid, zombie, start } (start folded).
+// psStatesArgv's output → Map pid → { ppid, zombie, start } (start on one
+// line, its runs of spaces folded: the one form it is compared in).
 export function parsePsStates(text) {
   const out = new Map();
   for (const line of String(text ?? "").split("\n")) {
     const m = /^\s*(\d+)\s+(\d+)\s+(\S+)\s+(\S.*?)\s*$/.exec(line);
     if (!m) continue;
-    out.set(Number(m[1]), { ppid: Number(m[2]), zombie: m[3].startsWith("Z"), start: foldStart(m[4]) });
+    out.set(Number(m[1]), { ppid: Number(m[2]), zombie: m[3].startsWith("Z"), start: oneLine(m[4]) });
   }
   return out;
 }
 
 // psStates of `pids` that ps still lists (a pid it doesn't list is gone);
 // null when ps can't run or fails (can't tell). ps exits 1, saying nothing,
-// when none of them is there.
+// when none of them is there. Run with PS_ENV (G2).
 export async function processStates(pids, { exec }) {
   const list = [...new Set(pids)].filter(validPid);
   if (list.length === 0) return new Map();
   const argv = psStatesArgv(list);
   let r;
   try {
-    r = await exec(argv[0], argv.slice(1));
+    r = await exec(argv[0], argv.slice(1), { env: { ...PS_ENV } });
   } catch {
     return null;
   }
@@ -180,9 +188,38 @@ export async function processStates(pids, { exec }) {
   return parsePsStates(r.stdout);
 }
 
-// A command line on one line, cut to MAX_COMMAND_SHOWN; null when empty.
+// An identity of a server process, as treeListening reads it and the CLI
+// keeps it on the repo's record (`serverProcs`): a valid pid and a start
+// time that is a non-empty string (G8). Anything else names no process.
+export const isIdentity = (p) =>
+  typeof p === "object" && p !== null && validPid(p.pid) && typeof p.start === "string" && oneLine(p.start) !== "";
+
+// The one key of an identity: its pid and its start time on one line, so the
+// start as ps prints it and as treeListening folded it are the same process.
+export const identityKey = (p) => `${p.pid}\u0000${oneLine(p.start)}`;
+
+// The identities of `known` (isIdentity's; the rest is skipped) that no
+// longer run as that process: ps doesn't list the pid, lists it as a zombie,
+// or with another start time (a reused pid). One ps for the whole list
+// (processStates, PS_ENV). → a Set of identityKey; empty when there is
+// nothing to check, or when ps can't run or fails: doubt forgets none (G3).
+export async function goneIdentities(known, { exec } = {}) {
+  const list = (Array.isArray(known) ? known : []).filter(isIdentity);
+  if (list.length === 0) return new Set();
+  const states = await processStates(list.map((p) => p.pid), { exec });
+  if (states === null) return new Set();
+  const gone = new Set();
+  for (const p of list) {
+    const st = states.get(p.pid);
+    if (!st || st.zombie || st.start !== oneLine(p.start)) gone.add(identityKey(p));
+  }
+  return gone;
+}
+
+// A command line on one line (oneLine), cut to MAX_COMMAND_SHOWN; null when
+// empty.
 function shownCommand(text) {
-  const line = String(text ?? "").replace(/\s+/g, " ").trim();
+  const line = oneLine(text);
   if (!line) return null;
   return line.length > MAX_COMMAND_SHOWN ? `${line.slice(0, MAX_COMMAND_SHOWN - 1)}…` : line;
 }
@@ -235,8 +272,8 @@ export async function treePorts(rootPid, { exec }) {
 //           shell), ascending and unique
 //   procs — one identity per listener under `serverPid` (Spotlight's own
 //           `script` in front; null: none): [{ pid, start, port }], `start`
-//           as ps prints it, folded (foldStart): the form serverSnapshot
-//           compares. Sorted by port, then pid.
+//           as ps prints it under PS_ENV, folded (oneLine): the form
+//           serverSnapshot compares. Sorted by port, then pid.
 // Only Spotlight's own server gets identities: never the shell's helpers or a
 // job put in the background there, nor anything when ps can't say or a pid
 // changed hands between the reads (confirmedSubtree). The CLI keeps these
@@ -458,16 +495,17 @@ export function insideRoot(dir, root) {
 
 // stopServer's `procs`, the identities treeListening read while Spotlight's
 // server ran: pid → the start times recorded for it (folded), and the ports
-// they were on. An entry without a valid pid and a start counts for nothing;
-// one without a valid port still names its process.
+// they were on. An entry that isn't an identity (isIdentity: a valid pid and
+// a non-empty string start) counts for nothing; one without a valid port
+// still names its process. These ports are the only place the identities'
+// ports join the turn-off's (G7): the CLI passes only the live ones.
 function knownIdentities(list) {
   const byPid = new Map();
   const ports = new Set();
   for (const p of Array.isArray(list) ? list : []) {
-    const start = typeof p?.start === "string" ? foldStart(p.start) : "";
-    if (!validPid(p?.pid) || !start) continue;
+    if (!isIdentity(p)) continue;
     if (!byPid.has(p.pid)) byPid.set(p.pid, new Set());
-    byPid.get(p.pid).add(start);
+    byPid.get(p.pid).add(oneLine(p.start));
     if (validPort(p.port)) ports.add(p.port);
   }
   return { byPid, ports };

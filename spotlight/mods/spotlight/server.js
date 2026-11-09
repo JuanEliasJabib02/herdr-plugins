@@ -504,9 +504,9 @@ async function stopEscaped({ root, rootPid, ports, procs, logPath, head, termina
 //   { ok: false, reason: "interrupt-failed", terminal, forced: 0, message }
 //     — hc couldn't send the Ctrl-C and, after it, neither hc nor ps showed
 //     anything to kill or proved the server gone
-//   { ok: false, reason: "still-running", terminal, forced, message } — its
-//     processes were killed, but hc still shows Spotlight's old `script` in
-//     front
+//   { ok: false, reason: "still-running", terminal, forced, pid, message } —
+//     its processes were killed, but hc still shows Spotlight's old `script`
+//     (`pid`) in front
 // `deps.kill` (process.kill's shape) is required: without it stopServer
 // throws before it reads or sends anything (F8).
 export async function stopServer({ root, terminal, logPath, serverPid, workspace, branch, ports, procs: known } = {}, deps) {
@@ -559,7 +559,7 @@ export async function stopServer({ root, terminal, logPath, serverPid, workspace
     const after = await inspectUntil(look, deps, (s) => !oldInFront(s, snapshot), PROMPT_MS);
     if (oldInFront(after, snapshot)) {
       const message = `Spotlight's server (pid ${after.pid}) still leads the terminal after it was killed: the server may still be running`;
-      return { ok: false, reason: "still-running", terminal: t, forced, message, ...failed };
+      return { ok: false, reason: "still-running", terminal: t, forced, pid: after.pid, message, ...failed };
     }
   } else if (interruptError && front.kind === "unknown") {
     // No Ctrl-C, no reading of the terminal after it, nothing ps could name:

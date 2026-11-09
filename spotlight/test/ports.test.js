@@ -6,11 +6,17 @@
 // to the lowest port).
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import * as portsMod from "../mods/spotlight/ports.js";
 import {
   LSOF_ARGV, parseLsofListen, processTree, treePorts, pickPort, portLabel, portUrl,
   portListeners, parseLsofCwd, processCwd, processCommand, foreignListener, stopProcessTree, FREE_PORT_GRACE_MS,
   childPids, insideRoot, serverSnapshot, serverLeftovers, stopLeftovers, LEFTOVER_GRACE_MS, validPort,
+  processStates, treeListening,
 } from "../mods/spotlight/ports.js";
+
+// Review r3 helpers, destructured so a missing one fails its own tests only.
+const { goneIdentities, identityKey } = portsMod;
 
 // Recorded from `lsof -nP -iTCP -sTCP:LISTEN -F pcn` on macOS (2026-11-06),
 // pids renumbered: every socket carries an `f` (fd) line, IPv4 and IPv6
@@ -573,4 +579,85 @@ test("F8: stopProcessTree and stopLeftovers need an injected kill: without one t
   await assert.rejects(stopLeftovers({ procs: [900] }, 100, { ...noKill, kill: "process.kill" }), /deps\.kill/);
   assert.deepEqual(w.signals, []);
   assert.deepEqual([...w.alive].sort(), [900, 901]);
+});
+
+// ── Review r3: identities read the same in every process (G2, G3) ──────────
+
+// serverWorld's exec, recording each call's file, args and options.
+function recordingWorld(over) {
+  const w = serverWorld(over);
+  const calls = [];
+  const exec = async (file, args, opts) => {
+    calls.push({ file, args, opts });
+    return w.deps.exec(file, args);
+  };
+  return { w, calls, deps: { ...w.deps, exec } };
+}
+const lstartReads = (calls) => calls.filter((c) => c.file === "ps" && c.args.some((a) => a.includes("lstart")));
+
+test("G2: every ps read that records or checks an identity runs with LC_ALL=C and TZ=UTC", async () => {
+  const { calls, deps } = recordingWorld();
+  await processStates([101, 103], deps);
+  // treeListening records the identities; serverSnapshot and serverLeftovers check them.
+  const found = await treeListening(100, 101, deps);
+  assert.deepEqual(found.procs, [{ pid: 103, start: "Sun Nov 8 10:00:03 2026", port: 3210 }]);
+  const snap = await serverSnapshot({ rootPid: 100, serverPid: 101, ports: [8080], procs: KNOWN }, deps);
+  await serverLeftovers(snap, APP, deps);
+  const reads = lstartReads(calls);
+  assert.ok(reads.length >= 4, `${reads.length} lstart reads`);
+  for (const c of reads) assert.deepEqual(c.opts?.env, { LC_ALL: "C", TZ: "UTC" }, c.args.join(" "));
+});
+
+test("G2: an identity reads the same whatever the caller's TZ and locale: the real ps through the CLI's exec", async () => {
+  const { exec } = await import("../mods/spotlight/cli-env.mjs");
+  const pinned = execFileSync("ps", ["-o", "lstart=", "-p", String(process.pid)], {
+    encoding: "utf8", env: { ...process.env, LC_ALL: "C", TZ: "UTC" },
+  }).replace(/\s+/g, " ").trim();
+  const saved = { TZ: process.env.TZ, LC_ALL: process.env.LC_ALL, LANG: process.env.LANG };
+  try {
+    for (const [tz, lc] of [["Pacific/Kiritimati", "es_ES.UTF-8"], ["America/Bogota", "fr_FR.UTF-8"]]) {
+      Object.assign(process.env, { TZ: tz, LC_ALL: lc, LANG: lc });
+      const states = await processStates([process.pid], { exec });
+      assert.equal(states?.get(process.pid)?.start, pinned, `${tz} ${lc}`);
+    }
+  } finally {
+    for (const [k, v] of Object.entries(saved)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  }
+});
+
+test("G3: goneIdentities names the identities that no longer run as that process, from one ps with the pinned env; doubt forgets none", async () => {
+  const { w, calls, deps } = recordingWorld();
+  w.zombies.add(104);
+  const alive = [
+    { pid: 103, start: "Sun Nov 8 10:00:03 2026", port: 3210 }, // as treeListening folds it
+    { pid: 610, start: "Sun Nov  8 10:00:00 2026", port: 8080 }, // as ps prints it
+  ];
+  const gone = [
+    { pid: 600, start: "Sun Nov 8 09:59:00 2026", port: 8080 }, // its pid runs another process
+    { pid: 640, start: "Sun Nov 8 10:00:00 2026", port: 8080 }, // ps doesn't list it
+    { pid: 104, start: "Sun Nov 8 10:00:03 2026", port: null }, // a zombie
+  ];
+  const junk = [null, { pid: 5 }, { pid: 6, start: 12 }, { pid: 7, start: "  " }, { pid: -1, start: "x" }];
+  const found = await goneIdentities([...alive, ...gone, ...junk], deps);
+  assert.deepEqual([...found].sort(), gone.map(identityKey).sort());
+  // The same start as ps prints it or folded is one identity.
+  assert.equal(identityKey(alive[1]), identityKey({ pid: 610, start: "Sun Nov 8 10:00:00 2026" }));
+  const reads = lstartReads(calls);
+  assert.equal(reads.length, 1, "one ps for the whole list");
+  assert.deepEqual(reads[0].opts?.env, { LC_ALL: "C", TZ: "UTC" });
+  assert.deepEqual(reads[0].args.at(-1).split(",").map(Number).sort((a, b) => a - b), [103, 104, 600, 610, 640]);
+
+  // Nothing to check: no ps at all.
+  calls.length = 0;
+  assert.deepEqual([...(await goneIdentities([], deps))], []);
+  assert.deepEqual([...(await goneIdentities(junk, deps))], []);
+  assert.deepEqual(calls, []);
+  // ps can't run, or fails: nothing is gone.
+  const blind = async (file) => (file === "ps" ? Promise.reject(new Error("spawn ps ENOENT")) : { code: 1, stdout: "", stderr: "" });
+  assert.deepEqual([...(await goneIdentities(gone, { exec: blind }))], []);
+  const failing = async () => ({ code: 2, stdout: "", stderr: "ps: bad" });
+  assert.deepEqual([...(await goneIdentities(gone, { exec: failing }))], []);
 });

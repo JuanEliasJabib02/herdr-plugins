@@ -295,19 +295,35 @@ test("a server error under a root error: the badges show the root error on top",
   assertContract(value);
 });
 
-// F9: one oneLine, exported for the popup.
-test("oneLine flattens whitespace to single spaces", async () => {
-  const { oneLine } = await import("../mods/spotlight/badges-model.js");
+// F9, G6: one oneLine, in text.js, for the mod's models and the CLI's
+// modules alike (ports.js folded ps's start times with a copy of it).
+test("G6: one oneLine (text.js) flattens whitespace to single spaces; the badges, the popup, ports.js and the CLI import it and fold none themselves", async () => {
+  const { oneLine } = await import("../mods/spotlight/text.js");
   assert.equal(oneLine("  a\n\tb   c "), "a b c");
   assert.equal(oneLine(42), "42");
+  assert.equal(oneLine(null), "");
+  assert.equal(oneLine(undefined), "");
+  for (const file of ["badges-model.js", "server-view-model.js", "ports.js", "cli-work.mjs"]) {
+    const src = fs.readFileSync(path.join(MOD_DIR, file), "utf8");
+    assert.match(src, /import \{[^}]*\boneLine\b[^}]*\} from "\.\/text\.js";/, `${file} imports it`);
+    assert.doesNotMatch(src, /\.replace\(\/\\s\+\/g, " "\)/, `${file} folds whitespace itself`);
+  }
 });
 
 // R9: the server errors were spelled three times (the CLI, the badges, the
-// popup); one constant now, which the three import. F3: the turn-off's
-// (server-survived, server-not-stopped) are server errors too.
-test("the server errors (port-busy, server-exited and the turn-off's) are one constant, imported by the CLI, the badges and the popup", async () => {
-  const { SERVER_ERRORS } = await import("../mods/spotlight/server-errors.js");
-  assert.deepEqual([...SERVER_ERRORS].sort(), ["port-busy", "server-exited", "server-not-stopped", "server-survived"]);
+// popup); one constant now, which the three import. G9: the turn-off's
+// (server-survived, server-not-stopped) are never on a record, so they are
+// another set: SERVER_ERRORS drives serverDown, the popup's actions and the
+// record's two-error stack, none of which they reach.
+test("G9: a record's server errors (port-busy, server-exited) are one constant, imported by the CLI, the badges and the popup; the turn-off's are another", async () => {
+  const { SERVER_ERRORS, TURN_OFF_ERRORS, isServerError, serverDown } = await import("../mods/spotlight/server-errors.js");
+  assert.deepEqual([...SERVER_ERRORS].sort(), ["port-busy", "server-exited"]);
+  assert.deepEqual([...(TURN_OFF_ERRORS ?? [])].sort(), ["server-not-stopped", "server-survived"]);
+  for (const code of SERVER_ERRORS) {
+    assert.equal(isServerError({ code }), true, code);
+    assert.equal(serverDown({ serverState: "stopped", lastError: { code } }), true, code);
+  }
+  for (const code of TURN_OFF_ERRORS ?? []) assert.equal(isServerError({ code }), false, code);
   for (const file of ["cli-work.mjs", "badges-model.js", "server-view-model.js"]) {
     const src = fs.readFileSync(path.join(MOD_DIR, file), "utf8");
     assert.match(src, /from "\.\/server-errors\.js";/, `${file} imports it`);

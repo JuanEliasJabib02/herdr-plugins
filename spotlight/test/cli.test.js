@@ -2209,7 +2209,8 @@ test("F7: a start that died under a root error goes under it: the root error sta
     assert.equal(serverError.message, busy);
     assert.equal(state.repos[DS_ROOT].serverState, "stopped");
     const toasts = () => state.notes.filter((n) => n.toast);
-    assert.deepEqual(toasts().map((n) => n.text), [`speaking: ${busy}`], rootError.code);
+    // G10: the toast says the root error goes first.
+    assert.deepEqual(toasts().map((n) => n.text), [`speaking: ${busy} Antes resuelve el root: ${rootError.message}`], rootError.code);
     assert.deepEqual(toasts()[0].action, action, rootError.code);
     // A later `on` still reads it as why, and nothing toasts again.
     const again = await describeServer(cx, cx.store.readState(), DS_MEMBER, DS_KEY);
@@ -2252,7 +2253,7 @@ test("F7: a start a busy port refuses under a root error: port-busy goes under i
   assert.equal(serverError?.code, "port-busy");
   assert.equal(serverError.pid, holder);
   assert.equal(serverError.message, message);
-  assert.deepEqual(state.notes.filter((n) => n.toast).map((n) => n.text), [`busy: ${message}`]);
+  assert.deepEqual(state.notes.filter((n) => n.toast).map((n) => n.text), [`busy: ${message} Antes resuelve el root: ${ROOT_DIVERGED.message}`]);
 });
 
 // ── F1: a restart keeps the processes of the run before ────────────────────

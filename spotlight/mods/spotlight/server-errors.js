@@ -2,17 +2,27 @@
 // shared by the CLI (cli-work.mjs), the badges (badges-model.js) and the
 // server popup (server-view-model.js), so the three never disagree on them.
 // Pure.
+//
+// SERVER_ERRORS, the server errors a record's lastError holds:
 //   port-busy           a process outside the server's terminal held the
 //                       port its start takes (D24), or the server found it
 //                       taken (D25)
 //   server-exited       the server died at start (D25)
-//   server-survived     a turn-off whose server lived through SIGKILL (D26)
-//   server-not-stopped  a turn-off whose server didn't stop for any other
-//                       reason (D26)
 // A sync that goes through leaves them; a start that goes through, or the
-// server coming up to listen, ends them. The turn-off's two leave no record
-// (it is gone with the turn-off): they live in its toast and its exit.
-export const SERVER_ERRORS = new Set(["port-busy", "server-exited", "server-survived", "server-not-stopped"]);
+// server coming up to listen, ends them, and so does a lighting whose server
+// needs no start (cli-work.mjs lightMember, G1). They drive serverDown, the
+// popup's actions, the toasts' popup action and the record's two-error stack
+// below.
+export const SERVER_ERRORS = new Set(["port-busy", "server-exited"]);
+
+// TURN_OFF_ERRORS, a turn-off whose server didn't stop (D26, cli-work.mjs
+// turnOffError):
+//   server-survived     some of it lived through SIGKILL, or was never
+//                       signalled
+//   server-not-stopped  it didn't stop for any other reason
+// Never stored on a record (the record is gone with the turn-off): they live
+// in its toast and its exit, so none of the above ever reads them (G9).
+export const TURN_OFF_ERRORS = new Set(["server-survived", "server-not-stopped"]);
 
 // A server that's not up (state.json's serverState; a record without one
 // reads stopped).
@@ -27,10 +37,11 @@ export function serverDown(record) {
 
 // ── A record's two errors (F6, F7) ─────────────────────────────────────────
 
-// A record's lastError holds one root error and one server error at most.
-// Every other code is a root error: what a git step on the root refused
-// (orca-holds, root-diverged, untracked-collision, git-failed, …) and the
-// reap's orphan-refs. The root error goes on top, with the server error it
+// A record's lastError holds one root error and one server error
+// (SERVER_ERRORS) at most. Every other code is a root error: what a git step
+// on the root refused (orca-holds, root-diverged, untracked-collision,
+// git-failed, …) and the reap's orphan-refs; a turn-off's TURN_OFF_ERRORS
+// never get here. The root error goes on top, with the server error it
 // covers as its `serverError`; the top one is what the popup, the badges,
 // `status` and the harness hook show. Each kind is written and cleared on
 // its own, whatever the other one does, so neither flips the other off:

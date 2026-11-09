@@ -40,7 +40,8 @@ import { normRoot, repoSettings } from "./settings.js";
 import { serverEnvsWithCommand, commandTemplate, isSafeVariant, formatVariant, inferredVariantNote } from "./server-plan.js";
 import { pickPort, portUrl } from "./ports.js";
 import { serverDown } from "./server-errors.js";
-import { errorText, oneLine } from "./badges-model.js";
+import { errorText } from "./badges-model.js";
+import { oneLine } from "./text.js";
 
 const ENV_LABELS = { local: "Local", dev: "Dev", prod: "Prod" };
 // Never orca-holds nor orca-active: forcing can't take a root from Orca (D27).

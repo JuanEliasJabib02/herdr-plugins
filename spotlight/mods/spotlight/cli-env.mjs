@@ -37,10 +37,12 @@ function envMs(name, fallback) {
 // Runs `file args` without a shell: { code, stdout, stderr }. A non-zero exit
 // resolves with its code; a timeout resolves 124. Rejects only when the
 // program can't start (ENOENT): server.js and ports.js read that as "can't
-// tell", never as an answer.
-export function exec(file, args, { timeoutMs = 30_000 } = {}) {
+// tell", never as an answer. `env` is merged over this process's own (ports.js
+// pins ps's locale and time zone with it, G2).
+export function exec(file, args, { timeoutMs = 30_000, env } = {}) {
+  const opts = { encoding: "utf8", maxBuffer: 32 * 1024 * 1024, timeout: timeoutMs, ...(env ? { env: { ...process.env, ...env } } : {}) };
   return new Promise((resolve, reject) => {
-    execFile(file, args, { encoding: "utf8", maxBuffer: 32 * 1024 * 1024, timeout: timeoutMs }, (err, stdout, stderr) => {
+    execFile(file, args, opts, (err, stdout, stderr) => {
       if (!err) return resolve({ code: 0, stdout, stderr });
       if (typeof err.code === "number") return resolve({ code: err.code, stdout, stderr });
       if (err.killed || err.signal) return resolve({ code: 124, stdout, stderr: stderr || `${file} timed out` });

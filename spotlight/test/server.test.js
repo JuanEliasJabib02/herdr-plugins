@@ -1051,7 +1051,7 @@ test("stopServer (F3): an unreadable terminal, or a server still in front after 
       : stale.exec(file, args);
   const r2 = await stopServer({ root: ROOT, terminal: s.terminal, logPath, serverPid: s.pid, ...HEAD }, { ...sd.deps, exec });
   assert.deepEqual(r2, {
-    ok: false, reason: "still-running", terminal: s.terminal, forced: 1,
+    ok: false, reason: "still-running", terminal: s.terminal, forced: 1, pid: s.pid,
     message: `Spotlight's server (pid ${s.pid}) still leads the terminal after it was killed: the server may still be running`,
   });
   assert.deepEqual(sd.signals.map(({ pid, sig }) => [pid, sig]), [[s.pid, "SIGTERM"]]);
