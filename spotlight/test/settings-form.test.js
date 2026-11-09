@@ -1,7 +1,9 @@
 // T9: the settings dialog's pure model (settings-form.js): lanes and repos
 // from projects.v1, the form built from settings.json, and a save that
 // clamps, refuses a command of more than one line, and says when the queue
-// changed so the dialog execs `spotlight reap`.
+// changed so the dialog execs `spotlight reap`. T40 (D47): the switch saved
+// on change (a lit repo turned off first, Apagar igual when refused), each
+// field saved on its own through the CAS, and Orca's help texts.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
@@ -15,12 +17,20 @@ import {
   scriptSuggestions,
   commandPlaceholder,
   NO_START,
-  planSave,
   isLit,
   turnOffArgv,
+  forceTurnOffArgv,
   TURN_OFF_TIMEOUT_MS,
   turnOffOutcome,
-  withEnabledOff,
+  offersForce,
+  afterTurnOff,
+  spotlightSwitch,
+  flipSpotlight,
+  saveChange,
+  fieldText,
+  casWrite,
+  HELP,
+  variantHelp,
 } from "../mods/spotlight/settings-form.js";
 import { parseSettings, defaultSettings, perSpaceLimit, repoSettings } from "../mods/spotlight/settings.js";
 import { detectServerScripts } from "../mods/spotlight/server-plan.js";
@@ -290,100 +300,29 @@ test("a field's placeholder is the command that would run with it empty", () => 
 
 const LIT = (holder) => ({ repos: { "/w/ax-back": { holder, serverState: "listening" } } });
 
-test("a lit repo switched to Apagado: turn it off first, `enabled` unchanged in the first save", () => {
-  const settings = stored({ version: 1, repos: { "/w/ax-back": { enabled: true } } });
-  const form = toForm(settings, { lanes: [], repos: reposOf(REG, settings, []) });
-  form.repos["/w/ax-back"].enabled = false;
-  form.repos["/w/ax-back"].port = "3000";
-  const plan = planSave(settings, form, LIT("/w/ax-back-wt/AX-1"));
-  assert.deepEqual(plan.errors, []);
-  assert.deepEqual(plan.turnOff, [{ root: "/w/ax-back", argv: ["toggle", "--workspace", "/w/ax-back", "--inline"] }]);
-  // Every other field is saved; the switch waits for the turn-off.
-  assert.equal(plan.settings.repos["/w/ax-back"].enabled, true);
-  assert.equal(plan.settings.repos["/w/ax-back"].port, 3000);
-  // A repo with nothing stored (the default) keeps nothing stored.
-  const unset = defaultSettings();
-  const form2 = toForm(unset, { lanes: [], repos: reposOf(REG, unset, []) });
-  form2.repos["/w/ax-back"].enabled = false;
-  const plan2 = planSave(unset, form2, LIT("/w/ax-back-wt/AX-1"));
-  assert.deepEqual(plan2.turnOff.map((t) => t.root), ["/w/ax-back"]);
-  assert.equal("/w/ax-back" in plan2.settings.repos, false);
-});
-
-test("the holder changed since the dialog loaded: the turn-off still names the root", () => {
-  const settings = stored({ version: 1, repos: { "/w/ax-back": { enabled: true } } });
-  const form = toForm(settings, { lanes: [], repos: reposOf(REG, settings, []) });
-  form.repos["/w/ax-back"].enabled = false;
-  const atLoad = planSave(settings, form, LIT("/w/ax-back-wt/AX-1"));
-  const atSave = planSave(settings, form, LIT("/w/ax-back-wt/AX-2"));
-  for (const plan of [atLoad, atSave]) {
-    assert.deepEqual(plan.turnOff[0].argv, ["toggle", "--workspace", "/w/ax-back", "--inline"]);
+test("the turn-off names the root, whoever holds it; lit while state.json has its record", () => {
+  // The holder changed since the dialog loaded: the argv still names the root.
+  for (const state of [LIT("/w/ax-back-wt/AX-1"), LIT("/w/ax-back-wt/AX-2")]) {
+    assert.deepEqual(flipSpotlight("/w/ax-back", true, state).turnOff.argv, ["toggle", "--workspace", "/w/ax-back", "--inline"]);
   }
   assert.deepEqual(turnOffArgv("/w/ax-back/"), ["toggle", "--workspace", "/w/ax-back", "--inline"]);
   assert.equal(TURN_OFF_TIMEOUT_MS, 120000);
-  // The re-read after the first save: still lit only while state.json has its record.
   assert.equal(isLit(LIT("/w/ax-back-wt/AX-2"), "/w/ax-back/"), true);
   assert.equal(isLit({ repos: {} }, "/w/ax-back"), false);
   // state.json unreadable: can't tell, so the CLI is asked (root-is-holder if nothing is lit).
   assert.equal(isLit(null, "/w/ax-back"), true);
 });
 
-test("an unlit repo switched to Apagado just saves enabled: false", () => {
-  const settings = stored({ version: 1, repos: { "/w/ax-back": { enabled: true } } });
-  const form = toForm(settings, { lanes: [], repos: reposOf(REG, settings, []) });
-  form.repos["/w/ax-back"].enabled = false;
-  for (const state of [{ repos: {} }, { repos: { "/w/ax-admin": { holder: "/w/ax-admin-wt/AX-1" } } }]) {
-    const plan = planSave(settings, form, state);
-    assert.deepEqual(plan.turnOff, []);
-    assert.equal(plan.settings.repos["/w/ax-back"].enabled, false);
-  }
-  // state.json unreadable: the turn-off asks the CLI first.
-  assert.deepEqual(planSave(settings, form, null).turnOff.map((t) => t.root), ["/w/ax-back"]);
-});
-
-test("only a switch to Apagado turns off: a lit repo already Apagado, or switched on, doesn't", () => {
-  const off = stored({ version: 1, repos: { "/w/ax-back": { enabled: false } } });
-  const keep = toForm(off, { lanes: [], repos: reposOf(REG, off, []) });
-  assert.deepEqual(planSave(off, keep, LIT("/w/ax-back-wt/AX-1")).turnOff, []);
-  const on = defaultSettings();
-  const form = toForm(on, { lanes: [], repos: reposOf(REG, on, []) });
-  form.repos["/w/ax-back"].enabled = true;
-  const plan = planSave(on, form, LIT("/w/ax-back-wt/AX-1"));
-  assert.deepEqual(plan.turnOff, []);
-  assert.equal(plan.settings.repos["/w/ax-back"].enabled, true);
-});
-
-test("a refused field refuses the whole save, turn-off included", () => {
-  const settings = stored({ version: 1, repos: { "/w/ax-back": { enabled: true } } });
-  const form = toForm(settings, { lanes: [], repos: reposOf(REG, settings, []) });
-  form.repos["/w/ax-back"].enabled = false;
-  form.repos["/w/ax-back"].port = "70000";
-  const plan = planSave(settings, form, LIT("/w/ax-back-wt/AX-1"));
-  assert.equal(plan.settings, null);
-  assert.deepEqual(plan.turnOff, []);
-  assert.deepEqual(plan.errors.map((e) => e.field), ["/w/ax-back:port"]);
-});
-
-test("the turn-off's answer: exit 0 or root-is-holder saves enabled: false", () => {
+test("the turn-off's answer: exit 0 or root-is-holder went off", () => {
   assert.deepEqual(turnOffOutcome({ code: 0, stdout: "Spotlight off in ax-back: root restored.\n", stderr: "" }), { ok: true, message: "" });
-  // Nothing lit any more (the record went between the re-read and the turn-off).
+  // Nothing lit any more (the record went between the read and the turn-off).
   assert.deepEqual(
     turnOffOutcome({ code: 2, stdout: "", stderr: "root-is-holder: the repository root cannot hold the Spotlight: it is the sync target.\n" }),
     { ok: true, message: "" },
   );
-  const first = stored({ version: 1, future: 1, repos: { "/w/ax-back": { enabled: true, port: 3000 }, "/w/ax-admin": { enabled: true } } });
-  const next = withEnabledOff(first, ["/w/ax-back/"]);
-  assert.equal(next.repos["/w/ax-back"].enabled, false);
-  assert.equal(next.repos["/w/ax-back"].port, 3000);
-  assert.equal(next.repos["/w/ax-admin"].enabled, true);
-  assert.equal(next.future, 1);
-  // A repo with no record gets one with just the switch.
-  assert.equal(withEnabledOff(defaultSettings(), ["/w/new"]).repos["/w/new"].enabled, false);
-  // The settings given are left alone.
-  assert.equal(first.repos["/w/ax-back"].enabled, true);
 });
 
-test("a turn-off that fails: enabled stays on, the message is stderr's first line", () => {
+test("a turn-off that fails: the message is stderr's first line", () => {
   const out = turnOffOutcome({
     code: 1,
     stdout: "",
@@ -394,7 +333,239 @@ test("a turn-off that fails: enabled stays on, the message is stderr's first lin
   assert.equal(turnOffOutcome({ code: 1, stdout: "algo\n", stderr: "" }).message, "algo");
   assert.equal(turnOffOutcome({ code: 137, stdout: "", stderr: "" }).message, "salió con código 137");
   assert.deepEqual(turnOffOutcome({ error: new Error("timed out after 120000 ms\nstack") }), { ok: false, message: "timed out after 120000 ms" });
-  // The failed repo's switch isn't written.
-  const first = stored({ version: 1, repos: { "/w/ax-back": { enabled: true } } });
-  assert.equal(withEnabledOff(first, []).repos["/w/ax-back"].enabled, true);
+});
+
+// ── T40 (D47): the switch saved on change, fields on blur or Enter, Orca's help ──
+
+const FACTS_ON = { harness: false, registered: true, gitRepo: true, hasServerCommand: true };
+
+test("Usar Spotlight shows the effective value: an unset repo shows its default", () => {
+  assert.deepEqual(spotlightSwitch({ enabled: null }, FACTS_ON), { on: true, disabled: false, note: "Por defecto: encendido" });
+  assert.deepEqual(spotlightSwitch({ enabled: null }, { ...FACTS_ON, hasServerCommand: false }), {
+    on: false,
+    disabled: false,
+    note: "Por defecto: apagado (sin comando de server)",
+  });
+  // A stored value is what it shows, whatever the default would be.
+  assert.deepEqual(spotlightSwitch({ enabled: false }, FACTS_ON), { on: false, disabled: false, note: "" });
+  assert.deepEqual(spotlightSwitch({ enabled: true }, null), { on: true, disabled: false, note: "" });
+  // While the default is looked up, it can't be flipped (it doesn't know what it shows).
+  assert.deepEqual(spotlightSwitch({ enabled: null }, null), { on: false, disabled: true, note: "Por defecto: …" });
+  // ~/.claude: always off, never flipped.
+  assert.deepEqual(spotlightSwitch({ enabled: true }, { ...FACTS_ON, harness: true }), {
+    on: false,
+    disabled: true,
+    note: "Siempre apagado (~/.claude es el harness en vivo)",
+  });
+});
+
+test("flipping the switch on an unlit repo writes enabled at once", () => {
+  const unset = defaultSettings();
+  // Unset and shown on (its default): the flip writes `enabled: false` at once.
+  const off = flipSpotlight("/w/ax-back/", true, { repos: { "/w/ax-admin": { holder: "/w/ax-admin-wt/AX-1" } } });
+  assert.equal(off.turnOff, null);
+  assert.deepEqual(off.change, { root: "/w/ax-back", field: "enabled", value: false });
+  assert.equal(saveChange(unset, off.change).settings.repos["/w/ax-back"].enabled, false);
+  // Shown off: on at once, even on a lit repo (only off turns off first).
+  const on = flipSpotlight("/w/ax-back", false, LIT("/w/ax-back-wt/AX-1"));
+  assert.equal(on.turnOff, null);
+  const out = saveChange(stored({ version: 1, future: 1, repos: { "/w/ax-back": { enabled: false, port: 3000 } } }), on.change);
+  assert.equal(out.settings.repos["/w/ax-back"].enabled, true);
+  assert.equal(out.settings.repos["/w/ax-back"].port, 3000);
+  assert.equal(out.settings.future, 1);
+  assert.equal(out.needsReap, false);
+  // Nothing to flip while what it shows isn't known.
+  assert.equal(flipSpotlight("/w/ax-back", null, { repos: {} }), null);
+});
+
+test("flipping it off on a lit repo runs the turn-off first; OK writes enabled: false", () => {
+  const settings = stored({ version: 1, repos: { "/w/ax-back": { enabled: true, port: 3000 } } });
+  const flip = flipSpotlight("/w/ax-back", true, LIT("/w/ax-back-wt/AX-1"));
+  assert.deepEqual(flip.turnOff, { root: "/w/ax-back", argv: ["toggle", "--workspace", "/w/ax-back", "--inline"] });
+  // The change waits for the turn-off.
+  assert.deepEqual(flip.change, { root: "/w/ax-back", field: "enabled", value: false });
+  // state.json unreadable: the turn-off asks the CLI first.
+  assert.notEqual(flipSpotlight("/w/ax-back", true, null).turnOff, null);
+  for (const result of [
+    { code: 0, stdout: "Spotlight off in ax-back: root restored.\n", stderr: "" },
+    { code: 2, stdout: "", stderr: "root-is-holder: the repository root cannot hold the Spotlight: it is the sync target.\n" },
+  ]) {
+    const after = afterTurnOff(result);
+    assert.deepEqual(after, { ok: true, message: "", writeOff: true, offerForce: false });
+  }
+  const out = saveChange(settings, flip.change);
+  assert.equal(out.settings.repos["/w/ax-back"].enabled, false);
+  assert.equal(out.settings.repos["/w/ax-back"].port, 3000);
+});
+
+test("a refused turn-off leaves the switch on and offers Apagar igual, which forces and leaves it on", () => {
+  const diverged = { code: 1, stdout: "", stderr: "root-diverged: El root cambió desde que se proyectó.\n" };
+  assert.deepEqual(afterTurnOff(diverged), {
+    ok: false,
+    message: "root-diverged: El root cambió desde que se proyectó.",
+    writeOff: false,
+    offerForce: true,
+  });
+  assert.equal(afterTurnOff({ code: 1, stdout: "", stderr: "untracked-collision: x\n" }).offerForce, true);
+  // A refusal no force fixes (Orca still holds the root, the server survived): no Apagar igual.
+  assert.equal(afterTurnOff({ code: 1, stdout: "", stderr: "orca-holds: Orca tiene el root\n" }).offerForce, false);
+  assert.equal(afterTurnOff({ error: new Error("timed out") }).offerForce, false);
+  assert.equal(offersForce("root-diverged: x"), true);
+  assert.equal(offersForce("server-survived: root-diverged: x"), false);
+  // Apagar igual: the forced turn-off of the root.
+  assert.deepEqual(forceTurnOffArgv("/w/ax-back/"), ["toggle", "--workspace", "/w/ax-back", "--inline", "--force"]);
+  // Whatever it answers, the switch isn't written: it stays on, as Orca's.
+  assert.deepEqual(afterTurnOff({ code: 0, stdout: "", stderr: "" }, { forced: true }), {
+    ok: true,
+    message: "",
+    writeOff: false,
+    offerForce: false,
+  });
+  assert.deepEqual(afterTurnOff(diverged, { forced: true }), {
+    ok: false,
+    message: "root-diverged: El root cambió desde que se proyectó.",
+    writeOff: false,
+    offerForce: false,
+  });
+});
+
+test("a command saves on its own, trimmed; an unchanged one writes nothing", () => {
+  const settings = stored({ version: 1, repos: { "/w/ax-back": { enabled: true, envs: { dev: "pnpm dev" }, extra: 7 } } });
+  const change = { root: "/w/ax-back", field: "envs.local", value: "  pnpm dev:mine  " };
+  const out = saveChange(settings, change);
+  assert.deepEqual(out.errors, []);
+  assert.deepEqual(out.settings.repos["/w/ax-back"], {
+    enabled: true,
+    envs: { local: "pnpm dev:mine", dev: "pnpm dev", prod: null },
+    env: "local",
+    port: null,
+    extra: 7,
+  });
+  assert.equal(out.needsReap, false);
+  // What the field shows once saved: the command as stored.
+  assert.equal(fieldText(out.settings, change), "pnpm dev:mine");
+  // The same value again (Enter, then blur): nothing to write.
+  assert.deepEqual(saveChange(out.settings, change), { settings: null, errors: [], needsReap: false });
+  assert.deepEqual(saveChange(settings, { root: "/w/ax-back", field: "envs.dev", value: "pnpm dev " }).settings, null);
+  // Emptied: back to the detected script.
+  const cleared = saveChange(settings, { root: "/w/ax-back", field: "envs.dev", value: "" });
+  assert.equal(cleared.settings.repos["/w/ax-back"].envs.dev, null);
+  // An unset repo left empty writes no record.
+  assert.equal(saveChange(defaultSettings(), { root: "/w/ax-admin", field: "envs.prod", value: " " }).settings, null);
+  // Two lines are refused, nothing written.
+  assert.deepEqual(saveChange(settings, { root: "/w/ax-back", field: "envs.prod", value: "pnpm i\npnpm dev" }), {
+    settings: null,
+    errors: [{ field: "/w/ax-back:envs.prod", message: "El comando debe ser una sola línea." }],
+    needsReap: false,
+  });
+});
+
+test("the port saves on its own; a bad one is refused, an unchanged one writes nothing", () => {
+  const settings = stored({ version: 1, repos: { "/w/ax-back": { enabled: true, port: 3000 } } });
+  const out = saveChange(settings, { root: "/w/ax-back", field: "port", value: " 4000 " });
+  assert.equal(out.settings.repos["/w/ax-back"].port, 4000);
+  assert.equal(out.settings.repos["/w/ax-back"].enabled, true);
+  assert.equal(fieldText(out.settings, { root: "/w/ax-back", field: "port" }), "4000");
+  assert.equal(saveChange(settings, { root: "/w/ax-back", field: "port", value: "3000" }).settings, null);
+  assert.equal(saveChange(settings, { root: "/w/ax-back", field: "port", value: "" }).settings.repos["/w/ax-back"].port, null);
+  assert.deepEqual(saveChange(settings, { root: "/w/ax-back", field: "port", value: "70000" }).errors, [
+    { field: "/w/ax-back:port", message: "El puerto va de 1 a 65535." },
+  ]);
+  // The env chip saves on its own too.
+  const env = saveChange(settings, { root: "/w/ax-back", field: "env", value: "dev" });
+  assert.equal(env.settings.repos["/w/ax-back"].env, "dev");
+  assert.equal(saveChange(env.settings, { root: "/w/ax-back", field: "env", value: "dev" }).settings, null);
+});
+
+test("queue values save one by one, as before; a queue change asks for the reap", () => {
+  const settings = stored({ version: 1, queue: { cap: 2, later: true } });
+  const cap = saveChange(settings, { queue: "cap", value: "9" });
+  assert.equal(cap.settings.queue.cap, 4);
+  assert.equal(cap.settings.queue.later, true);
+  assert.equal(cap.needsReap, true);
+  assert.equal(fieldText(cap.settings, { queue: "cap" }), "4");
+  // Text that isn't a number keeps the stored value: nothing to write, the field shows it again.
+  assert.deepEqual(saveChange(settings, { queue: "cap", value: "tres" }), { settings: null, errors: [], needsReap: false });
+  assert.equal(fieldText(settings, { queue: "cap" }), "2");
+  const lane = saveChange(settings, { queue: "perSpace", lane: "g-ax", value: "2" });
+  assert.equal(perSpaceLimit(lane.settings, "g-ax"), 2);
+  assert.equal(lane.needsReap, true);
+  assert.equal(fieldText(lane.settings, { queue: "perSpace", lane: "g-ax" }), "2");
+  // A lane at the default isn't written.
+  assert.equal(saveChange(settings, { queue: "perSpace", lane: "g-me", value: "1" }).settings, null);
+  const off = saveChange(settings, { queue: "enabled", value: false });
+  assert.equal(off.settings.queue.enabled, false);
+  assert.equal(off.needsReap, true);
+  assert.equal(saveChange(settings, { queue: "autoResume", value: true }).settings.queue.autoResume, true);
+  assert.equal(saveChange(settings, { queue: "autoResume", value: false }).settings, null);
+});
+
+test("each save goes through the CAS: a stale snapshot reads the file again and applies the change to it", async () => {
+  // Another writer stored ax-admin's switch after the dialog read the file.
+  let file = serializeSettings(stored({ version: 1, repos: { "/w/ax-admin": { enabled: true } } }));
+  const first = { text: serializeSettings(defaultSettings()), settings: defaultSettings() };
+  const writes = [];
+  const io = {
+    read: async () => file,
+    write: async (text, expected) => {
+      if (expected !== file) throw new Error("stale snapshot");
+      writes.push(text);
+      file = text;
+    },
+  };
+  const port = (value) => (s) => saveChange(s, { root: "/w/ax-back", field: "port", value });
+  const r = await casWrite(io, first, port("3000"));
+  assert.equal(r.ok, true);
+  assert.equal(r.wrote, true);
+  assert.equal(writes.length, 1);
+  assert.equal(r.text, file);
+  const now = parseSettings(file).settings;
+  assert.equal(now.repos["/w/ax-back"].port, 3000);
+  assert.equal(now.repos["/w/ax-admin"].enabled, true);
+  assert.deepEqual(r.settings, now);
+  // The same value again: nothing written, the snapshot kept.
+  const same = await casWrite(io, { text: r.text, settings: r.settings }, port("3000"));
+  assert.deepEqual([same.ok, same.wrote, writes.length], [true, false, 1]);
+  // A refused value writes nothing.
+  const bad = await casWrite(io, { text: r.text, settings: r.settings }, port("0"));
+  assert.deepEqual([bad.ok, bad.wrote, bad.errors.map((e) => e.field), writes.length], [false, false, ["/w/ax-back:port"], 1]);
+  // No file yet: created (expected null).
+  let created = null;
+  const fresh = await casWrite(
+    { read: async () => null, write: async (text, expected) => { assert.equal(expected, null); created = text; } },
+    { text: null, settings: defaultSettings() },
+    port("3001"),
+  );
+  assert.equal(fresh.wrote, true);
+  assert.equal(parseSettings(created).settings.repos["/w/ax-back"].port, 3001);
+  // Stale every time: it gives up after three tries.
+  let tries = 0;
+  const busy = await casWrite(
+    { read: async () => file, write: async () => { tries++; throw new Error("stale snapshot"); } },
+    { text: r.text, settings: r.settings },
+    port("3002"),
+  );
+  assert.deepEqual([busy.ok, busy.wrote, tries], [false, false, 3]);
+});
+
+test("the help texts are Orca's, in Spanish; the variant help only when the repo has variants", () => {
+  assert.deepEqual(HELP, {
+    section: "Prueba los cambios de un workspace en el root del proyecto sin duplicar dependencias instaladas ni builds.",
+    logs: "Con Spotlight encendido, la salida de la terminal del server queda en un log que los agentes de cualquier workspace leen con `spotlight logs`.",
+    switchLabel: "Usar Spotlight",
+    switch: "Muestra un botón de Spotlight en los workspaces de este proyecto que refleja sus cambios en el root del proyecto.",
+    serverTitle: "Server",
+    server: "Spotlight corre este comando en la terminal de Spotlight al prenderse y le agrega --port N. Un campo vacío usa el script detectado en package.json. Local usa Dev si no tiene.",
+    portLabel: "Puerto",
+    port: "Se agrega al comando como --port N. Vacío deja el puerto del comando.",
+    portPlaceholder: "Por defecto del comando",
+    forceOff: "Apagar igual",
+  });
+  assert.equal(
+    variantHelp({ detected: {}, scriptCommands: [], variants: ["co", "do"] }),
+    "Este proyecto corre uno de CO, DO a la vez. Escribe {variant} en un comando para correr el de cada tarea: Spotlight lo elige por las apps que cambió la rama de la tarea, o pregunta.",
+  );
+  assert.equal(variantHelp({ detected: {}, scriptCommands: [] }), null);
+  assert.equal(variantHelp({ variants: [] }), null);
+  assert.equal(variantHelp(null), null);
 });
