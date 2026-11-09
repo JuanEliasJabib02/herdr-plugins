@@ -194,10 +194,10 @@ across repos.
     project).
   - A row for each of Orca's shortcuts that has a key here, its key drawn as
     caps (⌘ ⇧ ↑ on macOS): "Create workspace" (`projects.new-workspace`),
-    "Move up workspace" and "Move down workspace" (`space.prev`,
-    `space.next`). A key counts when keys.json binds it in `global`, in the
-    shown layout's section or in `mod:projects`; a layout's key shadows a
-    global one.
+    "Move up workspace" and "Move down workspace" (`projects.space-prev`
+    and `projects.space-next`, else Herdr's `space.prev` and `space.next`).
+    A key counts when keys.json binds it in `global`, in the shown layout's
+    section or in `mod:projects`; a layout's key shadows a global one.
   - No "Star on GitHub".
 
 **How it behaves**
@@ -244,6 +244,19 @@ across repos.
     stays put for 60 s and the keeper logs it once. Nothing is made while
     this computer's spaces load, and without a window (`herdr-app check`)
     the keeper does nothing.
+- **Space keys skip Inicio.** In this layout `cmd-alt-]` and `cmd-alt-[`
+  (`projects.space-next`, `projects.space-prev`) and `ctrl-1`…`ctrl-9`
+  (`projects.space-1`…`projects.space-9`) do what Herdr's `space.next`,
+  `space.prev` and `space.select:N` do, over the space order without
+  Inicio: so they reach the same spaces as before Inicio, whatever is
+  shown. Next and prev wrap at the ends, as Herdr's do. From Inicio they go
+  to the space after or before it. `ctrl-N` past the last space, or a key
+  that would select the shown space, does nothing.
+- **Key commands run in the keeper.** A command reaches one shown copy of
+  the mod only, the first one started, so the keeper, which starts with
+  the window, is the only copy that reads them. Every `projects.*` command
+  works with the sidebar hidden (cmd-b), and `projects.ping` says `view
+  keeper`.
 - **Drag a project row** (Project mode) up or down onto another project row:
   a line marks where it lands, and on release the project moves there within
   its group, remembered. Leaving the list, or a new press anywhere else,
@@ -416,7 +429,7 @@ across repos.
   agents list don't reach it. Herdr's Apache 2.0 license is in the folder.
 - **Mod `mods/projects/`** (`mod.json` `{ "place": "none" }`), one mod in
   views picked by `props.view`:
-  - none = `tree.js` (the tree; the only copy that reads key commands);
+  - none = `tree.js` (the tree);
   - `groups` = `groups.js`;
   - `new-workspace` = `new-workspace.js`;
   - `delete-workspace` = `delete-workspace.js`;
@@ -424,13 +437,16 @@ across repos.
   - `task-menu` = `task-menu.js`, `task-note` = `task-note.js`,
     `delete-task` = `delete-task.js`;
   - `project-menu`, `workspace-menu`, `group-menu`, `group-form`;
-  - `keeper` = `keeper.js` (the status bar's 1 px cell), `inicio` =
-    `inicio.js` (Inicio's view).
+  - `keeper` = `keeper.js` (the status bar's 1 px cell, and the only copy
+    that reads key commands: `main.js` gives it the whole table), `inicio`
+    = `inicio.js` (Inicio's view).
   - Pure logic is in `lib.js`, `tree-model.js`, `task-model.js`,
     `new-workspace-model.js`, `remove-workspace-model.js`,
     `rename-workspace-model.js`, `badges-model.js` and `inicio-model.js`,
     tested with `node --test` (Delete's and Rename's against a real git,
-    Inicio's against a fake Herdr whose commands land a moment later).
+    Inicio's against a fake Herdr whose commands land a moment later). The
+    command loop is tested on the mod's real copies, with `herdr`,
+    `gpui-kit` and `gpui-base` stood in for (`test/inicio-model.test.js`).
   - `store.js` is the only code that touches the shared keys: `projects.v1`
     (groups and projects), `projects.ui.v1` (collapsed), `projects.cache.v1`
     (worktree lists), `projects.agents.v1` (`knownAgents()`),
@@ -445,8 +461,12 @@ across repos.
   - `config.js` holds `MOD`, `WORKTREE_ROOT` (`~/orca/workspaces`) and
     `BADGE_KEYS`.
 - **Commands:** `projects.add`, `projects.add-here`, `projects.new-workspace`,
-  `projects.group1`..`projects.group3`, `projects.ping`. `keys.json` binds
-  F1–F3 in section `layout:projects`.
+  `projects.group1`..`projects.group3`, `projects.ping`,
+  `projects.space-next`, `projects.space-prev`,
+  `projects.space-1`..`projects.space-9`. `keys.json` binds, in section
+  `layout:projects`, F1–F3 to the groups, and `cmd-alt-]`, `cmd-alt-[` and
+  `ctrl-1`…`ctrl-9` to the space commands. All of them run in the keeper's
+  copy.
 - **Herdr functions:** `spaces`, `panes`, `agents`, `focused`,
   `knownAgents`, `layout`, `window`, `machines`, `keys`, `home`,
   `pickFolder`, `watchFolder`, `exec`, `run` (`space.select`, `space.new`,
@@ -585,9 +605,13 @@ against.
   reload before scripting `herdr-app do projects.*`.
 - **Never launch the agent as `env VAR=1 claude`:** Herdr then sees `zsh`,
   not an agent, and shows no status. Use `claude --settings '{"env":{…}}'`.
-- **Merging `keys.json`:** F1–F3 need the plugin's `keys.json` merged into
-  yours. Once edited, your keys.json no longer receives Herdr's new default
-  shortcuts. In this layout, F2 replaces Herdr's `tab.rename`.
+- **Merging `keys.json`:** F1–F3 and the space keys need the plugin's
+  `keys.json` merged into yours. Once edited, your keys.json no longer
+  receives Herdr's new default shortcuts. In this layout, F2 replaces
+  Herdr's `tab.rename`, and `cmd-alt-]`, `cmd-alt-[` and `ctrl-1`…`ctrl-9`
+  replace `space.next`, `space.prev` and `space.select:N`; the installer
+  names each global key the layout's binding shadows. A key you already
+  bind in `layout:projects` keeps your binding.
 - **Delete deletes.** It removes the worktree's folder, its uncommitted
   work after "Delete anyway", and its merged branch. Its spaces close with
   their agents, including an agent session running in that worktree.
@@ -629,8 +653,13 @@ against.
 - **Inicio rests on what Herdr shows after a close:** the space at the
   closed one's place, seen but not documented. If Herdr changes it, the
   keeper still shows Inicio, after a flash of the space Herdr chose.
-- **Inicio counts in the space order.** Herdr's own space keys
-  (`space.next`, `space.prev`, `space.select:N`) land on it.
+- **Inicio counts in the space order** for Herdr's own commands. In this
+  layout the plugin's keys skip it, but `space.next`, `space.prev` and
+  `space.select:N` run any other way (the palette, `herdr-app do`, another
+  layout's keys, a key you bound yourself) land on it.
+- **Commands need the keeper.** In a layout without the keeper's cell, no
+  copy reads `projects.*` commands: keys and `herdr-app do projects.*` do
+  nothing there.
 - **Limits:**
   - Only the first three groups have keys.
   - Branch names have no user prefix and are slugged to 48 characters,
@@ -666,6 +695,11 @@ against.
   smaller, centered chips in the groups bar.
 - With keys.json merged, F1–F3 select groups 1–3 while a terminal has focus,
   and F2 no longer opens Rename tab in this layout.
+- With keys.json merged and Inicio right after the shown space,
+  `cmd-alt-]` and `cmd-alt-[` step through the spaces without ever showing
+  Inicio, and wrap at the ends; `ctrl-1`…`ctrl-9` select the spaces they
+  selected before Inicio existed. With the sidebar hidden (cmd-b), `herdr-app
+  do projects.ping` shows a toast that says `view keeper`.
 - `herdr-app do projects.new-workspace` opens the dialog on the focused
   space's project, with `origin/main` (or the repo's default) marked
   "default".

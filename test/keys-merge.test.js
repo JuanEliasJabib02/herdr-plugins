@@ -1,7 +1,9 @@
 // T4: F1–F3 switch groups through the plugin's keys.json (section
 // layout:projects), merged into the person's keys.json by the installer:
 // missing keys only, never a key they use (warned instead), a backup before
-// the write, and a second run changes nothing.
+// the write, and a second run changes nothing. workspace-sleep T8 (D7, S10):
+// the same section binds Herdr's space keys, cmd-alt-] / cmd-alt-[ and
+// ctrl-1…ctrl-9, to the keeper's projects.space-*, which skip Inicio.
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
@@ -16,6 +18,16 @@ const MERGE = join(repo, "scripts/keys-merge.mjs");
 const INSTALL = join(repo, "scripts/install.sh");
 const PLUGIN_KEYS = join(repo, "projects-sidebar/keys.json");
 const plugin = () => JSON.parse(readFileSync(PLUGIN_KEYS, "utf8"));
+
+// What the plugin binds in layout:projects, in its file's order.
+const GROUP_KEYS = { f1: "projects.group1", f2: "projects.group2", f3: "projects.group3" };
+const SPACE_KEYS = {
+  "cmd-alt-]": "projects.space-next",
+  "cmd-alt-[": "projects.space-prev",
+  ...Object.fromEntries(Array.from({ length: 9 }, (_, i) => [`ctrl-${i + 1}`, `projects.space-${i + 1}`])),
+};
+const PLUGIN_BINDINGS = { ...GROUP_KEYS, ...SPACE_KEYS };
+const addedAll = (keys) => Object.entries(keys).map(([key, action]) => ({ section: "layout:projects", key, action }));
 
 // A person's keys.json shaped like Herdr's own: F2 renames a tab everywhere,
 // control characters escaped, an object action, other layouts and mods.
@@ -46,10 +58,9 @@ const merge = (pluginPath, personPath) => spawnSync(process.execPath, [MERGE, pl
 
 // ── The plugin's keys ──────────────────────────────────────────────────────
 
-test("plugin keys.json: F1–F3 run projects.group1..3, only in layout:projects", () => {
-  assert.deepEqual(plugin(), {
-    "layout:projects": { f1: "projects.group1", f2: "projects.group2", f3: "projects.group3" },
-  });
+test("plugin keys.json: F1–F3 run projects.group1..3 and the space keys run projects.space-*, only in layout:projects", () => {
+  assert.deepEqual(plugin(), { "layout:projects": PLUGIN_BINDINGS });
+  assert.deepEqual(Object.keys(plugin()["layout:projects"]), Object.keys(PLUGIN_BINDINGS), "F1–F3 first, then the space keys");
 });
 
 // ── mergeKeys (pure) ───────────────────────────────────────────────────────
@@ -59,12 +70,8 @@ test("merge adds only the layout:projects section, after the person's sections",
   assert.equal(changed, true);
   assert.deepEqual(Object.keys(keys), [...Object.keys(HERDR), "layout:projects"]);
   for (const section of Object.keys(HERDR)) assert.deepEqual(keys[section], HERDR[section], section);
-  assert.deepEqual(keys["layout:projects"], { f1: "projects.group1", f2: "projects.group2", f3: "projects.group3" });
-  assert.deepEqual(added, [
-    { section: "layout:projects", key: "f1", action: "projects.group1" },
-    { section: "layout:projects", key: "f2", action: "projects.group2" },
-    { section: "layout:projects", key: "f3", action: "projects.group3" },
-  ]);
+  assert.deepEqual(keys["layout:projects"], PLUGIN_BINDINGS);
+  assert.deepEqual(added, addedAll(PLUGIN_BINDINGS), "F1–F3 plus the 11 space keys");
 });
 
 test("merge keeps every other key: F2 still renames tabs outside the projects layout", () => {
@@ -72,7 +79,7 @@ test("merge keeps every other key: F2 still renames tabs outside the projects la
   const { keys } = mergeKeys(HERDR, plugin());
   assert.deepEqual(HERDR, before, "the person's value is not mutated");
   for (const [section, key, action] of bindings(HERDR)) assert.deepEqual(keys[section][key], action, `${section} ${key}`);
-  assert.equal(bindings(keys).length, bindings(HERDR).length + 3);
+  assert.equal(bindings(keys).length, bindings(HERDR).length + 14);
   assert.equal(keys.global.f2, "tab.rename");
   assert.equal(keys.terminal["alt-left"], "send:\u001bb");
 });
@@ -89,8 +96,8 @@ test("merge is idempotent: merging the result again adds nothing", () => {
 test("merge never replaces a key the person uses: it is kept and reported", () => {
   const person = { ...HERDR, "layout:projects": { F2: "space.rename", f3: "projects.group3" } };
   const { keys, added, kept } = mergeKeys(person, plugin());
-  assert.deepEqual(keys["layout:projects"], { F2: "space.rename", f3: "projects.group3", f1: "projects.group1" });
-  assert.deepEqual(added, [{ section: "layout:projects", key: "f1", action: "projects.group1" }]);
+  assert.deepEqual(keys["layout:projects"], { F2: "space.rename", f3: "projects.group3", f1: "projects.group1", ...SPACE_KEYS });
+  assert.deepEqual(added, addedAll({ f1: "projects.group1", ...SPACE_KEYS }));
   assert.deepEqual(kept, [{ section: "layout:projects", key: "F2", theirs: "space.rename", action: "projects.group2" }]);
 });
 
@@ -98,6 +105,15 @@ test("merge reports a layout key that shadows a global one (F2 → tab.rename)",
   const { shadows } = mergeKeys(HERDR, plugin());
   assert.deepEqual(shadows, [{ section: "layout:projects", key: "f2", action: "projects.group2", global: "tab.rename" }]);
   assert.deepEqual(mergeKeys(mergeKeys(HERDR, plugin()).keys, plugin()).shadows, [], "only for keys added now");
+});
+
+test("merge reports the space keys a person's global binds: in the projects layout they run the keeper's instead (D7)", () => {
+  const person = { global: { "cmd-alt-]": "space.next", "ctrl-1": "space.select:1", "cmd-t": "tab.new" } };
+  const { shadows } = mergeKeys(person, plugin());
+  assert.deepEqual(shadows, [
+    { section: "layout:projects", key: "cmd-alt-]", action: "projects.space-next", global: "space.next" },
+    { section: "layout:projects", key: "ctrl-1", action: "projects.space-1", global: "space.select:1" },
+  ]);
 });
 
 test("merge leaves a section that isn't an object alone and reports it", () => {
@@ -232,9 +248,7 @@ test("install: merges the plugin's keys once; a second install changes nothing",
   assert.ok(existsSync(join(home, "mods/projects/main.js")));
   const keys = JSON.parse(readFileSync(join(home, "keys.json"), "utf8"));
   assert.deepEqual(keys["layout:projects"], {
-    f1: "projects.group1",
-    f2: "projects.group2",
-    f3: "projects.group3",
+    ...PLUGIN_BINDINGS,
     // Through projects-sidebar's `requires`.
     "cmd-alt-s": "agent-sleep.sleep-now",
     "cmd-alt-w": "agent-sleep.wake-all",

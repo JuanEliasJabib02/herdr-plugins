@@ -1,7 +1,6 @@
 // Projects: Orca's sidebar for Herdr. One mod in views; the layout and the
 // overlays give each copy props { view }:
-//   (none)            the projects tree, in the layout's Spaces block. The
-//                     only copy that reads key commands: it runs them all.
+//   (none)            the projects tree, in the layout's Spaces block
 //   groups            the groups bar (F1–F3), above the sidebar footer
 //   new-workspace     the New workspace dialog
 //   project-menu      a project's right-click menu
@@ -15,14 +14,16 @@
 //   task-note         a task's note
 //   delete-task       the Delete task dialog (a task lane's workspaces)
 //   keeper            the status row's 1 px cell: makes Inicio and keeps it
-//                     right after the shown space (workspace-sleep D6, D7)
+//                     right after the shown space (workspace-sleep D6, D7).
+//                     The only copy that reads key commands: it runs them
+//                     all, the sidebar shown or not (D7, T0b item 2)
 //   inicio            Inicio, the only pane of Inicio's space: Orca's
 //                     Landing, shown when the shown space closes or sleeps
 // Copies never reach into each other: they share state through store.js
 // (setShared re-renders every copy) and act through herdr commands.
 
 import { View, div } from "gpui-kit";
-import { props, nextCommand } from "herdr";
+import { props } from "herdr";
 import Tree, { commands as treeCommands } from "./tree.js";
 import ProjectMenu from "./project-menu.js";
 import BaseMenu from "./base-menu.js";
@@ -37,7 +38,7 @@ import TaskNote from "./task-note.js";
 import DeleteTask from "./delete-task.js";
 import NewWorkspace, { commands as newWorkspaceCommands } from "./new-workspace.js";
 import Inicio from "./inicio.js";
-import Keeper from "./keeper.js";
+import Keeper, { commands as keeperCommands } from "./keeper.js";
 
 // A copy without a view is the tree. scripts/check-views.sh rewrites this
 // line in a tmp copy, because herdr-app check draws only the default view.
@@ -63,7 +64,9 @@ const VIEWS = {
 
 // Every key command of the mod ("projects.<name>" in keys.json, or
 // `herdr-app do projects.<name>`), by name. A handler gets { cx, copy }.
-const COMMANDS = { ...treeCommands, ...groupsCommands, ...newWorkspaceCommands };
+// They all run in the keeper's copy (keeper.js listen), so none may rely on
+// the state of the copy that defines it: only the shared keys and herdr.
+const COMMANDS = { ...treeCommands, ...groupsCommands, ...newWorkspaceCommands, ...keeperCommands };
 
 export default class Projects extends View {
   init(p, cx) {
@@ -72,24 +75,10 @@ export default class Projects extends View {
     const V = VIEWS[this.name];
     this.view = V ? new V() : null;
     this.view?.init?.(pr, cx);
-    if (this.name === "tree") this.listen(cx);
-  }
-
-  listen(cx) {
-    const copy = Math.random().toString(36).slice(2, 7);
-    cx.spawn(async (cx) => {
-      for (;;) {
-        const c = await nextCommand();
-        const handler = COMMANDS[c];
-        try {
-          if (handler) await handler({ cx, copy });
-          else console.log(`projects: no command "${c}"`);
-        } catch (e) {
-          console.log(`projects: ${c} failed: ${e}`);
-        }
-        cx.notify();
-      }
-    });
+    // One command reaches one shown copy only, the first one started (T0b
+    // item 2): the keeper, in the status row from the window's start, is the
+    // only listener. In a layout without it, no copy reads commands.
+    if (this.name === "keeper") this.view.listen(cx, COMMANDS);
   }
 
   async close(cx) {

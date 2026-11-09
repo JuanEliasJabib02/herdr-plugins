@@ -12,12 +12,18 @@
 // from spawned tasks, never from render() (store.js "Never write from
 // render()"), and without a window it is inert, so `herdr-app check` never
 // makes a space.
+//
+// It is also the mod's only listener (D7, T8): a key command reaches one
+// shown copy only, the first one started (T0b item 2), and this one starts
+// with the window, so every `projects.<name>` runs here, the sidebar shown
+// or not (listen). Its own commands are the space keys, which skip Inicio.
 
 import { div } from "gpui-kit";
-import { run, spaces, panes, home, window, machines } from "herdr";
+import { run, spaces, panes, home, window, machines, nextCommand } from "herdr";
 import * as store from "./store.js";
 import {
   ensureInicio, inicioState, look, shouldSelect, targetIndex, newGuard, canMove, moved, observe, localReady,
+  SPACE_COMMANDS, spaceTarget,
 } from "./inicio-model.js";
 
 // A look this often, besides one each time the copy is drawn (spaces()
@@ -27,6 +33,24 @@ const TICK = 1000;
 const RETRY = 30000;
 
 const log = (line) => console.log(`projects: keeper: ${line}`);
+
+// Inicio's id now, by D6's rule (inicio-model.js inicioState), or null.
+function inicioId(sp, ps) {
+  const st = inicioState({ stored: store.inicio(), spaces: sp, panes: ps });
+  return st.kind === "ok" ? st.space.id : null;
+}
+
+// The space keys (D7, T8): projects.space-next, -prev and -1…-9, which
+// keys.json binds to cmd-alt-] / cmd-alt-[ and ctrl-1…ctrl-9 in the projects
+// layout. Each does what Herdr's own space.next, space.prev or
+// space.select:N does, over the order without Inicio (inicio-model.js
+// spaceTarget), so the keys act as they did before Inicio. A key with
+// nothing to change runs nothing.
+export const commands = Object.fromEntries(SPACE_COMMANDS.map((name) => [name, () => {
+  const sp = spaces();
+  const id = spaceTarget(name, sp, inicioId(sp, panes()));
+  if (id) run("space.select", { id });
+}]));
 
 export default class Keeper {
   init(_props, cx) {
@@ -78,8 +102,7 @@ export default class Keeper {
       sleep: (ms) => cx.sleep(ms),
     };
     const before = spaces();
-    const st = inicioState({ stored: store.inicio(), spaces: before, panes: panes() });
-    let id = st.kind === "ok" ? st.space.id : null;
+    let id = inicioId(before, panes());
     const select = shouldSelect(this.last, look(before), id);
     let shown = false;
     if (!id && Date.now() >= this.retryAt) {
@@ -106,6 +129,31 @@ export default class Keeper {
     if (index === null) return;
     run("space.move", { id, index });
     this.guard = moved(this.guard, index, now);
+  }
+
+  // The mod's command loop, moved here from the tree's copy (D7, T0b item
+  // 2): main.js starts it in this copy only, with `commands`, the mod's
+  // table (main.js COMMANDS), so no other copy waits on nextCommand(). A
+  // handler gets { cx, copy } and keeps no copy's state: it reads and writes
+  // the shared keys (store.js), which the tree's copy draws, and acts
+  // through herdr. Not tied to a window, as the look is: a command only
+  // comes from one, and a window that shows up later finds it listening.
+  listen(cx, commands) {
+    const copy = Math.random().toString(36).slice(2, 7);
+    cx.spawn(async (cx) => {
+      for (;;) {
+        const c = await nextCommand();
+        // Only the table's own names: "toString" is no command.
+        const handler = Object.hasOwn(commands, c) ? commands[c] : null;
+        try {
+          if (handler) await handler({ cx, copy });
+          else console.log(`projects: no command "${c}"`);
+        } catch (e) {
+          console.log(`projects: ${c} failed: ${e}`);
+        }
+        cx.notify();
+      }
+    });
   }
 
   // Drawn again whenever spaces() changes: a look right away, from a task.

@@ -4,8 +4,14 @@
 // the next sleep (so every id has to be read back from spaces()); where the
 // keeper puts Inicio, when it selects it, and the guards on its moves; what
 // the Inicio view says.
+//
+// T8: the space keys over the order without Inicio, and the keeper as the
+// mod's only listener (T0b item 2), run against the mod's real copies
+// (main.js) with herdr, gpui-kit and gpui-base faked.
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync, readdirSync } from "node:fs";
+import { registerHooks } from "node:module";
 import { matchSpaces } from "../projects-sidebar/mods/projects/lib.js";
 import { spacesToClose } from "../projects-sidebar/mods/projects/remove-workspace-model.js";
 import { spaceRenames } from "../projects-sidebar/mods/projects/tree-model.js";
@@ -13,7 +19,45 @@ import {
   INICIO_NAME, parseInicio, inicioValue, validInicio, inicioState, spaceNewArgs, ensureInicio,
   look, shouldSelect, targetIndex, newGuard, canMove, moved, observe, reordered,
   MOVE_WAIT, BUDGET_WINDOW, BUDGET_PAUSE, localReady, keyCaps, landing,
+  SPACE_COMMANDS, spaceTarget,
 } from "../projects-sidebar/mods/projects/inicio-model.js";
+
+// ── The mod's copies, with herdr faked (T8) ────────────────────────────────
+// main.js and every view import herdr, gpui-kit and gpui-base, which only
+// Herdr provides. These stand-ins export exactly the names the mod's files
+// import (read from their sources, so a new import needs no edit here):
+// each herdr function forwards to `fake`, the world a test sets up; gpui's
+// are inert, since nothing here draws. Registered, and main.js loaded,
+// before any test() (code-explorer-ops.test.js).
+const MOD_DIR = new URL("../projects-sidebar/mods/projects/", import.meta.url);
+const MOD_FILES = readdirSync(MOD_DIR).filter((f) => f.endsWith(".js"));
+const modSource = (f) => readFileSync(new URL(f, MOD_DIR), "utf8");
+function importedFrom(spec) {
+  const names = new Set();
+  for (const f of MOD_FILES) {
+    for (const m of modSource(f).matchAll(new RegExp(`import\\s*\\{([^}]*)\\}\\s*from\\s*"${spec}"`, "g"))) {
+      for (const part of m[1].split(",")) {
+        const name = part.trim().split(/\s+as\s+/)[0];
+        if (name) names.add(name);
+      }
+    }
+  }
+  return [...names];
+}
+const INERT = `const inert = new Proxy(function () {}, { get: (_, k) => (k === "then" ? undefined : inert), apply: () => inert, construct: () => inert });`;
+const gpui = (spec) => [INERT, ...importedFrom(spec).map((n) => (n === "View" ? "export class View {}" : `export const ${n} = inert;`))].join("\n");
+const FAKES = {
+  herdr: importedFrom("herdr").map((n) => `export const ${n} = (...a) => globalThis.__projectsHerdr(${JSON.stringify(n)}, a);`).join("\n"),
+  "gpui-kit": gpui("gpui-kit"),
+  "gpui-base": gpui("gpui-base"),
+};
+registerHooks({
+  resolve: (spec, ctx, next) => (Object.hasOwn(FAKES, spec) ? { url: `fake:${spec}`, shortCircuit: true } : next(spec, ctx)),
+  load: (url, ctx, next) => (url.startsWith("fake:") ? { format: "module", source: FAKES[url.slice(5)], shortCircuit: true } : next(url, ctx)),
+});
+let fake = {};
+globalThis.__projectsHerdr = (name, args) => (fake[name] ? fake[name](...args) : undefined);
+const { default: Projects } = await import("../projects-sidebar/mods/projects/main.js");
 
 const HOME = "/Users/demo";
 const WT = "/Users/demo/orca/workspaces/app/feat-login";
@@ -506,4 +550,235 @@ test("key caps: macOS glyphs, words elsewhere, a minus key kept", () => {
   assert.deepEqual(keyCaps("f2", "macos"), ["F2"]);
   assert.deepEqual(keyCaps("ctrl-shift-n", "linux"), ["Ctrl", "Shift", "N"]);
   assert.deepEqual(keyCaps("alt-enter", null), ["Alt", "Enter"]);
+});
+
+// ── Space keys skip Inicio (D7, T8, S10) ───────────────────────────────────
+
+// Spaces in this order, `shown` shown; "ini" is Inicio.
+const ordered = (ids, shown) => ids.map((id) => (id === "ini" ? inicio() : space(id))).map((s) => ({ ...s, active: s.id === shown }));
+const keyOn = (command, ids, shown) => spaceTarget(command, ordered(ids, shown), "ini");
+
+test("space keys: the eleven commands keys.json binds (cmd-alt-] / cmd-alt-[, ctrl-1…ctrl-9)", () => {
+  assert.deepEqual(SPACE_COMMANDS, ["space-next", "space-prev", ...Array.from({ length: 9 }, (_, i) => `space-${i + 1}`)]);
+});
+
+test("space keys: next and prev from every position skip Inicio, and wrap at the ends as Herdr's do (T0b item 3)", () => {
+  // Inicio right after b, as the keeper keeps it. shown → [next, prev].
+  const want = { a: ["b", "c"], b: ["c", "a"], c: ["a", "b"], ini: ["c", "b"] };
+  for (const [shown, [next, prev]] of Object.entries(want)) {
+    assert.equal(keyOn("space-next", ["a", "b", "ini", "c"], shown), next, `next from ${shown}`);
+    assert.equal(keyOn("space-prev", ["a", "b", "ini", "c"], shown), prev, `prev from ${shown}`);
+  }
+  assert.equal(keyOn("space-next", ["a", "b", "ini"], "b"), "a", "the last space wraps to the first, past Inicio at the end");
+  assert.equal(keyOn("space-prev", ["ini", "a", "b"], "a"), "b", "the first space wraps to the last, past Inicio at the start");
+  assert.equal(keyOn("space-next", ["a", "b", "ini"], "ini"), "a", "from Inicio at the end: wraps to the first");
+});
+
+test("space keys act exactly as Herdr's own over the order without Inicio, wherever Inicio sits", () => {
+  const plain = ["a", "b", "c", "d"];
+  for (const shown of plain) {
+    const i = plain.indexOf(shown);
+    for (let at = 0; at <= plain.length; at += 1) {
+      const ids = [...plain.slice(0, at), "ini", ...plain.slice(at)];
+      const where = `${shown} shown, Inicio at ${at + 1}`;
+      // Herdr's: next = index + 1, prev = index - 1, both wrapping; select:N = the Nth.
+      assert.equal(keyOn("space-next", ids, shown), plain[(i + 1) % 4], `next, ${where}`);
+      assert.equal(keyOn("space-prev", ids, shown), plain[(i + 3) % 4], `prev, ${where}`);
+      for (let n = 1; n <= 4; n += 1) assert.equal(keyOn(`space-${n}`, ids, shown), plain[n - 1] === shown ? null : plain[n - 1], `space-${n}, ${where}`);
+    }
+    assert.equal(spaceTarget("space-next", ordered(plain, shown), null), plain[(i + 1) % 4], "no Inicio: Herdr's next");
+  }
+});
+
+test("space-N reaches the Nth space without Inicio, and does nothing past the last", () => {
+  const ids = ["ini", "a", "b", "c"];
+  assert.equal(keyOn("space-1", ids, "c"), "a");
+  assert.equal(keyOn("space-3", ids, "a"), "c");
+  assert.equal(keyOn("space-4", ids, "a"), null, "three spaces besides Inicio");
+  assert.equal(keyOn("space-9", ids, "a"), null);
+  assert.equal(keyOn("space-1", ids, "ini"), "a", "from Inicio too");
+  assert.equal(keyOn("space-2", ["a", "b"], null), "b", "with no space shown");
+});
+
+test("space keys do nothing when nothing would change: the shown space is the only one besides Inicio, only Inicio, none shown, or no such command", () => {
+  for (const c of ["space-next", "space-prev", "space-1"]) assert.equal(keyOn(c, ["a", "ini"], "a"), null, c);
+  for (const c of ["space-next", "space-prev", "space-1"]) assert.equal(keyOn(c, ["ini"], "ini"), null, `only Inicio: ${c}`);
+  assert.equal(keyOn("space-next", ["a", "b"], null), null, "none shown");
+  assert.equal(keyOn("space-prev", [], null), null);
+  for (const c of ["space-0", "space-x", "space-", "next", "space-1.5"]) assert.equal(keyOn(c, ["a", "b"], "a"), null, c);
+});
+
+// ── The keeper is the mod's only listener (D7, T8, T0b item 2) ─────────────
+
+// The fake world the copies see: a registry with two groups, the worktree
+// lists the tree copy writes (projects.cache.v1), Inicio stored and right
+// after the shown space b (so the keeper's own look moves nothing), and the
+// herdr functions that act, recorded.
+const REG2 = {
+  version: 1,
+  groups: [{ id: "g1", name: "Projects", projects: [{ path: "/code/app", name: "app" }] }, { id: "g2", name: "Side", projects: [] }],
+  activeGroup: "g1",
+};
+function world({ spaces: sp, panes: ps, shown = "b" } = {}) {
+  const w = {
+    shared: { "projects.v1": REG2, "projects.cache.v1": CACHE, "projects.inicio.v1": { space: "ini" } },
+    runs: [], toasts: [], overlays: [], picks: [], listens: 0, waiting: [], queued: [],
+  };
+  const all = sp ?? ordered(["a", "b", "ini", "c"], shown);
+  const panesNow = ps ?? [term("a-t1", "/code/a"), term("b-t1", WT), view("ini-m"), term("c-t1", "/code/c")];
+  fake = {
+    props: () => w.props,
+    window: () => w.window,
+    machines: () => [{ name: null, layout: "ready" }],
+    spaces: () => all,
+    panes: () => panesNow,
+    home: () => HOME,
+    focused: () => null,
+    agents: () => [],
+    knownAgents: () => [],
+    keys: () => [],
+    layout: () => null,
+    theme: () => ({}),
+    shared: (k) => w.shared[k],
+    setShared: (k, v) => {
+      w.shared[k] = v;
+      return null;
+    },
+    run: (name, args) => {
+      w.runs.push([name, args]);
+      return null;
+    },
+    notify: (n) => {
+      w.toasts.push(n);
+      return null;
+    },
+    openOverlay: (spec) => {
+      w.overlays.push(spec);
+      return "o1";
+    },
+    pickFolder: async (o) => {
+      w.picks.push(o);
+      return null;
+    },
+    exec: async () => ({ code: 128, stdout: "", stderr: "fatal: not a git repository" }),
+    watchFolder: () => new Promise(() => {}),
+    nextCommand: () => {
+      w.listens += 1;
+      return new Promise((resolve) => (w.queued.length ? resolve(w.queued.shift()) : w.waiting.push(resolve)));
+    },
+  };
+  w.window = { active: true, platform: "macos" };
+  return w;
+}
+
+const settle = async () => {
+  for (let i = 0; i < 10; i += 1) await new Promise(setImmediate);
+};
+
+// A copy of the mod as Herdr starts one: props() set, then init with a cx
+// whose tasks run and whose timers never fire.
+async function copyOf(w, view) {
+  w.props = view ? { view } : null;
+  const cx = { spawn: (fn) => fn(cx)?.catch?.(() => {}), timer: { every() {} }, sleep: () => Promise.resolve(), notify() {} };
+  const c = new Projects();
+  c.init(null, cx);
+  await settle();
+  return c;
+}
+
+// A key command, as Herdr delivers one: to a copy waiting on nextCommand().
+async function send(w, name) {
+  const waiting = w.waiting.shift();
+  if (waiting) waiting(name);
+  else w.queued.push(name);
+  await settle();
+}
+
+const selects = (w) => w.runs.filter(([n]) => n === "space.select").map(([, a]) => a.id);
+
+test("only the keeper copy listens: one command reaches one shown copy only (T0b item 2), so the tree, groups and Inicio copies never wait on nextCommand()", async () => {
+  for (const view of [null, "tree", "groups", "inicio"]) {
+    const w = world();
+    await copyOf(w, view);
+    assert.equal(w.listens, 0, `${view ?? "no view"} doesn't listen`);
+  }
+  const w = world();
+  await copyOf(w, "keeper");
+  assert.equal(w.listens, 1, "the keeper listens");
+  const src = MOD_FILES.filter((f) => /\bnextCommand\(/.test(modSource(f)));
+  assert.deepEqual(src, ["keeper.js"], "no other file of the mod reads commands");
+});
+
+test("the keeper listens without a window too: commands come only from one, and it still acts on nothing on its own", async () => {
+  const w = world();
+  w.window = null;
+  await copyOf(w, "keeper");
+  assert.equal(w.listens, 1);
+  assert.deepEqual(w.runs, [], "inert: no look, no move, no making");
+});
+
+test("every existing projects.* command runs from the keeper copy, the tree copy's state reached through the store", async (t) => {
+  const log = t.mock.method(console, "log", () => {});
+  const w = world();
+  await copyOf(w, "keeper");
+
+  await send(w, "group2");
+  assert.equal(w.shared["projects.v1"].activeGroup, "g2", "F2: the stored registry the tree draws");
+  await send(w, "group1");
+  assert.equal(w.shared["projects.v1"].activeGroup, "g1");
+  await send(w, "group3");
+  assert.equal(w.shared["projects.v1"].activeGroup, "g1", "no third group: nothing");
+
+  await send(w, "new-workspace");
+  assert.deepEqual(w.overlays.map((o) => o.props), [{ view: "new-workspace", project: "/code/app" }],
+    "the shown space's project, from the worktree lists the tree copy stored");
+  assert.equal(w.overlays[0].kind, "dialog", "a centered dialog: where the copy sits doesn't matter");
+
+  await send(w, "add");
+  assert.deepEqual(w.picks, [{ prompt: "Add project" }], "the folder picker");
+
+  await send(w, "add-here");
+  assert.deepEqual(w.toasts.at(-1), { title: "Add project", body: "No space is focused.", level: "warning" });
+
+  await send(w, "ping");
+  assert.equal(w.toasts.at(-1).title, "projects: ping");
+  assert.match(w.toasts.at(-1).body, /^view keeper, copy [a-z0-9]+$/, "it says the keeper ran it");
+
+  assert.deepEqual(log.mock.calls.map((c) => c.arguments[0]).filter((l) => /no command|failed/.test(l)), []);
+  await send(w, "nope");
+  assert.ok(log.mock.calls.some((c) => c.arguments[0] === 'projects: no command "nope"'), "an unknown command is logged");
+  await send(w, "ping");
+  assert.equal(w.toasts.filter((n) => n.title === "projects: ping").length, 2, "the loop goes on after it");
+});
+
+test("the space keys run from the keeper copy over the order without Inicio", async () => {
+  const w = world(); // a, b (shown), Inicio, c
+  await copyOf(w, "keeper");
+  assert.deepEqual(w.runs, [], "Inicio already sits right after b");
+  await send(w, "space-next");
+  await send(w, "space-prev");
+  await send(w, "space-3");
+  await send(w, "space-2");
+  await send(w, "space-9");
+  assert.deepEqual(selects(w), ["c", "a", "c"], "next skips Inicio, prev is a, ctrl-3 is c; ctrl-2 is b, already shown, and ctrl-9 is past the last");
+
+  // D6's rule decides what Inicio is: one a terminal took over is an
+  // ordinary space until the keeper gives it back (no window here, so the
+  // keeper's own look stays out of it).
+  const taken = world({ panes: [term("a-t1", "/code/a"), term("b-t1", WT), view("ini-m"), term("ini-m", HOME, 2), term("c-t1", "/code/c")] });
+  taken.window = null;
+  await copyOf(taken, "keeper");
+  await send(taken, "space-next");
+  assert.deepEqual(selects(taken), ["ini"], "a taken-over Inicio is next after b");
+});
+
+test("every projects.* key in keys.json has a command in the keeper", async (t) => {
+  const log = t.mock.method(console, "log", () => {});
+  const keys = JSON.parse(readFileSync(new URL("../projects-sidebar/keys.json", import.meta.url), "utf8"));
+  const actions = Object.values(keys).flatMap((m) => Object.values(m)).filter((a) => typeof a === "string" && a.startsWith("projects."));
+  assert.ok(actions.length >= 14);
+  const w = world();
+  await copyOf(w, "keeper");
+  for (const a of actions) await send(w, a.slice("projects.".length));
+  assert.deepEqual(log.mock.calls.map((c) => c.arguments[0]).filter((l) => /no command|failed/.test(l)), []);
 });

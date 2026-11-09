@@ -7,7 +7,7 @@
 // selects it when the shown space is put away or vanishes. Here: which stored
 // id is Inicio, making it with the herdr side passed in (as tree-model.js
 // addProjectAt), where it goes, when to select it, the guards on its moves,
-// and what the view says.
+// the space keys that skip it, and what the view says.
 
 import { MOD } from "./config.js";
 
@@ -245,6 +245,41 @@ export function targetIndex(spaces, inicio) {
   if (at < 0 || !shown || shown.id === inicio || !local(shown)) return null;
   const index = all.filter((s) => s.id !== inicio).indexOf(shown) + 2;
   return index === at + 1 ? null : index;
+}
+
+// ── Space keys that skip Inicio (D7, T8) ───────────────────────────────────
+
+// The keeper's space commands, `projects.<name>`: keys.json binds Herdr's
+// own space keys to them in the projects layout (cmd-alt-] / cmd-alt-[,
+// ctrl-1…ctrl-9), since Herdr's space.next, space.prev and space.select:N
+// would land on Inicio every other press, and reach different spaces
+// depending on what's shown.
+export const SPACE_COMMANDS = Object.freeze(["space-next", "space-prev", ...Array.from({ length: 9 }, (_, i) => `space-${i + 1}`)]);
+
+// The space a space command selects, over the order without Inicio, so it
+// acts exactly as Herdr's own does when there is no Inicio:
+//   space-next, space-prev  the space after or before the shown one,
+//                           wrapping at the ends as Herdr's do (T0b item
+//                           3). From Inicio itself, the first space after
+//                           or before it;
+//   space-<N>               the Nth space (1-based); nothing past the last.
+// null when nothing changes: the target is the shown space (the only one
+// besides Inicio), no space is shown (next, prev), or the command isn't one.
+// `inicio`: Inicio's id now, or null while there is none.
+export function spaceTarget(command, spaces, inicio) {
+  const all = spaces ?? [];
+  const shown = all.find((s) => s.active)?.id ?? null;
+  const pick = (s) => (s && s.id !== shown ? s.id : null);
+  const nth = /^space-([1-9][0-9]*)$/.exec(command ?? "");
+  if (nth) return pick(all.filter((s) => s.id !== inicio)[Number(nth[1]) - 1]);
+  const dir = command === "space-next" ? 1 : command === "space-prev" ? -1 : 0;
+  const at = all.findIndex((s) => s.id === shown);
+  if (!dir || at < 0) return null;
+  for (let k = 1; k < all.length; k += 1) {
+    const s = all[(((at + dir * k) % all.length) + all.length) % all.length];
+    if (s.id !== inicio) return pick(s);
+  }
+  return null;
 }
 
 // ── Guards on the moves (D7, R1#3) ─────────────────────────────────────────
