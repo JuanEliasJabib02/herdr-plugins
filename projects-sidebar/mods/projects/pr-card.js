@@ -33,8 +33,8 @@
 // copy starts only the first time it shows, so a layout loaded with the
 // block hidden would never start the card: the tree, started fresh on every
 // layout load, shows it (showPrCard) where the card has something to say
-// (cardTarget), trying on its first ticks until it shows, and the card
-// decides again.
+// (cardTarget), trying each tick until it sees the card's copy running
+// (tree.js cardTick), and the card decides again.
 
 import { div, svg } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
@@ -97,11 +97,12 @@ export function cardTarget() {
 
 // J-001, J-010: the card's block shown when Herdr kept it hidden, so the
 // card's copy starts (only a shown copy does) and its place() decides again.
-// The tree runs it on its first ticks (tree.js cardTick), until the block
-// shows after a show. say: whether the card has something to say for the
-// shown space (cardTarget), so a main checkout never flashes. → "missing":
-// the layout has no card block (yet); "shown": it shows, left alone;
-// "hidden": hidden, and left so; "asked": hidden, and layout.show ran.
+// The tree runs it each tick (tree.js cardTick) until the block shows after
+// a show, or shows CARD_SEEN ticks in a row with none run. say: whether the
+// card has something to say for the shown space (cardTarget), so a main
+// checkout never flashes. → "missing": the layout has no card block (yet);
+// "shown": it shows, left alone; "hidden": hidden, and left so; "asked":
+// hidden, and layout.show ran.
 export function showPrCard(say) {
   const node = find(layout(), BLOCK);
   if (!node) return "missing";

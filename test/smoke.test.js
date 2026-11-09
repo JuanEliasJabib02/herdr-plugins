@@ -118,7 +118,7 @@ test("S5: the card shows the workspace of the folder Changes shows, asks one at 
   assert.doesNotMatch(card, /open_url\(/);
 });
 
-test("J-001, J-010: the tree, started fresh on every layout load, shows the card's block when Herdr kept it hidden and the card has something to say, watching every tick until a show it ran is seen shown (at most 5 shows), so the card's copy starts and its own place() decides again, even after a start on a main checkout (D9)", () => {
+test("J-001, J-010: the tree, started fresh on every layout load, shows the card's block when Herdr kept it hidden and the card has something to say, watching every tick until a show it ran is seen shown (at most 5 shows) or the block is seen shown 2 ticks in a row with no show run (J-014: shown at load, the copy runs), so the card's copy starts and its own place() decides again, even after a start on a main checkout (D9)", () => {
   const src = (f) => readFileSync(new URL(`../projects-sidebar/mods/projects/${f}`, import.meta.url), "utf8");
   const card = src("pr-card.js");
   // One rule for where the card has something to say: the card's own, which
@@ -150,8 +150,11 @@ test("J-001, J-010: the tree, started fresh on every layout load, shows the card
   assert.ok(tickAt >= 0, "tree.js runs one try in cardTick");
   const tick = tree.slice(tickAt, tree.indexOf("\n  }\n", tickAt));
   assert.match(tick, /const step = showPrCard\(cardTarget\(\) !== null\);/, "shown only where the card's own rule says it has something to say");
-  assert.match(tick, /if \(step === "asked"\) \{\s+this\.cardAsks\+\+;\s+if \(this\.cardAsks >= CARD_ASKS\) this\.cardDone = true;\s+\}/, "each show counted, at most CARD_ASKS");
-  assert.match(tick, /else if \(step === "shown" && this\.cardAsks > 0\) this\.cardDone = true;/, "shown after a show: the card's copy has started, the tree is done");
+  assert.match(tree, /^const CARD_SEEN = 2;$/m, "J-014: shown 2 ticks in a row, the card's copy runs");
+  assert.match(init, /this\.cardSeen = 0;/);
+  assert.match(tick, /if \(step === "asked"\) \{\s+this\.cardSeen = 0;\s+this\.cardAsks\+\+;\s+if \(this\.cardAsks >= CARD_ASKS\) this\.cardDone = true;\s+\}/, "each show counted, at most CARD_ASKS");
+  assert.match(tick, /else if \(step === "shown"\) \{\s+this\.cardSeen\+\+;\s+if \(this\.cardAsks > 0 \|\| this\.cardSeen >= CARD_SEEN\) this\.cardDone = true;\s+\}/, "shown after a show, or shown CARD_SEEN ticks in a row (J-014: a block shown at load, so the tree stops before the card's hide on a non-GitHub origin turns into flashes)");
+  assert.match(tick, /\} else this\.cardSeen = 0;/, "a tick with the block hidden or missing starts the count again");
 });
 
 test("J-005, J-006: the head truncates on its own and → base never shrinks; Mergear off says why on the card, dim and truncated beside it, keeping the hover (D6)", () => {

@@ -53,6 +53,11 @@ const PR_AGAIN = 10000;
 // a bound on the flashes when the card hides itself right after one (an
 // origin that isn't GitHub, read fast).
 const CARD_ASKS = 5;
+// The PR card's block seen shown this many ticks in a row with no show run
+// (J-014): it was shown at load, so the card's copy runs and decides from
+// then on. Without this the tree kept watching such a load, and on an origin
+// that isn't GitHub it re-showed the card the card had just hidden.
+const CARD_SEEN = 2;
 
 // Herdr's shipped chrome icons (chevrons): there in every install.
 const chrome = (name) => `mods/workspace-chrome/${name}.svg`;
@@ -91,9 +96,11 @@ export default class Tree {
     // the card starts and decides itself whether it has something to say
     // (cardTick, J-001, J-010). This copy starts on every layout load; the
     // show waits for the ticks, since on a cold start Herdr ignores it from
-    // init (seen live after a restart). How many shows were run, and whether
-    // the card's copy is known to run.
+    // init (seen live after a restart). How many shows were run, how many
+    // ticks in a row the block was seen shown, and whether the card's copy
+    // is known to run.
     this.cardAsks = 0;
+    this.cardSeen = 0;
     this.cardDone = false;
     this.sync(cx);
     // The PR card's block until its copy runs; new or removed projects (Add
@@ -119,16 +126,21 @@ export default class Tree {
   // checkout, so it doesn't flash there). A start on a main checkout keeps
   // watching, so the first workspace with something to say shows it however
   // late (seen live: a 5-tick limit left it hidden). No block yet (the layout
-  // not applied), a block still hidden, or one that shows before any show
-  // ran (its saved hidden flag may still come): the next tick looks again.
-  // Shown after a show: the card's copy has started and decides from then
-  // on, so this is done; so it is after CARD_ASKS shows.
+  // not applied) or a block still hidden: the next tick looks again. One
+  // that shows before any show ran may still get its saved hidden flag, so
+  // it counts as running only after CARD_SEEN ticks in a row (J-014). Shown
+  // after a show: the card's copy has started and decides from then on, so
+  // this is done; so it is after CARD_ASKS shows.
   cardTick() {
     const step = showPrCard(cardTarget() !== null);
     if (step === "asked") {
+      this.cardSeen = 0;
       this.cardAsks++;
       if (this.cardAsks >= CARD_ASKS) this.cardDone = true;
-    } else if (step === "shown" && this.cardAsks > 0) this.cardDone = true;
+    } else if (step === "shown") {
+      this.cardSeen++;
+      if (this.cardAsks > 0 || this.cardSeen >= CARD_SEEN) this.cardDone = true;
+    } else this.cardSeen = 0;
   }
 
   // ── Worktree engine (D6) ─────────────────────────────────────────────────

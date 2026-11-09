@@ -768,6 +768,13 @@ against.
   layout click, which Herdr saves in `layouts/.state/`. Moving between a
   workspace the card shows and one it doesn't (a main checkout, a Bitbucket
   repo) writes that file; it never runs when nothing changes.
+- **After a restart or a layout switch the tree shows the card's block**
+  when Herdr kept it hidden: a copy starts only when its block shows, so a
+  hidden card would never come back on its own. The tree tries each second
+  until it sees the card's copy running (shown after its show, or shown two
+  seconds in a row), at most five shows per layout load. A space where the
+  card has nothing to say only from what it reads (an origin that isn't
+  GitHub) can flash the card that many times after a restart.
 - **The PR card and the diff can differ** only when the folder Changes
   shows is a repo nested in a registered checkout (a submodule): the card
   shows the checkout's branch, the diff the nested repo.
