@@ -1,6 +1,7 @@
 // The code-editor plugin as Herdr gets it, on a fake Herdr home and a fake HOME,
 // never the person's: cmd-l opens and closes the right panel (S2), the window
-// wears One Dark Pro (S4), Material's icons travel with the Explorer (S5), and
+// wears One Dark Pro (S4), Material's icons travel with the Explorer (S5), the
+// Markdown preview and the PDF reader travel with the file mod (lector-md), and
 // the projects layout draws that Explorer in its panel.
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
@@ -50,10 +51,21 @@ function mods(node, out = []) {
 
 // ── S2: cmd-l ─────────────────────────────────────────────────────────────
 
+// lector-md D7: the PDF's find and zoom, beside the file's save and close.
+const FILE_KEYS = {
+  "cmd-s": "code-file.save",
+  "cmd-w": "code-file.close",
+  "cmd-f": "code-file.find",
+  "cmd-=": "code-file.zoom-in",
+  "cmd-+": "code-file.zoom-in",
+  "cmd--": "code-file.zoom-out",
+  "cmd-0": "code-file.zoom-reset",
+};
+
 test("S2: cmd-l toggles the panel in the projects layout only, so other layouts keep theirs; cmd-s and cmd-w go to the open file (D3, D18)", () => {
   assert.deepEqual(readJson(plugin("keys.json")), {
     "layout:projects": { "cmd-l": "layout.toggle:panel" },
-    "mod:code-file": { "cmd-s": "code-file.save", "cmd-w": "code-file.close" },
+    "mod:code-file": FILE_KEYS,
   });
 });
 
@@ -70,7 +82,7 @@ test("S2: installing merges cmd-l into the person's keys, in that layout's secti
   assert.equal(r.status, 0, r.stderr);
   const keys = readJson(join(home, "keys.json"));
   assert.deepEqual(keys["layout:projects"], { "cmd-l": "layout.toggle:panel" });
-  assert.deepEqual(keys["mod:code-file"], { "cmd-s": "code-file.save", "cmd-w": "code-file.close" });
+  assert.deepEqual(keys["mod:code-file"], FILE_KEYS);
   assert.deepEqual(keys.global, PERSON_KEYS.global);
   assert.deepEqual(keys.terminal, PERSON_KEYS.terminal);
 });
@@ -122,6 +134,26 @@ test("S4: install leaves the theme in Herdr's themes folder, byte for byte and l
   assert.equal(existsSync(join(home, "mods/code-explorer")), false);
   assert.equal(existsSync(join(home, ".herdr-plugins/code-editor.txt")), false);
   assert.equal(readFileSync(join(home, "themes/theirs.json"), "utf8"), "{}\n");
+});
+
+// ── lector-md: the Markdown preview and the PDF reader travel with the file mod ──
+
+test("lector-md T4: install ships the readers whole, byte for byte: the PDF helper's Swift source, the toolbar's icons with their license, and every model", () => {
+  const home = fakeHome();
+  const r = install(home, "code-editor");
+  assert.equal(r.status, 0, r.stderr);
+  const shipped = [
+    "pdfpages.swift", "pdf-model.js", "pdf-view.js", "markdown-model.js", "image-cache.js", "open-model.js",
+    "preview-view.js", "reader-model.js", "ui/LICENSE",
+    ...["code", "eye", "copy", "check", "zoom-in", "zoom-out", "rotate-ccw", "search", "chevron-up", "chevron-down", "x", "image"].map((i) => `ui/${i}.svg`),
+  ];
+  for (const file of shipped) {
+    const from = plugin(`mods/code-file/${file}`);
+    const to = join(home, "mods/code-file", file);
+    assert.ok(existsSync(to), `${file} installed`);
+    assert.equal(readFileSync(to, "utf8"), readFileSync(from, "utf8"), file);
+  }
+  assert.match(readFileSync(plugin("mods/code-file/ui/LICENSE"), "utf8"), /ISC/, "Lucide's license");
 });
 
 // ── S5: Material icons ─────────────────────────────────────────────────────

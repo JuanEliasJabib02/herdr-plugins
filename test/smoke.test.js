@@ -57,7 +57,7 @@ test("projects layout: agent-sleep's moon is the status bar's last cell, nothing
   assert.ok(requires.split("\n").includes("agent-sleep"));
 });
 
-test("projects layout: the status bar is a row, workspace-status, the spotlight flask, the claude-accounts footer, then agent-sleep's moon (claude-accounts D10, spotlight D20, agent-sleep D14)", () => {
+test("projects layout: the status bar is a row, workspace-status, the spotlight flask, the claude-accounts footer, keep-awake's cup, then agent-sleep's moon (claude-accounts D10, spotlight D20, keep-awake D10, agent-sleep D14)", () => {
   const status = find(read("layouts/projects.json"), "status");
   assert.equal(status.type, "row");
   assert.equal(status.resizable, false);
@@ -66,6 +66,7 @@ test("projects layout: the status bar is a row, workspace-status, the spotlight 
     { id: "status-workspace", type: "block", size: { weight: 1 }, content: { mod: "workspace-status" } },
     { id: "status-spotlight", type: "block", size: { px: 40 }, content: { mod: "spotlight", props: { view: "footer" } } },
     { id: "status-usage", type: "block", size: { weight: 1 }, content: { mod: "claude-accounts", props: { view: "footer" } } },
+    { id: "status-keep-awake", type: "block", size: { px: 64 }, content: { mod: "keep-awake" } },
     { id: "status-agent-sleep", type: "block", size: { px: 40 }, content: { mod: "agent-sleep" } },
   ]);
 });
@@ -247,6 +248,13 @@ test("S4: the card's Crear PR, on a branch without one, opens a modal dialog, a 
   assert.match(card, /createRequest\(/, "the card hands the dialog what it read");
   assert.match(card, /openCreatePr\(/);
   assert.match(card, /"Crear PR"/);
+});
+
+test("projects layout: keep-awake's cup sits right before the moon, with no props so it runs the loop, and requires installs it (keep-awake D10)", () => {
+  const cells = find(read("layouts/projects.json"), "status").children;
+  assert.deepEqual(cells.at(-2), { id: "status-keep-awake", type: "block", size: { px: 64 }, content: { mod: "keep-awake" } });
+  const requires = readFileSync(new URL("../projects-sidebar/requires", import.meta.url), "utf8");
+  assert.ok(requires.split("\n").includes("keep-awake"));
 });
 
 test("the workspace menu is a view of the mod (D20)", () => {

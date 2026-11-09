@@ -13,6 +13,7 @@ like Herdr's home, with a `RECIPE.md` and a `preview.png`).
 | [`spotlight/`](spotlight/) | Orca Pro Max's Spotlight and test queue: one dev server per repo at its root with the workspace's code projected there, the `spotlight` CLI agents use (`on`/`off`/`status`/`logs`), the test-turn queue with its flask, board and settings, and the sidebar badges. [Recipe](spotlight/RECIPE.md) |
 | [`agent-sleep/`](agent-sleep/) | Puts idle Claude Code terminals you aren't looking at to sleep to free memory, and resumes each one when you show its tab, the way Orca's agent hibernation works. Off until you turn it on. |
 | [`arc-spaces/`](arc-spaces/) | Cmd-click a link in a terminal and it opens in the Arc space of that workspace's group, with Arc still your default browser. macOS; needs projects-sidebar's groups and one `sudo ln -s`. [Recipe](arc-spaces/RECIPE.md) |
+| [`keep-awake/`](keep-awake/) | Orca's "Keep computer awake": a coffee cup in the status bar opens a popup with On (always), Agent (while an agent is working) and Off. It holds macOS's `caffeinate -i -s` for as long as it should, one for every window, and lets go when Herdr quits. Off until you pick a mode. [Recipe](keep-awake/RECIPE.md) |
 | [`code-editor/`](code-editor/) | A code editor and Explorer built from how Orca does them. `cmd-l` opens a right panel with a file tree, a filter by name, search inside files and file operations; each file opens in its own tab, with real saving, a warning when the file changes on disk, and a Blame view. One Dark Pro on the whole window, and Material's icons. [Recipe](code-editor/RECIPE.md) |
 
 ![Projects sidebar](projects-sidebar/preview.png)
@@ -44,6 +45,10 @@ herdr-app do layout.switch '{"name":"projects"}'  # ctrl-shift-l switches back
 - **Requires code-editor too:** the layout's right panel draws its Explorer and
   the layout wears its One Dark Pro theme, so it is installed the same way. A
   `themes/one-dark-pro.json` it didn't install stops the install.
+- **Requires keep-awake too:** the layout's status bar draws its coffee cup,
+  right before the moon, so it is installed the same way. It starts Off, so
+  the Mac sleeps as usual until you pick On or Agent in the popup the cup
+  opens.
 - **Commands on PATH:** a plugin's `bin` file lists executables of its mods
   that the installer links as `~/.local/bin/<name>` to the installed copy
   (spotlight's `spotlight` CLI). The link is recorded in the plugin's
