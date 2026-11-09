@@ -39,7 +39,7 @@ import { branchOf, hcGet, hcReadText, registeredRoots, sleep, taskKeyOfWorkspace
 import { recordEnv, envKeyOf } from "./task-env.js";
 import {
   SERVER_ERRORS, PORT_BUSY, SERVER_EXITED, SERVER_START_FAILED, SERVER_SURVIVED, SERVER_NOT_STOPPED, isServerError, serverErrorOf,
-  setRootError, setServerError, clearRootError, clearServerError,
+  setRootError, setServerError, clearRootError, clearServerError, serverDown,
 } from "./server-errors.js";
 import { oneLine } from "./text.js";
 
@@ -69,6 +69,24 @@ const POPUP_CODES = new Set(["root-diverged", "untracked-collision", ...SERVER_E
 
 const qctxOf = (cx) => ({ now: cx.now(), ...cx.settings.queue });
 
+// The server popup's button for a root error it can force (D22, D35, as
+// server-view-model.js names them), by what was refused (`op`): Orca's
+// "Activate anyway", "Force sync" and "Turn off anyway". A server error
+// under a root error is the server's (no op): the holder's tree over the
+// root, Forzar sync, is what resolves it.
+const FORCE_BUTTONS = { light: "Proyectar igual", sync: "Forzar sync", off: "Apagar igual" };
+
+// The popup's button a toast for `shown` leads to (D35): a root error's
+// force (FORCE_BUTTONS), a busy port's Liberar puerto y arrancar (D24), a
+// dead or failed start's Reintentar, or Reiniciar while the server is up
+// (the popup's own labels, server-errors.js serverDown). `record`: the
+// repo's, as its caller wrote it.
+function popupButton(shown, record, op) {
+  if (shown.code === PORT_BUSY) return "Liberar puerto y arrancar";
+  if (isServerError(shown)) return serverDown(record) ? "Reintentar" : "Reiniciar";
+  return FORCE_BUTTONS[op] ?? FORCE_BUTTONS.sync;
+}
+
 // A toast for `error` on `root`, opening the server popup when the popup can
 // act on the error it shows: `top`, the record's lastError once written (a
 // server error under orca-holds opens nothing, F7), else `error` itself
@@ -76,12 +94,19 @@ const qctxOf = (cx) => ({ now: cx.now(), ...cx.settings.queue });
 // error that went under a root error (`top`) can't be acted on before that
 // root error is resolved, and the popup shows the root error: its toast says
 // so, "<server error> Antes resuelve el root: <root error>" (G10), the root
-// error on one line whatever lines git gave it (H6).
-export function errorNote(s, { root, name, workspace, error, now, top = null }) {
+// error on one line whatever lines git gave it (H6). Every one is an error
+// note (D35: it toasts for 60 s); one that opens the popup carries the
+// button waiting there (popupButton), which its toast's body names, by
+// `op`: what was refused, "light", "sync" or "off" (a server error's
+// callers pass none).
+export function errorNote(s, { root, name, workspace, error, now, top = null, op = null }) {
   const shown = top ?? error;
-  const action = POPUP_CODES.has(shown.code) && workspace ? { action: { name: `spotlight.server.${serverId(workspace)}` } } : {};
+  const opens = POPUP_CODES.has(shown.code) && workspace;
+  const popup = opens
+    ? { action: { name: `spotlight.server.${serverId(workspace)}` }, button: popupButton(shown, s.repos?.[root], op) }
+    : {};
   const under = top && isServerError(error) && !isServerError(top) ? ` Antes resuelve el root: ${oneLine(top.message)}` : "";
-  addNote(s, { repo: root, text: `${name}: ${error.message}${under}`, toast: true, ...action }, now);
+  addNote(s, { repo: root, text: `${name}: ${error.message}${under}`, toast: true, level: "error", ...popup }, now);
 }
 
 // Whether the server error in force on `record` is `error` already: one
@@ -283,7 +308,7 @@ async function lightMember(cx, member, { force, taskKey, quiet = false }) {
       const now = cx.now();
       await cx.store.updateState((s) => {
         s.repos[root] = setRootError({ ...emptyRepo(), ...(s.repos[root] ?? {}) }, { ...error, at: now });
-        errorNote(s, { root, name, workspace, error, now });
+        errorNote(s, { root, name, workspace, error, now, op: "light" });
       });
       return { ok: false, message: error.message };
     }
@@ -458,7 +483,8 @@ function serverBusyOp({ restart = false, envName, chosenVariant }) {
 //                reap's detached sync; never Forzar sync or a hand-typed
 //                `spotlight sync`, N4): a failed start it repeats doesn't
 //                toast again (L3), nor an old server still running for the
-//                same cause, env and planned command (M1, N1)
+//                same cause, env and planned command (M1, N1), nor a
+//                variant the repo already waits for (D36)
 //   freePort     Liberar puerto y arrancar: stop the process the recorded
 //                port-busy error names when it still holds the port (D24)
 //   takeover     a fresh activation (lightMember: another workspace, or the
@@ -479,6 +505,9 @@ function serverBusyOp({ restart = false, envName, chosenVariant }) {
 // An old server that never let go of the prompt is no failed start: its own
 // state, still-running (M3), toasted as a failure is (the record's
 // restartStuck says the cause a sync already told, M1).
+// A plan that asks for a variant starts nothing: the record waits in
+// needs-variant, and every start asked for toasts "Elige una variante para
+// <repo>", opening the popup's chips (D36).
 // A plan with no command ends it on a takeover, and for the same holder once
 // no server of Spotlight's may run there any more (oursMayRun): with none,
 // there is no server to be wrong about (K1), but one of before still running
@@ -508,6 +537,14 @@ async function oursMayRun(cx, root, record) {
   return seen.kind === "spotlight" || seen.kind === "unknown";
 }
 
+// D36: the toast of a start that waits for a variant (Orca's "Pick a variant
+// for <project>", an info): its click opens the server popup of the
+// workspace it is for, whose chips pick it.
+function variantAsk(root, name, workspace) {
+  const action = workspace ? { action: { name: `spotlight.server.${serverId(workspace)}` } } : {};
+  return { repo: root, text: `Elige una variante para ${name}`, toast: true, level: "info", ...action };
+}
+
 // ensureServer's work, under the busy mark its caller asked for, if any.
 async function planAndStart(cx, root, opts) {
   const {
@@ -528,8 +565,13 @@ async function planAndStart(cx, root, opts) {
     await cx.store.updateState((s) => {
       const r = s.repos[root];
       if (!r) return;
+      // D36: one toast per start (Orca's variant prompt), opening the
+      // popup's chips; an automatic sync that finds the repo still waiting
+      // asks nothing again.
+      const repeat = syncing && r.serverState === "needs-variant";
       Object.assign(r, { serverState: "needs-variant", variantCandidates: plan.candidates });
       if (takeover) clearServerError(r);
+      if (!repeat) addNote(s, variantAsk(root, cx.nameOf(root), workspace ?? r.holder), now);
     });
     return { state: "needs-variant", candidates: plan.candidates };
   }
@@ -1051,6 +1093,12 @@ const restartFailure = (server) => {
   return server?.state === "port-busy" ? "port-busy" : null;
 };
 
+// D35: the toast of a Forzar sync that went through (Orca's "Spotlight
+// re-synced — the root mirrors the workspace again", a success).
+const RESYNCED = (root) => ({
+  repo: root, text: "Spotlight re-sincronizado: el root refleja el workspace otra vez.", toast: true, level: "success",
+});
+
 // Brings the root in step with its holder (`spotlight sync`, auto-sync, and
 // `on` for each lit member). Under the repo lock; the holder is read inside
 // it. `onlyIf(record)`: sync only when it says so (`on`: the task's own
@@ -1067,7 +1115,9 @@ const restartFailure = (server) => {
 // for the repo lock (`on`'s time left, J-001); past it, LockError
 // "lock-timeout". Forced (Forzar sync), the repo is busy while it works, its
 // holder the target (D33); a sync that isn't forced (auto-sync, `on`) never
-// marks it: it would flash on every save.
+// marks it: it would flash on every save. A forced one that goes through
+// toasts so (D35, Orca's forceSyncSpotlight), RESYNCED, in the write that
+// ends the root error.
 export async function syncRepo(cx, root, { force = false, asked = false, onlyIf, lockTimeoutMs } = {}) {
   const ask = force || asked;
   const wait = lockTimeoutMs === undefined ? {} : { timeoutMs: lockTimeoutMs };
@@ -1091,7 +1141,7 @@ export async function syncRepo(cx, root, { force = false, asked = false, onlyIf,
         if (!r || (r.lastError?.code === error.code && r.lastError?.message === error.message)) return;
         // Over the server error in force (F6): it comes back once a sync goes through.
         setRootError(r, { ...error, at: now });
-        errorNote(s, { root, name: cx.nameOf(root), workspace: holder, error, now });
+        errorNote(s, { root, name: cx.nameOf(root), workspace: holder, error, now, op: "sync" });
       });
       return { ok: false, holder, ...error };
     }
@@ -1111,9 +1161,11 @@ export async function syncRepo(cx, root, { force = false, asked = false, onlyIf,
     // An env to restart into, unless it is given up.
     const drifted = async () => !gaveUp && (await envDrift(cx, root, record, envs));
     if (result.skipped) {
-      if (record.lastError && !isServerError(record.lastError)) {
+      if (force || (record.lastError && !isServerError(record.lastError))) {
         await cx.store.updateState((s) => {
-          if (s.repos[root]) clearRootError(s.repos[root]);
+          if (!s.repos[root]) return;
+          clearRootError(s.repos[root]);
+          if (force) addNote(s, RESYNCED(root), cx.now());
         });
       }
       const server = (await drifted()) ? await refreshServer() : null;
@@ -1127,6 +1179,7 @@ export async function syncRepo(cx, root, { force = false, asked = false, onlyIf,
       Object.assign(r, { lastSnapshotSha: result.snapshotSha, lastSyncAt: now });
       clearRootError(r);
       r.pendingInstalls = installsFor(r.pendingInstalls, installs);
+      if (force) addNote(s, RESYNCED(root), now);
     });
     let server = null;
     if (installs.length > 0 || (await drifted())) server = await refreshServer();
@@ -1163,7 +1216,7 @@ export async function deactivateRepo(cx, root, { force = false, quiet = false } 
     const now = cx.now();
     await cx.store.updateState((s) => {
       s.repos[root] = setRootError({ ...emptyRepo(), ...(s.repos[root] ?? {}) }, { ...error, at: now });
-      errorNote(s, { root, name, workspace, error: told, now });
+      errorNote(s, { root, name, workspace, error: told, now, op: "off" });
     });
     return { ok: false, ...told, ...(stopped ? { stopped } : {}) };
   };
@@ -1208,13 +1261,14 @@ export async function deactivateRepo(cx, root, { force = false, quiet = false } 
     // lived through SIGKILL, hc couldn't reach or read its terminal, it kept
     // running). The root is restored all the same (no git step waits on that
     // process, and a turn-off never gets stuck on it), but the turn-off is an
-    // error that says why, never "root restaurado" (D26, F3).
+    // error that says why, never "root restaurado" (D26, F3): an error
+    // toast (D35).
     const failed = stopped?.ok === true ? null : turnOffError(stopped);
     const now = cx.now();
     await cx.store.updateState((s) => {
       delete s.repos[root];
       delete s.queue.lighting[`direct/${root}`];
-      if (failed) addNote(s, { repo: root, text: `${name}: ${failed.message}`, toast: true }, now);
+      if (failed) addNote(s, { repo: root, text: `${name}: ${failed.message}`, toast: true, level: "error" }, now);
       else if (!quiet) addNote(s, { repo: root, text: "Spotlight off — root restaurado", toast: true }, now);
       if (res.warning) addNote(s, { repo: root, text: `${name}: ${res.warning.message}`, toast: true }, now);
       for (const text of rescuedNotes(res.rescued, res.discardedRepos)) addNote(s, { repo: root, text: `${name}: ${text}`, toast: true }, now);

@@ -185,6 +185,24 @@ test("addNote: keeps the newest 200 notes", async () => {
   assert.deepEqual(notes.at(-2), { at: 42, repo: "/code/app", text: `n${NOTES_MAX + 4}`, toast: false });
 });
 
+test("D35: addNote keeps a note's level and the popup button its toast names; a note without them has neither, as before", async () => {
+  const dir = tmp();
+  const store = createStore({ stateDir: dir, hasServerCommand: noServer, now: () => 42 });
+  const action = { name: "spotlight.server.abc" };
+  await store.updateState((s) => {
+    addNote(s, { repo: "/code/app", text: "app: diverged", toast: true, action, level: "error", button: "Forzar sync" }, 43);
+    addNote(s, { repo: "/code/app", text: "resynced", toast: true, level: "success" }, 44);
+    addNote(s, { repo: "/code/app", text: "plain", toast: true }, 45);
+  });
+  const notes = store.readState().notes;
+  assert.deepEqual(notes, [
+    { at: 43, repo: "/code/app", text: "app: diverged", toast: true, action, level: "error", button: "Forzar sync" },
+    { at: 44, repo: "/code/app", text: "resynced", toast: true, level: "success" },
+    { at: 45, repo: "/code/app", text: "plain", toast: true },
+  ]);
+  assert.ok(!("level" in notes[2]) && !("button" in notes[2]));
+});
+
 test("variants: the per-task remembered variant, keyed <lane>/<taskKey>::<root>, at most 500, oldest dropped first", async () => {
   assert.equal(VARIANTS_MAX, 500);
   assert.equal(variantKey("g1", "AX-3447", "/code/landing/"), "g1/AX-3447::/code/landing");

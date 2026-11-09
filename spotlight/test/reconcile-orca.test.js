@@ -1435,14 +1435,16 @@ test("N4: Forzar sync and a hand-typed `spotlight sync` (asked) are a new ask: t
   assert.equal((await syncRepo(ox(), root)).restartFailed, null);
   assert.deepEqual(seen(), { interrupts: 1, toasts: [STILL] });
 
+  // Forzar sync goes through (D35: it says so), and its restart is stuck.
+  const RESYNCED = "Spotlight re-sincronizado: el root refleja el workspace otra vez.";
   assert.equal((await syncRepo(ox(), root, { force: true })).restartFailed, "still-running");
-  assert.deepEqual(seen(), { interrupts: 2, toasts: [STILL, STILL] });
+  assert.deepEqual(seen(), { interrupts: 2, toasts: [STILL, RESYNCED, STILL] });
   for (let i = 0; i < 2; i += 1) assert.equal((await syncRepo(ox(), root, { asked: true })).restartFailed, "still-running");
-  assert.deepEqual(seen(), { interrupts: 4, toasts: [STILL, STILL, STILL, STILL] });
+  assert.deepEqual(seen(), { interrupts: 4, toasts: [STILL, RESYNCED, STILL, STILL, STILL] });
 
   // Automatic again: still given up.
   assert.equal((await syncRepo(ox(), root)).restartFailed, null);
-  assert.deepEqual(seen(), { interrupts: 4, toasts: [STILL, STILL, STILL, STILL] });
+  assert.deepEqual(seen(), { interrupts: 4, toasts: [STILL, RESYNCED, STILL, STILL, STILL] });
 });
 
 test("N4: the reap's sync for a drifted env is an automatic one (`sync --repo <root> --auto`)", async () => {

@@ -26,8 +26,12 @@
 //   2. server      on the holder's and the root's rows while Spotlight is on
 //                  there: ":3000" / ":3000+1" listening, "…" starting, red
 //                  when stopped or gone, with the error as its tooltip when
-//                  a busy port or a death at start is why (D24, D25). A
-//                  click opens the server popup:
+//                  a busy port or a death at start is why (D24, D25). On
+//                  the holder's row a listening server that runs a variant
+//                  shows it instead of the port, uppercased and cut to 6
+//                  ("DO"), the port in its tooltip ("DO en :3000 · …",
+//                  D36, Orca's SpotlightVariantTag); the root's keeps the
+//                  port. A click opens the server popup:
 //                  the command `spotlight.server.<id>` reaches the footer
 //                  copy's nextCommand() as "server.<id>" (probed, RECIPE.md),
 //                  and `servers[id]` names the workspace.
@@ -64,10 +68,13 @@ import { MOD } from "./board-model.js";
 import { serverDown } from "./server-errors.js";
 import { oneLine } from "./text.js";
 import { ENV_LABELS, recordEnv, storedEnv } from "./task-env.js";
+import { formatVariant, isSafeVariant } from "./server-plan.js";
 
 export const iconPath = (name) => `mods/${MOD}/icons/${name}.svg`;
 
 const TEXT_MAX = 16;
+// D36: the variant on the holder's server badge, in code points, "…" included.
+const VARIANT_MAX = 6;
 const TOOLTIP_MAX = 200;
 const PER_ROW = 3;
 
@@ -248,8 +255,10 @@ function litFlashlight(record, at, { bin, root }) {
 
 // 2. The server badge of a lit repo's holder or root row. A server that
 // didn't come up (a busy port refused its start, D24, or it died starting,
-// D25: server-errors.js serverDown) says why.
-function serverBadge(record, at, configured) {
+// D25: server-errors.js serverDown) says why. `holder`: whether `at` is the
+// holder's row, where a listening server's variant takes the port's place
+// (D36: the root's row keeps the port, as "DO" beside ":3000" wouldn't fit).
+function serverBadge(record, at, configured, { holder = false } = {}) {
   const ports = Array.isArray(record.ports) ? record.ports.filter(Number.isInteger) : [];
   const what = [record.serverEnv, record.serverCommand].filter(Boolean).join(" · ");
   const action = popup(at);
@@ -260,7 +269,12 @@ function serverBadge(record, at, configured) {
     case "listening": {
       const picked = pickPort(ports, configured);
       const urls = [picked, ...ports.filter((p) => p !== picked)].filter((p) => p != null).map(portUrl);
-      return badge({ icon: "server", text: portLabel(ports, configured) || undefined, tone: "done", tooltip: [what, urls.join(" ")].filter(Boolean).join(" · "), action });
+      const port = portLabel(ports, configured);
+      const variant = holder && isSafeVariant(record.serverVariant) ? formatVariant(record.serverVariant) : null;
+      const where = variant ? [port ? `${variant} en ${port}` : variant] : [];
+      const tooltip = [...where, what, urls.join(" ")].filter(Boolean).join(" · ");
+      const text = variant ? cut(variant, VARIANT_MAX) : port || undefined;
+      return badge({ icon: "server", text, tone: "done", tooltip, action });
     }
     case "starting":
       return badge({ icon: "server", text: "…", tone: "working", tooltip: ["Arrancando", what].filter(Boolean).join(" · "), action });
@@ -470,7 +484,7 @@ export function buildBadges({ state, settings, projects = [], cache = {}, enable
       const configured = repoSettings(settings, root).port;
       for (const at of [holder, root]) {
         add(at, busy ? ring() : litFlashlight(record, at, { bin, root }));
-        add(at, serverBadge(record, at, configured));
+        add(at, serverBadge(record, at, configured, { holder: at === holder }));
         know(at, root);
       }
     } else if (record.lastError) {

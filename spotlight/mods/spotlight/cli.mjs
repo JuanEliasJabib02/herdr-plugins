@@ -571,7 +571,11 @@ async function verbPeek(cx, opts) {
 // of that task there, and survives the turn-off. It reaches a running server
 // only when this repo's holder has that key (record.envKey: the workspace
 // holds it, or another workspace of its task does); a workspace that doesn't
-// hold the root just stores it. A variant applies to the holder, as before.
+// hold the root just stores it. A variant is remembered for the workspace's
+// task and applies to it only while it holds the root: picked for a
+// workspace another one took the root from (a popup or prompt answered
+// late), it starts nothing and exits 1, "ya no tiene el root" (D36, Orca's
+// chooseSpotlightVariant). On a root nobody holds it is only remembered.
 async function verbEnv(cx, opts) {
   if (opts.task !== undefined || opts.group !== undefined) return verbEnvTask(cx, opts);
   if (opts.inline) return usage("spotlight env: --inline goes with --task and --group.");
@@ -595,6 +599,7 @@ async function verbEnv(cx, opts) {
     if (opts.env) await writeEnv(cx, key, opts.env);
     const record = cx.store.readState().repos[root];
     if (!record?.holder) return { state: "stored" };
+    if (opts.variant !== undefined && record.holder !== workspace) return { state: "lost-root", holder: record.holder };
     // The pick is this holder's only when it holds W's key (D32).
     const envHere = opts.env !== undefined && record.envKey === key;
     if (!envHere && opts.variant === undefined) return { state: "stored" };
@@ -609,6 +614,14 @@ async function verbEnv(cx, opts) {
       keepVariant: opts.variant === undefined,
     });
   });
+  if (r.state === "lost-root") {
+    const env = opts.env ? ` (el env ${opts.env} sí quedó guardado)` : "";
+    err(
+      `spotlight env: ${path.basename(workspace)} ya no tiene el root de ${cx.nameOf(root)} (lo tiene ${path.basename(r.holder)}): ` +
+        `la variante ${opts.variant} no arrancó nada${env}.`,
+    );
+    return 1;
+  }
   const what = [opts.env && `env ${opts.env}`, opts.variant && `variant ${opts.variant}`].filter(Boolean).join(", ");
   return reportEnv(cx, root, what, r);
 }

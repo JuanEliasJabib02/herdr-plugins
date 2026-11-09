@@ -26,7 +26,7 @@ import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { acquire, unlock, LockError } from "../mods/spotlight/locks.js";
 import {
-  rescuedNotes, describeServer, recordServers, waitForTurnServers, ensureServer, portBusyError,
+  rescuedNotes, describeServer, recordServers, waitForTurnServers, ensureServer, portBusyError, errorNote,
 } from "../mods/spotlight/cli-work.mjs";
 import { readSettings } from "../mods/spotlight/board-model.js";
 import { nodeIo } from "../mods/spotlight/server-plan.js";
@@ -2045,6 +2045,8 @@ test("a turn-off whose server lives through SIGKILL is an error that names it, n
   assert.doesNotMatch(off.stdout, /root restored/);
   const notes = w.state().notes.filter((n) => n.repo === app.root);
   assert.ok(notes.some((n) => n.toast && n.text === `app: ${message}`), JSON.stringify(notes));
+  // D35: an error toast, 60 s.
+  assert.equal(notes.find((n) => n.text === `app: ${message}`).level, "error");
   assert.ok(!notes.some((n) => n.text === "Spotlight off — root restaurado"), JSON.stringify(notes));
   assert.deepEqual(w.hc().kills, [{ pid: stuck, signal: "SIGTERM" }, { pid: stuck, signal: "SIGKILL" }]);
   assert.match(readFileSync(logPath, "utf8"), /server NOT stopped/);
@@ -2635,4 +2637,172 @@ test("D32: a record lit before T22 (envOverride, no envKey) keeps its env and re
   await sleep(1500);
   assert.equal(typed().length, n + 1, "the next reap leaves it alone");
   assert.equal(w.state().repos[app.root].serverEnv, "dev");
+});
+
+// ── D35: error toasts that name their popup button; D36: the variant ──────
+
+test("D35: errorNote: every error note is level error; one whose click opens the popup names the button there: Proyectar igual for a light, Forzar sync for a sync, Apagar igual for a turn-off, the server error's own; none where the popup can't act", () => {
+  const ROOT = "/Users/u/code/app";
+  const WS = "/Users/u/ws/app/ax-1";
+  const DIVERGED = { code: "root-diverged", message: "El root se movió del snapshot de Spotlight." };
+  const COLLISION = { code: "untracked-collision", message: "Hay archivos sin seguimiento en el root." };
+  const BUSY = portBusyError({ port: 3000, pid: 900, command: "node", cwd: "/x" });
+  const EXITED = { code: "server-exited", message: "El server se cayó al arrancar: boom" };
+  const FAILED = { code: "server-start-failed", message: "El server no arrancó: hc no pudo leer su terminal" };
+  const ORCA = { code: "orca-holds", message: "Este root lo tiene el Spotlight de Orca: apágalo allá primero." };
+  const GIT = { code: "git-failed", message: "fatal: bad object HEAD" };
+  // The note errorNote leaves, the record as its caller wrote it first.
+  const noteOf = (args, record = {}) => {
+    const s = { version: 1, repos: { [ROOT]: { serverState: "stopped", lastError: null, ...record } }, queue: { requests: [], lighting: {} }, notes: [], variants: {} };
+    errorNote(s, { root: ROOT, name: "app", workspace: WS, now: 5, ...args });
+    assert.equal(s.notes.length, 1);
+    return s.notes[0];
+  };
+  const action = serverNoteAction(WS);
+  const cases = [
+    ["a refused light", { error: DIVERGED, op: "light" }, {}, "Proyectar igual"],
+    ["a light refused on untracked files", { error: COLLISION, op: "light" }, {}, "Proyectar igual"],
+    ["a refused sync", { error: DIVERGED, op: "sync" }, {}, "Forzar sync"],
+    ["a sync refused on untracked files", { error: COLLISION, op: "sync" }, {}, "Forzar sync"],
+    ["a refused turn-off", { error: DIVERGED, op: "off" }, {}, "Apagar igual"],
+    ["a turn-off refused on untracked files", { error: COLLISION, op: "off" }, {}, "Apagar igual"],
+    ["a busy port", { error: BUSY, top: BUSY }, { lastError: BUSY }, "Liberar puerto y arrancar"],
+    ["a dead start", { error: EXITED, top: EXITED }, { lastError: EXITED }, "Reintentar"],
+    ["a failed start over a server that may still run", { error: FAILED, top: FAILED }, { lastError: FAILED, serverState: "listening" }, "Reiniciar"],
+    ["a busy port under a diverged root", { error: BUSY, top: { ...DIVERGED, serverError: BUSY } }, { lastError: { ...DIVERGED, serverError: BUSY } }, "Forzar sync"],
+  ];
+  for (const [what, args, record, button] of cases) {
+    const note = noteOf(args, record);
+    assert.equal(note.level, "error", what);
+    assert.equal(note.toast, true, what);
+    assert.deepEqual(note.action, action, what);
+    assert.equal(note.button, button, what);
+  }
+  // The text stays the error's: the button goes in the toast's body only (board-model.js).
+  assert.equal(noteOf({ error: DIVERGED, op: "sync" }).text, `app: ${DIVERGED.message}`);
+  for (const [what, args] of [
+    ["orca-holds", { error: ORCA, op: "off" }],
+    ["git-failed", { error: GIT, op: "sync" }],
+    ["no workspace to open the popup from", { error: DIVERGED, op: "sync", workspace: null }],
+  ]) {
+    const note = noteOf(args);
+    assert.equal(note.level, "error", what);
+    assert.equal(note.action, undefined, what);
+    assert.equal(note.button, undefined, what);
+  }
+});
+
+test("D35: refused on a diverged root, a sync, a turn-off and a takeover each toast as errors naming their popup button; a `sync --force` that goes through toasts 'Spotlight re-sincronizado…', a plain one doesn't", async () => {
+  const w = makeWorld();
+  const app = makeRepo(w, "app", { pkg: DEV, tasks: ["AX-8", "AX-9"] });
+  w.register([{ id: "g1", repos: [app] }]);
+  const [ws, other] = [app.ws["AX-8"], app.ws["AX-9"]];
+  assert.equal((await w.cli(["toggle", "--workspace", ws])).code, 0);
+  await w.until((s) => s.queue.lighting[`direct/${app.root}`]?.phase === "done", { what: "lit" });
+  git(app.root, "commit", "-q", "--allow-empty", "-m", "made in the root");
+  const errorsOf = (button) => w.state().notes.filter((n) => n.toast && n.level === "error" && n.button === button);
+
+  const sync = await w.cli(["sync", "--repo", app.root]);
+  assert.equal(sync.code, 1, sync.stdout + sync.stderr);
+  assert.match(sync.stderr, /root-diverged/);
+  assert.equal(errorsOf("Forzar sync").length, 1, JSON.stringify(w.state().notes));
+  assert.deepEqual(errorsOf("Forzar sync")[0].action, serverNoteAction(ws));
+
+  const off = await w.cli(["toggle", "--workspace", ws, "--inline"]);
+  assert.equal(off.code, 1, off.stdout + off.stderr);
+  assert.equal(errorsOf("Apagar igual").length, 1, JSON.stringify(w.state().notes));
+  assert.deepEqual(errorsOf("Apagar igual")[0].action, serverNoteAction(ws));
+
+  const take = await w.cli(["toggle", "--workspace", other, "--inline"]);
+  assert.equal(take.code, 1, take.stdout + take.stderr);
+  assert.equal(errorsOf("Proyectar igual").length, 1, JSON.stringify(w.state().notes));
+  assert.deepEqual(errorsOf("Proyectar igual")[0].action, serverNoteAction(other));
+  assert.equal(w.state().repos[app.root].holder, ws);
+
+  const RESYNCED = "Spotlight re-sincronizado: el root refleja el workspace otra vez.";
+  const resynced = () => w.state().notes.filter((n) => n.toast && n.text === RESYNCED);
+  const forced = await w.cli(["sync", "--repo", app.root, "--force"]);
+  assert.equal(forced.code, 0, forced.stdout + forced.stderr);
+  assert.equal(resynced().length, 1, JSON.stringify(w.state().notes));
+  assert.equal(resynced()[0].repo, app.root);
+  assert.equal(resynced()[0].level, "success");
+  assert.equal(w.state().repos[app.root].lastError, null);
+  // A sync nobody forced says nothing when it goes through.
+  assert.equal((await w.cli(["sync", "--repo", app.root])).code, 0);
+  assert.equal(resynced().length, 1);
+});
+
+const VARIANT_PKG = { packageManager: "pnpm@9.0.0", scripts: { "dev:co": "vite", "dev:mx": "vite" } };
+const VARIANT_APPS = { "apps/co/index.html": "co\n", "apps/mx/index.html": "mx\n" };
+const ASK = (repo) => `Elige una variante para ${repo}`;
+
+test("D36: a start that needs a variant toasts once, opening the popup; an automatic sync that finds it still waiting doesn't toast again, Reiniciar does", async () => {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), "sl-nv-")));
+  worlds.push({ dir });
+  const root = join(dir, "multi");
+  for (const [rel, text] of Object.entries({ "package.json": JSON.stringify(VARIANT_PKG), ...VARIANT_APPS })) write(root, rel, text);
+  const ws = "/Users/u/ws/multi/ax-1";
+  const state = {
+    version: 1,
+    repos: {
+      [root]: {
+        holder: ws, lastSnapshotSha: "a".repeat(40), lastSyncAt: 1, lastError: null, serverTerminal: null, serverPid: null, serverStartedAt: null,
+        serverCommand: null, serverEnv: null, serverVariant: null, serverState: "stopped", pendingInstalls: [], ports: [], logPath: join(dir, "multi.log"),
+      },
+    },
+    queue: { requests: [], lighting: {} },
+    notes: [],
+    variants: {},
+  };
+  const cx = memoryCx({ state, exec: shellExec().exec });
+  const asks = () => state.notes.filter((n) => n.toast && n.text === ASK("multi"));
+  assert.equal((await ensureServer(cx, root, { workspace: ws })).state, "needs-variant");
+  assert.equal(asks().length, 1, JSON.stringify(state.notes));
+  assert.deepEqual(asks()[0].action, serverNoteAction(ws));
+  assert.equal(asks()[0].level, "info");
+  // A sync's server work (a lockfile install) finds it still waiting.
+  assert.equal((await ensureServer(cx, root, { workspace: ws, keepVariant: true, ifRunning: true, syncing: true })).state, "needs-variant");
+  assert.equal(asks().length, 1);
+  // Reiniciar is a new start: it asks again.
+  assert.equal((await ensureServer(cx, root, { workspace: ws, keepVariant: true, restart: true })).state, "needs-variant");
+  assert.equal(asks().length, 2);
+});
+
+test("D36: each light that needs a variant asks for it; `env --variant` picked for a workspace that lost the root exits 1 with 'ya no tiene el root' and starts nothing (the pick stays for its task); the holder's pick starts it", async () => {
+  const w = makeWorld();
+  const app = makeRepo(w, "multi", { pkg: VARIANT_PKG, files: VARIANT_APPS, tasks: ["AX-1", "AX-2"] });
+  w.register([{ id: "g1", repos: [app] }]);
+  const [ws1, ws2] = [app.ws["AX-1"], app.ws["AX-2"]];
+  const asks = () => w.state().notes.filter((n) => n.toast && n.text === ASK("multi"));
+  assert.equal((await w.cli(["toggle", "--workspace", ws1])).code, 0);
+  await w.until((s) => s.queue.lighting[`direct/${app.root}`]?.phase === "done", { what: "lit" });
+  assert.equal(w.state().repos[app.root].serverState, "needs-variant");
+  assert.equal(asks().length, 1, JSON.stringify(w.state().notes));
+  assert.deepEqual(asks()[0].action, serverNoteAction(ws1));
+
+  // AX-2 takes the root: its start asks too.
+  const take = await w.cli(["toggle", "--workspace", ws2, "--inline"]);
+  assert.equal(take.code, 0, take.stdout + take.stderr);
+  assert.equal(w.state().repos[app.root].holder, ws2);
+  assert.equal(asks().length, 2);
+  assert.deepEqual(asks()[1].action, serverNoteAction(ws2));
+
+  // The popup opened on AX-1 before the takeover: its chip is too late.
+  const sent = w.hc().sent.length;
+  const late = await w.cli(["env", "--workspace", ws1, "--variant", "co"]);
+  assert.equal(late.code, 1, late.stdout + late.stderr);
+  assert.match(late.stderr, /ya no tiene el root/);
+  const rec = w.state().repos[app.root];
+  assert.equal(rec.serverState, "needs-variant");
+  assert.equal(rec.serverCommand, null);
+  assert.equal(rec.serverVariant, null);
+  assert.equal(w.hc().sent.length, sent, "nothing typed");
+  assert.equal(w.state().variants[`g1/AX-1::${app.root}`], "co");
+
+  const mine = await w.cli(["env", "--workspace", ws2, "--variant", "mx"]);
+  assert.equal(mine.code, 0, mine.stdout + mine.stderr);
+  const lit = w.state().repos[app.root];
+  assert.equal(lit.serverVariant, "mx");
+  assert.match(lit.serverCommand, /dev:mx/);
+  assert.equal(lit.serverState, "starting");
 });

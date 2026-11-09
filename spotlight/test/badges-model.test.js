@@ -190,6 +190,36 @@ test("the configured port wins the label when it listens", () => {
   assert.equal(build(one).value[B1][1].text, ":5173");
 });
 
+test("D36: the holder's server badge shows the variant, uppercased, with the port in its tooltip; the root row keeps the port", () => {
+  const s = baseState();
+  Object.assign(s.repos[BACK], { serverVariant: "do", serverCommand: "pnpm dev:do", ports: [3000] });
+  const { value } = build(s);
+  const [, server] = value[B1];
+  assert.equal(server.text, "DO");
+  assert.equal(server.tone, "done");
+  assert.equal(server.tooltip, "DO en :3000 · local · pnpm dev:do · http://localhost:3000");
+  assert.deepEqual(server.action, { command: `spotlight.server.${serverIdOf(B1)}` });
+  const [, rootServer] = value[BACK];
+  assert.equal(rootServer.text, ":3000");
+  assert.equal(rootServer.tooltip, "local · pnpm dev:do · http://localhost:3000");
+  assertContract(value);
+
+  // Longer than 6 code points: cut with "…" (6 in all); the tooltip names it whole.
+  Object.assign(s.repos[BACK], { serverVariant: "storefront", ports: [3000, 3001] });
+  const long = build(s).value[B1][1];
+  assert.equal(long.text, "STORE…");
+  assert.equal(codePoints(long.text), 6);
+  assert.equal(long.tooltip, "STOREFRONT en :3000+1 · local · pnpm dev:do · http://localhost:3000 http://localhost:3001");
+  assert.equal(build(s).value[BACK][1].text, ":3000+1");
+
+  // Not listening yet: the server's state, as before.
+  Object.assign(s.repos[BACK], { serverState: "starting", ports: [] });
+  assert.equal(build(s).value[B1][1].text, "…");
+  // No variant: the port, as before.
+  Object.assign(s.repos[BACK], { serverState: "listening", serverVariant: null, ports: [3000] });
+  assert.equal(build(s).value[B1][1].text, ":3000");
+});
+
 test("server states: starting, stopped, gone, needs-variant, no command", () => {
   const with_ = (fields) => {
     const s = baseState();
