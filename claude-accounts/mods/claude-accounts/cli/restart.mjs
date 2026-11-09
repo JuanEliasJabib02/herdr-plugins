@@ -84,7 +84,10 @@
 // another item on its terminal has stopped Claude, unless that one's runner
 // is gone. Per item (D8):
 //   1. Waits, with no cap, until the terminal's Claude is idle (state
-//      waitingIdle, written once), while the terminal lives and its account
+//      waitingIdle, written once), or, for a switch item, until Claude's own
+//      turn is over (lastTurn) and it isn't blocked on a question, even with
+//      background subagents still running (Orca's isClaudePaneMidTurn),
+//      while the terminal lives and its account
 //      still differs from the item's `to`. Right before acting it re-reads
 //      the terminal (D7): a switch item already on its target is dropped
 //      (Orca's consumePendingPaneAccountRestart); a resume job already on it
@@ -108,8 +111,9 @@
 //      (Claude refused the resume, "No conversation found…", and exited),
 //      it fails at once: detail is the error Claude left on the screen
 //      (`hc read`), then the line to run by hand.
-//   6. A resume job with a message: sending, `hc send` as the user (no
-//      HC_TERMINAL_ID). Then done.
+//   6. A resume job with a message, or a switch item that stopped running
+//      subagents (relaunchMessage names them for the resumed Claude):
+//      sending, `hc send` as the user (no HC_TERMINAL_ID). Then done.
 // A failed, timed-out or orphaned item's detail is `<why>: <the line to run
 // by hand>`. A non-final item whose runner died (its claim void: a dead pid,
 // or an `at` older than the stale window) reads failed "runner gone"
@@ -133,7 +137,7 @@ import { FILES, cliPath, defaultConfigDir, stateHome } from "./paths.mjs";
 import { failure, isAlive, readJson, render, withLock, writeAtomic } from "./files.mjs";
 import { knownAccounts, readSettings, sameEmail } from "./accounts.mjs";
 import { contractUsage } from "./usage.mjs";
-import { HC_SEND_TIMEOUT_MS, getTerminal, hasTranscript, hc, inspectTerminal, isIdle, lastPrompt, listClaudeTerminals } from "./terminals.mjs";
+import { HC_SEND_TIMEOUT_MS, getTerminal, hasTranscript, hc, inspectTerminal, isIdle, lastPrompt, lastTurn, listClaudeTerminals } from "./terminals.mjs";
 
 // Milliseconds. poll: how often a loop re-reads its terminal; shell and
 // claude: D8's step 3 and step 5 caps; shellBack: how long the shell may be
@@ -308,6 +312,17 @@ function manualLine(item, known) {
 }
 
 const withLine = (why, line) => (line ? `${why}: ${line}` : why);
+
+// What a switch tells the resumed Claude when its restart stopped subagents
+// still running: a resumed Claude doesn't launch them again on its own, and
+// never hears from them. Their titles when Herdr listed them, else the count
+// from the turn's end; null when none ran.
+export function relaunchMessage(label, titles, count) {
+  const head = `Claude Accounts restarted this session to move it to ${label}.`;
+  if (titles.length) return `${head} These subagents were still running and were stopped: ${titles.map((t) => JSON.stringify(t)).join(", ")}. Launch them again.`;
+  if (count > 0) return `${head} ${count} background subagent${count === 1 ? " was" : "s were"} still running and ${count === 1 ? "was" : "were"} stopped: launch again the ones that hadn't reported back.`;
+  return null;
+}
 
 const noConversation = (terminalId, sessionId) =>
   `there's no conversation to resume yet in terminal ${terminalId}: Claude hasn't saved session ${sessionId} (it has no messages)`;
@@ -851,7 +866,11 @@ async function runItem(home, id, t) {
       await finish(home, id, "failed", `Claude is terminal ${item.terminal}'s own program: there's no shell to restart it in`);
       return;
     }
-    if (found.kind === "claude" && isIdle(found)) {
+    // A switch goes once Claude's own turn is over, as Orca's does: its
+    // background subagents keep it busy, and they're stopped with it (then
+    // named in a message after the resume). Not while blocked on a question.
+    const turn = found.kind === "claude" && item.kind === "switch" && !isIdle(found) && found.state !== "blocked" ? await lastTurn(found.configDir, found.sessionId) : null;
+    if (found.kind === "claude" && (isIdle(found) || turn)) {
       // Nothing to resume (a /clear nobody has written to yet): Claude stays.
       if (!(await hasTranscript(found.configDir, found.sessionId))) {
         await finish(home, id, "failed", noConversation(item.terminal, found.sessionId));
@@ -862,9 +881,11 @@ async function runItem(home, id, t) {
       const args = keptArgs(found.argv);
       line = resumeLine(targetDir(known, item.to), args, found.sessionId);
       const seen = item;
+      const told = item.kind === "switch" ? relaunchMessage(labelOf(known, item.to), found.agents, turn?.backgroundAgents ?? 0) : null;
       const stopping = await mutate(home, id, (current) => {
         if (!sameTarget(current, seen)) return "skip";
         Object.assign(current, { from: found.account, sessionId: found.sessionId, args, state: "stopping" });
+        if (told) current.message = told;
         return null;
       });
       if (stopping === null) return;

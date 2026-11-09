@@ -20,7 +20,8 @@
 //     conversation found with session ID: …" and the shell is back;
 //   - `hc read` prints the terminal's screen: a starship-like two-line
 //     prompt ("ws on  main", then "❯ "), the typed lines, Claude's error;
-//   - every call is logged with whether HC_TERMINAL_ID reached it.
+//   - `hc get` shows the fake terminal's `records` (its subagents) while Claude lives;
+//   - every call is logged with whether HC_TERMINAL_ID or HC_SCOPE reached it.
 // Session files and transcripts are real files in fake config dirs; every
 // profile's projects/ links to ~/.claude/projects, as on the person's Mac.
 // The restart timings are set through CLAUDE_ACCOUNTS_RESTART_TIMING (see
@@ -30,7 +31,7 @@ import { test, after, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { execFile, spawn, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -178,7 +179,7 @@ const path = require("path");
 const { spawn, spawnSync } = require("child_process");
 const dir = process.env.FAKE_HC_DIR;
 const argv = process.argv.slice(2);
-fs.appendFileSync(path.join(dir, "calls.log"), JSON.stringify({ argv, hcTerminalId: process.env.HC_TERMINAL_ID ?? null }) + "\\n");
+fs.appendFileSync(path.join(dir, "calls.log"), JSON.stringify({ argv, hcTerminalId: process.env.HC_TERMINAL_ID ?? null, hcScope: process.env.HC_SCOPE ?? null }) + "\\n");
 const [cmd, ...rest] = argv;
 const pos = [];
 for (let i = 0; i < rest.length; i++) {
@@ -200,6 +201,7 @@ function view(v) {
       ? { pid: v.claude, name: v.name || "claude.exe", argv: v.argv, cwd: "/tmp" }
       : { pid: v.pid, name: "zsh", argv: ["-zsh"], cwd: "/tmp" },
     status: running ? { app: "claude-code", state: v.state || "idle" } : null,
+    records: running ? v.records || null : null,
     state: v.own && !running ? "finished" : "live",
     title: v.title || null,
     labels: {},
@@ -254,7 +256,7 @@ if (cmd === "ls") {
       fs.appendFileSync(path.join(dir, "pids"), child.pid + "\\n");
       fs.mkdirSync(path.join(lands, "sessions"), { recursive: true });
       fs.writeFileSync(path.join(lands, "sessions", child.pid + ".json"), JSON.stringify({ pid: child.pid, sessionId: sid, status: v.startStatus || "idle" }));
-      save(t, { ...load(t), claude: child.pid, argv: ["/Users/tester/.local/bin/claude", ...typed.args], state: "idle", screen: [...screen, "╭─ Claude Code ─╮"] });
+      save(t, { ...load(t), claude: child.pid, argv: ["/Users/tester/.local/bin/claude", ...typed.args], state: "idle", records: null, screen: [...screen, "╭─ Claude Code ─╮"] });
     }
   }
   process.stdout.write(JSON.stringify({ turn: 1 }) + "\\n");
@@ -292,8 +294,10 @@ function sandbox({ active = A, switchMode = "ask", timing = {} } = {}) {
     CLAUDE_ACCOUNTS_RESTART_TIMING: JSON.stringify({ ...TIMING, ...timing }),
     FAKE_HC_DIR: world,
     FAKE_LIFE_S: String(FAKE_LIFE_S),
-    // Set on purpose: no hc call may carry it (D7).
+    // Set on purpose: no hc call may carry them (D7; HC_SCOPE makes hc send
+    // wrap the text in <hc from=…>, so Claude reads a /exit as a message).
     HC_TERMINAL_ID: "t99",
+    HC_SCOPE: "s99",
   };
   for (const key of ["HOME", "TMPDIR", "CLAUDE_ACCOUNTS_HOME", "FAKE_HC_DIR"]) {
     assert.ok(env[key].startsWith(`${root}/`), `a sandbox path, never the person's: ${key}=${env[key]}`);
@@ -1141,6 +1145,53 @@ test("a Claude that quits on its own with nothing to resume (no transcript) drop
   assert.deepEqual(s.sends(), []);
 });
 
+// Claude's own end-of-turn line, with how many background agents still ran then.
+const endTurn = (term, n) =>
+  appendFileSync(term.transcriptFile, `${JSON.stringify({ type: "system", subtype: "turn_duration", pendingBackgroundAgentCount: n, sessionId: term.sessionId })}\n`);
+const subagent = (title, state = "working") => ({ app: "claude-code", state, title });
+
+test("Orca's 'not mid-turn': a Claude whose turn ended restarts while its subagents still run, and after the resume it's told which ones were stopped", async () => {
+  const s = sandbox({ active: A, switchMode: "restart" });
+  const records = { a1: subagent("Batch D T21: whole-task toggle"), a2: subagent("Fix r5"), a3: subagent("an old one", "idle") };
+  const t1 = s.term("t1", { on: A, status: "busy", state: "working", records });
+  endTurn(t1, 2);
+  // Herdr lists none of t2's subagents: the count from the turn's end says it.
+  const t2 = s.term("t2", { on: A, status: "busy", state: "working" });
+  endTurn(t2, 1);
+  s.json(["use", B]);
+  await until(() => s.queue().length === 2 && s.queue().every((i) => i.state === "done"), WAIT, "both restarts", s.queue);
+  assert.ok(!alive(t1.pid) && !alive(t2.pid), "both old Claudes were stopped");
+  assert.equal(accountNow(s, "t1"), B);
+  assert.equal(accountNow(s, "t2"), B);
+  const [line1, told1] = s.sends("t1");
+  assert.match(line1.text, / --resume /);
+  assert.match(told1.text, /^Claude Accounts restarted this session to move it to .+\. These subagents were still running and were stopped: "Batch D T21: whole-task toggle", "Fix r5"\. Launch them again\.$/);
+  const [line2, told2] = s.sends("t2");
+  assert.match(line2.text, / --resume /);
+  assert.match(told2.text, /\. 1 background subagent was still running and was stopped: launch again the ones that hadn't reported back\.$/);
+  assert.equal(s.sends().length, 4);
+});
+
+test("a turn still under way (a later prompt or a queued message), or one blocked on a question, keeps the restart waiting even with subagents running", async () => {
+  const s = sandbox({ active: A, switchMode: "restart" });
+  const t1 = s.term("t1", { on: A, status: "busy", state: "working", records: { a1: subagent("x") } });
+  endTurn(t1, 1);
+  appendFileSync(t1.transcriptFile, `${JSON.stringify({ type: "user", sessionId: t1.sessionId, message: { role: "user", content: "next" } })}\n`);
+  const t2 = s.term("t2", { on: A, status: "busy", state: "working", records: { a1: subagent("y") } });
+  endTurn(t2, 1);
+  appendFileSync(t2.transcriptFile, `${JSON.stringify({ type: "queue-operation", operation: "enqueue", sessionId: t2.sessionId })}\n`);
+  const t3 = s.term("t3", { on: A, status: "busy", state: "blocked" });
+  endTurn(t3, 1);
+  s.json(["use", B]);
+  await until(() => s.queue().length === 3 && s.queue().every((i) => i.state === "waitingIdle" && i.claimedBy), WAIT, "all three waiting", s.queue);
+  // Dozens of polls (25 ms each): none of them may act.
+  await sleep(1000);
+  assert.deepEqual(s.queue().map((i) => i.state), ["waitingIdle", "waitingIdle", "waitingIdle"]);
+  assert.ok([t1, t2, t3].every((t) => alive(t.pid)), "no Claude was stopped");
+  assert.deepEqual(s.sends(), []);
+  for (const t of ["t1", "t2", "t3"]) s.json(["restart", "--cancel", t]);
+});
+
 test("timeouts: a shell that doesn't come back, and a new Claude that never reports idle, end as timeout (4) with the line to run by hand", async () => {
   const s = sandbox({ timing: SHORT_CAPS });
   const t1 = s.term("t1", { on: A, ignoreTerm: true });
@@ -1650,12 +1701,13 @@ test("shellQuote and resumeLine: bare when safe, single-quoted otherwise", async
 
 // ── Last: what every test left behind ──────────────────────────────────────
 
-test("every hc call ran without HC_TERMINAL_ID, and no runner or fake Claude outlives the tests", async () => {
+test("every hc call ran without HC_TERMINAL_ID or HC_SCOPE, and no runner or fake Claude outlives the tests", async () => {
   const calls = sandboxes.flatMap((s) => s.calls());
   assert.ok(calls.length > 0);
   const kinds = new Set(calls.map((c) => c.argv[0]));
   for (const kind of ["ls", "get", "send"]) assert.ok(kinds.has(kind), `hc ${kind} was called`);
   assert.deepEqual(calls.filter((c) => c.hcTerminalId !== null), [], "HC_TERMINAL_ID never reaches hc");
+  assert.deepEqual(calls.filter((c) => c.hcScope !== null), [], "HC_SCOPE never reaches hc");
 
   await until(() => runnerPids().length === 0, WAIT, "every runner to exit", runnerPids);
   killAll();
