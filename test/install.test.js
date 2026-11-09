@@ -461,9 +461,9 @@ test("projects-sidebar requires spotlight: it lands first, with its command, and
   const status = find(JSON.parse(readFileSync(join(home, "layouts/projects.json"), "utf8")), "status");
   assert.deepEqual(
     status.children.map((c) => c.id),
-    ["status-workspace", "status-spotlight", "status-usage", "status-keep-awake", "status-agent-sleep"],
+    ["status-projects-keeper", "status-workspace", "status-spotlight", "status-usage", "status-keep-awake", "status-agent-sleep"],
   );
-  assert.deepEqual(status.children[1], {
+  assert.deepEqual(status.children.find((c) => c.id === "status-spotlight"), {
     id: "status-spotlight",
     type: "block",
     size: { px: 40 },

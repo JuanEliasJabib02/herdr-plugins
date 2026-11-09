@@ -6,13 +6,19 @@
 //   <why an asleep Claude stays asleep, one line each>
 //   Next: checkout-flow in 30 min
 //   Woke checkout-flow
+//   Sleep this workspace                               [Sleep]
 //   [Sleep now] [Wake all]
 //
 // It opens as tall as its lines (panelHeight) and can't change size, so the
-// lines take what is left and clip: the last ones are cut, the buttons never
-// are. "Sleep idle agents" switches automatic sleep (Sleep now works either
-// way); −/+ step the idle window from 1 min to 24 h. "Hide sleeping workspaces"
-// comes with projects-sidebar's filter tag (T6).
+// lines take what is left and clip: the last ones are cut, the rows and the
+// buttons never are. "Sleep idle agents" switches automatic sleep (Sleep now
+// works either way); −/+ step the idle window from 1 min to 24 h. "Sleep this
+// workspace" sleeps the shown workspace, keeping everything (workspace-sleep
+// D5 (b), T7), and asks first through the confirm when an agent is working or
+// may have unsent text: a row of its own, since a third button doesn't fit the
+// 280 px popup. Wake all is off when it would wake nothing: the Claudes of a
+// workspace put to sleep as a whole wake with it. "Hide sleeping" is
+// projects-sidebar's filter (workspace-sleep D8).
 //
 // Draws only: main.js hands it the view the loop copy shared and `ask`, which
 // names a command for the loop copy to run. No herdr import (main.js is the only
@@ -69,7 +75,8 @@ export function renderPanel({ t, view, windowText, ask }) {
       .children(view.holds.map((h, i) => line(`agent-sleep-hold-${i}`, h, t.blocked)))
       .when(Boolean(view.next), (el) => el.child(line("agent-sleep-next", view.next, t.muted)))
       .when(Boolean(view.last), (el) => el.child(line("agent-sleep-last", view.last, t.dim))))
+    .child(row("Sleep this workspace", button(t, "agent-sleep-sleep-workspace", "Sleep", true, ask("sleep-workspace"))))
     .child(h_flex().flex_none().h(PANEL.buttons).gap(6)
       .child(button(t, "agent-sleep-sleep-now", "Sleep now", true, ask("sleep-now")))
-      .child(button(t, "agent-sleep-wake-all", "Wake all", view.asleep > 0, ask("wake-all"))));
+      .child(button(t, "agent-sleep-wake-all", "Wake all", view.wakeable > 0, ask("wake-all"))));
 }

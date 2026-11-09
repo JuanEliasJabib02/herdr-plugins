@@ -15,6 +15,21 @@ Session ids are replaced with `00000000-0000-4000-8000-…`; scratch paths with
 | `claude-draft.txt` | A typed draft `❯ hola` (typed with `hc keys`, never sent). |
 | `claude-exit.txt` | After `/exit`: Claude's last frame, then `Resume this session with:` / `claude --resume <id>`, then the shell prompt. |
 
+## Claude Code 2.1.319 screens (workspace-sleep's T0b probe, 2026-11-08: a background terminal, `hc` run with `HC_TERMINAL_ID` and `HC_SCOPE` unset)
+
+| File | What it shows |
+|---|---|
+| `t0b-claude-idle.txt` | After a turn: an empty prompt line `❯` (T0b `03-idle`). |
+| `t0b-claude-draft.txt` | A one-line draft `❯ hola` (`04-draft`). |
+| `t0b-claude-draft-multi.txt` | A two-line draft (`hola` / `mundo`, made with `ctrl+j`), with Claude's "ctrl+g to edit in Vim" hint above the box (`06-multi`). |
+| `t0b-claude-ctrl-c.txt` | The one-line draft after one `ctrl+c`: the line is empty again (`07-ctrl-c`; `esc esc` gave the same). |
+| `t0b-interrupt.json` | `hc interrupt <t> --timeout 3 --json` on a working turn: `{"key":"esc","outcome":"stopped"}`; Core read `idle` right after (`10-interrupt`). |
+
+T0b also found: `ctrl+u` clears only the last line of a multi-line draft; one
+`ctrl+c` on an empty line leaves Claude running; an interrupt right after a send
+puts the prompt back on the input line; on `sleep 300` and `less` the report
+(`stopped`, `unknown`) didn't say whether the program was still in front.
+
 ## Shell screens (Juan's zsh with Starship and zsh-autosuggestions)
 
 | File | What it shows |

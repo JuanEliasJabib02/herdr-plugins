@@ -7,8 +7,9 @@
 // instead of projects, each row naming its project, and the header gets a
 // New workspace "+"; a lane shows its task's note on hover and has a
 // right-click menu (D34, D35). A workspace row also shows what other
-// plugins publish for it ("badges", D38). Below 160 px of sidebar it is a
-// rail of initials.
+// plugins publish for it ("badges", D38). The header's filter button opens
+// Hide sleeping's popup, which leaves asleep workspaces out of the rows
+// (workspace-sleep D8). Below 160 px of sidebar it is a rail of initials.
 //
 // This copy is also the worktree engine (D6): it lists every group's
 // projects into projects.cache.v1 at start, re-lists one when its
@@ -34,6 +35,7 @@ import { openNewWorkspace } from "./new-workspace.js";
 import { openProjectMenu } from "./project-menu.js";
 import { openWorkspaceMenu } from "./workspace-menu.js";
 import { openTaskMenu } from "./task-menu.js";
+import { openFilterMenu } from "./filter-menu.js";
 import { showPrCard, cardTarget } from "./pr-card.js";
 
 // git listings at once (Juan has ~30 projects).
@@ -84,12 +86,14 @@ export default class Tree {
     this.failed = new Set(); // projects git couldn't list last time (folder gone)
     // PR status: which account sees each owner's repos, whether a round is
     // running, whether one more was asked for meanwhile (projects.refresh-prs),
-    // when the last one started, and what the window and the active group
-    // were at the last tick.
+    // when the last one started, the last ask seen in the store (one stored
+    // before this copy started isn't run again), and what the window and the
+    // active group were at the last tick.
     this.prMemo = prMemo();
     this.prBusy = false;
     this.prAgain = false;
     this.prAt = 0;
+    this.prAsked = store.prsAsked();
     this.wasActive = false;
     this.prGroup = null;
     // The PR card's block, if Herdr kept it hidden in this layout: shown, so
@@ -229,18 +233,28 @@ export default class Tree {
   // ── PR status ────────────────────────────────────────────────────────────
 
   // Only the window in front asks (every copy draws what it stored): every
-  // PR_EVERY, or PR_AGAIN after coming back to the window or to another group.
+  // PR_EVERY, or PR_AGAIN after coming back to the window or to another group,
+  // or at once when `projects.refresh-prs` left an ask in the store since the
+  // last tick (store.js askPrs).
   prTick(cx) {
     const active = Boolean(window().active);
     const group = activeGroup(store.registry())?.id ?? null;
     const back = active && (!this.wasActive || group !== this.prGroup);
+    const asked = store.prsAsked();
+    const wanted = asked > this.prAsked;
+    this.prAsked = asked;
     this.wasActive = active;
     this.prGroup = group;
     if (!active) return;
+    if (wanted) {
+      this.askPrs(cx);
+      return;
+    }
     if (Date.now() - this.prAt >= (back ? PR_AGAIN : PR_EVERY)) this.refreshPrs(cx);
   }
 
-  // projects.refresh-prs (D8): a round now, asked by Mergear and Crear PR after each attempt.
+  // A round now, asked by Mergear and Crear PR after each attempt
+  // (projects.refresh-prs, D8, through the store: prTick).
   // While one runs, one more is recorded and runs after it: a round that
   // started before the merge read GitHub before it, so it is never the last
   // word on the sidebar's colors.
@@ -301,6 +315,9 @@ export default class Tree {
       home: home(),
       now: Date.now(),
       failed: this.failed,
+      // Hide sleeping (workspace-sleep D8): the rows only, never the rail.
+      hideSleeping: ui.hideSleeping,
+      exceptMain: ui.exceptMain,
     };
     const model = byTask ? buildTaskTree({ ...args, tasks: ui.tasks ?? [] }) : buildTree(args);
     const notes = byTask ? store.notes() : {};
@@ -312,7 +329,7 @@ export default class Tree {
       ? narrow ? [] : [emptyState(t)]
       : narrow ? model.projects.map((p) => railRow(p, t)) : model.rows.map((r) => row(r, t, notes, badges, prs));
     return v_flex().size_full().min_h(0).bg(t.chrome).text_size(13)
-      .child(header(model.group, narrow, byTask, t))
+      .child(header(model.group, narrow, byTask, ui.hideSleeping === true, t))
       .child(v_flex().id("projects-list").flex_1().min_h(0).px(narrow ? 0 : 8).pb(14).overflow_y_scrollbar().mode("always")
         .on_mouse_up("left", (_e, cx) => drop(cx))
         // Leaving the list (or the window) cancels a drag.
@@ -326,8 +343,10 @@ export default class Tree {
 }
 
 // In Task mode no project row carries New workspace's "+", so the header
-// does: for the focused space's project (D32, S13).
-function header(group, narrow, byTask, t) {
+// does: for the focused space's project (D32, S13). Left of Add project, the
+// filter button (workspace-sleep D8); the rail has no rows to filter, so not
+// there. `hiding`: Hide sleeping is on.
+function header(group, narrow, byTask, hiding, t) {
   return h_flex().h(31).flex_none().items_center().gap(6).text_size(11.5).text_color(t.dim)
     .when(narrow, (el) => el.justify_center())
     .when(!narrow, (el) => el.pl(16).pr(10).child(div().flex_1().min_w(0).truncate().child(group.name === "Projects" ? "Projects" : `Projects · ${group.name}`)))
@@ -336,11 +355,38 @@ function header(group, narrow, byTask, t) {
       .tooltip("New workspace")
       .on_click(() => openNewWorkspace(focusedProject()))
       .child(svg(icon("branch")).size(14))))
+    .when(!narrow, (el) => el.child(filterButton(hiding, t)))
     .child(div().id("projects-add").size(26).flex_none().flex().items_center().justify_center().rounded(6)
       .hover((s) => s.bg(t.hover).text_color(t.foreground))
       .tooltip("Add project")
       .on_click((_e, cx) => cx.spawn(async () => addFromPicker()))
       .child(svg(icon("plus")).size(14)));
+}
+
+// Whether the pointer is on the filter button: its glyph is drawn, not an
+// icon, so it can't take the hover's text color as the other buttons do.
+let filterHover = false;
+
+// Orca's filter button (SidebarFilter.tsx): its ListFilter glyph, three
+// bars, drawn here since neither this mod nor Herdr's chrome ships one, and
+// its popup (filter-menu.js) on click. While Hide sleeping is on, Orca's
+// badge at its top right counts the filters on, so a row that went missing
+// has its why in sight, and its tooltip says "Edit filters", as Orca's does.
+function filterButton(hiding, t) {
+  const color = filterHover ? t.foreground : t.dim;
+  const bar = (w) => div().w(w).h(1.5).rounded(1).bg(color);
+  return div().id("projects-filter").relative().size(26).flex_none().flex().items_center().justify_center().rounded(6)
+    .hover((s) => s.bg(t.hover))
+    .on_hover((hovered, cx) => {
+      if (filterHover === hovered) return;
+      filterHover = hovered;
+      cx.notify();
+    })
+    .tooltip(hiding ? "Edit filters" : "Filter workspaces")
+    .on_click(() => openFilterMenu())
+    .child(v_flex().items_center().gap(2).child(bar(11.5)).child(bar(7)).child(bar(3.5)))
+    .when(hiding, (el) => el.child(div().absolute().top(-2).right(-2).min_w(12).h(12).px(2).rounded(6).bg(t.accent)
+      .flex().items_center().justify_center().text_size(9).font_medium().text_color(t.accent_foreground).child("1")));
 }
 
 function emptyState(t) {
@@ -475,13 +521,18 @@ function projectRow(p, t) {
 // that place; the branch icon in its PR's color (green open, purple merged,
 // red closed, gray draft; pr-model.js PR_COLORS), its hover naming the PR;
 // other plugins' badges after the label (D38); the open dot when it has a
-// space; highlighted when shown.
+// space; highlighted when shown. Asleep (workspace-sleep D3, Orca's moon): a
+// moon in that place unless an agent needs attention, the label and icons
+// dimmed, no dot, and the main checkout's home after the label.
 function workspaceRow(w, t, badges, pr) {
   const width = badgeMaxWidth(badges.length);
   const busy = Boolean(w.status) && w.status !== "idle";
-  const shown = !busy && !w.main && pr ? pr : null;
+  const moon = w.asleep && !busy;
+  const shown = !busy && !moon && !w.main && pr ? pr : null;
   const tone = shown ? t[PR_COLORS[shown.state]] ?? t.dim : t.dim;
-  const lead = busy ? statusMark(w.status, t) : svg(icon(w.main ? "home" : "branch")).size(13).flex_none().text_color(tone);
+  const lead = busy ? statusMark(w.status, t)
+    : moon ? div().id(`m:${w.path}`).flex_none().tooltip("Sleeping").child(svg(icon("moon")).size(13).text_color(t.dim))
+    : svg(icon(w.main ? "home" : "branch")).size(13).flex_none().text_color(tone);
   return h_flex().id(`w:${w.path}`).h(28).flex_none().pl(26).pr(8).gap(8).items_center().rounded(8)
     .cursor_pointer()
     .when(w.selected, (el) => el.bg(t.selected))
@@ -496,12 +547,13 @@ function workspaceRow(w, t, badges, pr) {
     .child(h_flex().id(`lead:${w.path}`).w(14).flex_none().items_center().justify_center()
       .when(Boolean(shown), (el) => el.tooltip(prLabel(shown)))
       .child(lead))
-    .child(div().flex_1().min_w(0).truncate().text_color(w.open ? t.foreground : t.muted).child(w.label))
+    .child(div().flex_1().min_w(0).truncate().text_color(w.asleep ? t.dim : w.open ? t.foreground : t.muted).child(w.label))
+    .when(moon && w.main, (el) => el.child(svg(icon("home")).size(12).flex_none().text_color(t.dim)))
     .when(badges.length > 0, (el) => el.child(h_flex().flex_none().gap(BADGE_GAP).items_center()
       .children(badges.map((b) => badge(w, b, width, t)))))
     // Task mode: no project row above names it (Orca's project label).
     .when(Boolean(w.projectName), (el) => el.child(div().flex_none().max_w(110).truncate().text_size(11.5).text_color(t.dim).child(w.projectName)))
-    .when(w.open, (el) => el.child(div().size(6).flex_none().rounded(3).bg(w.selected ? t.accent : t.muted)));
+    .when(w.open && !w.asleep, (el) => el.child(div().size(6).flex_none().rounded(3).bg(w.selected ? t.accent : t.muted)));
 }
 
 // Another plugin's badge on a workspace row (D38): its icon and/or text in
@@ -641,8 +693,9 @@ async function addFolder(folder) {
 }
 
 // The header's "+" and `projects.add`: the system's folder picker. Needs no
-// open space (S6).
-async function addFromPicker() {
+// open space (S6). Inicio's Add project runs it in its own copy
+// (workspace-sleep D6, R1#10).
+export async function addFromPicker() {
   const folder = await pickFolder({ prompt: "Add project" });
   if (folder) await addFolder(folder);
 }
@@ -655,9 +708,16 @@ export const commands = {
   },
   // Add project: pick a folder.
   add: () => addFromPicker(),
-  // A PR round now, or one more after the one running (D8): Mergear asks
-  // for it after a merge. Run only here, the tree copy (main.js).
-  "refresh-prs": ({ cx, view }) => view?.askPrs?.(cx),
+  // A PR round now, or one more after the one running (D8): Mergear and
+  // Crear PR ask for it after theirs. The keeper's copy runs every command
+  // (workspace-sleep D7), so it leaves the ask in the store and the tree in
+  // the window in front runs it at its next tick (prTick).
+  "refresh-prs": () => store.askPrs(),
+  // Hide sleeping on or off (workspace-sleep D8), Orca's "Toggle Sleeping
+  // Workspaces", with no default key: keys.json can bind it. It runs in the
+  // keeper's copy (D7), so it flips projects.ui.v1, which every tree copy
+  // draws.
+  "toggle-sleeping": () => store.toggleSleeping(),
   // Add project: the focused space's live folder (S5, scriptable).
   "add-here": async () => {
     const at = liveFolder(focused(), spaces(), panes());

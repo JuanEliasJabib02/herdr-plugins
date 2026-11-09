@@ -178,8 +178,9 @@ function statusWord(status) {
 }
 
 // The terminal's own program (argv[0]) is a shell: `/bin/zsh`, `-zsh` (a
-// login shell), `fish`, `pwsh.exe`...
-function isShellRoot(argv) {
+// login shell), `fish`, `pwsh.exe`... Exported for a workspace's sleep
+// (workspace-sleep D2), which leaves any other terminal alone.
+export function isShellRoot(argv) {
   if (!Array.isArray(argv) || typeof argv[0] !== "string") return false;
   const name = argv[0].slice(argv[0].lastIndexOf("/") + 1).replace(/^-/, "").replace(/\.exe$/i, "");
   return SHELLS.has(name);

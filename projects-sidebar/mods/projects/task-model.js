@@ -9,7 +9,7 @@
 // group-menu.js, task-menu.js and delete-task.js draw and act on it.
 
 import { normPath, baseName, activeGroup, noteKeyOf } from "./lib.js";
-import { buildTree, mostUrgent, workspaceLabel, deletePrompt } from "./tree-model.js";
+import { buildTree, mostUrgent, workspaceLabel, deletePrompt, hiddenAsleep } from "./tree-model.js";
 
 // ── Task keys (D30) ────────────────────────────────────────────────────────
 
@@ -125,8 +125,14 @@ function compareLanes(a, b) {
 //   folder name in two projects is one task whatever their order (S26); a
 //   ticket and a name never share a lane; task:none, "No task"; servers,
 //   "Servers". A lane with nothing in it isn't shown.
+// Hide sleeping (workspace-sleep D8, `hideSleeping` and `exceptMain` in
+// args, as buildTree takes them) leaves out the same workspaces it leaves
+// out in Project mode (tree-model.js hiddenAsleep), the shown one never: a
+// lane counts only what it shows, and one left with nothing isn't shown.
+// Servers keeps a project's loading or missing row whatever it hides.
 export function buildTaskTree(args) {
   const model = buildTree(args);
+  const filter = { hideSleeping: args?.hideSleeping, exceptMain: args?.exceptMain };
   const folded = new Set(args?.tasks ?? []);
   const lanes = new Map();
   const laneOf = (lane, kind, label) => {
@@ -138,6 +144,7 @@ export function buildTaskTree(args) {
     if (p.loading) laneOf(SERVERS_LANE, "servers", "Servers").items.push({ row: { kind: "loading", project: p.path, projectName: p.name } });
     if (p.missing) laneOf(SERVERS_LANE, "servers", "Servers").items.push({ row: { kind: "missing", project: p.path, projectName: p.name } });
     for (const w of p.workspaces) {
+      if (hiddenAsleep(w, filter)) continue;
       const at = laneKey(w);
       if (at.kind === "name") {
         const lower = at.label.toLowerCase();

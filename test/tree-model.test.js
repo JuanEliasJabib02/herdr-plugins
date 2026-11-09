@@ -1,17 +1,21 @@
 // T3: the projects tree (M/tree-model.js): rows from the registry, the
 // worktree cache and Herdr's live spaces and agents; what a click does; Add
 // project; the project menu; the narrow rail; the worktree engine's helpers.
+// workspace-sleep T5: Hide sleeping (D8), its popup's items, and
+// projects.toggle-sleeping run from the keeper's copy.
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync, readdirSync } from "node:fs";
+import { registerHooks } from "node:module";
 import {
   emptyRegistry, addProject, addGroup, selectGroup, matchSpaces, setOrganize, parseRegistry, needsBackup,
-  setProjectBase, findProject,
+  setProjectBase, findProject, parseUi,
 } from "../projects-sidebar/mods/projects/lib.js";
 import {
   buildTree, openAction, openMainAction, railAction, workspaceLabel, workspaceMenuItems, initials, mostUrgent,
   agentTitle, ago, isNarrow, projectMenuItems, withoutProject, pruneCache, projectPaths,
   watchDirs, eachLimit, liveFolder, addProjectAt, deletePrompt, deleteOutcome, terminalsStaying,
-  renamePrompt, renameOutcome, reorderProject, spaceRenames,
+  renamePrompt, renameOutcome, reorderProject, spaceRenames, filterMenuItems,
 } from "../projects-sidebar/mods/projects/tree-model.js";
 
 const HOME = "/Users/demo";
@@ -90,6 +94,74 @@ test("open: two spaces on one workspace, the shown one is the one a click select
   const spaces = [space("s1", "/code/api"), space("s2", "/code/api/src", { active: true })];
   assert.equal(ws(tree({ spaces }), "develop").space, "s2");
   assert.equal(ws(tree({ spaces: [spaces[0], { ...spaces[1], active: false }] }), "develop").space, "s1");
+});
+
+test("asleep (workspace-sleep D3): no space, or every space with all its tabs settled; one awake tab or space wakes it", () => {
+  const settled = (id, folder, extra = {}) => space(id, folder, { tabs: [tab(`${id}-t1`, { settled: true }), tab(`${id}-t2`, { settled: true, active: false })], ...extra });
+  assert.equal(ws(tree(), "develop").asleep, true, "never opened: asleep, as Orca infers it");
+  assert.equal(ws(tree({ spaces: [space("s1", "/code/api")] }), "develop").asleep, false, "a space with a live tab");
+  assert.equal(ws(tree({ spaces: [settled("s1", "/code/api")] }), "develop").asleep, true, "every tab put away");
+  const half = space("s1", "/code/api", { tabs: [tab("s1-t1", { settled: true }), tab("s1-t2", { settled: false, active: false })] });
+  assert.equal(ws(tree({ spaces: [half] }), "develop").asleep, false, "one tab still out");
+  assert.equal(ws(tree({ spaces: [settled("s1", "/code/api"), space("s2", "/code/api/src")] }), "develop").asleep, false, "another space on it is awake");
+  assert.equal(ws(tree({ spaces: [space("s1", "/code/api", { tabs: [] })] }), "develop").asleep, false, "a space with no tabs listed isn't taken as asleep");
+});
+
+test("asleep (workspace-sleep D3): the main checkout sleeps too, and an agent needing attention keeps its status", () => {
+  const settled = space("s1", "/code/app", { status: "done", tabs: [tab("s1-t1", { settled: true })] });
+  const main = ws(tree({ spaces: [settled] }), "main");
+  assert.deepEqual([main.asleep, main.main, main.status, main.open], [true, true, "done", true]);
+});
+
+// ── Hide sleeping (workspace-sleep D8) ─────────────────────────────────────
+
+// A space whose every tab is put away (`tab.settle`): D3's asleep. LOGIN
+// (below, with the Delete dialog's cases) is feat/login's folder.
+const putAway = (id, folder, extra = {}) => space(id, folder, { tabs: [tab(`${id}-t1`, { settled: true })], ...extra });
+
+test("hide sleeping off: every row shows, asleep or not, whatever the exemption says (D8)", () => {
+  const all = ["P app", "W main", "W login", "P api", "W develop"];
+  assert.deepEqual(brief(tree().rows), all, "off by default: nothing is open, so every workspace is asleep, and all show");
+  assert.deepEqual(brief(tree({ hideSleeping: false, exceptMain: false }).rows), all);
+  assert.deepEqual(brief(tree({ hideSleeping: false, spaces: [putAway("s1", LOGIN)] }).rows), all);
+});
+
+test("hide sleeping on: asleep rows go, never-opened ones too; the main checkouts stay unless the exemption is off; a project row always stays (D8)", () => {
+  assert.deepEqual(brief(tree({ hideSleeping: true }).rows), ["P app", "W main", "P api", "W develop"], "Except default branch is on by default");
+  assert.deepEqual(brief(tree({ hideSleeping: true, exceptMain: true }).rows), ["P app", "W main", "P api", "W develop"]);
+  assert.deepEqual(brief(tree({ hideSleeping: true, exceptMain: false }).rows), ["P app", "P api"], "every workspace hidden: the project rows stay");
+  const awake = [space("s1", LOGIN), putAway("s2", "/code/api")];
+  assert.deepEqual(brief(tree({ hideSleeping: true, exceptMain: false, spaces: awake }).rows), ["P app", "W login", "P api"], "an awake workspace shows, a put-away one hides");
+});
+
+test("hide sleeping on: the shown workspace is never hidden, nor one whose agent needs attention; a hidden one takes its agents along (D8, D3)", () => {
+  const shown = tree({ hideSleeping: true, exceptMain: false, spaces: [putAway("s1", LOGIN, { active: true })] });
+  assert.deepEqual(brief(shown.rows), ["P app", "W login", "P api"], "shown though every tab is put away");
+  assert.equal(ws(shown, "login").asleep, true);
+  const done = tree({ hideSleeping: true, exceptMain: false, spaces: [putAway("s1", LOGIN, { status: "done" })] });
+  assert.deepEqual(brief(done.rows), ["P app", "W login", "P api"], "its status mark shows instead of the moon (D3), so the row isn't sleeping to look at");
+  const idle = tree({ hideSleeping: true, exceptMain: false, spaces: [putAway("s1", LOGIN, { status: "idle" })], agents: [agent("t1", "s1", { title: "Login form" })] });
+  assert.deepEqual(brief(idle.rows), ["P app", "P api"], "an idle agent is no attention: the row and its agent go");
+});
+
+test("hide sleeping on: the rail, a folded project and the rows git hasn't given yet are as before (D8)", () => {
+  const off = tree();
+  const on = tree({ hideSleeping: true, exceptMain: false });
+  assert.deepEqual(on.projects, off.projects, "the rail and a project's click see every workspace");
+  assert.deepEqual(brief(tree({ hideSleeping: true, collapsed: ["/code/app"] }).rows), ["P app", "P api", "W develop"]);
+  const { "/code/api": _, ...cache } = CACHE;
+  assert.deepEqual(brief(tree({ hideSleeping: true, exceptMain: false, cache }).rows), ["P app", "P api", "loading"]);
+  assert.deepEqual(brief(tree({ hideSleeping: true, exceptMain: false, cache, failed: new Set(["/code/api"]) }).rows), ["P app", "P api", "missing"]);
+});
+
+test("filter popup (D8): Hide sleeping, off by default; Except default branch only while hiding, indented, on by default", () => {
+  assert.deepEqual(filterMenuItems(parseUi(undefined)), [{ id: "hide-sleeping", label: "Hide sleeping", icon: "moon", on: false }]);
+  assert.deepEqual(filterMenuItems(parseUi({ exceptMain: false })), [{ id: "hide-sleeping", label: "Hide sleeping", icon: "moon", on: false }], "the exemption shows only while hiding");
+  assert.deepEqual(filterMenuItems(parseUi({ hideSleeping: true })), [
+    { id: "hide-sleeping", label: "Hide sleeping", icon: "moon", on: true },
+    { id: "except-main", label: "Except default branch", icon: "branch", on: true, indented: true },
+  ]);
+  assert.equal(filterMenuItems(parseUi({ hideSleeping: true, exceptMain: false }))[1].on, false);
 });
 
 test("click (D8): an open workspace selects its space, a closed one opens a space named by its label", () => {
@@ -742,4 +814,86 @@ test("spaceRenames: nothing to rename when the label stays or an input is missin
   assert.deepEqual(spaceRenames({ path: at, before: null, after: "x", spaces, matches }), []);
   assert.deepEqual(spaceRenames({ path: at, before: "feat", after: "x", spaces: null, matches }), []);
   assert.deepEqual(spaceRenames({ path: at, before: "feat", after: "x", spaces, matches: null }), []);
+});
+
+// ── projects.toggle-sleeping, from the keeper's copy (workspace-sleep D8) ──
+// Every projects.* command runs in the keeper's copy (keeper.js listen,
+// workspace-sleep D7), never the tree's, so the filter's command is run
+// there, as Herdr delivers it, and has only the store to reach the tree by.
+// main.js and its views import herdr, gpui-kit and gpui-base, which only
+// Herdr provides: the stand-ins export exactly the names the mod's files
+// import, read from their sources (test/inicio-model.test.js has the same).
+// Each herdr function forwards to `fake`; gpui's are inert, since nothing
+// here draws.
+const MOD_DIR = new URL("../projects-sidebar/mods/projects/", import.meta.url);
+function importedFrom(spec) {
+  const names = new Set();
+  for (const f of readdirSync(MOD_DIR).filter((x) => x.endsWith(".js"))) {
+    for (const m of readFileSync(new URL(f, MOD_DIR), "utf8").matchAll(new RegExp(`import\\s*\\{([^}]*)\\}\\s*from\\s*"${spec}"`, "g"))) {
+      for (const part of m[1].split(",")) {
+        const name = part.trim().split(/\s+as\s+/)[0];
+        if (name) names.add(name);
+      }
+    }
+  }
+  return [...names];
+}
+const INERT = `const inert = new Proxy(function () {}, { get: (_, k) => (k === "then" ? undefined : inert), apply: () => inert, construct: () => inert });`;
+const gpui = (spec) => [INERT, ...importedFrom(spec).map((n) => (n === "View" ? "export class View {}" : `export const ${n} = inert;`))].join("\n");
+const FAKES = {
+  herdr: importedFrom("herdr").map((n) => `export const ${n} = (...a) => globalThis.__projectsHerdr(${JSON.stringify(n)}, a);`).join("\n"),
+  "gpui-kit": gpui("gpui-kit"),
+  "gpui-base": gpui("gpui-base"),
+};
+registerHooks({
+  resolve: (spec, ctx, next) => (Object.hasOwn(FAKES, spec) ? { url: `fake:${spec}`, shortCircuit: true } : next(spec, ctx)),
+  load: (url, ctx, next) => (url.startsWith("fake:") ? { format: "module", source: FAKES[url.slice(5)], shortCircuit: true } : next(url, ctx)),
+});
+let fake = {};
+globalThis.__projectsHerdr = (name, args) => (fake[name] ? fake[name](...args) : undefined);
+const { default: Projects } = await import("../projects-sidebar/mods/projects/main.js");
+
+const settle = async () => {
+  for (let i = 0; i < 10; i += 1) await new Promise(setImmediate);
+};
+
+// The keeper's copy with no window: it listens all the same (T8) and makes
+// or moves nothing, so the shared keys hold only what the commands wrote.
+async function keeperWith(shared) {
+  const w = { shared: { ...shared }, waiting: [], logs: [] };
+  fake = {
+    props: () => ({ view: "keeper" }),
+    window: () => null,
+    shared: (k) => w.shared[k],
+    setShared: (k, v) => {
+      w.shared[k] = v;
+      return null;
+    },
+    nextCommand: () => new Promise((resolve) => w.waiting.push(resolve)),
+  };
+  const cx = { spawn: (fn) => fn(cx)?.catch?.(() => {}), timer: { every() {} }, sleep: () => Promise.resolve(), notify() {} };
+  new Projects().init(null, cx);
+  await settle();
+  return w;
+}
+// A key command, as Herdr delivers one: to the copy waiting on nextCommand().
+async function send(w, name) {
+  w.waiting.shift()?.(name);
+  await settle();
+}
+
+test("projects.toggle-sleeping flips Hide sleeping in projects.ui.v1 from the keeper's copy, keeping the folds and the exemption, and the tree reads it back (D8)", async (t) => {
+  const log = t.mock.method(console, "log", () => {});
+  const w = await keeperWith({ "projects.ui.v1": { collapsed: ["/code/app"], tasks: ["servers"], exceptMain: false } });
+  await send(w, "toggle-sleeping");
+  assert.deepEqual(w.shared["projects.ui.v1"], { collapsed: ["/code/app"], tasks: ["servers"], hideSleeping: true, exceptMain: false }, "on");
+  const ui = parseUi(w.shared["projects.ui.v1"]);
+  assert.deepEqual(brief(tree({ hideSleeping: ui.hideSleeping, exceptMain: ui.exceptMain }).rows), ["P app", "P api"], "what the tree draws from the stored value");
+  await send(w, "toggle-sleeping");
+  assert.deepEqual(w.shared["projects.ui.v1"], { collapsed: ["/code/app"], tasks: ["servers"], exceptMain: false }, "off again: no key, as parseUi reads it");
+  assert.deepEqual(log.mock.calls.map((c) => c.arguments[0]).filter((l) => /no command|failed/.test(l)), []);
+
+  const fresh = await keeperWith({});
+  await send(fresh, "toggle-sleeping");
+  assert.deepEqual(fresh.shared["projects.ui.v1"], { collapsed: [], hideSleeping: true }, "nothing stored yet: the default ui, hiding");
 });

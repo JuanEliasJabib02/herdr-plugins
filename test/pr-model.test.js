@@ -351,11 +351,11 @@ test("stored value: valid entries read back as themselves, the rest is dropped, 
 
 const src = (f) => readFileSync(new URL(`../projects-sidebar/mods/projects/${f}`, import.meta.url), "utf8");
 
-test("tree.js: render reads the PRs once; the branch icon takes its PR's color and hover, never on the main checkout or under an agent's mark", () => {
+test("tree.js: render reads the PRs once; the branch icon takes its PR's color and hover, never on the main checkout, under an agent's mark or on an asleep row's moon (workspace-sleep D3)", () => {
   const tree = src("tree.js");
   assert.equal(tree.split("store.prs()").length - 1, 2, "read in render, and once more to merge a round");
   const row = tree.slice(tree.indexOf("function workspaceRow("), tree.indexOf("\n}\n", tree.indexOf("function workspaceRow(")));
-  assert.match(row, /const shown = !busy && !w\.main && pr \? pr : null;/);
+  assert.match(row, /const shown = !busy && !moon && !w\.main && pr \? pr : null;/);
   assert.match(row, /t\[PR_COLORS\[shown\.state\]\] \?\? t\.dim/);
   assert.match(row, /\.tooltip\(prLabel\(shown\)\)/);
 });

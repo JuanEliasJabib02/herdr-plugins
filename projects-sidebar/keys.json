@@ -2,6 +2,17 @@
   "layout:projects": {
     "f1": "projects.group1",
     "f2": "projects.group2",
-    "f3": "projects.group3"
+    "f3": "projects.group3",
+    "cmd-alt-]": "projects.space-next",
+    "cmd-alt-[": "projects.space-prev",
+    "ctrl-1": "projects.space-1",
+    "ctrl-2": "projects.space-2",
+    "ctrl-3": "projects.space-3",
+    "ctrl-4": "projects.space-4",
+    "ctrl-5": "projects.space-5",
+    "ctrl-6": "projects.space-6",
+    "ctrl-7": "projects.space-7",
+    "ctrl-8": "projects.space-8",
+    "ctrl-9": "projects.space-9"
   }
 }

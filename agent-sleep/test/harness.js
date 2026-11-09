@@ -1,6 +1,9 @@
 // The fake world the coordinator tests run against (T5, T7): Core terminals,
 // Claude session files, Herdr's layout, and the injected hc / exec / files /
-// clock. Shared by coordinator.test.js and restart.test.js.
+// clock. Shared by coordinator.test.js and restart.test.js. Workspace sleep
+// (workspace-sleep T3) adds Herdr's run() as `herdrRun` (tab.settle and
+// tab.unsettle change the tabs' `settled`), `hc interrupt`, and the `ps` and
+// `kill` a hang-up runs: nothing reaches a real process.
 import { readFileSync } from "node:fs";
 import { Coordinator } from "../mods/agent-sleep/coordinator.js";
 
@@ -36,6 +39,14 @@ export const DRAFT = fixture("claude-draft.txt");
 export const EXIT = fixture("claude-exit.txt");
 export const SHELL_BARE = fixture("shell-bare.txt");
 export const SHELL_TYPED = fixture("shell-typed.txt");
+// workspace-sleep's T0b (Claude Code 2.1.319): an empty prompt line, a one-line
+// and a two-line draft, the line after one ctrl+c, and `hc interrupt`'s report.
+export const IDLE_319 = fixture("t0b-claude-idle.txt");
+export const DRAFT_319 = fixture("t0b-claude-draft.txt");
+export const MULTI_319 = fixture("t0b-claude-draft-multi.txt");
+export const CLEARED_319 = fixture("t0b-claude-ctrl-c.txt");
+export const INTERRUPTED = fixture("t0b-interrupt.json");
+export const WORKSPACES = `${APP}/agent-sleep/workspaces.json`;
 
 // ── A fake world: Core terminals, Claude session files, Herdr's layout ─────
 
@@ -105,6 +116,13 @@ export function makeWorld() {
     shared: {},
     writes: [],
     logs: [],
+    runs: [], // herdrRun calls, as [name, args]
+    interrupts: [], // `hc interrupt` calls: { address, args }
+    onInterrupt: null, // (address, w): what the interrupt did to the world
+    interruptReport: null, // its JSON; T0b's by default
+    pgids: {}, // a root pid → { pgid, tpgid }, as `ps -o pgid=,tpgid=` prints them
+    kills: [], // every `kill`'s args
+    onKill: null, // (args, w): what the signal did
   };
   w.core.t9 = shellOf(claude("t9", { pid: 900, fgPid: 900 }));
   w.screens.t9 = SHELL_BARE;
@@ -233,7 +251,25 @@ export function deps(w) {
         return ok("");
       }
       if (cmd === "server") return ok(JSON.stringify({ holder: { instance: w.holder, pid: 1, current: true, terminals: 3 } }));
+      if (cmd === "interrupt") {
+        const address = rest[0];
+        if (!w.core[address]) return fail("no such terminal");
+        w.interrupts.push({ address, args: rest.slice(1) });
+        if (w.onInterrupt) w.onInterrupt(address, w);
+        return ok(w.interruptReport ?? INTERRUPTED);
+      }
       return fail(`unknown command ${cmd}`);
+    },
+    // Herdr's run(): returns null. tab.settle / tab.unsettle put a tab away or
+    // bring it back, as T0 saw.
+    herdrRun: (name, args) => {
+      w.runs.push([name, args]);
+      if (name === "tab.settle" || name === "tab.unsettle") {
+        for (const s of w.spaces) {
+          s.tabs = s.tabs.map((t) => (t.id === args?.id ? { ...t, settled: name === "tab.settle" } : t));
+        }
+      }
+      return null;
     },
     exec: async (cmd, args) => {
       w.execs.push([cmd, ...args]);
@@ -256,6 +292,15 @@ export function deps(w) {
         return ok(w.transcripts.has(sid) ? `${from}/-code-app/${name}\n` : "");
       }
       if (cmd === "test") return args[0] === "-d" && w.dirs.has(args[1]) ? ok("") : fail("");
+      if (cmd === "ps" && args[1] === "pgid=,tpgid=") {
+        const g = w.pgids[Number(args.at(-1))];
+        return g ? ok(`${String(g.pgid).padStart(5)} ${String(g.tpgid).padStart(5)}\n`) : fail();
+      }
+      if (cmd === "kill") {
+        w.kills.push(args);
+        if (w.onKill) w.onKill(args, w);
+        return ok("");
+      }
       if (cmd === "ps") {
         const kb = w.rss[Number(args.at(-1))];
         return kb ? ok(`  ${kb}\n`) : fail();
@@ -292,6 +337,66 @@ export function setup({ t1 = true, t2 = false, settings = { enabled: true, idleM
   if (settings) w.files[SETTINGS] = JSON.stringify(settings);
   if (t1) addClaude(w, "t1", { pid: 100, fgPid: 200, sid: SID1 });
   if (t2) addClaude(w, "t2", { pid: 101, fgPid: 201, sid: SID2, cwd: "/code/checkout-flow" });
+  return { w, co: new Coordinator(deps(w)) };
+}
+
+// ── Workspace sleep (workspace-sleep T3) ───────────────────────────────────
+
+// Herdr's spaces as spaces() and panes() give them, panes with their folder.
+// `list`: [{ id, folder?, machine?, tabs: { [tabId]: [[pane, terminal, cwd]] } }];
+// a pane whose terminal is null is a mod pane (projects-sidebar's, as
+// Inicio's). Every tab starts unsettled, the first of each space its active
+// one; `shown` is the shown space.
+export function spacesWorld(w, list, shown = list[0]?.id ?? null) {
+  w.spaces = list.map((s, i) => ({
+    id: s.id,
+    index: i + 1,
+    name: s.id,
+    folder: s.folder ?? "",
+    machine: s.machine ?? null,
+    active: false,
+    tabs: Object.keys(s.tabs).map((id, j) => ({ id, index: j + 1, active: j === 0, settled: false })),
+  }));
+  w.panes = list.flatMap((s) => Object.entries(s.tabs).flatMap(([tab, panes]) => panes.map(([pane, terminal, cwd]) => ({
+    pane, terminal, tab, cwd: cwd ?? null, ...(terminal === null ? { mod: "projects" } : {}),
+  }))));
+  showSpace(w, shown);
+}
+
+// The shown space changes (a click on its row, or the keeper selecting Inicio).
+export function showSpace(w, id) {
+  w.spaces = w.spaces.map((s) => ({ ...s, active: s.id === id }));
+  const tab = w.spaces.find((s) => s.id === id)?.tabs.find((t) => t.active)?.id ?? null;
+  w.focused = { space: id, tab, pane: null, terminal: null, shown: null, agent: null, cwd: null };
+}
+
+export const settledTabs = (w) => w.spaces.flatMap((s) => s.tabs.filter((t) => t.settled).map((t) => t.id));
+
+// A terminal whose zsh root is in front, at a bare prompt.
+export function addShell(w, address, { pid, cwd = "/code/app", ...over }) {
+  w.core[address] = { ...shellOf(claude(address, { pid, fgPid: pid, cwd })), ...over };
+  w.screens[address] = SHELL_BARE;
+}
+
+// A program other than Claude in front of its zsh root (`sleep 300`, `less`):
+// its own process group, the terminal's foreground one, as `ps` prints them
+// (T0b item 5).
+export function addProgram(w, address, { pid, fgPid, name = "sleep", cwd = "/code/app" }) {
+  w.core[address] = {
+    ...shellOf(claude(address, { pid, fgPid: pid, cwd })),
+    foreground: { argv: [name, "300"], cwd, name, pid: fgPid },
+  };
+  w.screens[address] = "";
+  w.pgids[pid] = { pgid: pid, tpgid: fgPid };
+}
+
+export const entries = (w) => (w.files[WORKSPACES] ? JSON.parse(w.files[WORKSPACES]).workspaces : {});
+
+// A world for workspace sleep: automatic sleep off (a sleep the person asks
+// for works either way, and no tick of its own gets in the way), no Claude yet.
+export function workspaceSetup({ settings = { enabled: false, idleMinutes: 30 } } = {}) {
+  const w = makeWorld();
+  if (settings) w.files[SETTINGS] = JSON.stringify(settings);
   return { w, co: new Coordinator(deps(w)) };
 }
 

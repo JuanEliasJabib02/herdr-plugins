@@ -19,28 +19,49 @@ across repos.
   in the person's UI font.
 - **Projects tree:**
   - Header: 31 px, 11.5 px `dim` text. It reads "Projects · <group>", or
-    "Projects" for the default group, with a "+" (Add project) on the right.
+    "Projects" for the default group, with a filter button ("Filter
+    workspaces", Orca's three-bar glyph) and a "+" (Add project) on the
+    right. While Hide sleeping is on, the filter button carries Orca's
+    badge, a small `accent` "1" at its top right, and its tooltip reads
+    "Edit filters", as Orca's does.
   - Project rows: 28 px with rounded 8 corners. Each has a chevron (collapse),
     a folder icon, the repo name in `foreground` semibold, and a "+" (New
     workspace) that brightens on hover.
   - Workspace rows: 28 px, indented 26 px.
     - Leading icon: the agent's status mark while one of its spaces is
-      working, blocked or done; otherwise a home icon on the main checkout and
-      a branch icon on the others.
+      working, blocked or done; otherwise a moon when the workspace is
+      asleep, a home icon on the main checkout and a branch icon on the
+      others.
+    - Asleep (Orca's moon): no space shows the workspace, or every space on
+      it has all its tabs put away (`tab.settle`, `settled` on each tab).
+      The tree doesn't care who put them away. The moon's tooltip says
+      "Sleeping", the label and icons are `dim`, there's no dot, and the
+      main checkout keeps its home icon after the label.
     - The branch icon takes the color of the branch's newest GitHub PR, as
       Orca shows it: green (`ansi2`) open, purple (`ansi5`) merged, red
       (`ansi1`) closed without merging, `dim` gray as a draft. Its hover
-      names it ("PR #161 · Open"). With no PR it stays `dim`.
+      names it ("PR #161 · Open"). With no PR it stays `dim`. An asleep
+      row draws the moon in its place, so it shows no PR color.
     - Label: the branch on the main checkout. On the others, the branch's
       last segment (`user/feat-x` → `feat-x`), or the folder name when
-      detached. It is bright when the workspace has a space.
+      detached. It is bright when the workspace is awake and `dim` while
+      asleep, which a workspace with no space always is.
     - After the label, other plugins' badges, if any (see Badges from
       other plugins).
-    - A dot on the right when a space is open there: `accent` while shown,
-      `muted` otherwise.
+    - A dot on the right when a space is open there and it isn't asleep:
+      `accent` while shown, `muted` otherwise.
     - The shown workspace has a `selected` background.
   - Agent rows: 24 px, under their workspace. Each shows the program's icon,
     the agent's title, and the time since its tab changed ("2m").
+  - **Hide sleeping** (the filter button's popup, or
+    `projects.toggle-sleeping`; Orca's sleeping filter): asleep workspace
+    rows go, with their agents, those never opened too, as in Orca.
+    - The shown workspace never hides, nor does one whose agent is working,
+      blocked or done: it shows that mark, not the moon.
+    - "Except default branch", on by default, keeps every main checkout.
+    - A project row stays even when all its workspaces hide, and the
+      narrow rail is unchanged.
+    - Both settings survive a reload.
   - Empty group: "No projects in this group yet." and an "Add project" button.
     A project git can't list shows "Can't read this folder."
 - **Groups bar** (drawn like Orca's, so a long name never takes the bar):
@@ -97,9 +118,13 @@ across repos.
     remove one first.").
   - The header gets a branch-icon button, "New workspace", next to Add
     project: the dialog opens on the focused space's project.
+  - Hide sleeping leaves out the same workspaces as in Project mode: a lane
+    counts only the rows it shows, and a lane left with none isn't shown.
+    Servers keeps a project's "Loading…" row.
 - **Narrow sidebar** (under 160 px wide): projects show as initials ("HP" for
   herdr-plugins) with the most urgent status among their workspaces. Group
-  chips shrink to 26 px and center, and "+" hides.
+  chips shrink to 26 px and center, and "+" hides. The tree's header shows
+  its "+" only: the rail has no workspace rows to filter.
 - **New workspace dialog:** a 560 × 600 modal with these parts:
   - Project select: the current group's projects only (the space you're in); switch groups for another's.
   - Name input: takes a name, a branch, `#123`, or a GitHub issue / pull
@@ -178,6 +203,11 @@ across repos.
   - The group menu is a 210 × 200 popup: Organize by Project, Organize by
     Task, a separator, Rename…, Delete group. The New / Rename group form is
     a 380 × 214 dialog.
+  - The filter popup is 240 px wide, at the pointer, as Orca's: "Hide
+    sleeping" with the moon and a switch, off by default; while it's on,
+    "Except default branch" with the branch icon, indented and `muted`, on
+    by default. A click, or Enter or Space on the highlighted row, flips a
+    switch and the popup stays open; ↑/↓ move, Esc closes.
 - **PR card** (the right panel's Changes, above Herdr's diff, as Orca shows
   the PR atop Source Control): a 176 px card with rounded 10 corners, a 1 px
   `border` and the terminals' `background`, 8 px above Changes' own card.
@@ -220,6 +250,24 @@ across repos.
     what is left to fill in `dim` ("Escribe un título."). Footer Cancelar
     and "Crear PR" or "Publicar y crear PR" (`solid`, ⌘↵, off only while
     the base or the title is missing), "Creando…" while it runs.
+- **Inicio** (Orca's Landing): what shows when the shown workspace closes or
+  sleeps, instead of the next worktree.
+  - It is a space named "Inicio" in the home folder. Its only tab is this
+    mod's `inicio` view, centered on `background`.
+  - Herdr's icon (the one the brand block draws) at 80 px, then "Herdr" in
+    36 px bold.
+  - "Select a workspace from the sidebar to begin.", or "Add a project to
+    get started." while no group has a project, in `muted`.
+  - Two buttons: "Add project" (the folder picker, as the header's "+") and
+    "Create workspace" (the New workspace dialog on the active group's first
+    project).
+  - A row for each of Orca's shortcuts that has a key here, its key drawn as
+    caps (⌘ ⇧ ↑ on macOS): "Create workspace" (`projects.new-workspace`),
+    "Move up workspace" and "Move down workspace" (`projects.space-prev`
+    and `projects.space-next`, else Herdr's `space.prev` and `space.next`).
+    A key counts when keys.json binds it in `global`, in the shown layout's
+    section or in `mod:projects`; a layout's key shadows a global one.
+  - No "Star on GitHub".
 
 **How it behaves**
 
@@ -233,6 +281,52 @@ across repos.
   shown one, else the first). If it has none, opens a space there named
   after its label. Click an agent row: focuses that agent's pane. Click a
   project row: collapse or expand, remembered.
+- **Closing never shows another worktree.** The keeper, a 1 px copy of this
+  mod in the status bar, keeps Inicio right after the shown space
+  (`space.move`). Herdr shows the space now at a closed one's place, so
+  closing the shown space by any path lands on Inicio: Cmd+W on its last
+  tab, the tab or pane X, a menu, the picker, `exit` in its last terminal.
+  - **When it selects Inicio:** the shown space just had all its tabs put
+    away (a workspace sleep), or the shown space vanished and Herdr showed
+    another (a flash, then Inicio). Inicio itself closed counts: a new one
+    is shown, never the next worktree. A space that becomes shown already
+    put away (a click on a sleeping row) is left alone, since agent-sleep
+    wakes it. Only changes count: after a reload the first look does
+    nothing.
+  - **When it doesn't move Inicio:** while Inicio is shown, and while a
+    remote space is shown (Inicio can't sit in another machine's block).
+  - **Making it:** when none is there, the keeper makes it (`space.new`
+    with the home folder on this computer, then the view's tab, then the
+    first terminal tab closed) and shows again the space shown before, so
+    Inicio is the only flash. Its id is kept in `projects.inicio.v1`. One
+    left half-made by a reload is finished. A making that didn't land
+    closes what it made and is tried again after 30 s.
+  - **A terminal in Inicio** (Cmd+T, code-tabs' "+", a split beside the
+    view) makes it an ordinary space: its view pane closes, it gets Herdr's
+    name back, and a new Inicio is made.
+  - **No worktree's:** its folder is the home folder and it holds no
+    terminal, so it shows under no workspace, and no workspace's Delete or
+    Rename touches it.
+  - **Guards:** no new move until `spaces()` shows the last one applied (or
+    2 s passed). When the space order changes under the keeper more than 3
+    times in 10 s (two screens share the order, not the selection), Inicio
+    stays put for 60 s and the keeper logs it once. Nothing is made while
+    this computer's spaces load, and while there is no window (`herdr-app
+    check`, or a start before the window is up) the keeper does nothing; it
+    starts on its own once the window is there.
+- **Space keys skip Inicio.** In this layout `cmd-alt-]` and `cmd-alt-[`
+  (`projects.space-next`, `projects.space-prev`) and `ctrl-1`…`ctrl-9`
+  (`projects.space-1`…`projects.space-9`) do what Herdr's `space.next`,
+  `space.prev` and `space.select:N` do, over the space order without
+  Inicio: so they reach the same spaces as before Inicio, whatever is
+  shown. Next and prev wrap at the ends, as Herdr's do. From Inicio they go
+  to the space after or before it. `ctrl-N` past the last space, or a key
+  that would select the shown space, does nothing.
+- **Key commands run in the keeper.** A command reaches one shown copy of
+  the mod only, the first one started, so the keeper, which starts with
+  the window, is the only copy that reads them. Every `projects.*` command
+  works with the sidebar hidden (cmd-b), and `projects.ping` says `view
+  keeper`.
 - **Drag a project row** (Project mode) up or down onto another project row:
   a line marks where it lands, and on release the project moves there within
   its group, remembered. Leaving the list, or a new press anywhere else,
@@ -470,7 +564,10 @@ across repos.
   flask), then `{ "mod": "claude-accounts", "props": { "view": "footer" } }`
   (weight 1), Claude's usage at its right as in Orca, and last
   `status-agent-sleep` → `{ "mod": "agent-sleep" }` (px 40): the agent-sleep
-  plugin's moon, which must be in the shown layout for its loop to run. Block
+  plugin's moon, which must be in the shown layout for its loop to run. The
+  row's first cell is `status-projects-keeper` → `{ "mod": "projects",
+  "props": { "view": "keeper" } }` (px 1), the keeper, outside the sidebar
+  so a hidden sidebar still starts it. Block
   `agents` → `{ "mod": "projects-agents" }`. The root sets `"theme":
   "one-dark-pro"`. The right panel runs the window's height beside the tab bar
   and the terminals, as in Orca: the row `work-row` holds the column `work` and
@@ -493,7 +590,7 @@ across repos.
   agents list don't reach it. Herdr's Apache 2.0 license is in the folder.
 - **Mod `mods/projects/`** (`mod.json` `{ "place": "none" }`), one mod in
   views picked by `props.view`:
-  - none = `tree.js` (the tree; the only copy that reads key commands);
+  - none = `tree.js` (the tree);
   - `groups` = `groups.js`;
   - `new-workspace` = `new-workspace.js`;
   - `delete-workspace` = `delete-workspace.js`;
@@ -504,22 +601,34 @@ across repos.
   - `merge-menu` and `merge-pr` = `merge-pr.js` (Mergear's methods popup
     and its confirm dialog);
   - `create-pr` = `create-pr.js` (Crear PR's dialog);
-  - `project-menu`, `workspace-menu`, `group-menu`, `group-form`.
+  - `project-menu`, `workspace-menu`, `group-menu`, `group-form`;
+  - `filter-menu` = `filter-menu.js` (the header's Hide sleeping popup);
+  - `keeper` = `keeper.js` (the status bar's 1 px cell, and the only copy
+    that reads key commands: `main.js` gives it the whole table), `inicio`
+    = `inicio.js` (Inicio's view).
   - `main.js` names the view a copy without props draws in one line,
     `const DEFAULT_VIEW = "tree";`, which `scripts/check-views.sh` rewrites
     to check each view.
   - Pure logic is in `lib.js`, `tree-model.js`, `task-model.js`,
     `new-workspace-model.js`, `remove-workspace-model.js`,
     `rename-workspace-model.js`, `badges-model.js`, `pr-model.js` (the PR
-    colors) and `pr-card-model.js` (the PR card), tested with `node
-    --test` (Delete's and Rename's against a real git). The card finds its
-    workspace with `lib.js` `checkoutAt`, the rule `matchSpaces` places
+    colors), `pr-card-model.js` (the PR card) and `inicio-model.js`, tested
+    with `node --test` (Delete's and Rename's against a real git, Inicio's
+    against a fake Herdr whose commands land a moment later). The command
+    loop is tested on the mod's real copies, with `herdr`, `gpui-kit` and
+    `gpui-base` stood in for (`test/inicio-model.test.js`). The card finds
+    its workspace with `lib.js` `checkoutAt`, the rule `matchSpaces` places
     spaces by.
   - `store.js` is the only code that touches the shared keys: `projects.v1`
-    (groups and projects), `projects.ui.v1` (collapsed), `projects.cache.v1`
+    (groups and projects), `projects.ui.v1` (collapsed projects, folded
+    lanes, and Hide sleeping: `"hideSleeping": true` only while on,
+    `"exceptMain": false` only while Except default branch is off),
+    `projects.cache.v1`
     (worktree lists), `projects.agents.v1` (`knownAgents()`),
-    `projects.notes.v1` (task notes) and `projects.prs.v1` (the PR of each
-    workspace's branch, `pr-model.js`). A stored `projects.v1` with a malformed
+    `projects.notes.v1` (task notes), `projects.prs.v1` (the PR of each
+    workspace's branch, `pr-model.js`), `projects.prs-ask.v1` (a number
+    that grows at each `projects.refresh-prs`) and `projects.inicio.v1` (Inicio's
+    space id, `{ "space": "<id>" }`, written only by the keeper). A stored `projects.v1` with a malformed
     group or project keeps the valid rest, and the original is copied to
     `projects.v1.backup` before the first write over it; a malformed
     `projects.notes.v1` goes to `projects.notes.v1.backup` the same way.
@@ -529,18 +638,27 @@ across repos.
   - `config.js` holds `MOD`, `WORKTREE_ROOT` (`~/orca/workspaces`) and
     `BADGE_KEYS`.
 - **Commands:** `projects.add`, `projects.add-here`, `projects.new-workspace`,
-  `projects.group1`..`projects.group3`, `projects.ping`, and
+  `projects.group1`..`projects.group3`, `projects.ping`,
   `projects.refresh-prs` (a PR round now, or one more after the one
-  running: Mergear and Crear PR run it after theirs). All run in the tree
-  copy, the only one that reads commands. `keys.json` binds F1–F3 in
-  section `layout:projects`.
+  running: Mergear and Crear PR run it after theirs. It leaves the ask in
+  `projects.prs-ask.v1`, and the tree in the window in front runs the
+  round at its next second, so the tree stays the only writer of the PR
+  colors),
+  `projects.space-next`, `projects.space-prev`,
+  `projects.space-1`..`projects.space-9`, `projects.toggle-sleeping`
+  (Hide sleeping on or off, Orca's "Toggle Sleeping Workspaces", with no
+  default key). `keys.json` binds, in section
+  `layout:projects`, F1–F3 to the groups, and `cmd-alt-]`, `cmd-alt-[` and
+  `ctrl-1`…`ctrl-9` to the space commands. All of them run in the keeper's
+  copy.
 - **Herdr functions:** `spaces`, `panes`, `agents`, `focused`,
-  `knownAgents`, `layout`, `window`, `home`, `pickFolder`, `watchFolder`,
-  `exec`, `run` (`space.select`, `space.new`, `space.close`, `pane.focus`,
-  the PR card's `layout.show` and `layout.hide` of its own block, and
-  Mergear's and Crear PR's `projects.refresh-prs`),
-  `openOverlay`, `closeOverlay`, `shared`, `setShared`, `notify`, `theme`,
-  `props`, `nextCommand`.
+  `knownAgents`, `layout`, `window`, `machines`, `keys`, `home`,
+  `pickFolder`, `watchFolder`, `exec`, `run` (`space.select`, `space.new`,
+  `space.close`, `pane.focus`, the PR card's `layout.show` and
+  `layout.hide` of its own block, and Mergear's and Crear PR's
+  `projects.refresh-prs`; the keeper adds `space.move`, `space.rename`,
+  `tab.new`, `tab.close` and `pane.close`), `openOverlay`, `closeOverlay`,
+  `shared`, `setShared`, `notify`, `theme`, `props`, `nextCommand`.
 - **Programs it runs:**
   - `git`, in the registered repos: `rev-parse --git-common-dir`,
     `worktree list --porcelain`, `for-each-ref`, `show-ref`, `fetch origin`
@@ -592,9 +710,10 @@ across repos.
   - `open <url>`, the PR card's "Abrir en GitHub".
   - Whatever program another plugin's badge names in its `exec`, when you
     click that badge; its hover says which ("· runs <program>").
-- **Art:** its own Lucide-style icons in `icons/` (folder, branch, home,
-  plus, code, copy), plus chevrons, check, x and square-pen from
-  Herdr's `workspace-chrome` and agent icons from Herdr's `icons/`.
+- **Art:** its own Lucide-style icons in `icons/` (folder, folder-plus,
+  branch, home, plus, code, copy), plus chevrons, check, x and square-pen
+  from Herdr's `workspace-chrome`, agent icons from Herdr's `icons/`, and
+  Herdr's `frame/welcome/herdr.png` on Inicio.
 
 **Badges from other plugins**
 
@@ -708,9 +827,13 @@ against.
   reload before scripting `herdr-app do projects.*`.
 - **Never launch the agent as `env VAR=1 claude`:** Herdr then sees `zsh`,
   not an agent, and shows no status. Use `claude --settings '{"env":{…}}'`.
-- **Merging `keys.json`:** F1–F3 need the plugin's `keys.json` merged into
-  yours. Once edited, your keys.json no longer receives Herdr's new default
-  shortcuts. In this layout, F2 replaces Herdr's `tab.rename`.
+- **Merging `keys.json`:** F1–F3 and the space keys need the plugin's
+  `keys.json` merged into yours. Once edited, your keys.json no longer
+  receives Herdr's new default shortcuts. In this layout, F2 replaces
+  Herdr's `tab.rename`, and `cmd-alt-]`, `cmd-alt-[` and `ctrl-1`…`ctrl-9`
+  replace `space.next`, `space.prev` and `space.select:N`; the installer
+  names each global key the layout's binding shadows. A key you already
+  bind in `layout:projects` keeps your binding.
 - **Delete deletes.** It removes the worktree's folder, its uncommitted
   work after "Delete anyway", and its merged branch. Its spaces close with
   their agents, including an agent session running in that worktree.
@@ -761,9 +884,12 @@ against.
 - **`herdr-app check` draws only the tree view.** Check the other views
   from a copy whose `main.js` defaults to them: `scripts/check-views.sh
   projects-sidebar/mods/projects pr merge-menu merge-pr create-pr` checks
-  the PR card, Mergear's popup and dialog, and Crear PR's dialog. Outside
-  Herdr there is no
-  workspace and no props, so that check draws their empty states only.
+  the PR card, Mergear's popup and dialog, and Crear PR's dialog, and
+  `scripts/check-views.sh projects-sidebar/mods/projects inicio keeper`
+  checks Inicio and the keeper, and `scripts/check-views.sh
+  projects-sidebar/mods/projects tree filter-menu` the tree and its filter
+  popup. Outside Herdr there is no workspace and no
+  props, so that check draws their empty states only.
 - **The PR card hides by clicking:** its `layout.hide` / `layout.show` is a
   layout click, which Herdr saves in `layouts/.state/`. Moving between a
   workspace the card shows and one it doesn't (a main checkout, a Bitbucket
@@ -778,6 +904,16 @@ against.
 - **The PR card and the diff can differ** only when the folder Changes
   shows is a repo nested in a registered checkout (a submodule): the card
   shows the checkout's branch, the diff the nested repo.
+- **Inicio rests on what Herdr shows after a close:** the space at the
+  closed one's place, seen but not documented. If Herdr changes it, the
+  keeper still shows Inicio, after a flash of the space Herdr chose.
+- **Inicio counts in the space order** for Herdr's own commands. In this
+  layout the plugin's keys skip it, but `space.next`, `space.prev` and
+  `space.select:N` run any other way (the palette, `herdr-app do`, another
+  layout's keys, a key you bound yourself) land on it.
+- **Commands need the keeper.** In a layout without the keeper's cell, no
+  copy reads `projects.*` commands: keys and `herdr-app do projects.*` do
+  nothing there.
 - **Limits:**
   - Only the first three groups have keys.
   - Branch names have no user prefix and are slugged to 48 characters,
@@ -807,10 +943,19 @@ against.
 - With a space open in a repo, `herdr-app do projects.add-here` lists that
   repo with `main` (home icon, open dot) and its other worktrees.
   A space in a folder outside every project is not shown.
+- With the layout shown, a space named Inicio exists right after the shown
+  space and shows Herdr, the hint and both buttons. Cmd+W on the last tab of
+  a middle space and of the last space both land on Inicio with no other
+  worktree drawn, and so they do with the sidebar hidden (cmd-b).
 - `layout.resize {id: "sidebar", px: 76}` shows initials in the tree and
   smaller, centered chips in the groups bar.
 - With keys.json merged, F1–F3 select groups 1–3 while a terminal has focus,
   and F2 no longer opens Rename tab in this layout.
+- With keys.json merged and Inicio right after the shown space,
+  `cmd-alt-]` and `cmd-alt-[` step through the spaces without ever showing
+  Inicio, and wrap at the ends; `ctrl-1`…`ctrl-9` select the spaces they
+  selected before Inicio existed. With the sidebar hidden (cmd-b), `herdr-app
+  do projects.ping` shows a toast that says `view keeper`.
 - `herdr-app do projects.new-workspace` opens the dialog on the focused
   space's project, with `origin/main` (or the repo's default) marked
   "default".

@@ -183,6 +183,31 @@ test("a folded lane shows only its header; the other lanes keep their rows", () 
   assert.deepEqual(tree({ registry: setOrganize(emptyRegistry(), "g1", "task"), cache: {} }), { group: { id: "g1", name: "Projects" }, empty: true, projects: [], rows: [] });
 });
 
+// ── Hide sleeping (workspace-sleep D8) ─────────────────────────────────────
+
+// A space whose every tab is put away (`tab.settle`): D3's asleep.
+const putAway = (id, folder, extra = {}) => space(id, folder, { tabs: [tab(`${id}-t1`, { settled: true })], ...extra });
+
+test("hide sleeping in Task mode: off, every lane shows; on, a lane whose workspaces all hide isn't shown, and Servers keeps the main checkouts unless the exemption is off (D8)", () => {
+  const all = brief(tree().rows);
+  assert.deepEqual(brief(tree({ hideSleeping: false, exceptMain: false }).rows), all, "off: as before");
+  assert.deepEqual(brief(tree({ hideSleeping: true }).rows), ["T Servers (3)", "W main · app", "W develop · api", "W main · web"],
+    "nothing is open, so every workspace is asleep: only the exempt main checkouts stay");
+  assert.deepEqual(brief(tree({ hideSleeping: true, exceptMain: false }).rows), [], "every lane empty, so none is shown");
+});
+
+test("hide sleeping in Task mode: a lane counts only what it shows, the shown workspace stays, and Servers keeps a project's loading row (D8)", () => {
+  const spaces = [space("s1", `${W}/api/login`), putAway("s2", `${W}/app/ax-99`, { active: true }), putAway("s3", `${W}/api/ax-1000`)];
+  assert.deepEqual(brief(tree({ hideSleeping: true, exceptMain: false, spaces }).rows), ["T AX-99 (1)", "W ax-99 · app", "T login (1)", "W login · api"],
+    "ax-99 is shown though put away; app's login is asleep and goes, api's is awake; AX-1000 is put away");
+  const at = tree({ hideSleeping: true, exceptMain: false, spaces }).rows.find((r) => r.lane === "task:AX-99");
+  assert.deepEqual([at.count, at.selected], [1, true]);
+  const cache = { "/code/app": CACHE["/code/app"] };
+  assert.deepEqual(brief(tree({ hideSleeping: true, exceptMain: false, cache, failed: new Set(["/code/web"]) }).rows), ["T Servers (0)", "loading · api", "missing · web"],
+    "no project is ever hidden: its row git hasn't given yet stays");
+  assert.deepEqual(brief(tree({ hideSleeping: true, tasks: [SERVERS_LANE] }).rows), ["T Servers (3)"], "a folded lane still counts what it would show");
+});
+
 // ── Group menu (D32) ───────────────────────────────────────────────────────
 
 test("group menu: Organize by Project and by Task, the current one checked, a separator, then Rename… and Delete group with their why", () => {

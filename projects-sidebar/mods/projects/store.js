@@ -13,9 +13,10 @@ import { parseBadges } from "./badges-model.js";
 import { parsePrs } from "./pr-model.js";
 import {
   KEYS, changed, normPath,
-  parseRegistry, registryWrites, parseUi, withCollapsed, withTaskCollapsed, parseCache, parseAgents,
+  parseRegistry, registryWrites, parseUi, withCollapsed, withTaskCollapsed, withHideSleeping, withExceptMain, parseCache, parseAgents,
   parseNotes, withNote, notesFull, notesWrites,
 } from "./lib.js";
+import { parseInicio, inicioValue } from "./inicio-model.js";
 
 function write(key, value) {
   if (!changed(shared(key), value)) return false;
@@ -45,7 +46,7 @@ export function updateRegistry(fn) {
   return next;
 }
 
-// ── projects.ui.v1: collapsed projects, folded Task lanes ──────────────────
+// ── projects.ui.v1: collapsed projects, folded Task lanes, Hide sleeping ───
 
 export const ui = () => parseUi(shared(KEYS.ui));
 
@@ -63,6 +64,20 @@ export function toggleCollapsed(path) {
 export function toggleTaskCollapsed(lane) {
   const now = ui();
   return saveUi(withTaskCollapsed(now, lane, !(now.tasks ?? []).includes(lane)));
+}
+
+// The sleeping filter (workspace-sleep D8), read by the tree and its popup.
+// Hide sleeping: the popup's first switch and projects.toggle-sleeping, run
+// in the keeper's copy (D7), which reaches the tree only through this key.
+export function toggleSleeping() {
+  const now = ui();
+  return saveUi(withHideSleeping(now, now.hideSleeping !== true));
+}
+
+// Except default branch: the popup's second switch, shown while hiding.
+export function toggleExceptMain() {
+  const now = ui();
+  return saveUi(withExceptMain(now, now.exceptMain === false));
 }
 
 // ── projects.cache.v1: each project's worktree list ────────────────────────
@@ -123,9 +138,36 @@ export function savePrs(next) {
   return write(KEYS.prs, next);
 }
 
+// projects.prs-ask.v1: a round asked for (`projects.refresh-prs`, run by
+// Mergear and Crear PR). Commands run in the keeper's copy (workspace-sleep
+// D7), never the tree's, so the ask waits here for the tree's next tick
+// (tree.js prTick), which stays the only writer of projects.prs.v1. Each ask
+// is larger than the last, even within the same millisecond.
+export const prsAsked = () => {
+  const v = shared(KEYS.prsAsk);
+  return Number.isFinite(v) ? v : 0;
+};
+
+export function askPrs() {
+  setShared(KEYS.prsAsk, Math.max(Date.now(), prsAsked() + 1));
+}
+
 // ── badges.*: other plugins' indicators (D38) ──────────────────────────────
 // Read only: each key belongs to the plugin that publishes it, which also
 // clears its own paths. { [workspacePath]: [badge] }, validated and capped
 // by badges-model.js; tree.js reads it once per render.
 
 export const badges = () => parseBadges(BADGE_KEYS.map((k) => shared(k)));
+
+// ── projects.inicio.v1: Inicio's space (workspace-sleep D6) ─────────────────
+// Written only by the keeper (keeper.js), from a spawned task: the id it
+// made, or null once that space is no longer Inicio. panes() exposes no
+// props, so Inicio is remembered by id (R1#7); only one a reload left
+// half-made, never stored, is told by its shape (inicio-model.js
+// inicioState).
+
+export const inicio = () => parseInicio(shared(KEYS.inicio));
+
+export function saveInicio(id) {
+  return write(KEYS.inicio, inicioValue(id));
+}

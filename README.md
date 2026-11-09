@@ -8,7 +8,7 @@ like Herdr's home, with a `RECIPE.md` and a `preview.png`).
 
 | Folder | What it does |
 |---|---|
-| [`projects-sidebar/`](projects-sidebar/) | Replaces Herdr's Spaces list with projects and their workspaces (git worktrees), groups switched with F1–F3, Add project, and a New workspace dialog that can make the same branch in companion repos and give the agent access to them. Each workspace's branch icon turns green with an open PR and purple once it is merged, with either of your GitHub accounts. [Recipe](projects-sidebar/RECIPE.md) |
+| [`projects-sidebar/`](projects-sidebar/) | Replaces Herdr's Spaces list with projects and their workspaces (git worktrees), groups switched with F1–F3, Add project, and a New workspace dialog that can make the same branch in companion repos and give the agent access to them. Each workspace's branch icon turns green with an open PR and purple once it is merged, with either of your GitHub accounts; a workspace asleep (Orca's moon, which includes one never opened) shows the moon there instead. [Recipe](projects-sidebar/RECIPE.md) |
 | [`claude-accounts/`](claude-accounts/) | Orca's Claude usage and accounts: the active account's session, weekly and Fable usage in the sidebar footer, a popover and a panel with every account, Manage Accounts (sign in, add, remove), the account new Claude terminals start on, restarting running Claude terminals onto a new account, and a usage details window. Its CLI publishes the accounts and their usage for other plugins. [Recipe](claude-accounts/RECIPE.md) |
 | [`spotlight/`](spotlight/) | Orca Pro Max's Spotlight and test queue: one dev server per repo at its root with the workspace's code projected there, the `spotlight` CLI agents use (`on`/`off`/`status`/`logs`), the test-turn queue with its flask, board and settings, and the sidebar badges. [Recipe](spotlight/RECIPE.md) |
 | [`agent-sleep/`](agent-sleep/) | Puts idle Claude Code terminals you aren't looking at to sleep to free memory, and resumes each one when you show its tab, the way Orca's agent hibernation works. Off until you turn it on. |
@@ -54,8 +54,9 @@ herdr-app do layout.switch '{"name":"projects"}'  # ctrl-shift-l switches back
   (spotlight's `spotlight` CLI). The link is recorded in the plugin's
   manifest, a foreign file in the way stops the install, and `--uninstall`
   removes it.
-- **Keys:** F1–F3 come from the plugin's `keys.json`, which the installer
-  merges into yours. It adds only keys you don't use and backs the file up
+- **Keys:** F1–F3 (groups), plus `cmd-alt-]` / `cmd-alt-[` (next and
+  previous space) and `ctrl-1`…`ctrl-9` (the Nth space), which skip Inicio,
+  come from the plugin's `keys.json`, which the installer merges into yours. It adds only keys you don't use and backs the file up
   first (`keys.json.bak-<time>`). Once your keys.json is edited, Herdr stops
   adding its new default shortcuts to it. In the projects layout, F2 selects
   group 2 instead of renaming the tab, and `cmd-l` opens and closes the right
@@ -63,7 +64,8 @@ herdr-app do layout.switch '{"name":"projects"}'  # ctrl-shift-l switches back
   skips the merge; then switch groups by clicking, or with
   `herdr-app do projects.group1`.
 - **Uninstall:** `scripts/install.sh --uninstall` removes only what the
-  install copied. Your keys.json keeps the F1–F3 lines.
+  install copied. Your keys.json keeps the plugin's lines, and the space
+  named Inicio stays open until you close it.
 
 ## Where workspaces go
 
