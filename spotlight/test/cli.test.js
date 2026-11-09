@@ -28,7 +28,7 @@ import { acquire, unlock, LockError } from "../mods/spotlight/locks.js";
 import {
   rescuedNotes, describeServer, recordServers, waitForTurnServers, ensureServer, portBusyError, errorNote,
 } from "../mods/spotlight/cli-work.mjs";
-import { readSettings } from "../mods/spotlight/board-model.js";
+import { readSettings, takeToasts, toastMark } from "../mods/spotlight/board-model.js";
 import { nodeIo } from "../mods/spotlight/server-plan.js";
 import { appendLogHeader } from "../mods/spotlight/server-log.js";
 
@@ -733,6 +733,9 @@ test("toggle off with a file made by hand in the root where the original commit 
   const note = w.state().notes.find((n) => n.toast && /page\.txt/.test(n.text));
   assert.ok(note, JSON.stringify(w.state().notes));
   assert.match(note.text, /^app: page\.txt quedó como cambio sin commit \(tu versión\)\. Copia en refs\/herdr-spotlight\/rescued\/\S+\.$/);
+  // D41: Herdr's own toast keeps its words under a title naming the repo.
+  assert.equal(note.title, "Spotlight · app");
+  assert.equal(note.body, note.text.slice("app: ".length));
 });
 
 test("rescuedNotes: the line for files not written back points at `git show <ref>:<archivo>`, never at a checkout that would overwrite what came back", () => {
@@ -2068,8 +2071,10 @@ test("a turn-off whose server lives through SIGKILL is an error that names it, n
   assert.doesNotMatch(off.stdout, /root restored/);
   const notes = w.state().notes.filter((n) => n.repo === app.root);
   assert.ok(notes.some((n) => n.toast && n.text === `app: ${message}`), JSON.stringify(notes));
-  // D35: an error toast, 60 s.
+  // D35: an error toast, 60 s; D41: a turn-off's title, its message the body.
   assert.equal(notes.find((n) => n.text === `app: ${message}`).level, "error");
+  assert.equal(notes.find((n) => n.text === `app: ${message}`).title, "No se pudo apagar Spotlight en app");
+  assert.equal(notes.find((n) => n.text === `app: ${message}`).body, message);
   assert.ok(!notes.some((n) => n.text === "Spotlight off — root restaurado"), JSON.stringify(notes));
   assert.deepEqual(w.hc().kills, [{ pid: stuck, signal: "SIGTERM" }, { pid: stuck, signal: "SIGKILL" }]);
   assert.match(readFileSync(logPath, "utf8"), /server NOT stopped/);
@@ -2715,6 +2720,72 @@ test("D35: errorNote: every error note is level error; one whose click opens the
   }
 });
 
+test("D41: errorNote's title says what was refused (a light, a sync, a turn-off) and its body is Orca's description of the code, else its message; a server error is Herdr's own: 'Spotlight · <repo>' over its words; `text` stays the log's line", () => {
+  const ROOT = "/Users/u/code/app";
+  const WS = "/Users/u/ws/app/ax-1";
+  const noteOf = (args, record = {}) => {
+    const s = { version: 1, repos: { [ROOT]: { serverState: "stopped", lastError: null, ...record } }, queue: { requests: [], lighting: {} }, notes: [], variants: {} };
+    errorNote(s, { root: ROOT, name: "app", workspace: WS, now: 5, ...args });
+    return s.notes[0];
+  };
+  const TITLES = { light: "No se pudo prender Spotlight en app", sync: "Falló el sync de Spotlight", off: "No se pudo apagar Spotlight en app" };
+  const DESCRIPTIONS = {
+    "operation-in-progress": "Termina o aborta primero el merge/rebase en curso.",
+    "root-diverged": "El root del proyecto tiene cambios hechos fuera del workspace de Spotlight. Haz commit o descártalos ahí primero.",
+    "restore-conflict": "Restaurar los cambios originales del root dio conflicto. Resuélvelo en el root del proyecto y vuelve a intentar.",
+    "untracked-collision": "Archivos sin seguimiento en el root se sobrescribirían. Muévelos o bórralos, o fuerza el sync.",
+    "not-enabled": "Spotlight no está activado para este proyecto.",
+  };
+  for (const [op, title] of Object.entries(TITLES)) {
+    for (const [code, body] of Object.entries(DESCRIPTIONS)) {
+      const error = { code, message: `the ${code} message` };
+      const note = noteOf({ error, op });
+      assert.deepEqual({ title: note.title, body: note.body, level: note.level }, { title, body, level: "error" }, `${op} ${code}`);
+      assert.equal(note.text, `app: the ${code} message`, `${op} ${code}: the log's line`);
+    }
+    // Any other code: its own message.
+    const other = noteOf({ error: { code: "not-on-primary-branch", message: "Check out a branch in the root." }, op });
+    assert.deepEqual([other.title, other.body], [title, "Check out a branch in the root."], op);
+  }
+  // A refused turn-off whose server didn't stop either (G4): Orca's description, then that.
+  const both = noteOf({ error: { code: "root-diverged", message: "diverged. Además, el server no paró: hc no pudo leer su terminal." }, op: "off", also: "hc no pudo leer su terminal" });
+  assert.equal(both.body, `${DESCRIPTIONS["root-diverged"]} Además, el server no paró: hc no pudo leer su terminal.`);
+  // Server errors (a busy port, a dead or failed start): Herdr's own words under "Spotlight · app".
+  const BUSY = portBusyError({ port: 3000, pid: 900, command: "node", cwd: "/x" });
+  const busy = noteOf({ error: BUSY, top: BUSY }, { lastError: BUSY });
+  assert.deepEqual([busy.title, busy.body, busy.text], ["Spotlight · app", BUSY.message, `app: ${BUSY.message}`]);
+  const DIVERGED = { code: "root-diverged", message: "El root se movió del snapshot de Spotlight." };
+  const under = noteOf({ error: BUSY, top: { ...DIVERGED, serverError: BUSY } }, { lastError: { ...DIVERGED, serverError: BUSY } });
+  assert.equal(under.title, "Spotlight · app");
+  assert.equal(under.body, `${BUSY.message} Antes resuelve el root: ${DIVERGED.message}`);
+  // The hint goes after the body in the toast (board-model.js), never in `text`.
+  const [toast] = takeToasts([noteOf({ error: DIVERGED, op: "off" })], toastMark(0)).toasts;
+  assert.deepEqual(toast, {
+    title: TITLES.off, body: `${DESCRIPTIONS["root-diverged"]} Clic: Apagar igual en el popup`, level: "error", timeout: 60_000, action: serverNoteAction(WS),
+  });
+});
+
+test("D41: a single light's note: success, Orca's title, the body by what its server did (Arrancando, Reiniciando con only for a server it replaced, else where the logs stay); its text names repo and holder as before", async () => {
+  const { lightNote } = await import("../mods/spotlight/cli-work.mjs");
+  const LOG ="/Users/u/.local/state/herdr-spotlight/logs/app-abc123.log";
+  const base = { root: "/code/app", name: "app", workspace: "/ws/app/ax-1", logPath: LOG };
+  const plan = { command: "npm run dev --" };
+  const fresh = lightNote({ ...base, server: { state: "started", plan, result: { ok: true, started: true } } });
+  assert.deepEqual(fresh, {
+    repo: "/code/app", text: "Spotlight on · app ← ax-1 · server arrancando", toast: true, level: "success",
+    title: "Spotlight on — el root del proyecto ahora refleja este workspace", body: `Arrancando npm run dev -- — logs en ${LOG}`,
+  });
+  const restarted = lightNote({ ...base, server: { state: "started", plan, result: { ok: true, started: true, restarted: true } } });
+  assert.equal(restarted.body, `Reiniciando con npm run dev -- — logs en ${LOG}`);
+  assert.equal(restarted.text, "Spotlight on · app ← ax-1 · server arrancando");
+  for (const state of ["running", "none", "needs-variant", "pending", "failed", "still-running", "port-busy", "terminal-busy"]) {
+    const note = lightNote({ ...base, server: { state, plan, result: { ok: true, started: false } } });
+    assert.equal(note.body, `Los logs del server quedan para los agentes en ${LOG}`, state);
+    assert.equal(note.title, "Spotlight on — el root del proyecto ahora refleja este workspace", state);
+    assert.match(note.text, /^Spotlight on · app ← ax-1 · /, state);
+  }
+});
+
 test("D35: refused on a diverged root, a sync, a turn-off and a takeover each toast as errors naming their popup button; a `sync --force` that goes through toasts 'Spotlight re-sincronizado…', a plain one doesn't", async () => {
   const w = makeWorld();
   const app = makeRepo(w, "app", { pkg: DEV, tasks: ["AX-8", "AX-9"] });
@@ -2828,4 +2899,113 @@ test("D36: each light that needs a variant asks for it; `env --variant` picked f
   assert.equal(lit.serverVariant, "mx");
   assert.match(lit.serverCommand, /dev:mx/);
   assert.equal(lit.serverState, "starting");
+});
+
+// ── D41: toasts as Orca's ──────────────────────────────────────────────────
+
+test("D41: the variant prompt is Orca's: an info titled 'Elige una variante para <project>', its body, 60 s, opening the popup's chips; its text as before", async () => {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), "sl-vp-")));
+  worlds.push({ dir });
+  const root = join(dir, "multi");
+  for (const [rel, text] of Object.entries({ "package.json": JSON.stringify(VARIANT_PKG), ...VARIANT_APPS })) write(root, rel, text);
+  const ws = "/Users/u/ws/multi/ax-1";
+  const state = {
+    version: 1,
+    repos: {
+      [root]: {
+        holder: ws, lastSnapshotSha: "a".repeat(40), lastSyncAt: 1, lastError: null, serverTerminal: null, serverPid: null, serverStartedAt: null,
+        serverCommand: null, serverEnv: null, serverVariant: null, serverState: "stopped", pendingInstalls: [], ports: [], logPath: join(dir, "multi.log"),
+      },
+    },
+    queue: { requests: [], lighting: {} },
+    notes: [],
+    variants: {},
+  };
+  const cx = memoryCx({ state, exec: shellExec().exec });
+  assert.equal((await ensureServer(cx, root, { workspace: ws })).state, "needs-variant");
+  const [ask] = state.notes;
+  assert.deepEqual(ask, {
+    at: ask.at, repo: root, text: ASK("multi"), toast: true, level: "info", action: serverNoteAction(ws),
+    title: "Elige una variante para multi", body: "Su server arranca con la que elijas, y esta tarea la recuerda.", timeout: 60_000,
+  });
+  assert.deepEqual(takeToasts(state.notes, toastMark(0)).toasts, [{
+    title: "Elige una variante para multi", body: "Su server arranca con la que elijas, y esta tarea la recuerda.", level: "info", timeout: 60_000,
+    action: serverNoteAction(ws),
+  }]);
+});
+
+test("D41: a click (`toggle --note`) refused: a turn-off on a diverged root and a light where Spotlight is off each write an error note with Orca's title and exit 0; the popup's Apagar and a bare call keep exit 1 and 2 with stderr", async () => {
+  const w = makeWorld();
+  const app = makeRepo(w, "app", { pkg: DEV, tasks: ["AX-7"] });
+  const docs = makeRepo(w, "docs", { tasks: ["AX-8"] });
+  w.register([{ id: "g1", repos: [app, docs] }]);
+  const ws = app.ws["AX-7"];
+  assert.equal((await w.cli(["toggle", "--workspace", ws])).code, 0);
+  await w.until((s) => s.queue.lighting[`direct/${app.root}`]?.phase === "done", { what: "lit" });
+  git(app.root, "commit", "-q", "--allow-empty", "-m", "made in the root");
+  const errors = () => w.state().notes.filter((n) => n.toast && n.level === "error");
+
+  const click = await w.cli(["toggle", "--workspace", ws, "--note"]);
+  assert.equal(click.code, 0, click.stderr + click.stdout);
+  assert.equal(errors().length, 1, JSON.stringify(w.state().notes));
+  const [refused] = errors();
+  assert.equal(refused.repo, app.root);
+  assert.equal(refused.title, "No se pudo apagar Spotlight en app");
+  assert.equal(refused.body, "El root del proyecto tiene cambios hechos fuera del workspace de Spotlight. Haz commit o descártalos ahí primero.");
+  assert.equal(refused.button, "Apagar igual");
+  assert.deepEqual(refused.action, serverNoteAction(ws));
+  assert.match(refused.text, /^app: /);
+  // The popup still offers Apagar igual from the record's error.
+  assert.equal(w.state().repos[app.root].lastError.code, "root-diverged");
+  assert.ok(refsOf(app.root).includes("refs/herdr-spotlight/snapshot"), "nothing turned off");
+  // The popup's Apagar (no --note): exit 1 and stderr, as before.
+  const popup = await w.cli(["toggle", "--workspace", ws]);
+  assert.equal(popup.code, 1, popup.stderr + popup.stdout);
+  assert.match(popup.stderr, /^root-diverged: /);
+
+  const off = await w.cli(["toggle", "--workspace", docs.ws["AX-8"], "--note"]);
+  assert.equal(off.code, 0, off.stderr + off.stdout);
+  const enabled = errors().find((n) => n.repo === docs.root);
+  assert.ok(enabled, JSON.stringify(w.state().notes));
+  assert.equal(enabled.title, "No se pudo prender Spotlight en docs");
+  assert.equal(enabled.body, "Spotlight no está activado para este proyecto.");
+  assert.equal(enabled.action, undefined, "no popup can turn it on");
+  assert.deepEqual(refsOf(docs.root), []);
+  // A bare call (agents): exit 2 and stderr, as before.
+  const bare = await w.cli(["toggle", "--workspace", docs.ws["AX-8"]]);
+  assert.equal(bare.code, 2, bare.stderr + bare.stdout);
+  assert.match(bare.stderr, /^not-enabled: /);
+  assert.equal(errors().filter((n) => n.repo === docs.root).length, 1, "a bare call writes no note");
+});
+
+test("D41: a fresh light toasts 'Arrancando <command> — logs en <log>'; a takeover that replaced the running server, 'Reiniciando con <command> — …'; `spotlight logs` still prints which workspace lit what", async () => {
+  const w = makeWorld();
+  const app = makeRepo(w, "app", { pkg: ENV_PKG, tasks: ["AX-1", "AX-2"] });
+  w.register([{ id: "g1", repos: [app] }]);
+  w.listen(app.root, [3000]);
+  const [ws1, ws2] = [app.ws["AX-1"], app.ws["AX-2"]];
+  const lights = () => w.state().notes.filter((n) => n.toast && n.level === "success" && /^Spotlight on · /.test(n.text));
+  const TITLE = "Spotlight on — el root del proyecto ahora refleja este workspace";
+
+  assert.equal((await w.cli(["toggle", "--workspace", ws1, "--inline"])).code, 0);
+  const logPath = w.state().repos[app.root].logPath;
+  assert.equal(lights().length, 1, JSON.stringify(w.state().notes));
+  assert.deepEqual([lights()[0].title, lights()[0].body, lights()[0].text], [
+    TITLE, `Arrancando npm run local -- — logs en ${logPath}`, "Spotlight on · app ← ax-1 · server arrancando",
+  ]);
+
+  // AX-2's own env, picked before it holds: its takeover replaces the server running Local.
+  assert.equal((await w.cli(["env", "--task", "AX-2", "--group", "g1", "--env", "dev", "--inline"])).code, 0);
+  const take = await w.cli(["toggle", "--workspace", ws2, "--inline"]);
+  assert.equal(take.code, 0, take.stderr + take.stdout);
+  assert.equal(w.state().repos[app.root].serverCommand, "npm run dev --");
+  assert.equal(lights().length, 2, JSON.stringify(w.state().notes));
+  assert.deepEqual([lights()[1].title, lights()[1].body, lights()[1].text], [
+    TITLE, `Reiniciando con npm run dev -- — logs en ${logPath}`, "Spotlight on · app ← ax-2 · server arrancando",
+  ]);
+
+  const logs = await w.cli(["logs", "--repo", app.root]);
+  assert.equal(logs.code, 0, logs.stderr);
+  assert.match(logs.stdout, /^ {2}\d\d:\d\d:\d\d {2}Spotlight on · app ← ax-1 · server arrancando$/m);
+  assert.match(logs.stdout, /^ {2}\d\d:\d\d:\d\d {2}Spotlight on · app ← ax-2 · server arrancando$/m);
 });

@@ -44,12 +44,16 @@
 //              taskBatch?: { <groupId>/<KEY>: { op, since, pid } } (D31: a
 //                          whole-task toggle running; setTaskBatch,
 //                          clearTaskBatch; absent when none runs) },
-//     notes: [≤ 200 { at, repo, text, toast, action?, level?, button? }],
+//     notes: [≤ 200 { at, repo, text, toast, action?, level?, button?, title?, body?, timeout? }],
 //                  level (D35): notify's level, info|success|warning|error;
 //                  an error toasts for 60 s (board-model.js takeToasts).
 //                  button: the server popup's button the toast's click
 //                  leads to ("Forzar sync"), named in its body, never in
-//                  `text` (the log `spotlight logs` prints)
+//                  `text` (the log `spotlight logs` prints).
+//                  title, body, timeout (D41): the toast's own, Orca's
+//                  words; without them it reads "Spotlight" over `text`, as
+//                  before. An empty body is a title-only toast. `text`
+//                  stays the log's line (which workspace lit what)
 //     variants: { <lane>/<taskKey>::<root>: <variant> },   ≤ 500, oldest dropped first
 //     envs?: { <groupId>/<KEY> | ws:<path>: local|dev|prod } }
 //                  D32: every env pick, surviving the turn-off; ≤ 500, the
@@ -181,12 +185,17 @@ export function parseState(text) {
 export const serializeState = (state) => `${JSON.stringify(state, null, 2)}\n`;
 
 // Appends a note (D18: progress and errors the footer turns into toasts),
-// keeping the newest NOTES_MAX. `level` and `button` (D35) are kept only
-// when given, so a note without them reads as before. Mutates and returns
-// `state`.
-export function addNote(state, { repo = null, text, toast = false, action, level, button } = {}, at = Date.now()) {
+// keeping the newest NOTES_MAX. `level` and `button` (D35), and the toast's
+// `title`, `body` and `timeout` (D41: a non-empty title, any string as the
+// body, the empty one too, a positive duration in ms) are kept only when
+// given as one, so a note without them reads as before. Mutates and
+// returns `state`.
+export function addNote(state, { repo = null, text, toast = false, action, level, button, title, body, timeout } = {}, at = Date.now()) {
   state.notes.push({
     at, repo, text, toast: Boolean(toast), ...(action ? { action } : {}), ...(level ? { level } : {}), ...(button ? { button } : {}),
+    ...(typeof title === "string" && title !== "" ? { title } : {}),
+    ...(typeof body === "string" ? { body } : {}),
+    ...(Number.isFinite(timeout) && timeout > 0 ? { timeout } : {}),
   });
   if (state.notes.length > NOTES_MAX) state.notes.splice(0, state.notes.length - NOTES_MAX);
   return state;

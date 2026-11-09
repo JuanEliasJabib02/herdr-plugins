@@ -203,6 +203,25 @@ test("D35: addNote keeps a note's level and the popup button its toast names; a 
   assert.ok(!("level" in notes[2]) && !("button" in notes[2]));
 });
 
+test("D41: addNote keeps a note's title, body (an empty one too: a title-only toast) and timeout; a note without them, or with values that aren't one, has none, as before", async () => {
+  const dir = tmp();
+  const store = createStore({ stateDir: dir, hasServerCommand: noServer, now: () => 42 });
+  await store.updateState((s) => {
+    addNote(s, { repo: "/code/app", text: "Spotlight on · app ← ax-1 · server arrancando", toast: true, level: "success", title: "Spotlight on — x", body: "Arrancando vite — logs en /l" }, 43);
+    addNote(s, { repo: "/code/app", text: "Spotlight off — root restaurado", toast: true, level: "success", title: "Spotlight off — y", body: "" }, 44);
+    addNote(s, { repo: "/code/app", text: "ask", toast: true, level: "info", title: "Elige", body: "b", timeout: 60_000 }, 45);
+    addNote(s, { repo: "/code/app", text: "plain", toast: true }, 46);
+    addNote(s, { repo: "/code/app", text: "odd", toast: true, title: "", body: 7, timeout: 0 }, 47);
+  });
+  assert.deepEqual(store.readState().notes, [
+    { at: 43, repo: "/code/app", text: "Spotlight on · app ← ax-1 · server arrancando", toast: true, level: "success", title: "Spotlight on — x", body: "Arrancando vite — logs en /l" },
+    { at: 44, repo: "/code/app", text: "Spotlight off — root restaurado", toast: true, level: "success", title: "Spotlight off — y", body: "" },
+    { at: 45, repo: "/code/app", text: "ask", toast: true, level: "info", title: "Elige", body: "b", timeout: 60_000 },
+    { at: 46, repo: "/code/app", text: "plain", toast: true },
+    { at: 47, repo: "/code/app", text: "odd", toast: true },
+  ]);
+});
+
 test("variants: the per-task remembered variant, keyed <lane>/<taskKey>::<root>, at most 500, oldest dropped first", async () => {
   assert.equal(VARIANTS_MAX, 500);
   assert.equal(variantKey("g1", "AX-3447", "/code/landing/"), "g1/AX-3447::/code/landing");

@@ -270,6 +270,49 @@ describe("toasts (D18)", () => {
       { title: "Spotlight", body: "plain", level: "info" },
     ]);
   });
+
+  test("D41: a note's title, body and timeout make its toast: title ?? \"Spotlight\", body ?? text (an empty body shows none), its own timeout over the error's 60 s; the popup hint follows the body", () => {
+    const action = { name: "spotlight.server.0123456789ab" };
+    const notes = [
+      // A light: Orca's title, the body by what the server did; `text` stays the log's line.
+      {
+        at: START + 1, repo: "/code/app", text: "Spotlight on · app ← ax-1 · server arrancando", toast: true, level: "success",
+        title: "Spotlight on — el root del proyecto ahora refleja este workspace", body: "Arrancando npm run dev -- — logs en /l/app.log",
+      },
+      // A title-only toast (Orca's plain success): the empty body is no body.
+      { at: START + 2, repo: "/code/app", text: "Spotlight off — root restaurado", toast: true, level: "success", title: "Spotlight off — root del proyecto restaurado", body: "" },
+      // An error naming its popup button: the hint goes after the body, never after `text`.
+      {
+        at: START + 3, repo: "/code/app", text: "app: The root moved.", toast: true, level: "error", action, button: "Apagar igual",
+        title: "No se pudo apagar Spotlight en app", body: "El root del proyecto tiene cambios hechos fuera del workspace de Spotlight. Haz commit o descártalos ahí primero.",
+      },
+      // A warning with its own timeout; the variant prompt, an info for 60 s.
+      { at: START + 4, repo: "/code/app", text: "app: detached", toast: true, level: "warning", title: "Spotlight off — el root del proyecto quedó detached", body: "La rama original del root ya no existe, así que quedó detached en su commit original.", timeout: 60_000 },
+      { at: START + 5, repo: "/code/app", text: "Elige una variante para app", toast: true, level: "info", action, title: "Elige una variante para app", body: "Su server arranca con la que elijas, y esta tarea la recuerda.", timeout: 60_000 },
+      // Herdr's own: a title over its words, the body read from `text`.
+      { at: START + 6, repo: "/code/app", text: "Cerraste la terminal del server de app: Spotlight sigue prendido.", toast: true, action, title: "Spotlight · app" },
+      // Fields that aren't one: an empty title, a body that isn't text, a timeout that isn't a duration.
+      { at: START + 7, repo: "/code/app", text: "plain", toast: true, title: "", body: 7, timeout: -5 },
+    ];
+    assert.deepEqual(takeToasts(notes, toastMark(START)).toasts, [
+      { title: "Spotlight on — el root del proyecto ahora refleja este workspace", body: "Arrancando npm run dev -- — logs en /l/app.log", level: "success" },
+      { title: "Spotlight off — root del proyecto restaurado", level: "success" },
+      {
+        title: "No se pudo apagar Spotlight en app",
+        body: "El root del proyecto tiene cambios hechos fuera del workspace de Spotlight. Haz commit o descártalos ahí primero. Clic: Apagar igual en el popup",
+        level: "error", timeout: 60_000, action,
+      },
+      { title: "Spotlight off — el root del proyecto quedó detached", body: "La rama original del root ya no existe, así que quedó detached en su commit original.", level: "warning", timeout: 60_000 },
+      { title: "Elige una variante para app", body: "Su server arranca con la que elijas, y esta tarea la recuerda.", level: "info", timeout: 60_000, action },
+      { title: "Spotlight · app", body: "Cerraste la terminal del server de app: Spotlight sigue prendido.", level: "warning", action },
+      { title: "Spotlight", body: "plain", level: "info" },
+    ]);
+    // An empty body with a popup to open still names its button.
+    const bare = [{ at: START + 1, text: "x", toast: true, level: "error", action, button: "Forzar sync", title: "Falló el sync de Spotlight", body: "" }];
+    assert.deepEqual(takeToasts(bare, toastMark(START)).toasts, [
+      { title: "Falló el sync de Spotlight", body: "Clic: Forzar sync en el popup", level: "error", timeout: 60_000, action },
+    ]);
+  });
 });
 
 describe("the state watch", () => {

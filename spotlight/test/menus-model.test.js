@@ -86,7 +86,8 @@ function build({ state = baseState(), settings = settingsOf(), enabled = ENABLED
 const ids = (list) => (list ?? []).map((it) => it.id);
 const itemOf = (list, id) => (list ?? []).find((it) => it.id === id);
 const checkedOf = (list) => (itemOf(list, "env")?.items ?? []).filter((it) => it.checked).map((it) => it.text);
-const toggleExec = (at) => ({ exec: [BIN, "toggle", "--workspace", at] });
+// D41: the menu's toggle carries --note, as the badges' (a refusal toasts, exit 0).
+const toggleExec = (at) => ({ exec: [BIN, "toggle", "--workspace", at, "--note"] });
 const BUSY = { op: "sync", since: 5, pid: 4242 };
 const codePoints = (s) => [...s].length;
 

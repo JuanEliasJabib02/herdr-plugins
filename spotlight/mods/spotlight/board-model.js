@@ -18,7 +18,8 @@
 //   footerView(board)        the flask: { count, quiet, tooltip }
 //   toastMark(startedAt), takeToasts(notes, mark)
 //                            notes with `toast: true` newer than the mark,
-//                            as notify() takes them (an error for 60 s, D35)
+//                            as notify() takes them (an error for 60 s, D35;
+//                            the note's own title, body and timeout, D41)
 //   isStateBatch(dir, paths) whether a watchFolder batch touched state.json
 //   reapTargets(state), reapFingerprint(terminals, targets),
 //   reapClock(), reapTick(clock, { now, print }), reapDone(clock)
@@ -280,19 +281,26 @@ const ERROR_TOAST_MS = 60_000;
 
 // notify()'s argument for one note. Its level is the note's own (D35); a
 // note without one (or with one notify doesn't know) is a warning when it
-// has an action (a toast that opens the server popup), else info. An error
-// lasts ERROR_TOAST_MS. Herdr's notify has one action and no labeled button,
-// so a toast that opens the popup names the button waiting there in its
-// body ("Clic: Forzar sync en el popup"), from the note's `button`.
+// has an action (a toast that opens the server popup), else info. Its title
+// and body are the note's own (D41: Orca's words), else "Spotlight" over
+// its text, as before; an empty body is a title-only toast (Orca's plain
+// success). Its timeout is the note's own (D41: a warning or the variant
+// prompt for 60 s), else ERROR_TOAST_MS for an error, else Herdr's default.
+// Herdr's notify has one action and no labeled button, so a toast that
+// opens the popup names the button waiting there after its body ("Clic:
+// Forzar sync en el popup"), from the note's `button`.
 function toastOf(note) {
   const action = actionOf(note.action);
   const level = LEVELS.has(note.level) ? note.level : action ? "warning" : "info";
-  const hint = action && isText(note.button) ? ` Clic: ${note.button} en el popup` : "";
+  const hint = action && isText(note.button) ? `Clic: ${note.button} en el popup` : "";
+  const said = typeof note.body === "string" ? note.body : note.text;
+  const body = [said, hint].filter(isText).join(" ");
+  const timeout = Number.isFinite(note.timeout) && note.timeout > 0 ? note.timeout : level === "error" ? ERROR_TOAST_MS : null;
   return {
-    title: "Spotlight",
-    body: `${note.text}${hint}`,
+    title: isText(note.title) ? note.title : "Spotlight",
+    ...(body ? { body } : {}),
     level,
-    ...(level === "error" ? { timeout: ERROR_TOAST_MS } : {}),
+    ...(timeout ? { timeout } : {}),
     ...(action ? { action } : {}),
   };
 }

@@ -87,6 +87,35 @@ function popupButton(shown, record, op) {
   return FORCE_BUTTONS[op] ?? FORCE_BUTTONS.sync;
 }
 
+// D41: the title of a toast Herdr has and Orca doesn't (a busy port, a dead
+// or failed start, a stuck restart, a server ended by hand, an inferred
+// variant, rescued files): its words stay the body, under the repo's name.
+export const herdrTitle = (name) => `Spotlight · ${name}`;
+
+// D41: a toast note of Herdr's own words on a repo: `text` "<repo>: <words>"
+// as before (the log's line), the toast herdrTitle over `body`, the words
+// (the repo is in the title now).
+const herdrNote = (root, name, words, body = words) => ({ repo: root, text: `${name}: ${words}`, toast: true, title: herdrTitle(name), body });
+
+// D41: an error toast's title by what was refused (Orca's
+// spotlightActivateFailedTitle, "Spotlight sync failed",
+// spotlightDeactivateFailedTitle), in Spanish.
+const ERROR_TITLES = {
+  light: (name) => `No se pudo prender Spotlight en ${name}`,
+  sync: () => "Falló el sync de Spotlight",
+  off: (name) => `No se pudo apagar Spotlight en ${name}`,
+};
+
+// D41: Orca's description of an error code (spotlightErrorDescription), in
+// Spanish; any other code's toast says its own message.
+const ORCA_DESCRIPTIONS = {
+  "operation-in-progress": "Termina o aborta primero el merge/rebase en curso.",
+  "root-diverged": "El root del proyecto tiene cambios hechos fuera del workspace de Spotlight. Haz commit o descártalos ahí primero.",
+  "restore-conflict": "Restaurar los cambios originales del root dio conflicto. Resuélvelo en el root del proyecto y vuelve a intentar.",
+  "untracked-collision": "Archivos sin seguimiento en el root se sobrescribirían. Muévelos o bórralos, o fuerza el sync.",
+  "not-enabled": "Spotlight no está activado para este proyecto.",
+};
+
 // A toast for `error` on `root`, opening the server popup when the popup can
 // act on the error it shows: `top`, the record's lastError once written (a
 // server error under orca-holds opens nothing, F7), else `error` itself
@@ -99,14 +128,27 @@ function popupButton(shown, record, op) {
 // button waiting there (popupButton), which its toast's body names, by
 // `op`: what was refused, "light", "sync" or "off" (a server error's
 // callers pass none).
-export function errorNote(s, { root, name, workspace, error, now, top = null, op = null }) {
+// D41: refused (`op`), its title says what was (ERROR_TITLES) and its body
+// is Orca's description of the code, else the message; `also`, why the
+// server didn't stop either, follows a description (a message says it
+// already, alsoNotStopped). A server error (no `op`) is Herdr's own:
+// herdrTitle over its words. The note's `text` stays "<repo>: <message>",
+// the log's line.
+export function errorNote(s, { root, name, workspace, error, now, top = null, op = null, also = null }) {
   const shown = top ?? error;
   const opens = POPUP_CODES.has(shown.code) && workspace;
   const popup = opens
     ? { action: { name: `spotlight.server.${serverId(workspace)}` }, button: popupButton(shown, s.repos?.[root], op) }
     : {};
   const under = top && isServerError(error) && !isServerError(top) ? ` Antes resuelve el root: ${oneLine(top.message)}` : "";
-  addNote(s, { repo: root, text: `${name}: ${error.message}${under}`, toast: true, level: "error", ...popup }, now);
+  const titled = ERROR_TITLES[op];
+  const said = ORCA_DESCRIPTIONS[error.code];
+  let body = `${error.message}${under}`;
+  if (titled && said) body = also ? `${said} Además, el server no paró: ${also}.` : said;
+  addNote(s, {
+    repo: root, text: `${name}: ${error.message}${under}`, toast: true, level: "error", ...popup,
+    title: titled ? titled(name) : herdrTitle(name), body,
+  }, now);
 }
 
 // Whether the server error in force on `record` is `error` already: one
@@ -288,6 +330,34 @@ const SERVER_WORDS = {
   "terminal-busy": "terminal ocupada",
 };
 
+// D41: a single light's toast body by what its server did, Orca's
+// describeStart (spotlight-activated-toast.ts): a start, or a restart only
+// when ensureServer replaced a server that ran (restartServer's
+// `restarted`, in its result); every other state (none, needs-variant,
+// pending, failed, still-running, port-busy, terminal-busy, running) says
+// where the logs stay.
+function startedBody(server, logPath) {
+  if (server?.state !== "started") return `Los logs del server quedan para los agentes en ${logPath}`;
+  const command = server.plan?.command;
+  return server.result?.restarted ? `Reiniciando con ${command} — logs en ${logPath}` : `Arrancando ${command} — logs en ${logPath}`;
+}
+
+// A single light that went through (a fresh one or a takeover, D41): a
+// success with Orca's title, the body by what its server did (startedBody,
+// the record's log); `text` stays the log's line, which names the repo,
+// the holder and the server's state word (SERVER_WORDS), for `spotlight
+// logs`. `server`: ensureServer's answer.
+export function lightNote({ root, name, workspace, server, logPath }) {
+  return {
+    repo: root,
+    text: `Spotlight on · ${name} ← ${path.basename(workspace)} · ${SERVER_WORDS[server.state] ?? server.state}`,
+    toast: true,
+    level: "success",
+    title: "Spotlight on — el root del proyecto ahora refleja este workspace",
+    body: startedBody(server, logPath),
+  };
+}
+
 // One repo of a lighting: activate (fresh or takeover), or sync when the
 // workspace already holds it; then the server. The repo is busy all along,
 // its target `workspace` (D33); a fresh light's record is made for the mark,
@@ -366,8 +436,7 @@ async function lightMember(cx, member, { force, taskKey, quiet = false }) {
     const server = await ensureServer(cx, root, { workspace, branch, taskKey, keepVariant: sameHolder && !taskKey, takeover: switched });
     if (switched && !quiet) {
       await cx.store.updateState((s) => {
-        const text = `Spotlight on · ${name} ← ${path.basename(workspace)} · ${SERVER_WORDS[server.state] ?? server.state}`;
-        addNote(s, { repo: root, text, toast: true }, cx.now());
+        addNote(s, lightNote({ root, name, workspace, server, logPath }), cx.now());
       });
     }
     return { ok: true, server };
@@ -550,10 +619,15 @@ async function oursMayRun(cx, root, record) {
 
 // D36: the toast of a start that waits for a variant (Orca's "Pick a variant
 // for <project>", an info): its click opens the server popup of the
-// workspace it is for, whose chips pick it.
+// workspace it is for, whose chips pick it. D41: Orca's title and body,
+// for 60 s like an error (Orca's never closes by itself); `text` as before.
+const VARIANT_ASK_MS = 60_000;
 function variantAsk(root, name, workspace) {
   const action = workspace ? { action: { name: `spotlight.server.${serverId(workspace)}` } } : {};
-  return { repo: root, text: `Elige una variante para ${name}`, toast: true, level: "info", ...action };
+  return {
+    repo: root, text: `Elige una variante para ${name}`, toast: true, level: "info", ...action,
+    title: `Elige una variante para ${name}`, body: "Su server arranca con la que elijas, y esta tarea la recuerda.", timeout: VARIANT_ASK_MS,
+  };
 }
 
 // ensureServer's work, under the busy mark its caller asked for, if any.
@@ -696,7 +770,8 @@ async function planAndStart(cx, root, opts) {
       if (taskKey && plan.variant && (plan.source === "inferred" || plan.source === "chosen")) {
         rememberVariant(s, `${taskKey}::${normRoot(root)}`, plan.variant);
       }
-      if (plan.note) addNote(s, { repo: root, text: plan.note, toast: true }, now);
+      // Herdr's own toast (D41): its words, byte for byte (server-view-model.js reads them), under a title.
+      if (plan.note) addNote(s, { repo: root, text: plan.note, toast: true, title: herdrTitle(cx.nameOf(root)) }, now);
     } else if (r.ok && r.reason === "already-running") {
       if (rec.serverState !== "listening") rec.serverState = "starting";
       if (r.pid) rec.serverPid = r.pid;
@@ -728,7 +803,11 @@ async function planAndStart(cx, root, opts) {
       const was = rec.restartStuck;
       const repeat = syncing && was?.reason === stuck.reason && was.env === stuck.env && was.command === stuck.command;
       rec.restartStuck = stuck;
-      if (!repeat) addNote(s, { repo: root, text: `${cx.nameOf(root)}: ${stillRunningText(r)}`, toast: true }, now);
+      if (!repeat) {
+        // The words open the toast's body: "El server sigue corriendo: …".
+        const words = stillRunningText(r);
+        addNote(s, herdrNote(root, cx.nameOf(root), words, `${words[0].toUpperCase()}${words.slice(1)}`), now);
+      }
     } else {
       // The start didn't go through: its own server error over whatever was
       // there (K3, H2; under a root error the record has, F7), opening the
@@ -1026,7 +1105,9 @@ async function settleServerEnd(cx, root) {
           if (!serverEnded(rec, live.state) || rec.serverStartedAt !== record.serverStartedAt) return false;
           Object.assign(rec, { serverState: live.state, ports: [] });
           const action = { name: `spotlight.server.${serverId(rec.holder)}` };
-          addNote(s, { repo: root, text: SERVER_ENDS[live.state](cx.nameOf(root)), toast: true, action }, now);
+          // Herdr's own toast (D41): its words, under a title.
+          const name = cx.nameOf(root);
+          addNote(s, { repo: root, text: SERVER_ENDS[live.state](name), toast: true, action, title: herdrTitle(name) }, now);
           return true;
         });
         return wrote.result ? live.state : null;
@@ -1127,9 +1208,11 @@ const restartFailure = (server) => {
 };
 
 // D35: the toast of a Forzar sync that went through (Orca's "Spotlight
-// re-synced — the root mirrors the workspace again", a success).
+// re-synced — the root mirrors the workspace again", a success). D41:
+// Orca's words as its title alone; `text` as before.
 const RESYNCED = (root) => ({
   repo: root, text: "Spotlight re-sincronizado: el root refleja el workspace otra vez.", toast: true, level: "success",
+  title: "Spotlight re-sincronizado — el root refleja el workspace otra vez", body: "",
 });
 
 // Brings the root in step with its holder (`spotlight sync`, auto-sync, and
@@ -1244,7 +1327,8 @@ export async function syncRepo(cx, root, { force = false, asked = false, onlyIf,
 // holder the target (D33). `quiet` (the whole-task toggle, D31, whose
 // summary says it once): no "Spotlight off — root restaurado" note; a
 // refusal, a server that didn't stop, a warning or rescued files still
-// toast.
+// toast. A root left detached toasts Orca's warning instead of the success
+// (D41, detachedToast), quiet or not.
 export async function deactivateRepo(cx, root, { force = false, quiet = false } = {}) {
   const name = cx.nameOf(root);
   // A refusal: the git error goes on the record (a root error, over the
@@ -1254,11 +1338,12 @@ export async function deactivateRepo(cx, root, { force = false, quiet = false } 
   // never the record (TURN_OFF_ERRORS, G9).
   const fail = async (e, workspace, stopped = null) => {
     const error = toSpotlightError(e);
-    const told = stopped && stopped.ok !== true ? { ...error, message: alsoNotStopped(error.message, stopped) } : error;
+    const notStopped = stopped && stopped.ok !== true;
+    const told = notStopped ? { ...error, message: alsoNotStopped(error.message, stopped) } : error;
     const now = cx.now();
     await cx.store.updateState((s) => {
       s.repos[root] = setRootError({ ...emptyRepo(), ...(s.repos[root] ?? {}) }, { ...error, at: now });
-      errorNote(s, { root, name, workspace, error: told, now, op: "off" });
+      errorNote(s, { root, name, workspace, error: told, now, op: "off", also: notStopped ? stopFailure(stopped) : null });
     });
     return { ok: false, ...told, ...(stopped ? { stopped } : {}) };
   };
@@ -1310,14 +1395,31 @@ export async function deactivateRepo(cx, root, { force = false, quiet = false } 
     await cx.store.updateState((s) => {
       delete s.repos[root];
       delete s.queue.lighting[`direct/${root}`];
-      if (failed) addNote(s, { repo: root, text: `${name}: ${failed.message}`, toast: true, level: "error" }, now);
-      else if (!quiet) addNote(s, { repo: root, text: "Spotlight off — root restaurado", toast: true }, now);
-      if (res.warning) addNote(s, { repo: root, text: `${name}: ${res.warning.message}`, toast: true }, now);
-      for (const text of rescuedNotes(res.rescued, res.discardedRepos)) addNote(s, { repo: root, text: `${name}: ${text}`, toast: true }, now);
+      // D41: a turn-off's error (Orca's title), Orca's success, or, left
+      // detached, Orca's warning alone in its place, quiet or not.
+      if (failed) {
+        addNote(s, { repo: root, text: `${name}: ${failed.message}`, toast: true, level: "error", title: ERROR_TITLES.off(name), body: failed.message }, now);
+      } else if (!quiet && !res.warning) {
+        addNote(s, { repo: root, text: "Spotlight off — root restaurado", toast: true, level: "success", title: "Spotlight off — root del proyecto restaurado", body: "" }, now);
+      }
+      if (res.warning) addNote(s, { repo: root, text: `${name}: ${res.warning.message}`, ...detachedToast(res) }, now);
+      for (const text of rescuedNotes(res.rescued, res.discardedRepos)) addNote(s, herdrNote(root, name, text), now);
     });
     const done = { warning: res.warning, stopped, rescued: res.rescued, discardedRepos: res.discardedRepos };
     return failed ? { ok: false, ...failed, ...done } : { ok: true, ...done };
   });
+}
+
+// D41: the toast of a turn-off that restored the root but couldn't put it
+// back on its branch (sync.js deactivate's branch-missing warning): Orca's
+// warning, for 60 s, its body by why: the branch checked out in another
+// worktree (`branchInUse`), or gone.
+const DETACHED_TOAST_MS = 60_000;
+function detachedToast({ originalBranch, branchInUse }) {
+  const body = branchInUse
+    ? `Su rama "${originalBranch}" está abierta en otro workspace, así que el root no pudo volver a ella. Libera esa rama (o cambia el root a cualquier rama) para volver a engancharlo.`
+    : "La rama original del root ya no existe, así que quedó detached en su commit original.";
+  return { toast: true, level: "warning", title: "Spotlight off — el root del proyecto quedó detached", body, timeout: DETACHED_TOAST_MS };
 }
 
 // Some pids, for a sentence: "el proceso 900 <one>", "los procesos 900,

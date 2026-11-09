@@ -15,7 +15,10 @@
 //   internal: light --task k [--force], classify --terminal t,
 //             continue --inline [--auto], env --task k --group id --inline,
 //             sync --repo r --auto (auto-sync's and the reap's: an
-//             automatic sync, which leaves an env that couldn't run, N4)
+//             automatic sync, which leaves an env that couldn't run, N4),
+//             toggle --workspace p --note (projects-sidebar's click, the
+//             badges' and the menu's: a refusal it answers at once is an
+//             error toast and exit 0, D41)
 //
 // `restart --free-port` is the server popup's "Liberar puerto y arrancar"
 // (D24): it stops the process the recorded port-busy error names, then
@@ -101,6 +104,7 @@ const FLAGS = {
   group: "string",
   account: "string",
   inline: "bool",
+  note: "bool",
   auto: "bool",
   "free-port": "bool",
   help: "bool",
@@ -371,16 +375,22 @@ async function verbToggle(cx, opts) {
       // (D27), over a server error the record has, which still applies (R8,
       // F6). A refused click on orca-holds also answers with a toast (T1),
       // with no popup action: no force path takes a root from Orca, as with
-      // orca-active.
-      if (forceable || error.code === "orca-holds") {
+      // orca-active. D41: a click (`--note`: projects-sidebar's badge or
+      // menu, whose own exec-failure toast would say it again) answers every
+      // refusal with a turn-off's error toast, opening the popup where it
+      // can act (Apagar igual), and exits 0; the popup's Apagar, the
+      // settings' --inline and agents keep exit 1 and stderr.
+      const recorded = forceable || error.code === "orca-holds";
+      const noted = opts.note || error.code === "orca-holds";
+      if (recorded || noted) {
         const now = cx.now();
         await cx.store.updateState((s) => {
-          if (s.repos[root]) setRootError(s.repos[root], { ...error, at: now });
-          if (error.code === "orca-holds") errorNote(s, { root, name, workspace, error, now });
+          if (recorded && s.repos[root]) setRootError(s.repos[root], { ...error, at: now });
+          if (noted) errorNote(s, { root, name, workspace, error, now, op: "off" });
         });
       }
       err(`${error.code}: ${error.message}${hint}`);
-      return 1;
+      return opts.note ? 0 : 1;
     }
     cx.spawn(["toggle", "--workspace", workspace, "--inline", ...(force ? ["--force"] : [])]);
     out(`Turning Spotlight off in ${name}: the root goes back to how it was and its server stops.`);
@@ -389,8 +399,15 @@ async function verbToggle(cx, opts) {
 
   if (workspace === root) return usage("root-is-holder: the repository root cannot hold the Spotlight: it is the sync target.");
   if (!(await cx.store.repoEnabled(root, cx.settings))) {
-    err(`not-enabled: Spotlight is off for ${name}. Turn it on in Spotlight's settings first.`);
-    return 2;
+    const error = { code: "not-enabled", message: `Spotlight is off for ${name}. Turn it on in Spotlight's settings first.` };
+    // D41: a click (`--note`) answers with a light's error toast and exit 0;
+    // anyone else keeps exit 2 (a usage error) and stderr.
+    if (opts.note) {
+      const now = cx.now();
+      await cx.store.updateState((s) => errorNote(s, { root, name, workspace, error, now, op: "light" }));
+    }
+    err(`${error.code}: ${error.message}`);
+    return opts.note ? 0 : 2;
   }
   const key = `direct/${root}`;
   const taskKey = await taskKeyOfWorkspace(workspace, root, cx.shared);

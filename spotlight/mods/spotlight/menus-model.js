@@ -64,9 +64,11 @@ function item({ id, text, icon, danger, busy, tooltip, checked, action, items })
   return it;
 }
 
+// D41: --note, as the badges' toggle: a refusal is a Spotlight error toast
+// and exit 0, never projects-sidebar's exec-failure toast as well.
 const toggleItem = (bin, at, off, busy) => item({
   id: "toggle", text: off ? "Apagar Spotlight" : "Proyectar este workspace", icon: "flashlight", busy,
-  action: { exec: [bin, "toggle", "--workspace", at] },
+  action: { exec: [bin, "toggle", "--workspace", at, "--note"] },
 });
 
 const forceItem = (bin, root, busy) => item({

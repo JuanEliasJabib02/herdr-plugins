@@ -177,7 +177,7 @@ test("listening → gone: one 'Cerraste la terminal del server de <repo>…' toa
   assert.equal(rec.holder, wt, "Spotlight stays on");
   assert.deepEqual(rec.serverProcs, [P3000], "the turn-off still kills what escaped (F1)");
   assert.deepEqual(state.notes, [
-    { at: state.notes[0].at, repo: root, text: GONE_TEXT, toast: true, action: { name: `spotlight.server.${serverId(wt)}` } },
+    { at: state.notes[0].at, repo: root, text: GONE_TEXT, toast: true, action: { name: `spotlight.server.${serverId(wt)}` }, title: "Spotlight · landing" },
   ]);
   // Decided under the repo lock, with a give-up: never waiting on a restart.
   const settle = lockCalls.filter((c) => c.store === "cli");

@@ -189,7 +189,7 @@ test("holder and root rows: amber flashlight, the server's port, and the holder'
   assert.equal(light.tone, "working", "amber: Herdr's accent is blue in its default theme");
   // Orca's holder tooltip (WorktreeCardSpotlightControls activeHere + lastSynced + the server's state).
   assert.equal(light.tooltip, "Spotlight encendido: este workspace se refleja en el root del proyecto. Clic para apagarlo. Sincronizado a las 22:58:04. Server corriendo en el puerto 3000.");
-  assert.deepEqual(light.action, { exec: [BIN, "toggle", "--workspace", B1] });
+  assert.deepEqual(light.action, { exec: [BIN, "toggle", "--workspace", B1, "--note"] });
 
   assert.equal(server.text, ":3000+1");
   assert.equal(server.tone, "done");
@@ -277,7 +277,7 @@ test("dim flashlights on the other workspaces of enabled repos; none on disabled
   assert.deepEqual(icons(value[B2]), ["flashlight", "clock"]);
   assert.equal(value[B2][0].tone, "dim");
   assert.equal(value[B2][0].tooltip, "Spotlight · proyectar aquí (ahora ax-3447)");
-  assert.deepEqual(value[B2][0].action, { exec: [BIN, "toggle", "--workspace", B2] });
+  assert.deepEqual(value[B2][0].action, { exec: [BIN, "toggle", "--workspace", B2, "--note"] });
   // front: enabled, nothing lit there.
   assert.deepEqual(icons(value[F2]), ["flashlight"]);
   assert.equal(value[F2][0].tooltip, "Spotlight · encender aquí");
@@ -392,7 +392,7 @@ test("D33: a busy repo: the ring replaces the flashlight on the holder's and the
   assert.ok(isBusyChip(value[BACK][0], BACK), "the root's chip spins");
   assert.equal(value[B1][1].text, ":3000+1");
   assert.deepEqual(icons(value[B2]), ["flashlight", "clock"]);
-  assert.deepEqual(value[B2][0].action, { exec: [BIN, "toggle", "--workspace", B2] });
+  assert.deepEqual(value[B2][0].action, { exec: [BIN, "toggle", "--workspace", B2, "--note"] });
   assertContract(value);
 
   // A takeover in flight: the target spins too, in its flashlight's place.
@@ -857,7 +857,8 @@ const LOG = "/Users/u/.local/state/herdr-spotlight/logs/back.log";
 const CHIP_TIP = (server) => `El root del proyecto refleja "ax-3447". Clic para abrir la terminal del server. ${server}`;
 const LOGS_TIP = (where) => `Los agentes de cualquier workspace pueden leer los logs del server: spotlight logs --repo ${where}.`;
 const PEEK = { exec: [BIN, "peek", "--repo", BACK] };
-const ROOT_OFF = { exec: [BIN, "toggle", "--workspace", BACK] };
+// D41: the click's argv carries --note, so a refusal is a Spotlight toast and exit 0.
+const ROOT_OFF = { exec: [BIN, "toggle", "--workspace", BACK, "--note"] };
 const X = {
   icon: "mods/spotlight/icons/x.svg", tone: "dim", hover: "working", reveal: "hover",
   tooltip: "Apagar Spotlight y restaurar el root del proyecto", action: ROOT_OFF,

@@ -276,7 +276,10 @@ function badge({ icon, text, tone, tooltip, action, spin, reveal, pill, dot, hov
   return b;
 }
 
-const toggle = (bin, workspace) => ({ exec: [bin, "toggle", "--workspace", workspace] });
+// D41: a click's toggle carries --note: a refusal the CLI answers at once is
+// a Spotlight error toast and exit 0, so projects-sidebar's exec-failure
+// toast doesn't say it a second time.
+const toggle = (bin, workspace) => ({ exec: [bin, "toggle", "--workspace", workspace, "--note"] });
 const popup = (workspace) => ({ command: `${MOD}.server.${serverIdOf(workspace)}` });
 // D38's "Ver server": the root's "Spotlight" tab, as the popup's button.
 const peek = (bin, root) => ({ exec: [bin, "peek", "--repo", root] });

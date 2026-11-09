@@ -13,7 +13,8 @@
 // Everything goes through cli-work.mjs (lightTask, deactivateRepo) with
 // `quiet`, so no repo says "Spotlight on · …" or "Spotlight off — root
 // restaurado" itself; a failure never stops the rest and toasts itself; one
-// summary note says how the batch went (summaryOf).
+// summary note says how the batch went (summaryNote: Orca's toast, the
+// text summaryOf's).
 //
 // The batch runs inside queue.taskBatch[<groupId>/<KEY>] (cli-work.mjs
 // withTaskBatch), so the lane's flashlight spins and takes no click until it
@@ -32,6 +33,20 @@ import { toSpotlightError } from "./sync.js";
 export function summaryOf(op, label, ok, total) {
   if (!(ok > 0)) return null;
   return ok === total ? `Spotlight ${op} · ${label}` : `Spotlight ${op} en ${ok} de ${total} proyectos`;
+}
+
+// The batch's toast (D41, Orca's notifyTaskSpotlightBatch): every member →
+// a success, "Spotlight on para AX-3653"; some → a warning, "Spotlight on en
+// 1 de 2 proyectos"; Orca's words as the title alone. Its `text` stays
+// summaryOf's, what the CLI prints. null when none went through.
+export function summaryNote(op, label, ok, total) {
+  const text = summaryOf(op, label, ok, total);
+  if (!text) return null;
+  const all = ok === total;
+  return {
+    text, toast: true, level: all ? "success" : "warning",
+    title: all ? `Spotlight ${op} para ${label}` : `Spotlight ${op} en ${ok} de ${total} proyectos`, body: "",
+  };
 }
 
 // The lane's task in its group, with each repo's holder from state.json, so
@@ -118,9 +133,10 @@ export async function toggleTask(cx, { group, task, terminals = [] }) {
     const errors = op === "off" ? await turnOff(cx, members) : await turnOn(cx, lane, key);
     const done = members.length - Object.keys(errors).length;
     const summary = summaryOf(op, label, done, members.length);
-    if (summary) {
+    const note = summaryNote(op, label, done, members.length);
+    if (note) {
       await cx.store.updateState((s) => {
-        addNote(s, { text: summary, toast: true }, cx.now());
+        addNote(s, note, cx.now());
       });
     }
     return { ok: done > 0, op, label, taskKey: lane.taskKey, summary, errors, skipped, members };
