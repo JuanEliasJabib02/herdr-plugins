@@ -19,6 +19,10 @@
 // Anything else is dropped field by field: a bad icon or action goes and the
 // badge stays; a badge left with neither icon nor text goes; a value that
 // isn't an object is no badges at all. Never throws.
+//
+// The field validators (iconOf, textOf, actionOf, publisherOf) are exported:
+// menus-model.js checks plugins' workspace menu items (`menus.*`, Spotlight's
+// D30) with them, so an item's action follows a badge's rules.
 
 import { BADGE_KEYS } from "./config.js";
 import { normPath, isAbsolute, noteKeyOf } from "./lib.js";
@@ -42,7 +46,7 @@ const cut = (s, max) => [...s].slice(0, max).join("");
 
 // mods/<mod>/…/<name>.svg under Herdr's home: no `..`, no empty segment, no
 // backslash (a separator on Windows).
-function iconOf(icon) {
+export function iconOf(icon) {
   if (typeof icon !== "string" || icon.includes("\\")) return null;
   const parts = icon.split("/");
   if (parts.length < 3 || parts[0] !== "mods") return null;
@@ -50,11 +54,12 @@ function iconOf(icon) {
   return /.\.svg$/.test(parts.at(-1)) ? icon : null;
 }
 
-// One line: runs of whitespace (newlines too) as one space, trimmed.
-function textOf(text) {
+// One line: runs of whitespace (newlines too) as one space, trimmed, at most
+// `max` code points (a badge's 16 unless told: a menu item's text takes 40).
+export function textOf(text, max = TEXT_MAX) {
   if (typeof text !== "string") return null;
   const line = text.replace(/\s+/g, " ").trim();
-  return line ? cut(line, TEXT_MAX) : null;
+  return line ? cut(line, max) : null;
 }
 
 // One line too, like textOf, so what a click runs (badgeTooltip puts it
@@ -70,12 +75,16 @@ function tooltipOf(tooltip) {
 // from whatever branch the workspace has checked out, so it's refused.
 const programOk = (p) => p !== "" && (p.startsWith("/") || !p.includes("/"));
 
-// The plugin that published under `key`: the name right after `badges.`
-// (badges.spotlight and badges.spotlight.v2 are both spotlight's). null for
-// any other key, which then runs no command.
-function publisherOf(key) {
-  if (typeof key !== "string" || !key.startsWith("badges.")) return null;
-  return key.slice("badges.".length).split(".")[0] || null;
+// The keys a plugin publishes under, badges and workspace menu items (D30).
+const PUBLISHED = ["badges.", "menus."];
+
+// The plugin that published under `key`: the name right after `badges.` or
+// `menus.` (badges.spotlight, badges.spotlight.v2 and menus.spotlight are
+// all spotlight's). null for any other key, which then runs no command.
+export function publisherOf(key) {
+  if (typeof key !== "string") return null;
+  const prefix = PUBLISHED.find((p) => key.startsWith(p));
+  return prefix ? key.slice(prefix.length).split(".")[0] || null : null;
 }
 
 // `run` also runs Herdr's own commands (app.quit, window.close, app.reset…),
@@ -84,7 +93,9 @@ function publisherOf(key) {
 const ownCommand = (command, publisher) =>
   typeof command === "string" && COMMAND.test(command) && publisher !== null && command.split(".")[0] === publisher;
 
-function actionOf(action, publisher) {
+// A badge's (or a menu item's) action, or null: `publisher` is publisherOf
+// the key it came under.
+export function actionOf(action, publisher) {
   if (!isObject(action)) return null;
   const { command, exec } = action;
   if (command !== undefined && exec !== undefined) return null;

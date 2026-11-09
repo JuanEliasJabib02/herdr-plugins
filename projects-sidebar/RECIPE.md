@@ -126,7 +126,10 @@ across repos.
     group ▸, Remove from list.
   - The workspace menu is a 220-wide popup: Copy Path, Copy Worktree Name
     and, on a worktree that isn't the main checkout, Rename… and then
-    Delete… after a separator, in `blocked`.
+    Delete… after a separator, in `blocked`. Then, after another separator,
+    the items other plugins publish for that workspace (see Menu items from
+    other plugins). Its height follows its rows: 31 px each, 9 per
+    separator, 50 for the title and padding.
   - The Rename dialog is a 380 × 320 modal:
     - "Rename <label>" and the path with `~`;
     - a "Branch" input, prefilled with the branch and selected;
@@ -255,7 +258,9 @@ across repos.
   saved one, then the latest remote branches.
 - **Right-click a workspace:** opens the workspace menu. Copy Path and Copy
   Worktree Name (the folder's name) go to the clipboard, and a toast says
-  "Copied".
+  "Copied". Another plugin's item runs what that plugin published: its row
+  shows "…" while its program runs, then the menu closes; one with ▸
+  reopens the menu at the pointer on its submenu.
 - **Delete…** (never on the main checkout): the dialog asks git first, on a
   fresh `worktree list`: the lock, `status` with untracked files, and
   submodule checkouts as git counts them. Delete then runs, in this order:
@@ -513,8 +518,10 @@ across repos.
     to check each view.
   - Pure logic is in `lib.js`, `tree-model.js`, `task-model.js`,
     `new-workspace-model.js`, `remove-workspace-model.js`,
-    `rename-workspace-model.js`, `badges-model.js`, `pr-model.js` (the PR
-    colors) and `pr-card-model.js` (the PR card), tested with `node
+    `rename-workspace-model.js`, `badges-model.js`, `menus-model.js` (other
+    plugins' workspace menu items, with `badges-model.js`'s validators),
+    `pr-model.js` (the PR colors) and `pr-card-model.js` (the PR card),
+    tested with `node
     --test` (Delete's and Rename's against a real git). The card finds its
     workspace with `lib.js` `checkoutAt`, the rule `matchSpaces` places
     spaces by.
@@ -527,10 +534,10 @@ across repos.
     `projects.v1.backup` before the first write over it; a malformed
     `projects.notes.v1` goes to `projects.notes.v1.backup` the same way.
     It also reads the badge keys `badges.spotlight`, `badges.pr` and
-    `badges.hibernate`, read-only: other plugins write them, and this
-    plugin never writes or clears one.
-  - `config.js` holds `MOD`, `WORKTREE_ROOT` (`~/orca/workspaces`) and
-    `BADGE_KEYS`.
+    `badges.hibernate`, and the menu key `menus.spotlight`, read-only:
+    other plugins write them, and this plugin never writes or clears one.
+  - `config.js` holds `MOD`, `WORKTREE_ROOT` (`~/orca/workspaces`),
+    `BADGE_KEYS` and `MENU_KEYS`.
 - **Commands:** `projects.add`, `projects.add-here`, `projects.new-workspace`,
   `projects.group1`..`projects.group3`, `projects.ping`, and
   `projects.refresh-prs` (a PR round now, or one more after the one
@@ -594,7 +601,9 @@ across repos.
   - `test -e`, to check whether a folder exists.
   - `open <url>`, the PR card's "Abrir en GitHub".
   - Whatever program another plugin's badge names in its `exec`, when you
-    click that badge; its hover says which ("· runs <program>").
+    click that badge; its hover says which ("· runs <program>"). The same
+    for another plugin's workspace menu item, when you choose it; there its
+    label, the plugin's words, is all the row shows.
 - **Art:** its own Lucide-style icons in `icons/` (folder, branch, home,
   plus, code, copy), plus chevrons, check, x and square-pen from
   Herdr's `workspace-chrome` and agent icons from Herdr's `icons/`.
@@ -750,6 +759,110 @@ contract a publisher codes against.
         "text": "Dev",
         "tooltip": "Spotlight env of this task",
         "action": { "exec": ["/usr/local/bin/spotlight", "env", "--task", "AX-3653", "--group", "g1", "--env", "dev"] }
+      }
+    ]
+  }
+  ```
+
+**Menu items from other plugins**
+
+Other plugins can add items to a workspace's right-click menu, the Spotlight
+plugin first (Orca's Spotlight items in its worktree menu). This plugin knows
+none of them: it reads, draws and runs what they publish, after its own
+items. This section is the contract a publisher codes against.
+
+- **Keys:** `menus.spotlight`, read in that order (`config.js`
+  `MENU_KEYS`). As with badges: a plugin writes only its own key, with
+  `setShared(key, value)`, each write replaces the whole value, and adding a
+  plugin is one line in that list.
+- **Value:** `{ [workspacePath]: [item] }`. A path is the workspace's
+  folder, absolute, spelled as `git worktree list` prints it (a trailing
+  slash is ignored; two spellings of one path share its items and their
+  cap). Any other key (a lane key included) is ignored; a value that isn't
+  an object is no items; a path whose value isn't a list has none.
+- **An item:** `{ id, text, icon?, danger?, disabled?, why?, checked?,
+  action?, items? }`.
+  - `id`: 1 to 64 of letters, digits, `.`, `_`, `:` and `-`, starting with
+    a letter or digit. It names the row (the running one shows "…") and a
+    submenu's item. A later item repeating an id in the same list is
+    dropped. Your ids never clash with this plugin's own (`delete` is not
+    Delete…).
+  - `text`: the row's label, at most 40 code points (a longer one is cut),
+    on one line: runs of whitespace become one space.
+  - `icon`: as a badge's (`mods/<mod>/…/<name>.svg`), drawn 14 px at the
+    row's start, tinted. Without one the row keeps the empty slot, so labels
+    line up.
+  - `danger: true`: the row in `blocked`, like Delete… (an action that
+    destroys or forces something).
+  - `disabled: true`: the row dim, never highlighted, a click does nothing;
+    its action stays in the value but never runs.
+  - `why`: on a disabled item only, why it's off (e.g. "Sincronizando…"),
+    shown on hover; at most 200 code points, one line. An enabled item's
+    `why` is dropped.
+  - `checked: true`: a radio mark (a dot) at the row's end; publish it on
+    the one picked of a group (e.g. the env in use).
+  - `action`: exactly a badge's (see Badges from other plugins): `{
+    "command": "<mod>.<command>" }`, whose part before the first `.` must be
+    your key's first name after `menus.` (`menus.spotlight` may run
+    `spotlight.*` only), or `{ "exec": [program, ...args] }` with the same
+    argv rules.
+  - `items`: a submenu, one level only: up to 6 items of the same shape,
+    whose own `items` are dropped (the item stays). An item with a submenu
+    shows ▸ at its end, and its `action` and `checked` are dropped: choosing
+    it (or → on it) closes the menu and opens the submenu at the pointer,
+    titled with the item's text, as the project menu's Move to group ▸. A
+    submenu whose items all drop is no submenu.
+  - Required: `id` and `text`; an item without either valid goes whole. Any
+    other field that breaks a rule is dropped alone; `false` or any value
+    but `true` is no flag. Unknown fields are ignored.
+- **Limits:** at most 8 items per plugin on a workspace (6 in a submenu);
+  dropped items don't take a place.
+- **Drawing:** this plugin's own items first (Copy Path, Copy Worktree Name
+  and, off the main checkout, Rename… and Delete…), then a separator and
+  your items in order; with two plugins, each one's items start after a
+  separator of their own. No item published for that workspace: no
+  separator, the menu as before. The popup's height follows the rows. Your
+  list is read again on every render, so a value you publish while the menu
+  is open (a disabled item turning on) shows at once; the height doesn't
+  follow it until the menu opens again.
+- **Choosing:** a click or Enter.
+  - `command`: the menu closes, then `run(command)`, as a badge's (no args,
+    no answer, only the mod's shown copies).
+  - `exec`: the menu stays open while the program runs, the row's label
+    ending in "…" and the other rows waiting; it runs as a badge's exec, in
+    the workspace's folder, argv only, never a shell, with exec's 30 s. Then
+    a non-zero exit (stderr's first line, else "exited with code N"), or a
+    program that can't start, is a warning toast titled with the program's
+    name, and the menu closes. A menu closed meanwhile (Esc, a click beside
+    it) doesn't stop the program, and its failure still toasts.
+  - Neither, or disabled: nothing happens.
+  - So keep an exec short: start long work detached and return (Spotlight's
+    verbs return in under a second), and report its outcome yourself.
+- **Lifetime:** the format only grows; a breaking change gets a new key
+  (e.g. `menus.spotlight.v2`), whose commands are still `spotlight.*`. A
+  publisher clears its own paths, and its key (`setShared(key, null)`),
+  when they no longer apply: a stale item stays until it does.
+- **Example:** this `menus.spotlight` value adds two items to one workspace's
+  menu: "Proyectar este workspace" runs the program there, and "Entorno de
+  Spotlight ▸" opens a submenu with Local picked and Prod off:
+
+  ```json
+  {
+    "/Users/you/orca/workspaces/app/login": [
+      {
+        "id": "toggle",
+        "text": "Proyectar este workspace",
+        "icon": "mods/spotlight/icons/flashlight.svg",
+        "action": { "exec": ["/usr/local/bin/spotlight", "toggle", "--workspace", "/Users/you/orca/workspaces/app/login"] }
+      },
+      {
+        "id": "env",
+        "text": "Entorno de Spotlight",
+        "items": [
+          { "id": "env-local", "text": "Local", "checked": true, "action": { "exec": ["/usr/local/bin/spotlight", "env", "--workspace", "/Users/you/orca/workspaces/app/login", "--env", "local"] } },
+          { "id": "env-dev", "text": "Dev", "action": { "exec": ["/usr/local/bin/spotlight", "env", "--workspace", "/Users/you/orca/workspaces/app/login", "--env", "dev"] } },
+          { "id": "env-prod", "text": "Prod", "disabled": true, "why": "Sin comando para Prod" }
+        ]
       }
     ]
   }

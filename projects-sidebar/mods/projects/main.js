@@ -6,7 +6,8 @@
 //   new-workspace     the New workspace dialog
 //   project-menu      a project's right-click menu
 //   base-menu         a project's Default branch… (its saved base, D37)
-//   workspace-menu    a workspace's right-click menu
+//   workspace-menu    a workspace's right-click menu, other plugins' items
+//                     after its own, or one of their submenus (props.sub)
 //   delete-workspace  the Delete dialog (a worktree, its spaces, its branch)
 //   rename-workspace  the Rename dialog (a worktree's branch and folder)
 //   group-menu        a group's right-click menu

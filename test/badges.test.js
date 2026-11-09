@@ -11,6 +11,7 @@ import { readFileSync } from "node:fs";
 import { BADGE_KEYS } from "../projects-sidebar/mods/projects/config.js";
 import {
   parseBadges, badgeTooltip, badgeMaxWidth, badgeRun, laneBadgeKey, execFailure, startFailure, BADGE_ROOM, BADGE_GAP,
+  iconOf, textOf, actionOf as validAction, publisherOf,
 } from "../projects-sidebar/mods/projects/badges-model.js";
 
 const src = (f) => readFileSync(new URL(`../projects-sidebar/mods/projects/${f}`, import.meta.url), "utf8");
@@ -452,4 +453,40 @@ test("tree.js draws the active group's lane badges on a lane's header, and spins
   assert.match(body("badgeIcon"), /b\.spin \? pic\.spin\(BADGE_SPIN\) : pic/);
   // gpui-kit's spin() takes at least 100 ms a turn.
   assert.ok(Number(/^const BADGE_SPIN = (\d+);/m.exec(tree)?.[1]) >= 100);
+});
+
+// ── The validators menu items share (Spotlight T19, its D30) ──────────────
+
+test("the badge validators are exported for menus-model.js, and publisherOf knows badges.* and menus.* (D30)", () => {
+  // The publisher: the name right after `badges.` or `menus.`.
+  for (const key of ["badges.spotlight", "badges.spotlight.v2", "menus.spotlight", "menus.spotlight.v2"]) {
+    assert.equal(publisherOf(key), "spotlight", key);
+  }
+  assert.equal(publisherOf("badges.pr"), "pr");
+  assert.equal(publisherOf("menus.pr"), "pr");
+  for (const key of ["badges.", "menus.", "spotlight", "menu.spotlight", "badge.spotlight", "closeGuards.spotlight", "xmenus.spotlight", "", 5, null]) {
+    assert.equal(publisherOf(key), null, JSON.stringify(key));
+  }
+
+  // actionOf: the publisher's own command, or exec as argv.
+  assert.deepEqual(validAction({ command: "spotlight.toggle" }, "spotlight"), { command: "spotlight.toggle" });
+  assert.equal(validAction({ command: "pr.open" }, "spotlight"), null);
+  assert.equal(validAction({ command: "spotlight.toggle" }, null), null);
+  assert.deepEqual(validAction({ exec: ["/usr/bin/true", "a"] }, null), { exec: ["/usr/bin/true", "a"] });
+  assert.equal(validAction({ exec: ["./x"] }, "spotlight"), null);
+
+  // textOf: one line, cut at a badge's 16 code points unless told another cap.
+  assert.equal(textOf("  a\n  b "), "a b");
+  assert.equal(textOf("x".repeat(20)), "x".repeat(16));
+  assert.equal(textOf("x".repeat(50), 40), "x".repeat(40));
+  assert.equal(textOf(" \n "), null);
+  assert.equal(textOf(5), null);
+
+  // iconOf: a mods/…/*.svg path or null.
+  assert.equal(iconOf(ICON), ICON);
+  assert.equal(iconOf("mods/s/../x.svg"), null);
+
+  // Badges still parse under their keys only: a value read as menus.* is a
+  // badge publisher's for commands, but the keys list stays BADGE_KEYS.
+  assert.deepEqual(parseBadges([{ "/w": [{ text: "x", action: { command: "spotlight.x" } }] }])["/w"][0].action, { command: "spotlight.x" });
 });

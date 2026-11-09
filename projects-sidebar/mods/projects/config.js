@@ -18,3 +18,11 @@ export const icon = (name) => `mods/${MOD}/icons/${name}.svg`;
 // other plugins". A fixed list, not an index key: shared state keeps the
 // last write, so two plugins adding themselves to one index would race.
 export const BADGE_KEYS = Object.freeze(["badges.spotlight", "badges.pr", "badges.hibernate"]);
+
+// Other plugins' items in a workspace's right-click menu (Spotlight's D30):
+// the shared() keys this mod reads, never writes, in the order their items
+// are drawn, after this mod's own. Same rules as BADGE_KEYS: a fixed list,
+// one line per plugin. Each key is { [workspacePath]: [item] }, read by
+// menus-model.js parseMenus; the format is RECIPE.md "Menu items from other
+// plugins".
+export const MENU_KEYS = Object.freeze(["menus.spotlight"]);
