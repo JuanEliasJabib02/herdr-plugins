@@ -1,7 +1,8 @@
 // T8: the test queue as the footer flask and the "Cola de pruebas" popup draw
 // it (M/board-model.js), plus the footer copy's bookkeepers: the toasts'
-// high-water mark (D18), the state watch's batch filter, and the reaper's
-// debounce (D13). Modeled on Orca's
+// high-water mark (D18), kept in shared state so a note written while another
+// layout was shown still toasts (D45), the state watch's batch filter, and
+// the reaper's debounce (D13). Modeled on Orca's
 // O/src/renderer/src/components/sidebar/test-queue/test-queue-board.test.ts,
 // with the words of tester case 14 (~/Desktop/test-queue/specs/14-spanish).
 // The queue in the fixtures is built with queue.js, as the CLI builds it.
@@ -11,6 +12,7 @@ import { request, release, pause } from "../mods/spotlight/queue.js";
 import {
   readState, readSettings, boardView, footerView, toastMark, takeToasts, isStateBatch, reapTargets,
   reapFingerprint, reapClock, reapTick, reapDone, stateDirOf, cliPathOf, REAP_DEBOUNCE_MS, REAP_EVERY_MS,
+  TOAST_KEY, TOAST_MAX_AGE_MS,
 } from "../mods/spotlight/board-model.js";
 
 const MINUTE = 60_000;
@@ -312,6 +314,98 @@ describe("toasts (D18)", () => {
     assert.deepEqual(takeToasts(bare, toastMark(START)).toasts, [
       { title: "Falló el sync de Spotlight", body: "Clic: Forzar sync en el popup", level: "error", timeout: 60_000, action },
     ]);
+  });
+});
+
+describe("toasts while another layout was shown (D45)", () => {
+  const NOW = T0 + 60 * MINUTE;
+  const note = (at, text) => ({ at, repo: "/code/app", text, toast: true });
+  // What the stored mark goes through: shared.json is JSON.
+  const stored = (mark) => JSON.parse(JSON.stringify(mark));
+
+  test("the mark is kept under spotlight.toasts.v1, and a note older than 10 minutes is too old", () => {
+    assert.equal(TOAST_KEY, "spotlight.toasts.v1");
+    assert.equal(TOAST_MAX_AGE_MS, 10 * MINUTE);
+  });
+
+  test("notes newer than the stored mark toast once, those older than 10 minutes don't; the whole mark moves to the last one toasted", () => {
+    // The last copy toasted a note 30 minutes ago, then `projects` stopped showing.
+    const kept = stored({ at: NOW - 30 * MINUTE, seen: [`${NOW - 30 * MINUTE}\n/code/app\nlast shown`] });
+    const mark = toastMark(NOW, kept);
+    assert.deepEqual(mark, kept);
+    const notes = [
+      note(NOW - 40 * MINUTE, "before the mark"),
+      note(NOW - 30 * MINUTE, "last shown"),
+      note(NOW - 20 * MINUTE, "newer than the mark, 20 minutes old"),
+      note(NOW - 10 * MINUTE, "exactly 10 minutes old"),
+      note(NOW - 9 * MINUTE, "9 minutes old"),
+      note(NOW - 2 * MINUTE, "2 minutes old, first"),
+      note(NOW - 2 * MINUTE, "2 minutes old, second"),
+    ];
+    const first = takeToasts(notes, mark, { now: NOW, stored: kept });
+    assert.deepEqual(first.toasts.map((t) => t.body), ["9 minutes old", "2 minutes old, first", "2 minutes old, second"]);
+    assert.deepEqual(first.mark, {
+      at: NOW - 2 * MINUTE,
+      seen: [`${NOW - 2 * MINUTE}\n/code/app\n2 minutes old, first`, `${NOW - 2 * MINUTE}\n/code/app\n2 minutes old, second`],
+    });
+
+    // Written back: the next read, and a copy started from it, toast nothing again,
+    // not even the notes in the very millisecond of the last one toasted.
+    const written = stored(first.mark);
+    assert.deepEqual(takeToasts(notes, first.mark, { now: NOW + 1000, stored: written }).toasts, []);
+    const restarted = toastMark(NOW + 5 * MINUTE, written);
+    assert.deepEqual(takeToasts(notes, restarted, { now: NOW + 5 * MINUTE, stored: written }).toasts, []);
+
+    // A note written later in that same millisecond still toasts.
+    const later = [...notes, note(NOW - 2 * MINUTE, "2 minutes old, third")];
+    const third = takeToasts(later, restarted, { now: NOW + 5 * MINUTE, stored: written });
+    assert.deepEqual(third.toasts.map((t) => t.body), ["2 minutes old, third"]);
+    assert.deepEqual(third.mark.seen.length, 3);
+  });
+
+  test("only notes too old to toast: nothing toasts and the mark stays", () => {
+    const kept = stored({ at: NOW - 30 * MINUTE, seen: [] });
+    const { toasts, mark } = takeToasts([note(NOW - 20 * MINUTE, "old")], toastMark(NOW, kept), { now: NOW, stored: kept });
+    assert.deepEqual(toasts, []);
+    assert.deepEqual(mark, kept);
+  });
+
+  test("with no stored mark, or an unreadable one, the copy's start time is the mark", () => {
+    const unreadable = [
+      undefined, null, "mark", 5, [], {}, { at: "1", seen: [] }, { at: NaN, seen: [] },
+      { at: NOW - MINUTE }, { at: NOW - MINUTE, seen: "x" }, { at: NOW - MINUTE, seen: [1] },
+    ];
+    for (const value of unreadable) {
+      const mark = toastMark(NOW, value);
+      assert.deepEqual(mark, { at: NOW, seen: [] }, JSON.stringify(value) ?? String(value));
+      const { toasts } = takeToasts([note(NOW - 1000, "before start"), note(NOW + 1000, "after start")], mark, { now: NOW + 2000, stored: value });
+      assert.deepEqual(toasts.map((t) => t.body), ["after start"]);
+    }
+  });
+
+  test("a second copy reading the same stored mark doesn't toast a note the first already moved past", () => {
+    // Two copies shown at once (two windows), both started before any mark was stored.
+    const a = toastMark(NOW, null);
+    const b = toastMark(NOW, null);
+    const notes = [note(NOW + 1000, "Spotlight on")];
+
+    const first = takeToasts(notes, a, { now: NOW + 1500, stored: null });
+    assert.deepEqual(first.toasts.map((t) => t.body), ["Spotlight on"]);
+    const written = stored(first.mark);
+
+    const second = takeToasts(notes, b, { now: NOW + 1600, stored: written });
+    assert.deepEqual(second.toasts, []);
+    assert.deepEqual(second.mark, written);
+
+    // Each copy's own mark and the stored one, in the same millisecond, add up.
+    const more = [...notes, note(NOW + 1000, "Spotlight off")];
+    const own = { at: NOW + 1000, seen: [`${NOW + 1000}\n/code/app\nSpotlight off`] };
+    const merged = takeToasts(more, own, { now: NOW + 2000, stored: written });
+    assert.deepEqual(merged.toasts, []);
+    assert.deepEqual(new Set(merged.mark.seen), new Set([...own.seen, ...written.seen]));
+
+    // A stored mark older than the copy's own doesn't take it back.
+    assert.deepEqual(takeToasts(notes, first.mark, { now: NOW + 2000, stored: { at: NOW - MINUTE, seen: [] } }).toasts, []);
   });
 });
 

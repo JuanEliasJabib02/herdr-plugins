@@ -2,8 +2,9 @@
 // (T8, S1, S9, S13), ported from Orca's test-queue-board.ts and
 // TestQueuePopover.tsx (O/src/renderer/src/components/sidebar/test-queue/),
 // with the words of Orca's Spanish locale (tester case 14). Plus the footer
-// copy's three bookkeepers: the toasts' high-water mark (D18), the state
-// watch's batch filter (D18) and the reaper's debounce (D13).
+// copy's three bookkeepers: the toasts' high-water mark (D18, kept in shared
+// state, D45), the state watch's batch filter (D18) and the reaper's
+// debounce (D13).
 // Pure: no herdr or gpui-kit import, so `node --test` loads it; footer.js,
 // board.js and reaper.js read the files and the live data and hand them in.
 //
@@ -16,8 +17,10 @@
 //   boardView({ state, settings, registry, now })
 //                            the popup: header, sections and rows
 //   footerView(board)        the flask: { count, quiet, tooltip }
-//   toastMark(startedAt), takeToasts(notes, mark)
-//                            notes with `toast: true` newer than the mark,
+//   toastMark(startedAt, stored), takeToasts(notes, mark, { now, stored })
+//                            notes with `toast: true` newer than the mark
+//                            (the later of the copy's own and the one stored
+//                            under TOAST_KEY) and under 10 minutes old (D45),
 //                            as notify() takes them (an error for 60 s, D35;
 //                            the note's own title, body and timeout, D41)
 //   isStateBatch(dir, paths) whether a watchFolder batch touched state.json
@@ -258,12 +261,38 @@ export function footerView(board) {
   return { count: board.count, quiet: board.count === 0 && board.paused.length === 0, tooltip };
 }
 
-// ── Toasts (D18) ───────────────────────────────────────────────────────────
+// ── Toasts (D18, D45) ──────────────────────────────────────────────────────
 
 // The high-water mark: the newest note time shown, and which notes of that
-// very millisecond were shown (two writes can share one). It starts at the
-// footer copy's start time, so a restarted copy never replays old notes.
-export const toastMark = (startedAt) => ({ at: startedAt, seen: [] });
+// very millisecond were shown (two writes can share one). Herdr runs the
+// footer copy only while `projects` is shown, so the whole mark is kept in
+// shared state under this key (D45): a copy that starts again, after another
+// layout was shown or Herdr restarted, toasts the notes written meanwhile.
+export const TOAST_KEY = "spotlight.toasts.v1";
+// Notes this old or older when a copy reads them are skipped, not toasted
+// late (D45: "if under 10 minutes old").
+export const TOAST_MAX_AGE_MS = 10 * MINUTE_MS;
+
+// A stored mark as the footer wrote it, or null when the value isn't one.
+function storedMark(value) {
+  if (!isObject(value) || !Number.isFinite(value.at) || !Array.isArray(value.seen)) return null;
+  if (!value.seen.every((key) => typeof key === "string")) return null;
+  return { at: value.at, seen: [...value.seen] };
+}
+
+// The later of two marks; in the same millisecond, what either saw.
+function laterMark(own, other) {
+  if (!other || other.at < own.at) return own;
+  if (other.at > own.at) return other;
+  return { at: own.at, seen: [...new Set([...own.seen, ...other.seen])] };
+}
+
+/**
+ * The mark a footer copy starts from: the stored one (`shared(TOAST_KEY)`),
+ * else, with none stored or an unreadable one, the copy's start time, so it
+ * never replays notes written before it started (D18).
+ */
+export const toastMark = (startedAt, stored) => storedMark(stored) ?? { at: startedAt, seen: [] };
 
 const noteKey = (n) => `${n.at}\n${n.repo ?? ""}\n${n.text}`;
 
@@ -308,15 +337,23 @@ function toastOf(note) {
 /**
  * The notes to post as toasts: `toast: true`, newer than the mark, oldest
  * first. → { toasts: [notify argument], mark: the mark after them }.
+ * `stored`: the mark in shared state (`shared(TOAST_KEY)`), which another
+ * copy may have moved; the later of it and `mark` is where this read starts,
+ * so a note another copy already toasted isn't toasted again (D45).
+ * `now`: with it, a note TOAST_MAX_AGE_MS old or older is skipped. The mark
+ * moves only to the last note toasted, so when some toast the caller writes
+ * the returned mark back to TOAST_KEY.
  */
-export function takeToasts(notes, mark) {
+export function takeToasts(notes, mark, { now, stored } = {}) {
+  const from = laterMark(mark, storedMark(stored));
   const fresh = (Array.isArray(notes) ? notes : [])
     .filter((n) => isObject(n) && n.toast === true && isText(n.text) && Number.isFinite(n.at))
-    .filter((n) => n.at > mark.at || (n.at === mark.at && !mark.seen.includes(noteKey(n))))
+    .filter((n) => n.at > from.at || (n.at === from.at && !from.seen.includes(noteKey(n))))
+    .filter((n) => !Number.isFinite(now) || now - n.at < TOAST_MAX_AGE_MS)
     .sort((a, b) => a.at - b.at);
-  if (fresh.length === 0) return { toasts: [], mark };
+  if (fresh.length === 0) return { toasts: [], mark: from };
   const at = fresh[fresh.length - 1].at;
-  const seen = [...(at === mark.at ? mark.seen : []), ...fresh.filter((n) => n.at === at).map(noteKey)];
+  const seen = [...(at === from.at ? from.seen : []), ...fresh.filter((n) => n.at === at).map(noteKey)];
   return { toasts: fresh.map(toastOf), mark: { at, seen } };
 }
 
