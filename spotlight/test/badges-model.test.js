@@ -3,9 +3,11 @@
 // projects.v1 / projects.cache.v1 values, and published under
 // badges.spotlight only when the value changes. Every badge has to pass
 // projects-sidebar's contract (its RECIPE.md "Badges from other plugins"):
-// icon `mods/<mod>/…/<name>.svg`, text ≤ 16 code points, tooltip ≤ 200, at
-// most 3 per plugin on a row, `command` = `spotlight.<…>` matching its
-// regex, `exec` argv0 absolute.
+// an icon `mods/<mod>/…/<name>.svg` or a text (a text badge has no icon), text ≤ 16
+// code points, tooltip ≤ 200, at most 4 per plugin on a row, `command` =
+// `spotlight.<…>` matching its regex, `exec` argv0 absolute, and D39's
+// `reveal`, `pill`, `dot` and `hover` with their values; projects-sidebar's
+// own parser keeps every field.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -19,6 +21,7 @@ import {
 import { serverViewModel } from "../mods/spotlight/server-view-model.js";
 import { cliPathOf, readState, readSettings } from "../mods/spotlight/board-model.js";
 import { serverId } from "../mods/spotlight/cli-work.mjs";
+import { parseBadges } from "../../projects-sidebar/mods/projects/badges-model.js";
 
 // Destructured, not named in the imports: a helper that's missing fails its
 // own tests, not the whole file's load.
@@ -110,29 +113,41 @@ function build(state = baseState(), settings = settingsOf()) {
   return buildBadges({ state, settings, projects, cache, enabled, bin: BIN });
 }
 
-const icons = (list) => (list ?? []).map((b) => path.basename(b.icon, ".svg"));
+// A row's badges by what shows: the icon's name, or a text badge's text.
+const icons = (list) => (list ?? []).map((b) => (b.icon ? path.basename(b.icon, ".svg") : b.text));
 
 // projects-sidebar's checks, as its badges-model.js applies them.
 const COMMAND = /^[a-z0-9][a-z0-9-]*\.[a-z0-9][a-z0-9._-]*$/;
 // D29: a task lane's key, `<groupId>/task:<KEY>`.
 const LANE_KEY = /^[^/]+\/task:[^/].*$/;
+const TONES = ["accent", "dim", "working", "blocked", "done"];
 const codePoints = (s) => [...s].length;
 function assertContract(value) {
   for (const [at, list] of Object.entries(value)) {
     assert.ok((at.startsWith("/") && !at.endsWith("/")) || LANE_KEY.test(at), `absolute path without trailing slash, or a lane key: ${at}`);
-    assert.ok(Array.isArray(list) && list.length >= 1 && list.length <= 3, `1..3 badges on ${at}`);
+    assert.ok(Array.isArray(list) && list.length >= 1 && list.length <= 4, `1..4 badges on ${at}`);
     for (const b of list) {
-      assert.match(b.icon, /^mods\/spotlight\/icons\/[a-z-]+\.svg$/);
-      assert.ok(fs.existsSync(path.join(MOD_DIR, "icons", path.basename(b.icon))), `${b.icon} exists`);
+      // D39: a text badge has no icon; every badge has one or the other.
+      assert.ok(b.icon !== undefined || b.text !== undefined, `an icon or a text on ${at}`);
+      if (b.icon !== undefined) {
+        assert.match(b.icon, /^mods\/spotlight\/icons\/[a-z-]+\.svg$/);
+        assert.ok(fs.existsSync(path.join(MOD_DIR, "icons", path.basename(b.icon))), `${b.icon} exists`);
+      }
       if (b.text !== undefined) assert.ok(codePoints(b.text) <= 16 && !/\s{2}|\n/.test(b.text), `text "${b.text}"`);
-      assert.ok(["accent", "dim", "working", "blocked", "done"].includes(b.tone), `tone ${b.tone}`);
+      assert.ok(TONES.includes(b.tone), `tone ${b.tone}`);
       assert.ok(typeof b.tooltip === "string" && codePoints(b.tooltip) <= 200 && !/\n/.test(b.tooltip), `tooltip "${b.tooltip}"`);
       // D29: `spin` is true or absent.
       if (b.spin !== undefined) assert.equal(b.spin, true, `spin on ${b.icon}`);
+      // D39's fields, each with its own values.
+      if (b.reveal !== undefined) assert.ok(["hover", "grow"].includes(b.reveal), `reveal ${b.reveal}`);
+      if (b.pill !== undefined) assert.equal(b.pill, true, `pill on ${at}`);
+      if (b.dot !== undefined) assert.ok(["on", "off"].includes(b.dot), `dot ${b.dot}`);
+      if (b.hover !== undefined) assert.ok(TONES.includes(b.hover), `hover ${b.hover}`);
       const { action } = b;
       if (action === undefined) {
-        // The queue badges click like their row; the busy ring (D33) has no action.
-        assert.ok(["flask", "clock", "pause", "spinner"].includes(path.basename(b.icon, ".svg")), "only queue badges and the ring have no action");
+        // The queue badges click like their row; the busy ring (D33) and the
+        // root's logs icon (D39, Orca's) have no action.
+        assert.ok(["flask", "clock", "pause", "spinner", "logs"].includes(path.basename(b.icon ?? "", ".svg")), "only queue badges, the ring and the logs icon have no action");
         continue;
       }
       assert.ok((action.command === undefined) !== (action.exec === undefined), "exactly one of command / exec");
@@ -145,6 +160,12 @@ function assertContract(value) {
         assert.ok(action.exec.every((a) => typeof a === "string" && a.length <= 500 && !a.includes("\0")));
       }
     }
+  }
+  // projects-sidebar's own parser (what it draws from) keeps every badge and
+  // every field as published: nothing is dropped field by field.
+  const parsed = parseBadges([value], ["badges.spotlight"]);
+  for (const [at, list] of Object.entries(value)) {
+    assert.deepEqual((parsed[at] ?? []).map(({ key, index, ...b }) => b), list, `projects-sidebar keeps ${at} as published`);
   }
 }
 
@@ -161,15 +182,14 @@ test("ids: the server badge's id is the CLI's serverId (sha1 of the path, 12 hex
 test("holder and root rows: amber flashlight, the server's port, and the holder's flask", () => {
   const { value } = build();
   assert.deepEqual(icons(value[B1]), ["flashlight", "server", "flask"]);
-  assert.deepEqual(icons(value[BACK]), ["flashlight", "server"]);
+  // D39: the root row is Orca's: the SPOTLIGHT chip, the port, logs and the X.
+  assert.deepEqual(icons(value[BACK]), ["flashlight", ":3000+1", "logs", "x"]);
 
   const [light, server, flask] = value[B1];
   assert.equal(light.tone, "working", "amber: Herdr's accent is blue in its default theme");
-  assert.equal(light.tooltip, "Spotlight · sincronizado 22:58:04");
+  // Orca's holder tooltip (WorktreeCardSpotlightControls activeHere + lastSynced + the server's state).
+  assert.equal(light.tooltip, "Spotlight encendido: este workspace se refleja en el root del proyecto. Clic para apagarlo. Sincronizado a las 22:58:04. Server corriendo en el puerto 3000.");
   assert.deepEqual(light.action, { exec: [BIN, "toggle", "--workspace", B1] });
-  assert.equal(value[BACK][0].tone, "working");
-  assert.equal(value[BACK][0].tooltip, "Spotlight · ax-3447 · sincronizado 22:58:04");
-  assert.deepEqual(value[BACK][0].action, { exec: [BIN, "toggle", "--workspace", BACK] });
 
   assert.equal(server.text, ":3000+1");
   assert.equal(server.tone, "done");
@@ -190,15 +210,15 @@ test("the configured port wins the label when it listens", () => {
   assert.equal(build(one).value[B1][1].text, ":5173");
 });
 
-test("D36: the holder's server badge shows the variant, uppercased, with the port in its tooltip; the root row keeps the port", () => {
+test("D36, D39: the holder's server badge shows the variant as Orca's tag (a dim pill, no icon), with the port in its tooltip; the root row keeps the port", () => {
   const s = baseState();
   Object.assign(s.repos[BACK], { serverVariant: "do", serverCommand: "pnpm dev:do", ports: [3000] });
   const { value } = build(s);
   const [, server] = value[B1];
-  assert.equal(server.text, "DO");
-  assert.equal(server.tone, "done");
-  assert.equal(server.tooltip, "DO en :3000 · local · pnpm dev:do · http://localhost:3000");
-  assert.deepEqual(server.action, { command: `spotlight.server.${serverIdOf(B1)}` });
+  assert.deepEqual(server, {
+    text: "DO", tone: "dim", pill: true, tooltip: "DO en :3000 · local · pnpm dev:do · http://localhost:3000",
+    action: { command: `spotlight.server.${serverIdOf(B1)}` },
+  });
   const [, rootServer] = value[BACK];
   assert.equal(rootServer.text, ":3000");
   assert.equal(rootServer.tooltip, "local · pnpm dev:do · http://localhost:3000");
@@ -209,15 +229,18 @@ test("D36: the holder's server badge shows the variant, uppercased, with the por
   const long = build(s).value[B1][1];
   assert.equal(long.text, "STORE…");
   assert.equal(codePoints(long.text), 6);
+  assert.equal(long.pill, true);
   assert.equal(long.tooltip, "STOREFRONT en :3000+1 · local · pnpm dev:do · http://localhost:3000 http://localhost:3001");
   assert.equal(build(s).value[BACK][1].text, ":3000+1");
 
-  // Not listening yet: the server's state, as before.
+  // Not listening yet: the server's state, as before, with its icon and no pill.
   Object.assign(s.repos[BACK], { serverState: "starting", ports: [] });
-  assert.equal(build(s).value[B1][1].text, "…");
+  const starting = build(s).value[B1][1];
+  assert.deepEqual([starting.text, starting.pill, path.basename(starting.icon)], ["…", undefined, "server.svg"]);
   // No variant: the port, as before.
   Object.assign(s.repos[BACK], { serverState: "listening", serverVariant: null, ports: [3000] });
-  assert.equal(build(s).value[B1][1].text, ":3000");
+  const plain = build(s).value[B1][1];
+  assert.deepEqual([plain.text, plain.tone, plain.pill, path.basename(plain.icon)], [":3000", "done", undefined, "server.svg"]);
 });
 
 test("server states: starting, stopped, gone, needs-variant, no command", () => {
@@ -238,9 +261,12 @@ test("server states: starting, stopped, gone, needs-variant, no command", () => 
   assert.equal(with_({ serverState: "gone", ports: [] }).tooltip, "Server cerrado · clic para reiniciarlo");
   assert.equal(with_({ serverState: "stopped", ports: [] }).tooltip, "Server parado · local · pnpm dev --port 3000");
   const ask = with_({ serverState: "needs-variant", serverCommand: null, ports: [] });
+  // Orca's SpotlightVariantTag with no variant: a muted outlined "?" pill, no icon.
   assert.equal(ask.text, "?");
-  assert.equal(ask.tone, "accent");
-  assert.equal(ask.tooltip, "Elige una variante: clic para abrir el server");
+  assert.equal(ask.icon, undefined);
+  assert.equal(ask.tone, "dim");
+  assert.equal(ask.pill, true);
+  assert.equal(ask.tooltip, "Aún no hay variante de Spotlight. Clic para elegir una.");
   const none = with_({ serverState: "stopped", serverCommand: null, serverTerminal: null, ports: [] });
   assert.equal(none.tone, "dim");
   assert.equal(none.tooltip, "Sin server · clic para elegir uno");
@@ -296,14 +322,20 @@ test("a server that didn't come up (D24, D25): the server badge is red and its t
     const s = baseState();
     Object.assign(s.repos[BACK], { serverState: "stopped", ports: [], lastError });
     const { value } = build(s);
-    for (const at of [B1, BACK]) {
-      const server = value[at][1];
-      assert.equal(server.tone, "blocked", lastError.code);
-      assert.equal(server.tooltip, lastError.message);
-      assert.deepEqual(server.action, { command: `spotlight.server.${serverIdOf(at)}` });
-      assert.equal(value[at][0].tone, "blocked");
-      assert.equal(value[at][0].tooltip, `Spotlight: ${lastError.message}`);
-    }
+    const server = value[B1][1];
+    assert.equal(server.tone, "blocked", lastError.code);
+    assert.equal(server.tooltip, lastError.message);
+    assert.deepEqual(server.action, { command: `spotlight.server.${serverIdOf(B1)}` });
+    assert.equal(value[B1][0].tone, "blocked");
+    assert.equal(value[B1][0].tooltip, `Spotlight: ${lastError.message}`);
+    // D39: the root row has no port; the chip (a server error is no root
+    // error) keeps its tone and its click, and its tooltip says why.
+    assert.deepEqual(icons(value[BACK]), ["flashlight", "logs", "x"]);
+    const [chip] = value[BACK];
+    assert.equal(chip.tone, "working", lastError.code);
+    assert.deepEqual(chip.action, { exec: [BIN, "peek", "--repo", BACK] });
+    assert.equal(chip.dot, "off");
+    assert.equal(chip.tooltip, `El root del proyecto refleja "ax-3447". Clic para abrir la terminal del server. ${lastError.message}`);
     assertContract(value);
   }
   // A start refused before any server ran (no command, no terminal yet)
@@ -330,15 +362,22 @@ test("a server error under a root error: the badges show the root error on top",
   for (const at of [B1, BACK]) {
     assert.equal(value[at][0].tone, "blocked");
     assert.equal(value[at][0].tooltip, `Spotlight: ${ORCA.message}`);
-    assert.equal(value[at][1].tone, "blocked");
-    assert.notEqual(value[at][1].tooltip, busy.message);
   }
+  assert.equal(value[B1][1].tone, "blocked");
+  assert.notEqual(value[B1][1].tooltip, busy.message);
+  // D39: the root row has no port badge while nothing listens.
+  assert.deepEqual(icons(value[BACK]), ["flashlight", "logs", "x"]);
   assertContract(value);
 });
 
 // D33: while a light, a turn-off, a Forzar sync or a restart works on a
 // repo, its flashlight is M's own ring, spinning, with no action.
 const RING = { icon: "mods/spotlight/icons/spinner.svg", tone: "working", tooltip: "Sincronizando…", spin: true };
+// The holder's ring keeps its server dot (D39, Orca's holder button while syncing).
+const HOLDER_RING = { ...RING, dot: "on" };
+// The root's chip while busy (D39): the ring in its icon's place, its click kept.
+const isBusyChip = (b, root) =>
+  b.pill === true && b.text === "Spotlight" && b.icon === RING.icon && b.spin === true && b.action?.exec?.join(" ") === `${BIN} peek --repo ${root}`;
 
 test("D33: a busy repo: the ring replaces the flashlight on the holder's and the root's rows, and on the target's; it spins, reads 'Sincronizando…' and has no action", () => {
   // A Forzar sync of the holder: its row and the root's spin; the server
@@ -348,8 +387,9 @@ test("D33: a busy repo: the ring replaces the flashlight on the holder's and the
   s.repos[BACK].busy = { op: "sync", since: 5, pid: 4242, workspace: B1 };
   const { value } = build(s);
   assert.deepEqual(icons(value[B1]), ["spinner", "server", "flask"]);
-  assert.deepEqual(icons(value[BACK]), ["spinner", "server"]);
-  for (const at of [B1, BACK]) assert.deepEqual(value[at][0], RING, at);
+  assert.deepEqual(icons(value[BACK]), ["spinner", ":3000+1", "logs"]);
+  assert.deepEqual(value[B1][0], HOLDER_RING);
+  assert.ok(isBusyChip(value[BACK][0], BACK), "the root's chip spins");
   assert.equal(value[B1][1].text, ":3000+1");
   assert.deepEqual(icons(value[B2]), ["flashlight", "clock"]);
   assert.deepEqual(value[B2][0].action, { exec: [BIN, "toggle", "--workspace", B2] });
@@ -359,7 +399,9 @@ test("D33: a busy repo: the ring replaces the flashlight on the holder's and the
   const takeover = baseState();
   takeover.repos[BACK].busy = { op: "light", since: 5, pid: 4242, workspace: B2 };
   const moving = build(takeover).value;
-  for (const at of [B1, BACK, B2]) assert.deepEqual(moving[at][0], RING, at);
+  assert.deepEqual(moving[B1][0], HOLDER_RING);
+  assert.ok(isBusyChip(moving[BACK][0], BACK));
+  assert.deepEqual(moving[B2][0], RING);
   assert.deepEqual(icons(moving[B2]), ["spinner", "clock"]);
   assertContract(moving);
 
@@ -391,7 +433,8 @@ test("D33: a busy repo: the ring replaces the flashlight on the holder's and the
   const off = baseState();
   off.repos[BACK].busy = { op: "off", since: 5, pid: 4242, workspace: null };
   const going = build(off).value;
-  for (const at of [B1, BACK]) assert.deepEqual(going[at][0], RING, at);
+  assert.deepEqual(going[B1][0], HOLDER_RING);
+  assert.ok(isBusyChip(going[BACK][0], BACK));
 
   // The ring's rows still resolve the server popup's id.
   assert.equal(build(fresh).servers[serverIdOf(unlisted)]?.root, FRONT);
@@ -477,7 +520,7 @@ test("a slot-only request shows its flask on the caller's own workspace", () => 
   assert.deepEqual(icons(build(s).value[O1]), ["flask"]);
 });
 
-test("every badge passes projects-sidebar's contract, at most 3 per row", () => {
+test("every badge passes projects-sidebar's contract, at most 4 per row", () => {
   const busy = baseState();
   busy.repos[FRONT] = repo({
     holder: F1, lastSyncAt: at(9, 1, 2), serverTerminal: "t8", serverCommand: `pnpm dev:${"x".repeat(300)}`, serverEnv: "dev",
@@ -497,7 +540,9 @@ test("the id map resolves every server command it published, and every workspace
   const { value, servers } = build(busy);
   const commands = Object.entries(value).flatMap(([at, list]) =>
     list.filter((b) => b.action?.command).map((b) => ({ at, id: b.action.command.slice("spotlight.server.".length) })));
-  assert.ok(commands.length >= 4);
+  // back's holder and root (its port, D39), front's holder (its root, still
+  // starting, has no port badge).
+  assert.ok(commands.length >= 3);
   for (const { at, id } of commands) assert.equal(servers[id]?.workspace, at);
   assert.equal(servers[serverIdOf(B1)].root, BACK);
   assert.equal(servers[serverIdOf(BACK)].root, BACK);
@@ -570,8 +615,9 @@ test("taskModeGroups: the ids of projects.v1's groups organized by Task; anythin
 test("D31: a Task-mode group's lanes get the task's flashlight, keyed and acting with the group; dim until every member is held, then working; skipped repos named", () => {
   const { value } = buildLanes();
   // AX-3447: back held by B1, front not lit, other skipped (Spotlight off).
-  // Its env pill (D32, T22) sits between the flashlight and the flask.
-  const [light, , flask] = value[laneKey("AX-3447")];
+  // Orca's order (TaskSectionHeader): the flashlight, the queue badge, then
+  // the env pill (D32, D39).
+  const [light, flask] = value[laneKey("AX-3447")];
   assert.deepEqual(light, {
     icon: "mods/spotlight/icons/flashlight.svg", tone: "dim", tooltip: `${NOT_LIT} Saltado, Spotlight apagado en: other`, action: laneToggle("AX-3447"),
   });
@@ -580,7 +626,7 @@ test("D31: a Task-mode group's lanes get the task's flashlight, keyed and acting
   assert.equal(value[laneKey("AX-3500")][0].tone, "dim");
   assert.equal(value[laneKey("AX-3500")][0].tooltip, NOT_LIT);
   // A name lane: the lowercased name, as projects-sidebar keys it.
-  assert.deepEqual(value[laneKey("login")], [{ icon: "mods/spotlight/icons/flashlight.svg", tone: "dim", tooltip: NOT_LIT, action: laneToggle("login") }]);
+  assert.deepEqual(value[laneKey("login")][0], { icon: "mods/spotlight/icons/flashlight.svg", tone: "dim", tooltip: NOT_LIT, action: laneToggle("login") });
   assertContract(value);
 
   // Every member held by one of the task's workspaces: working, the lit tooltip.
@@ -638,9 +684,9 @@ test("D31: the task's queue badge on its lane, as on its rows: testing, queued #
     terminal: "t3", taskKey: "ax/login", label: "login", lane: "ax", state: "waiting", requestedAt: 4, members: [member(FRONT, "front", F2)], workspace: F2, root: FRONT,
   });
   const { value } = buildLanes(s);
-  // AX-3447 holds back: its env pill (D32) comes before the queue badge.
-  assert.deepEqual(icons(value[laneKey("AX-3447")]), ["flashlight", "server", "flask"]);
-  assert.deepEqual(icons(value[laneKey("AX-3500")]), ["flashlight", "clock"]);
+  // AX-3447 holds back: the queue badge, then its env pill (D32), as Orca's header.
+  assert.deepEqual(icons(value[laneKey("AX-3447")]), ["flashlight", "flask", "Local ▾"]);
+  assert.deepEqual(icons(value[laneKey("AX-3500")]), ["flashlight", "clock", "Local ▾"]);
   const second = value[laneKey("login")][1];
   assert.deepEqual(icons([second]), ["clock"]);
   assert.equal(second.text, "#2");
@@ -651,7 +697,7 @@ test("D31: the task's queue badge on its lane, as on its rows: testing, queued #
   Object.assign(s.queue.requests[1], { state: "paused", pauseReason: "limit", pausedAt: 9 });
   assert.equal(buildLanes(s).value[laneKey("AX-3500")][1].tooltip, "Pausado · sin límite");
   const off = buildLanes(s, { settings: settingsOf({ version: 1, queue: { enabled: false } }) }).value;
-  assert.deepEqual(icons(off[laneKey("AX-3447")]), ["flashlight", "server"]);
+  assert.deepEqual(icons(off[laneKey("AX-3447")]), ["flashlight", "Local ▾"]);
 });
 
 test("D29: a group not in Task mode gets no lane keys", () => {
@@ -664,52 +710,58 @@ test("D29: a group not in Task mode gets no lane keys", () => {
   assert.deepEqual(Object.keys(build().value).filter((k) => !k.startsWith("/")), []);
 });
 
-// ── T22 (D32): the env pill on the task lane ───────────────────────────────
-// After the lane's flashlight, before its queue badge: the env of the task's
-// servers, drawn with today's contract (the server icon and the text; T31
-// makes it D39's text badge). Shown as Orca shows it: always while a member
-// holds its root or the stored env isn't Local, otherwise not.
+// ── T22 (D32), T31 (D39): the env pill on the task lane ───────────────────
+// After the lane's flashlight and its queue badge, as Orca's header
+// (TaskSectionHeader): the env of the task's servers, Orca's TaskSpotlightEnvPill,
+// a text badge "<env> ▾" with no icon and no border. Shown as Orca shows it:
+// always while a member holds its root or the stored env isn't Local,
+// otherwise it grows in on the header's hover (`reveal: "grow"`).
 
 const envIdOf = (key) => sha1Hex(`ax/${key}`).slice(0, 12);
 const envCommand = (key) => ({ command: `spotlight.env.${envIdOf(key)}` });
 const ENV_TIP = (label) => `Entorno de Spotlight de esta tarea: ${label}. Clic para cambiarlo.`;
-const pill = (key, text, tooltip = ENV_TIP(text)) => ({ icon: "mods/spotlight/icons/server.svg", text, tone: "dim", tooltip, action: envCommand(key) });
+const pill = (key, label, { tooltip = ENV_TIP(label), reveal } = {}) =>
+  ({ text: `${label} ▾`, tone: "dim", tooltip, action: envCommand(key), ...(reveal ? { reveal } : {}) });
+// A lane's env pill: its text badge ending in "▾".
+const envOf = (list) => (list ?? []).find((b) => !b.icon && b.text?.endsWith(" ▾"));
 
 test("D32: the env pill shows while a member holds: with nothing stored, the held repo's env; it opens the lane's env popup, which the id map names", () => {
   const built = buildLanes();
   const { value } = built;
   // AX-3447: back held by B1, nothing stored, back's settings env (Local).
-  assert.deepEqual(icons(value[laneKey("AX-3447")]), ["flashlight", "server", "flask"]);
-  assert.deepEqual(value[laneKey("AX-3447")][1], pill("AX-3447", "Local"));
-  // AX-3500's only member is held by another task's workspace; login's isn't lit.
-  assert.deepEqual(icons(value[laneKey("AX-3500")]), ["flashlight", "clock"]);
-  assert.deepEqual(icons(value[laneKey("login")]), ["flashlight"]);
+  assert.deepEqual(icons(value[laneKey("AX-3447")]), ["flashlight", "flask", "Local ▾"]);
+  assert.deepEqual(envOf(value[laneKey("AX-3447")]), pill("AX-3447", "Local"));
+  // AX-3500's only member is held by another task's workspace; login's isn't
+  // lit: their pill grows in on the header's hover.
+  assert.deepEqual(icons(value[laneKey("AX-3500")]), ["flashlight", "clock", "Local ▾"]);
+  assert.deepEqual(envOf(value[laneKey("AX-3500")]), pill("AX-3500", "Local", { reveal: "grow" }));
+  assert.deepEqual(value[laneKey("login")], [value[laneKey("login")][0], pill("login", "Local", { reveal: "grow" })]);
   assertContract(value);
   // The id map: the command's id → the lane, with its members for the popup.
   assert.deepEqual(built.lanes[envIdOf("AX-3447")], {
     group: "ax", task: "AX-3447",
     members: [{ root: BACK, name: "back", workspaces: [B1] }, { root: FRONT, name: "front", workspaces: [F1] }],
   });
-  assert.equal(built.lanes[envIdOf("login")]?.task, "login", "every lane with a flashlight is named, shown pill or not");
+  assert.equal(built.lanes[envIdOf("login")]?.task, "login", "every lane with a flashlight is named");
   // The settings' env of the held repo, or a pick stored for the task (Local included), wins.
   const dev = buildLanes(baseState(), { settings: settingsOf({ version: 1, repos: { [BACK]: { env: "dev" } } }) }).value;
-  assert.deepEqual(dev[laneKey("AX-3447")][1], pill("AX-3447", "Dev"));
+  assert.deepEqual(envOf(dev[laneKey("AX-3447")]), pill("AX-3447", "Dev"));
   const stored = buildLanes(baseState({ envs: { "ax/AX-3447": "prod" } })).value;
-  assert.deepEqual(stored[laneKey("AX-3447")][1], pill("AX-3447", "Prod"));
+  assert.deepEqual(envOf(stored[laneKey("AX-3447")]), pill("AX-3447", "Prod"));
   const local = buildLanes(baseState({ envs: { "ax/AX-3447": "local" } }), { settings: settingsOf({ version: 1, repos: { [BACK]: { env: "dev" } } }) }).value;
-  assert.deepEqual(local[laneKey("AX-3447")][1], pill("AX-3447", "Local"));
+  assert.deepEqual(envOf(local[laneKey("AX-3447")]), pill("AX-3447", "Local"));
   // The ring while the batch runs keeps the pill beside it.
   const batch = baseState();
   batch.queue.taskBatch = { "ax/AX-3447": { op: "on", since: 5, pid: 4242 } };
-  assert.deepEqual(icons(buildLanes(batch).value[laneKey("AX-3447")]), ["spinner", "server", "flask"]);
+  assert.deepEqual(icons(buildLanes(batch).value[laneKey("AX-3447")]), ["spinner", "flask", "Local ▾"]);
 });
 
-test("D32: with nobody holding, the pill shows only for a stored env that isn't Local; the same task in another space is another key", () => {
+test("D32, D39: with nobody holding, the pill is always shown only for a stored env that isn't Local, else it grows in on hover; the same task in another space is another key", () => {
   const s = baseState({ envs: { "ax/AX-3500": "dev", "ax/login": "local", "ag/AX-3447": "prod" } });
   const { value } = buildLanes(s);
-  assert.deepEqual(value[laneKey("AX-3500")][1], pill("AX-3500", "Dev"));
-  assert.deepEqual(icons(value[laneKey("login")]), ["flashlight"], "Local stored, nothing held: no pill");
-  assert.deepEqual(value[laneKey("AX-3447")][1], pill("AX-3447", "Local"), "another space's pick for AX-3447 isn't this one's");
+  assert.deepEqual(envOf(value[laneKey("AX-3500")]), pill("AX-3500", "Dev"));
+  assert.deepEqual(envOf(value[laneKey("login")]), pill("login", "Local", { reveal: "grow" }), "Local stored, nothing held: on hover");
+  assert.deepEqual(envOf(value[laneKey("AX-3447")]), pill("AX-3447", "Local"), "another space's pick for AX-3447 isn't this one's");
   // No flashlight (no member with Spotlight on), no pill: there is no server to run.
   const laneCache = { ...cache, [OTHER]: [...cache[OTHER], { path: `${WS}/other/ax-9`, branch: "juan/AX-9", main: false }] };
   assert.equal(buildLanes(baseState({ envs: { "ax/AX-9": "dev" } }), { laneCache }).value[laneKey("AX-9")], undefined);
@@ -723,16 +775,20 @@ test("D32: nothing stored, two repos held: their env when they agree, else Mixto
     return s;
   };
   const agree = settingsOf({ version: 1, repos: { [BACK]: { env: "dev" }, [FRONT]: { env: "dev" } } });
-  assert.deepEqual(buildLanes(both(), { settings: agree }).value[laneKey("AX-3447")][1], pill("AX-3447", "Dev"));
+  assert.deepEqual(envOf(buildLanes(both(), { settings: agree }).value[laneKey("AX-3447")]), pill("AX-3447", "Dev"));
   const differ = settingsOf({ version: 1, repos: { [FRONT]: { env: "dev" } } });
-  const mixed = buildLanes(both(), { settings: differ }).value[laneKey("AX-3447")][1];
-  assert.deepEqual(mixed, pill("AX-3447", "Mixto", "Entorno de Spotlight de esta tarea: mixto (back Local · front Dev). Clic para elegir uno."));
+  const mixed = envOf(buildLanes(both(), { settings: differ }).value[laneKey("AX-3447")]);
+  assert.deepEqual(mixed, pill("AX-3447", "Mixto", { tooltip: "Entorno de Spotlight de esta tarea: mixto (back Local · front Dev). Clic para elegir uno." }));
   // A held record lit before T22 counts with its envOverride; a keyed one with what is stored for its key.
-  const legacy = buildLanes(both({ envOverride: "local" }), { settings: differ }).value[laneKey("AX-3447")][1];
-  assert.equal(legacy.text, "Local");
-  const keyed = buildLanes(both({ envKey: "ax/AX-3447" }), { settings: differ }).value[laneKey("AX-3447")][1];
-  assert.equal(keyed.text, "Mixto", "nothing stored for the key: the settings' env");
+  const legacy = envOf(buildLanes(both({ envOverride: "local" }), { settings: differ }).value[laneKey("AX-3447")]);
+  assert.equal(legacy.text, "Local ▾");
+  const keyed = envOf(buildLanes(both({ envKey: "ax/AX-3447" }), { settings: differ }).value[laneKey("AX-3447")]);
+  assert.equal(keyed.text, "Mixto ▾", "nothing stored for the key: the settings' env");
   assertContract(buildLanes(both(), { settings: differ }).value);
+  // Mixto with nobody holding (the members' settings differ): on hover.
+  const idle = baseState();
+  delete idle.repos[BACK];
+  assert.deepEqual(envOf(buildLanes(idle, { settings: differ }).value[laneKey("AX-3447")]).reveal, "grow");
 });
 
 test("D32: laneEnv, the pill's value: the stored env, else the held repos' env when they agree, else null (Mixto); with nobody holding, every member's would-be env, and not shown", () => {
@@ -768,7 +824,183 @@ test("D32: the server popup's selected env equals the pill's when they agree", (
   ];
   cases[2][0].repos[BACK].envKey = "ax/AX-3447";
   for (const [state, settings] of cases) {
-    const shown = buildLanes(state, { settings }).value[laneKey("AX-3447")][1].text;
-    assert.equal(shown, { local: "Local", dev: "Dev", prod: "Prod" }[popupEnv(state, settings)], JSON.stringify(state.envs ?? null));
+    const shown = envOf(buildLanes(state, { settings }).value[laneKey("AX-3447")]).text;
+    assert.equal(shown, `${{ local: "Local", dev: "Dev", prod: "Prod" }[popupEnv(state, settings)]} ▾`, JSON.stringify(state.envs ?? null));
   }
+});
+
+// ── T31 (D39): Spotlight's sidebar as Orca's ───────────────────────────────
+// WorktreeCardSpotlightControls: the idle flashlight on the row's hover, the
+// holder's flashlight with its server dot, and the root row's SPOTLIGHT chip,
+// port, logs icon and X; projects-sidebar draws the fields (its T30).
+
+const LOG = "/Users/u/.local/state/herdr-spotlight/logs/back.log";
+const CHIP_TIP = (server) => `El root del proyecto refleja "ax-3447". Clic para abrir la terminal del server. ${server}`;
+const LOGS_TIP = (where) => `Los agentes de cualquier workspace pueden leer los logs del server: spotlight logs --repo ${where}.`;
+const PEEK = { exec: [BIN, "peek", "--repo", BACK] };
+const ROOT_OFF = { exec: [BIN, "toggle", "--workspace", BACK] };
+const X = {
+  icon: "mods/spotlight/icons/x.svg", tone: "dim", hover: "working", reveal: "hover",
+  tooltip: "Apagar Spotlight y restaurar el root del proyecto", action: ROOT_OFF,
+};
+
+// back's root row, with `fields` on its record.
+function rootRow(fields = {}, over = {}) {
+  const s = baseState(over);
+  Object.assign(s.repos[BACK], fields);
+  return build(s).value[BACK];
+}
+
+test("D39: a workspace that doesn't hold the root shows its dim flashlight on its row's hover; the holder's, a busy target's ring and the lane's are always shown", () => {
+  const { value } = build();
+  for (const at of [B2, F1, F2]) {
+    assert.equal(value[at][0].reveal, "hover", at);
+    assert.equal(path.basename(value[at][0].icon), "flashlight.svg");
+    assert.equal(value[at][0].dot, undefined, "only the holder's flashlight has a dot");
+  }
+  assert.equal(value[B1][0].reveal, undefined);
+  const takeover = baseState();
+  takeover.repos[BACK].busy = { op: "light", since: 5, pid: 4242, workspace: B2 };
+  assert.deepEqual(build(takeover).value[B2][0], RING);
+  assert.equal(buildLanes().value[laneKey("AX-3447")][0].reveal, undefined);
+  assertContract(value);
+});
+
+test("D39: the holder's flashlight carries the server dot: on while starting or listening, and while syncing; off when stopped; none with no server or its terminal gone", () => {
+  const dotOf = (fields, busy) => {
+    const s = baseState();
+    Object.assign(s.repos[BACK], fields);
+    if (busy) s.repos[BACK].busy = { op: "sync", since: 5, pid: 4242, workspace: B1 };
+    return build(s).value[B1][0].dot;
+  };
+  assert.equal(dotOf({}), "on");
+  assert.equal(dotOf({ serverState: "starting", ports: [] }), "on");
+  assert.equal(dotOf({}, true), "on", "the ring keeps it");
+  assert.equal(dotOf({ serverState: "starting", ports: [] }, true), "on");
+  assert.equal(dotOf({ serverState: "stopped", ports: [] }), "off");
+  assert.equal(dotOf({ serverState: "stopped", ports: [] }, true), "off");
+  assert.equal(dotOf({ serverState: "stopped", ports: [], lastError: { code: "server-exited", message: "x", at: 5 } }), "off");
+  assert.equal(dotOf({ serverState: "gone", ports: [] }), undefined);
+  assert.equal(dotOf({ serverState: "stopped", serverCommand: null, serverTerminal: null, ports: [] }), undefined);
+  // On an error the red flashlight keeps it (Orca's held button always does).
+  assert.equal(dotOf({ lastError: { code: "root-diverged", message: "x", at: 5 } }), "on");
+});
+
+test("D39: the lit root row, in Orca's order: the SPOTLIGHT chip (the server's tab), the port, the logs icon and the X on hover", () => {
+  const row = rootRow({ logPath: LOG });
+  assert.deepEqual(icons(row), ["flashlight", ":3000+1", "logs", "x"]);
+  const [chip, port, logs, x] = row;
+  assert.deepEqual(chip, {
+    icon: "mods/spotlight/icons/flashlight.svg", text: "Spotlight", tone: "working", pill: true, dot: "on",
+    tooltip: CHIP_TIP("Server corriendo en el puerto 3000."), action: PEEK,
+  });
+  assert.deepEqual(port, {
+    text: ":3000+1", tone: "dim", tooltip: "local · pnpm dev --port 3000 · http://localhost:3000 http://localhost:3001",
+    action: { command: `spotlight.server.${serverIdOf(BACK)}` },
+  });
+  assert.deepEqual(logs, { icon: "mods/spotlight/icons/logs.svg", tone: "dim", reveal: "hover", tooltip: LOGS_TIP(`back (${LOG})`) });
+  assert.deepEqual(x, X);
+  // The configured port leads the chip's tooltip, as the port badge's label.
+  const settings = settingsOf({ version: 1, repos: { [BACK]: { port: 3001 } } });
+  assert.equal(build(baseState(), settings).value[BACK][0].tooltip, CHIP_TIP("Server corriendo en el puerto 3001."));
+  // No log path yet: the command alone.
+  assert.equal(rootRow()[2].tooltip, LOGS_TIP("back"));
+  // The repo's name is projects-sidebar's (the CLI's `--repo` takes it).
+  const named = buildBadges({
+    state: baseState(), settings: settingsOf(), cache, enabled, bin: BIN,
+    projects: parseProjects({ version: 1, groups: [{ id: "ax", name: "AX", projects: [{ path: BACK, name: "back-api" }] }] }),
+  });
+  assert.equal(named.value[BACK][2].tooltip, LOGS_TIP("back-api"));
+  assertContract(build().value);
+});
+
+test("D39: with no port the root row has no port badge: the chip's dot and tooltip carry the server's state", () => {
+  const cases = [
+    [{ serverState: "starting", ports: [] }, "on", "Server arrancando."],
+    [{ serverState: "stopped", ports: [] }, "off", "Server detenido."],
+    [{ serverState: "gone", ports: [] }, undefined, "Server cerrado."],
+    [{ serverState: "needs-variant", serverCommand: null, ports: [] }, "off", "Elige una variante para arrancar el server."],
+    [{ serverState: "stopped", serverCommand: null, serverTerminal: null, ports: [] }, undefined, "Sin server."],
+  ];
+  for (const [fields, dot, server] of cases) {
+    const row = rootRow(fields);
+    assert.deepEqual(icons(row), ["flashlight", "logs", "x"], fields.serverState);
+    assert.equal(row[0].dot, dot, fields.serverState);
+    assert.equal(row[0].tooltip, CHIP_TIP(server), fields.serverState);
+    assert.deepEqual(row[0].action, PEEK);
+    assert.equal(row[0].tone, "working");
+  }
+  // Listening with no port read: the chip says it runs, and there is no port badge.
+  const bare = rootRow({ ports: [] });
+  assert.deepEqual(icons(bare), ["flashlight", "logs", "x"]);
+  assert.equal(bare[0].tooltip, CHIP_TIP("Server corriendo."));
+  // The holder's server badge keeps the state and the popup.
+  const s = baseState();
+  Object.assign(s.repos[BACK], { serverState: "starting", ports: [] });
+  assert.deepEqual(build(s).value[B1][1].action, { command: `spotlight.server.${serverIdOf(B1)}` });
+});
+
+test("D39: the root terminal's own queue badge takes the logs icon's place on the lit root row; an unlit root keeps it as before", () => {
+  const ask = (root) => ({
+    terminal: "t7", taskKey: `cwd:${root}`, label: path.basename(root), lane: "ax", state: "holding", requestedAt: 5, grantedAt: 6,
+    members: [], workspace: root, root, slotOnly: true,
+  });
+  const s = baseState();
+  s.queue.requests.push(ask(BACK), { ...ask(FRONT), terminal: "t8" });
+  const { value } = build(s);
+  assert.deepEqual(icons(value[BACK]), ["flashlight", ":3000+1", "flask", "x"]);
+  assert.equal(value[BACK][2].tooltip, "Probando");
+  assert.deepEqual(icons(value[FRONT]), ["flask"], "an unlit root: its queue badge alone");
+  assertContract(value);
+});
+
+test("D39, D33: a busy repo's chip spins with its click kept, and the X is gone", () => {
+  const s = baseState();
+  s.repos[BACK].busy = { op: "restart", since: 5, pid: 4242, workspace: B1 };
+  const row = build(s).value[BACK];
+  assert.deepEqual(icons(row), ["spinner", ":3000+1", "logs"]);
+  assert.deepEqual(row[0], {
+    icon: "mods/spotlight/icons/spinner.svg", spin: true, text: "Spotlight", tone: "working", pill: true, dot: "on",
+    tooltip: CHIP_TIP("Server corriendo en el puerto 3000."), action: PEEK,
+  });
+  assertContract(build(s).value);
+});
+
+test("D39: a root error makes the chip blocked, its click the toggle as the root's flashlight did; busy, it spins and shows the server's tab", () => {
+  const diverged = { code: "root-diverged", message: "The repository root moved off the Spotlight snapshot.", at: 5 };
+  const row = rootRow({ lastError: diverged });
+  assert.deepEqual(icons(row), ["flashlight", ":3000+1", "logs", "x"]);
+  assert.deepEqual(row[0], {
+    icon: "mods/spotlight/icons/flashlight.svg", text: "Spotlight", tone: "blocked", pill: true, dot: "on",
+    tooltip: "Root desviado: abre el server para forzar", action: ROOT_OFF,
+  });
+  // A server error under it: still the root's.
+  const under = rootRow({ serverState: "stopped", ports: [], lastError: { ...diverged, serverError: { code: "port-busy", message: "x", at: 4 } } });
+  assert.deepEqual([under[0].tone, under[0].action], ["blocked", ROOT_OFF]);
+  // Busy (a Forzar sync of it): the ring, and a click that shows the tab.
+  const busy = rootRow({ lastError: diverged, busy: { op: "sync", since: 5, pid: 4242, workspace: B1 } });
+  assert.deepEqual([path.basename(busy[0].icon), busy[0].spin, busy[0].tone, busy[0].action], ["spinner.svg", true, "blocked", PEEK]);
+  assert.deepEqual(icons(busy), ["spinner", ":3000+1", "logs"]);
+});
+
+test("D39: an unlit refused root keeps today's flashlight and popup", () => {
+  const s = baseState();
+  s.repos = { [FRONT]: repo({ lastError: { code: "untracked-collision", message: "x", at: 5 } }) };
+  assert.deepEqual(build(s).value[FRONT], [{
+    icon: "mods/spotlight/icons/flashlight.svg", tone: "blocked", tooltip: "Archivos sin seguimiento en el root: abre el server para forzar",
+    action: { command: `spotlight.server.${serverIdOf(FRONT)}` },
+  }]);
+});
+
+test("D39: at most 4 badges per row from Spotlight", () => {
+  const s = baseState();
+  for (const n of [1, 2, 3]) {
+    s.queue.requests.push({
+      terminal: `q${n}`, taskKey: `ax/AX-9${n}`, label: `AX-9${n}`, lane: "ax", state: "paused", pauseReason: "limit", requestedAt: 9 + n,
+      members: [member(BACK, "back", B1)], workspace: B1, root: BACK,
+    });
+  }
+  const { value } = build(s);
+  assert.deepEqual(icons(value[B1]), ["flashlight", "server", "flask", "pause"]);
+  assertContract(value);
 });
