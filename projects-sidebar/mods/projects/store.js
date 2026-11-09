@@ -10,6 +10,7 @@
 import { shared, setShared } from "herdr";
 import { BADGE_KEYS } from "./config.js";
 import { parseBadges } from "./badges-model.js";
+import { parsePrs } from "./pr-model.js";
 import {
   KEYS, changed, normPath,
   parseRegistry, registryWrites, parseUi, withCollapsed, withTaskCollapsed, parseCache, parseAgents,
@@ -110,6 +111,16 @@ export const agents = () => parseAgents(shared(KEYS.agents));
 
 export function saveAgents(list) {
   return write(KEYS.agents, parseAgents(list));
+}
+
+// ── projects.prs.v1: the PR of each workspace's branch ─────────────────────
+// Written by the tree copy in the window in front, after asking GitHub
+// (pr-model.js mergePrs), only when a PR changed; read once per render.
+
+export const prs = () => parsePrs(shared(KEYS.prs));
+
+export function savePrs(next) {
+  return write(KEYS.prs, next);
 }
 
 // ── badges.*: other plugins' indicators (D38) ──────────────────────────────
