@@ -3,7 +3,8 @@
 // lookup. Node-only, like cli.mjs; the mod never imports it.
 //
 // Programs are called by bare name (hc, git, lsof, pgrep, herdr-app), so a
-// fake earlier on PATH stands in for each in tests.
+// fake earlier on PATH stands in for each in tests. Signals go through
+// `serverDeps.kill` only.
 
 import fs from "node:fs";
 import fsp from "node:fs/promises";
@@ -326,7 +327,9 @@ export function makeContext() {
     now: Date.now,
     sleep,
     spawn: spawnDetached,
-    serverDeps: { exec, now: Date.now, sleep },
+    // Every signal Spotlight sends (a turn-off's leftovers, D26; Liberar
+    // puerto y arrancar, D24) goes through `kill`, process.kill's shape.
+    serverDeps: { exec, now: Date.now, sleep, kill: (pid, signal) => process.kill(pid, signal) },
     pollMs: envMs("SPOTLIGHT_POLL_MS", 2_500),
     portPollMs: envMs("SPOTLIGHT_PORT_POLL_MS", 2_500),
     graceMs: envMs("SPOTLIGHT_NO_SERVER_GRACE_MS", 15_000),

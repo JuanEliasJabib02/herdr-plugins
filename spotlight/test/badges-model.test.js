@@ -277,6 +277,18 @@ test("a server that didn't come up (D24, D25): the server badge is red and its t
   assert.equal(build(back).value[B1][1].text, ":3000+1");
 });
 
+// R9: the server errors were spelled three times (the CLI, the badges, the
+// popup); one constant now, which the three import.
+test("the server errors (port-busy, server-exited) are one constant, imported by the CLI, the badges and the popup", async () => {
+  const { SERVER_ERRORS } = await import("../mods/spotlight/server-errors.js");
+  assert.deepEqual([...SERVER_ERRORS].sort(), ["port-busy", "server-exited"]);
+  for (const file of ["cli-work.mjs", "badges-model.js", "server-view-model.js"]) {
+    const src = fs.readFileSync(path.join(MOD_DIR, file), "utf8");
+    assert.match(src, /from "\.\/server-errors\.js";/, `${file} imports it`);
+    assert.doesNotMatch(src, /"port-busy",\s*"server-exited"/, `${file} spells the set itself`);
+  }
+});
+
 test("queue badges: queued #N with its reason, paused for the limit or sign-in, none with the queue off", () => {
   const { value } = build();
   const clock = value[B2][1];

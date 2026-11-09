@@ -32,6 +32,7 @@ import { normRoot, repoSettings } from "./settings.js";
 import { portLabel, pickPort, portUrl } from "./ports.js";
 import { positionOf } from "./queue.js";
 import { MOD } from "./board-model.js";
+import { serverDown } from "./server-errors.js";
 
 export const iconPath = (name) => `mods/${MOD}/icons/${name}.svg`;
 
@@ -192,17 +193,14 @@ function litFlashlight(record, at, { bin, root }) {
   return badge({ icon: "flashlight", tone: "working", tooltip: `Spotlight${who}${synced}`, action: toggle(bin, at) });
 }
 
-// The server didn't come up: a busy port refused its start (D24), or it died
-// starting (D25). Its badge says why.
-const DOWN_CODES = new Set(["port-busy", "server-exited"]);
-const DOWN_STATES = new Set(["stopped", "gone"]);
-
-// 2. The server badge of a lit repo's holder or root row.
+// 2. The server badge of a lit repo's holder or root row. A server that
+// didn't come up (a busy port refused its start, D24, or it died starting,
+// D25: server-errors.js serverDown) says why.
 function serverBadge(record, at, configured) {
   const ports = Array.isArray(record.ports) ? record.ports.filter(Number.isInteger) : [];
   const what = [record.serverEnv, record.serverCommand].filter(Boolean).join(" · ");
   const action = popup(at);
-  if (DOWN_CODES.has(record.lastError?.code) && DOWN_STATES.has(record.serverState ?? "stopped")) {
+  if (serverDown(record)) {
     return badge({ icon: "server", tone: "blocked", tooltip: record.lastError.message || errorText(record.lastError), action });
   }
   switch (record.serverState) {

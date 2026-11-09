@@ -288,3 +288,38 @@ test("a server that didn't come up: Ver log and Reintentar on port-busy and serv
     assert.deepEqual(m.actions.map((a) => a.label), ["Ver server", "Reiniciar", "Apagar"], lastError?.code ?? "none");
   }
 });
+
+// R7: a refused restart keeps its port-busy over a server that is still up
+// (D24). The popup says what the badge says: down only when the server is
+// stopped or gone.
+test("a server error over a server still up (a refused restart, D24): Ver server and Reiniciar; Ver log and Reintentar only once it is stopped or gone", () => {
+  for (const serverState of ["listening", "starting"]) {
+    const m = model({ state: stateWith(repo({ serverState, lastError: PORT_BUSY })) });
+    assert.deepEqual(m.actions.map((a) => a.label), ["Ver server", "Reiniciar", "Apagar"], serverState);
+    // The port's holder is still someone else's: Liberar puerto y arrancar stays.
+    assert.deepEqual(ids(m.force), ["free-port"], serverState);
+  }
+  for (const serverState of ["stopped", "gone", null]) {
+    const m = model({ state: stateWith(repo({ serverState, ports: [], lastError: SERVER_EXITED })) });
+    assert.deepEqual(m.actions.map((a) => a.label), ["Ver log", "Reintentar", "Apagar"], String(serverState));
+  }
+});
+
+// T2 (live test): the popup showed the error twice, a red "Spotlight: <msg>"
+// and a grey, cut copy of the same text. It says it once; the grey line is
+// only for an engine message the red line's words don't carry.
+test("the popup says the error once: the message alone, or the badge's words with the engine's message under them when they differ", () => {
+  const ORCA = { code: "orca-holds", message: "Este root lo tiene el Spotlight de Orca: apágalo allá primero.", at: 3 };
+  for (const lastError of [PORT_BUSY, SERVER_EXITED, ORCA, { code: "git-failed", message: "git exploded", at: 3 }]) {
+    const m = model({ state: stateWith(repo({ serverState: "stopped", ports: [], lastError })) });
+    assert.equal(m.errorTitle, `Spotlight: ${lastError.message}`, lastError.code);
+    assert.equal(m.errorDetail, null, lastError.code);
+  }
+  const moved = "The repository root moved off the Spotlight snapshot.";
+  const diverged = model({ state: stateWith(repo({ lastError: { code: "root-diverged", message: moved, at: 3 } })) });
+  assert.equal(diverged.errorTitle, "Root desviado: abre el server para forzar");
+  assert.equal(diverged.errorDetail, moved);
+  const none = model();
+  assert.equal(none.errorTitle, null);
+  assert.equal(none.errorDetail, null);
+});

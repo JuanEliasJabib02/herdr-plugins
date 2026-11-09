@@ -8,7 +8,8 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync, realpathSync } from "nod
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 
-import { reconcileFree } from "../mods/spotlight/cli-work.mjs";
+import { reconcileFree, recordServers, coverError, syncRepo } from "../mods/spotlight/cli-work.mjs";
+import { planGit } from "../mods/spotlight/cli-env.mjs";
 import { activate, gitContext } from "../mods/spotlight/sync.js";
 import { emptyRepo } from "../mods/spotlight/store.js";
 
@@ -55,7 +56,7 @@ beforeEach(async () => {
     updateState: async (fn) => ({ result: fn(state) }),
   };
   let now = 1000;
-  cx = { reapStore: store, shared: {}, now: () => now++ };
+  cx = { reapStore: store, store, shared: {}, now: () => now++ };
 });
 afterEach(() => rmSync(base, { recursive: true, force: true }));
 
@@ -113,4 +114,60 @@ test("our refs with no record while Orca holds: orca-holds, then orphan-refs onc
   run(root, "reset", "-q", "--hard", snapshot);
   await reconcileFree(cx);
   assert.equal(state.repos[root].lastError.code, "orphan-refs");
+});
+
+// R8: Orca taking the root used to drop a server error that still applied
+// (a busy port, a death at start: D24, D25), and Orca letting go left no
+// error at all. orca-holds keeps it, and gives it back then, unless the
+// server came up meanwhile.
+const BUSY = { code: "port-busy", port: 3008, pid: null, command: null, cwd: null, message: "El puerto 3008 estaba ocupado al arrancar el server.", at: 7 };
+
+test("a server error Orca's hold covers comes back once Orca lets go", async () => {
+  Object.assign(state.repos[root], { serverState: "stopped", lastError: BUSY });
+  detachOnCommitBy(root, "Orca Spotlight", "orca\n");
+  await reconcileFree(cx);
+  assert.equal(state.repos[root].lastError.code, "orca-holds");
+  assert.equal(state.repos[root].lastError.message, MSG);
+  run(root, "reset", "-q", "--hard", snapshot);
+  assert.deepEqual(await reconcileFree(cx), [{ root, action: "cleared" }]);
+  assert.deepEqual(state.repos[root].lastError, BUSY);
+  assert.equal(state.repos[root].holder, wt);
+});
+
+test("a server that comes up while Orca holds ends its error: nothing comes back once Orca lets go", async () => {
+  Object.assign(state.repos[root], { serverState: "stopped", lastError: BUSY });
+  detachOnCommitBy(root, "Orca Spotlight", "orca\n");
+  await reconcileFree(cx);
+  await recordServers(cx, [{ root, lit: true, serverState: "listening", ports: [3008] }]);
+  assert.equal(state.repos[root].lastError.code, "orca-holds", "Orca still has the root");
+  run(root, "reset", "-q", "--hard", snapshot);
+  await reconcileFree(cx);
+  assert.equal(state.repos[root].lastError, null);
+});
+
+test("a sync that goes through once Orca let go, before any reap, gives the kept server error back too (a sync leaves server errors)", async () => {
+  const held = { code: "orca-holds", message: MSG, at: 9, serverError: BUSY };
+  Object.assign(state.repos[root], { serverState: "stopped", lastError: held });
+  const sx = { ...cx, gitCtx: gitContext(), planGit, nameOf: () => "root" };
+  // Nothing new in the holder: the no-op sync.
+  assert.equal((await syncRepo(sx, root)).skipped, true);
+  assert.deepEqual(state.repos[root].lastError, BUSY);
+  // An edit in the holder: a sync that runs.
+  state.repos[root].lastError = held;
+  write(wt, "a.txt", "edited\n");
+  const r = await syncRepo(sx, root);
+  assert.equal(r.ok, true);
+  assert.equal(r.skipped, false);
+  assert.deepEqual(state.repos[root].lastError, BUSY);
+});
+
+test("coverError: orca-holds written over a server error keeps it, also when written again; nothing else is kept", () => {
+  const ORCA = { code: "orca-holds", message: MSG, at: 9 };
+  assert.deepEqual(coverError(BUSY, ORCA), { ...ORCA, serverError: BUSY });
+  assert.deepEqual(coverError({ ...ORCA, serverError: BUSY }, { ...ORCA, at: 10 }), { ...ORCA, at: 10, serverError: BUSY });
+  const diverged = { code: "root-diverged", message: "m", at: 1 };
+  assert.deepEqual(coverError(diverged, ORCA), ORCA);
+  assert.deepEqual(coverError(null, ORCA), ORCA);
+  const failed = { code: "git-failed", message: "x", at: 2 };
+  assert.deepEqual(coverError(BUSY, failed), failed);
 });

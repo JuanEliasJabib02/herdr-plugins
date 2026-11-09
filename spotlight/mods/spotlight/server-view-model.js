@@ -11,9 +11,15 @@
 //             the repo's dev:<v> apps; the running one selected, the
 //             inferred one marked (its note, inferredVariantNote)
 //   urls      each listening port, the picked one first
+//   errorTitle, errorDetail  the error, said once (T2): the badge's words
+//             (badges-model.js errorText) in red, and under them the
+//             engine's message only when those words don't carry it
+//             (root-diverged's hint over git's message); null without one
 //   actions   Ver server, Reiniciar, Apagar; on a server that didn't come up
-//             (port-busy, server-exited: D24, D25) the first two read Ver
-//             log (the server terminal holds what it printed) and Reintentar
+//             and isn't up now (port-busy, server-exited over a server
+//             stopped or gone: D24, D25, server-errors.js serverDown) the
+//             first two read Ver log (the server terminal holds what it
+//             printed) and Reintentar
 //   force     on root-diverged / untracked-collision only: Forzar sync (the
 //             holder's tree over the root), Proyectar igual (a refused
 //             takeover or fresh activation, forced), Apagar igual; on
@@ -29,17 +35,26 @@
 import { normRoot, repoSettings } from "./settings.js";
 import { serverEnvsWithCommand, commandTemplate, isSafeVariant, formatVariant, inferredVariantNote } from "./server-plan.js";
 import { pickPort, portUrl } from "./ports.js";
+import { serverDown } from "./server-errors.js";
+import { errorText } from "./badges-model.js";
 
 const ENV_LABELS = { local: "Local", dev: "Dev", prod: "Prod" };
 // Never orca-holds nor orca-active: forcing can't take a root from Orca (D27).
 const FORCE_CODES = new Set(["root-diverged", "untracked-collision"]);
-// The server didn't come up: a busy port refused its start (D24), or it died
-// starting (D25).
-const DOWN_CODES = new Set(["port-busy", "server-exited"]);
 // A server that's up (state.json's serverState).
 const RUNNING = new Set(["starting", "listening"]);
 
 const baseName = (p) => normRoot(p).split("/").filter(Boolean).pop() ?? p;
+const oneLine = (s) => String(s).replace(/\s+/g, " ").trim();
+
+// The error's two lines (T2): the badge's words, and the engine's message
+// when those words don't already say it.
+function errorLines(error) {
+  if (!error) return { errorTitle: null, errorDetail: null };
+  const title = errorText(error);
+  const message = typeof error.message === "string" ? oneLine(error.message) : "";
+  return { errorTitle: title, errorDetail: message && !title.includes(message) ? error.message : null };
+}
 
 // The lighting whose last run failed on `root`: the refused takeover (or
 // fresh activation) that Proyectar igual forces. The latest one wins.
@@ -113,8 +128,9 @@ export function serverViewModel({ state, settings, repo, workspace, detection, b
   const urls = picked === null ? [] : [picked, ...ports.filter((p) => p !== picked)].map(portUrl);
 
   const error = record?.lastError ?? null;
-  // D25: same controls, named for a server that didn't come up.
-  const down = DOWN_CODES.has(error?.code);
+  // D25: same controls, named for a server that didn't come up; a refused
+  // restart over a server still up keeps Ver server and Reiniciar (D24).
+  const down = serverDown(record);
   const actions = [];
   if (record?.serverTerminal || holder) actions.push({ id: "peek", label: down ? "Ver log" : "Ver server", argv: [bin, "peek", "--repo", root] });
   if (holder) {
@@ -144,6 +160,7 @@ export function serverViewModel({ state, settings, repo, workspace, detection, b
     serverCommand: record?.serverCommand ?? null,
     needsVariant: asking,
     error,
+    ...errorLines(error),
     envs,
     envNote,
     variants: chips,

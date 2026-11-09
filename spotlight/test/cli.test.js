@@ -8,6 +8,8 @@
 //                   `pgrep` answering from that file, a `herdr-app` that
 //                   records its argv, and a `git` wrapper that sleeps before
 //                   chosen subcommands (to hold a repo lock mid-work)
+//   NODE_OPTIONS    a preloaded process.kill that never really signals a
+//                   pid the fake hc handed out (FAKE_KILL, R5)
 // and real git repos with real worktrees. Detached work (`light`, `sync
 // --detach`, `classify`) runs as real detached processes; tests wait on
 // state.json for it. Nothing here touches a real Herdr terminal.
@@ -15,14 +17,20 @@ import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import { execFile, execFileSync, spawn, spawnSync } from "node:child_process";
 import {
-  mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, realpathSync, rmSync, chmodSync, symlinkSync,
+  mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, realpathSync, rmSync, chmodSync, symlinkSync, appendFileSync,
 } from "node:fs";
+import fsp from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, dirname, basename } from "node:path";
 import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
-import { acquire, unlock } from "../mods/spotlight/locks.js";
-import { rescuedNotes } from "../mods/spotlight/cli-work.mjs";
+import { acquire, unlock, LockError } from "../mods/spotlight/locks.js";
+import {
+  rescuedNotes, describeServer, recordServers, waitForTurnServers, ensureServer, portBusyError,
+} from "../mods/spotlight/cli-work.mjs";
+import { readSettings } from "../mods/spotlight/board-model.js";
+import { nodeIo } from "../mods/spotlight/server-plan.js";
+import { appendLogHeader } from "../mods/spotlight/server-log.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const MOD = join(HERE, "..", "mods", "spotlight");
@@ -252,6 +260,73 @@ fi
 exit 2
 `;
 
+// The world's process.kill (R5), preloaded into every node process the world
+// runs (NODE_OPTIONS --require: the CLI, its detached copies, the fakes).
+// The fake hc hands out pids from 50000 up, inside the range macOS gives
+// real processes: a pid of the fake world is never signalled for real, even
+// when a real process has that number. A signal to one lands in hc.json's
+// `kills`, and SIGTERM, SIGKILL, SIGINT or SIGHUP end it there (a terminal's
+// foreground goes back to its shell; the shell itself only records it),
+// unless its terminal is `unkillable` (a process stuck past SIGKILL). Once
+// signalled, a fake pid's signal 0 is answered from the fake too. Real pids
+// (the processes a test spawns: `foreign` and their `children`) get real
+// signals, and so does every other signal 0, which sends nothing.
+const FAKE_KILL = `
+${FAKE_LIB}
+const realKill = process.kill.bind(process);
+const ENDS = new Set(["SIGTERM", "SIGKILL", "SIGINT", "SIGHUP"]);
+const holding = (s, pid) => Object.values(s.terminals ?? {}).filter((t) => t.state === "live" && (t.pid === pid || (t.foreground && t.foreground.pid === pid)));
+const gone = () => Object.assign(new Error("kill ESRCH"), { code: "ESRCH", errno: -3, syscall: "kill" });
+function isFake(s, pid) {
+  if ((s.fakePids ?? []).includes(pid)) return true;
+  const real = new Set((s.foreign ?? []).map((f) => f.pid));
+  for (const [p, kids] of Object.entries(s.children ?? {})) {
+    real.add(Number(p));
+    for (const k of kids) real.add(k);
+  }
+  if (real.has(pid)) return false;
+  const known = Object.values(s.terminals ?? {}).some((t) => t.pid === pid || (t.foreground && t.foreground.pid === pid));
+  return known || (pid >= 50000 && pid < (s.nextPid ?? 50000));
+}
+function deliver(s, pid, signal) {
+  const at = holding(s, pid);
+  if (at.length === 0) return gone();
+  (s.fakePids ??= []).includes(pid) || s.fakePids.push(pid);
+  (s.kills ??= []).push({ pid, signal });
+  if (ENDS.has(signal)) {
+    for (const t of at) {
+      if (t.pid === pid || t.unkillable) continue;
+      t.foreground = { pid: t.pid, name: "zsh", argv: ["/bin/zsh", "-l"], cwd: t.cwd };
+      delete t.serverPorts;
+      delete t.pendingShell;
+    }
+  }
+  save(s);
+  return true;
+}
+process.kill = function kill(pid, signal = "SIGTERM") {
+  if (!STATE) return realKill(pid, signal);
+  const n = Number(pid);
+  if (signal === 0 || signal === "0") {
+    const s = load();
+    if (!(s.fakePids ?? []).includes(n)) return realKill(pid, signal);
+    if (holding(s, n).length === 0) throw gone();
+    return true;
+  }
+  let answer = null;
+  lock();
+  try {
+    const s = load();
+    if (isFake(s, n)) answer = deliver(s, n, String(signal));
+  } finally {
+    unlock();
+  }
+  if (answer === null) return realKill(pid, signal);
+  if (answer instanceof Error) throw answer;
+  return true;
+};
+`;
+
 function writeExec(file, text) {
   writeFileSync(file, text);
   chmodSync(file, 0o755);
@@ -270,6 +345,8 @@ function makeWorld() {
   writeExec(join(bin, "pgrep"), FAKE_PGREP);
   writeExec(join(bin, "herdr-app"), FAKE_HERDR_APP);
   writeExec(join(bin, "git"), FAKE_GIT);
+  const fakeKill = join(bin, "fake-kill.cjs");
+  writeFileSync(fakeKill, FAKE_KILL);
   const gitconfig = join(dir, "gitconfig");
   writeFileSync(
     gitconfig,
@@ -288,6 +365,8 @@ function makeWorld() {
     GIT_CONFIG_NOSYSTEM: "1",
     SPOTLIGHT_POLL_MS: "100",
     SPOTLIGHT_PORT_POLL_MS: "100",
+    // R5: every node process of the world signals through the fake kill.
+    NODE_OPTIONS: [process.env.NODE_OPTIONS, `--require "${fakeKill}"`].filter(Boolean).join(" "),
   });
   const statePath = join(app, "spotlight", "state.json");
   const w = {
@@ -1018,11 +1097,34 @@ test("D27: turning off a root Orca's Spotlight took refuses, records orca-holds 
   const orca = git("-c", "user.name=Orca Spotlight", "-c", "user.email=o@x", "commit-tree", tree, "-p", "HEAD", "-m", "Orca Spotlight snapshot");
   git("reset", "-q", "--hard", orca);
 
+  // R8: a server error the record had when Orca took the root (a busy port).
+  const busy = { code: "port-busy", port: 3008, pid: null, command: null, cwd: null, message: "El puerto 3008 estaba ocupado al arrancar el server.", at: 1 };
+  const before = w.state();
+  Object.assign(before.repos[app.root], { lastError: busy, serverState: "stopped" });
+  w.writeState(before);
+
+  const message = "Este root lo tiene el Spotlight de Orca: apágalo allá primero.";
   const off = await w.cli(["toggle", "--workspace", ws, "--force"]);
   assert.notEqual(off.code, 0);
-  assert.match(off.stdout + off.stderr, /Este root lo tiene el Spotlight de Orca: apágalo allá primero\./);
+  assert.ok((off.stdout + off.stderr).includes(message), off.stdout + off.stderr);
   assert.equal(w.state().repos[app.root].lastError?.code, "orca-holds");
   assert.equal(git("rev-parse", "HEAD"), orca);
+
+  // T1: the refused click answers with a toast, with no popup action (no
+  // force path takes a root from Orca, D27), as orca-active's does.
+  const toasts = () => w.state().notes.filter((n) => n.repo === app.root && n.toast && n.text === `orcaheld: ${message}`);
+  assert.equal(toasts().length, 1, JSON.stringify(w.state().notes));
+  assert.equal(toasts()[0].action, undefined);
+  // The badge's click (no --force) is refused the same way, and answered again.
+  const click = await w.cli(["toggle", "--workspace", ws]);
+  assert.equal(click.code, 1, click.stderr);
+  assert.equal(toasts().length, 2);
+
+  // R8: the busy port still applies once Orca lets go: the reap gives it back.
+  assert.deepEqual(w.state().repos[app.root].lastError.serverError, busy);
+  git("reset", "-q", "--hard", "refs/herdr-spotlight/snapshot");
+  assert.equal((await w.cli(["reap"])).code, 0);
+  assert.deepEqual(w.state().repos[app.root].lastError, busy);
 });
 
 test("logs --path, logs after the notes, peek, and env --variant checked before it is stored", async () => {
@@ -1837,4 +1939,249 @@ test("a server that dies at start with any other error: `on` says 'El server se 
   assert.equal(retry.code, 0, retry.stderr + retry.stdout);
   assert.equal(w.state().repos[app.root].lastError, null);
   assert.equal(w.state().repos[app.root].serverState, "starting");
+});
+
+// ── R5: signals reach only the processes they are meant for ────────────────
+
+// The fake hc hands out pids from 50000 up, inside the range macOS gives real
+// processes: a pid of the fake world may be a real process of the user's.
+test("R5: a fake pid is never really signalled: a turn-off whose fake server ignores Ctrl-C stops it in the fake world only, though a real process has its pid", async () => {
+  const w = makeWorld();
+  const app = makeRepo(w, "app", { pkg: DEV, tasks: ["AX-40"] });
+  w.register([{ id: "g1", repos: [app] }]);
+  const ws = app.ws["AX-40"];
+  assert.equal((await w.cli(["toggle", "--workspace", ws])).code, 0);
+  await w.until((s) => s.queue.lighting[`direct/${app.root}`]?.phase === "done", { what: "lit" });
+  const logPath = w.state().repos[app.root].logPath;
+  // A real process holds the number the fake server goes by, and the fake
+  // server ignores Ctrl-C, so the turn-off has to kill it (D26).
+  const real = spawnProc("sleep", ["300"]);
+  w.hcUpdate((s) => {
+    const t = Object.values(s.terminals).find((x) => x.labels?.["spotlight.repo"] === app.root);
+    t.foreground = { ...t.foreground, pid: real.pid };
+    t.ignoresInterrupt = true;
+  });
+
+  const off = await w.cli(["toggle", "--workspace", ws]);
+  assert.equal(off.code, 0, off.stderr + off.stdout);
+  await w.until((s) => !s.repos[app.root], { what: "turned off", ms: 60_000 });
+  assert.equal(alive(real.pid), true, "the real process with the fake server's pid was never signalled");
+  assert.deepEqual(w.hc().kills, [{ pid: real.pid, signal: "SIGTERM" }]);
+  // In the fake world the server died of it: the turn-off says it was forced.
+  assert.match(readFileSync(logPath, "utf8"), /Spotlight off — server stopped \(forced: 1 process/);
+  assert.equal(w.serverTerminal(app.root).foreground.name, "zsh", "the fake server is gone, its shell leads");
+});
+
+// A process that lives through SIGKILL (stuck in the kernel, or not ours to
+// signal): stopServer says "survived" (ports.js stopProcessTree, D26).
+test("a turn-off whose server lives through SIGKILL is an error that names it, never 'root restored' alone; the root is restored all the same", async () => {
+  const w = makeWorld();
+  const app = makeRepo(w, "app", { pkg: DEV, tasks: ["AX-41"] });
+  w.register([{ id: "g1", repos: [app] }]);
+  const ws = app.ws["AX-41"];
+  assert.equal((await w.cli(["toggle", "--workspace", ws])).code, 0);
+  await w.until((s) => s.queue.lighting[`direct/${app.root}`]?.phase === "done", { what: "lit" });
+  const logPath = w.state().repos[app.root].logPath;
+  let stuck;
+  w.hcUpdate((s) => {
+    const t = Object.values(s.terminals).find((x) => x.labels?.["spotlight.repo"] === app.root);
+    Object.assign(t, { ignoresInterrupt: true, unkillable: true });
+    stuck = t.foreground.pid;
+  });
+
+  // `toggle` hands this to a detached `--inline` copy; run that one here.
+  const off = await w.cli(["toggle", "--workspace", ws, "--inline"]);
+  assert.equal(off.code, 1, off.stdout + off.stderr);
+  const message = `El server no paró al apagar Spotlight: el proceso ${stuck} siguió vivo después de SIGKILL (el root sí se restauró).`;
+  assert.equal(off.stderr.trim(), `server-survived: ${message}`);
+  assert.doesNotMatch(off.stdout, /root restored/);
+  const notes = w.state().notes.filter((n) => n.repo === app.root);
+  assert.ok(notes.some((n) => n.toast && n.text === `app: ${message}`), JSON.stringify(notes));
+  assert.ok(!notes.some((n) => n.text === "Spotlight off — root restaurado"), JSON.stringify(notes));
+  assert.deepEqual(w.hc().kills, [{ pid: stuck, signal: "SIGTERM" }, { pid: stuck, signal: "SIGKILL" }]);
+  assert.match(readFileSync(logPath, "utf8"), /server NOT stopped/);
+  // The root is back on its branch and Spotlight's record is gone.
+  assert.equal(git(app.root, "symbolic-ref", "--short", "HEAD"), "main");
+  assert.equal(w.state().repos[app.root], undefined);
+});
+
+test("why Liberar puerto y arrancar left the port taken: a protected holder, or one that lived through SIGKILL", async () => {
+  const { portBusyLine } = await import("../mods/spotlight/cli.mjs");
+  const error = { code: "port-busy", message: "El puerto 3008 lo tiene next-server (pid 900, en /Users/u/old)." };
+  assert.equal(portBusyLine({ error }), `port-busy: ${error.message}`);
+  assert.equal(
+    portBusyLine({ error, freed: { ok: false, reason: "protected", pids: [900] } }),
+    `port-busy: ${error.message} Spotlight no lo paró: de ese proceso dependen Herdr o el server.`,
+  );
+  assert.equal(
+    portBusyLine({ error, freed: { ok: false, reason: "survived", pids: [900], killed: [900], survivors: [900] } }),
+    `port-busy: ${error.message} El proceso 900 siguió vivo después de SIGKILL: Spotlight no pudo liberar el puerto.`,
+  );
+  assert.equal(
+    portBusyLine({ error, freed: { ok: false, reason: "survived", pids: [900, 901], killed: [900, 901], survivors: [900, 901] } }),
+    `port-busy: ${error.message} Los procesos 900, 901 siguieron vivos después de SIGKILL: Spotlight no pudo liberar el puerto.`,
+  );
+});
+
+// cli-work.mjs over an in-memory store and a fake exec/kill: the paths a
+// subprocess world can't time (R5, R6, R10).
+function memoryCx({ state, exec, kill, busy = () => false }) {
+  let clock = 0;
+  return {
+    store: {
+      readState: () => structuredClone(state),
+      updateState: async (fn) => ({ result: fn(state) }),
+      // `busy`: a start or restart in flight holds the repo's lock.
+      withRepoLock: async (_root, fn) => {
+        if (busy()) throw new LockError("lock-timeout", "the repo lock is held");
+        return fn();
+      },
+    },
+    settings: readSettings(JSON.stringify({ version: 1 })),
+    io: nodeIo(fsp),
+    planGit: async () => {
+      throw new Error("no git in this test");
+    },
+    now: Date.now,
+    sleep,
+    nameOf: (root) => basename(root),
+    portPollMs: 50,
+    graceMs: 60_000,
+    // A clock of its own: a 5 s grace passes at once.
+    serverDeps: { exec, kill, now: () => clock, sleep: async (ms) => { clock += Math.max(0, ms); } },
+  };
+}
+
+const ok = (stdout) => ({ code: 0, stdout, stderr: "" });
+const none = { code: 1, stdout: "", stderr: "" };
+
+// What hc, pgrep, lsof and ps say of a server terminal whose shell (pid 100)
+// leads, with no port open in its tree: a start that died, or one whose line
+// isn't typed yet. `holders`: who listens on the port asked about, one entry
+// per lookup (null: nobody).
+function shellExec({ holders = [] } = {}) {
+  const calls = [];
+  const exec = async (file, args) => {
+    calls.push([file, ...args]);
+    if (file === "hc" && args[0] === "get") {
+      return ok(JSON.stringify({ address: args[1], pid: 100, state: "live", foreground: { pid: 100, name: "zsh", argv: ["/bin/zsh", "-l"] } }));
+    }
+    if (file === "pgrep") return none;
+    if (file === "lsof" && args.includes("-d")) return ok(`p${args[args.indexOf("-p") + 1]}\nfcwd\nn/Users/u/old\n`);
+    if (file === "lsof") {
+      const one = args.find((a) => a.startsWith("-iTCP:"));
+      if (!one) return none;
+      const pid = holders.length > 0 ? holders.shift() : null;
+      return pid ? ok(`p${pid}\ncnode\nf21\nn*:${one.slice("-iTCP:".length)}\n`) : none;
+    }
+    if (file === "ps") return ok("next-server (v16.0.1)\n");
+    return { code: 1, stdout: "", stderr: `no fake ${file}` };
+  };
+  return { exec, calls };
+}
+
+test("R5: Liberar puerto y arrancar signals only through cx.serverDeps.kill", async () => {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), "sl-r5-")));
+  worlds.push({ dir });
+  const root = join(dir, "freed");
+  mkdirSync(root);
+  write(root, "package.json", JSON.stringify({ scripts: { dev: "next dev -p 3008" } }));
+  // No OS hands out this pid: a signal that skipped the injected kill reaches nobody.
+  const FAKE = 9_000_000;
+  const kills = [];
+  const kill = (pid, signal) => {
+    kills.push([pid, signal]);
+    return true; // it never goes, and lsof keeps showing it
+  };
+  const { exec } = shellExec({ holders: [FAKE, FAKE, FAKE] });
+  const busy = portBusyError({ port: 3008, pid: FAKE, command: "next-server (v16.0.1)", cwd: "/Users/u/old" });
+  const state = {
+    version: 1,
+    repos: {
+      [root]: {
+        holder: "/Users/u/ws/freed/ax-9", lastSnapshotSha: "a".repeat(40), lastSyncAt: 1, lastError: { ...busy, at: 1 }, serverTerminal: "t1",
+        serverPid: null, serverStartedAt: null, serverCommand: null, serverEnv: null, serverVariant: null, serverState: "stopped",
+        pendingInstalls: [], ports: [], logPath: join(dir, "freed.log"),
+      },
+    },
+    queue: { requests: [], lighting: {} },
+    notes: [],
+    variants: {},
+  };
+  const cx = memoryCx({ state, exec, kill });
+  const r = await ensureServer(cx, root, { workspace: "/Users/u/ws/freed/ax-9", restart: true, freePort: true });
+  assert.equal(r.state, "port-busy", JSON.stringify(r));
+  assert.deepEqual(kills.filter(([, signal]) => signal !== 0), [[FAKE, "SIGTERM"], [FAKE, "SIGKILL"]]);
+});
+
+// ── R6, R10: a dead start is decided once, under the repo lock ─────────────
+
+const DS_ROOT = "/Users/u/code/speaking";
+const DS_WS = "/Users/u/ws/speaking/ax-30";
+const DS_KEY = "g1/AX-30";
+const DS_MEMBER = { root: DS_ROOT, name: "speaking", workspace: DS_WS, workspaces: [DS_WS] };
+
+// spotlight-1's start of the incident: Spotlight typed it (`starting`), and
+// its log says EADDRINUSE :3008 since the start marker.
+function deadStartState() {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), "sl-dead-")));
+  worlds.push({ dir });
+  const logPath = join(dir, "speaking.log");
+  appendLogHeader(logPath, { workspace: "ax-30", branch: "AX-30", event: "started: pnpm dev", at: Date.now() });
+  appendFileSync(logPath, SE_CRASH);
+  return {
+    version: 1,
+    repos: {
+      [DS_ROOT]: {
+        holder: DS_WS, lastSnapshotSha: "a".repeat(40), lastSyncAt: 1, lastError: null, serverTerminal: "t1", serverPid: 200,
+        serverStartedAt: 5, serverCommand: "pnpm dev", serverEnv: "local", serverVariant: null, serverState: "starting",
+        pendingInstalls: [], ports: [], logPath,
+      },
+    },
+    queue: { requests: [], lighting: {} },
+    notes: [],
+    variants: {},
+  };
+}
+
+test("R6: a start in flight holds the repo lock: `on` reads no death there and keeps waiting; once it is free, the death settled under the lock is what `on` says", async () => {
+  let held = true;
+  const state = deadStartState();
+  const cx = memoryCx({ state, exec: shellExec().exec, busy: () => held });
+  const seen = await describeServer(cx, cx.store.readState(), DS_MEMBER, DS_KEY);
+  assert.equal(seen.serverError, undefined, JSON.stringify(seen));
+  assert.equal(seen.error, undefined);
+  await recordServers(cx, [seen]);
+  assert.equal(state.repos[DS_ROOT].serverState, "starting", "left for whoever holds the lock");
+  assert.equal(state.repos[DS_ROOT].lastError, null);
+  assert.deepEqual(state.notes, []);
+  // Nothing ends the wait before its deadline (the grace for a repo with no
+  // server is long here).
+  const from = Date.now();
+  const waited = await waitForTurnServers(cx, { members: [DS_MEMBER], key: DS_KEY, deadline: from + 400, syncErrors: {} });
+  assert.ok(Date.now() - from >= 350, `the wait ended after ${Date.now() - from} ms`);
+  assert.equal(waited.ready, false);
+  assert.equal(waited.servers[0].serverError, undefined);
+
+  held = false;
+  const settled = await describeServer(cx, cx.store.readState(), DS_MEMBER, DS_KEY);
+  assert.equal(settled.serverError, true);
+  assert.equal(settled.error, "El puerto 3008 estaba ocupado al arrancar el server.");
+  assert.equal(state.repos[DS_ROOT].lastError.message, settled.error);
+  assert.equal(state.repos[DS_ROOT].serverState, "stopped");
+});
+
+test("R10: a dead start's error is computed once: what `on` prints is what is recorded and toasted", async () => {
+  // 900 listens on 3008 at the first look only: a second look would name nobody.
+  const { exec, calls } = shellExec({ holders: [900] });
+  const state = deadStartState();
+  const cx = memoryCx({ state, exec });
+  const seen = await describeServer(cx, cx.store.readState(), DS_MEMBER, DS_KEY);
+  await recordServers(cx, [seen]);
+  const message = "El puerto 3008 lo tiene next-server (v16.0.1) (pid 900, en /Users/u/old).";
+  assert.equal(seen.error, message);
+  assert.equal(state.repos[DS_ROOT].lastError.message, message);
+  assert.deepEqual(state.notes.filter((n) => n.toast).map((n) => n.text), [`speaking: ${message}`]);
+  assert.equal(calls.filter((c) => c[0] === "lsof" && c.includes("-iTCP:3008")).length, 1, "the port's holder is looked up once");
+  assert.equal(state.repos[DS_ROOT].serverState, "stopped");
 });
