@@ -648,11 +648,14 @@ contract a publisher codes against.
   - Any other key is ignored.
   - A value that isn't an object (`null`, a string, a list) is no badges.
   - A path or lane whose value isn't a list draws nothing there.
-- **A badge:** `{ icon?, text?, tone?, tooltip?, action?, spin? }`.
+- **A badge:** `{ icon?, text?, tone?, tooltip?, action?, spin?, reveal?,
+  pill?, dot?, hover? }`.
   - `icon`: an SVG under Herdr's home (`~/.config/herdr-app`),
     `mods/<mod>/…/<name>.svg` at any depth, with no `..`, empty segment or
-    backslash. Drawn 12 px, tinted. Build it from your mod's folder name:
-    an install may have renamed it.
+    backslash. Drawn 12 px (10 px in a pill), tinted: draw it with
+    `stroke="currentColor"` (or `fill`) so it takes the badge's color and
+    its hover's. Build it from your mod's folder name: an install may have
+    renamed it.
   - `text`: at most 16 code points (a longer one is cut), on one line:
     runs of whitespace become one space.
   - `tone`: `accent`, `dim`, `working`, `blocked` or `done`, the theme's
@@ -664,7 +667,33 @@ contract a publisher codes against.
     mark, e.g. a ring icon while your plugin works). `false` or absent:
     still. Any other value is dropped alone. A badge with only text
     doesn't turn.
-  - A badge needs an icon or a text; one with neither is dropped.
+  - `reveal`: `"hover"` draws the badge at opacity 0 until its row (the
+    workspace row, or the lane header) is hovered, then fades it in; it
+    keeps its place meanwhile (Orca's idle flashlight, its logs icon and
+    its X). `"grow"` also opens it from width 0 to its own width, and
+    closes it back (Orca's env pill); collapsed it takes no gap either.
+    Both move in 150 ms, ease-in-out. A reveal badge takes a click only
+    when it was pressed while its row was hovered: at opacity 0 a click on
+    it does nothing. Absent: always shown. Any other value is dropped
+    alone.
+  - `pill`: `true` draws an outlined pill, 16 px tall, its text uppercase
+    at 10 px. With the `dim` tone it is Orca's variant tag: the theme's
+    border, no fill, the hover color on hover with its text lifting to the
+    foreground. With any other tone it is Orca's SPOTLIGHT chip: the tone's
+    border at 30 %, a 5 % fill, 15 % on hover, its text in the tone. A pill
+    is never cut: the row's name gives way instead. `false` or absent: no
+    pill. Any other value is dropped alone.
+  - `dot`: `"on"` or `"off"`, a 6 px dot (Orca's server dot): filled in the
+    `done` color, or a hollow `dim` ring. On a badge with an icon it sits
+    at the icon's bottom-right; on a pill, or a badge with no icon, after
+    the text. It takes no clicks. Any other value is dropped alone.
+  - `hover`: a tone (as `tone`) the badge's chip and color take on hover
+    instead of its own (Orca's X: `dim`, amber on hover, so `"tone": "dim",
+    "hover": "working"`). Only a badge with an action has a hover look.
+    Anything but a tone is dropped alone.
+  - A badge needs an icon or a text; one with neither is dropped. A text
+    with no icon is a text badge: just the text in its tone, with no icon
+    slot (Orca's port label, its env pill).
   - A field that breaks a rule is dropped alone: a bad icon or action goes
     and the rest of the badge stays. Unknown fields are ignored.
 - **`action`:** `{ "command": "<mod>.<command>" }` or
@@ -696,30 +725,52 @@ contract a publisher codes against.
   - A non-zero exit, or a program that can't start, shows a warning toast
     titled with the program's name: stderr's first line, else "exited with
     code N". While a badge's program runs, more clicks on it are ignored.
-- **Limits:** at most 3 badges per plugin on a row, and 4 per row in all,
+- **Limits:** at most 4 badges per plugin on a row, and 5 per row in all,
   in key order; the rest aren't drawn. A lane header is a row of its own,
-  with the same limits.
+  with the same limits. The cap leaves a place; the row's width may run
+  out first (see Drawing).
 - **Drawing:** after the workspace row's label, in Project and Task modes,
   main checkouts included, never on the narrow rail. On a lane header:
   after its label and, folded, its status mark (Orca's order: status, then
   the task's buttons), before its count, folded or not. The icon, then the
-  text (11.5 px), in the tone's color. The row's badges share 128 px (one
-  badge up to 72 px, four up to 29 px each, 4 px apart), and a long text
-  ends in "…", so the label keeps its room. The hover shows the tooltip,
-  then what a click runs: "· runs <argv[0]>" or "· <command>".
+  text (11.5 px), in the tone's color, 4 px apart. Drawn as Orca's sidebar
+  buttons:
+  - A badge with an action is a 16 px tall rounded button (4 px corners;
+    one with text gets 4 px on each side), and the pointer shows over it.
+    On hover a chip shows behind it: the `working` tone at 10 % (Orca's
+    amber), the `blocked` tone at 10 %, else the foreground at 15 % (over
+    the hovered row, so it shows as Orca's gray square); a
+    `dim` badge lifts to the foreground, any other keeps its color (or both
+    take the badge's `hover` tone). Colors change at once: Herdr's
+    transitions move only opacity, width, height, left and top. A badge
+    without an action has no hover look.
+  - Widths: a pill is never cut. An icon-only badge takes 16 px. The text
+    badges share what is left of 128 px after the icon-only badges and the
+    4 px gaps (a text badge up to 72 px; five text badges up to 22 px
+    each), and a long text ends in "…". When the row runs out of width,
+    its name gives way first, then, in Task mode, the project name drawn
+    after the badges (up to 110 px); the badges never shrink. A lit
+    Spotlight root (its pill, port, logs icon and X, about 170 px) leaves
+    the name a few px in Project mode, and the name and the project name
+    about 48 px between them in Task mode.
+  - The hover shows the tooltip, then what a click runs: "· runs
+    <argv[0]>" or "· <command>".
 - **Clicks:** on a workspace row, a click runs the action and doesn't open
   the workspace; a right-click opens the workspace menu, as on the row, and
   never runs the action; a badge without an action clicks like its row. On
   a lane header, a click runs the action and never folds the lane, and a
   badge without an action swallows the click (it doesn't fold the lane
   either); a right-click opens the task menu, as on the header, and never
-  runs the action.
+  runs the action. On either row, a `reveal` badge pressed while it
+  doesn't show (its row not hovered) does nothing on its click.
 - **Lifetime:** the format only grows; a breaking change gets a new key
-  (e.g. `badges.spotlight.v2`). Lane keys and `spin` were added this way:
-  an older projects-sidebar drops a lane key (it isn't absolute) and
-  ignores `spin`, and draws the rest. A publisher clears its own paths and
-  lanes, and its key (`setShared(key, null)`), when they no longer apply: a
-  stale badge stays until it does.
+  (e.g. `badges.spotlight.v2`). Lane keys, `spin`, `reveal`, `pill`, `dot`
+  and `hover` were added this way: an older projects-sidebar drops a lane
+  key (it isn't absolute), ignores the other fields (a `reveal` badge then
+  always shows, a pill is plain text, no dot) and draws the rest, at most
+  3 per plugin and 4 per row. A publisher clears its own paths and lanes,
+  and its key (`setShared(key, null)`), when they no longer apply: a stale
+  badge stays until it does.
 - **Example:** this `badges.spotlight` value draws a "live" badge in the
   `working` color on one workspace. Its hover reads "Spotlight is on · runs
   /usr/local/bin/spotlight", and a click runs that program with the three
@@ -759,6 +810,37 @@ contract a publisher codes against.
         "text": "Dev",
         "tooltip": "Spotlight env of this task",
         "action": { "exec": ["/usr/local/bin/spotlight", "env", "--task", "AX-3653", "--group", "g1", "--env", "dev"] }
+      }
+    ]
+  }
+  ```
+
+- **Example, Orca's look:** on a project's main checkout, this value draws
+  an amber "SPOTLIGHT" pill with a filled dot after its text, then
+  ":3000" in the dim color, then an X that shows only while the row is
+  hovered, dim and amber on hover. A click on the X while it is hidden does
+  nothing:
+
+  ```json
+  {
+    "/Users/you/code/app": [
+      {
+        "icon": "mods/spotlight/icons/flashlight.svg",
+        "text": "Spotlight",
+        "tone": "working",
+        "pill": true,
+        "dot": "on",
+        "tooltip": "The root mirrors login.",
+        "action": { "exec": ["/usr/local/bin/spotlight", "peek", "--repo", "/Users/you/code/app"] }
+      },
+      { "text": ":3000", "tone": "dim", "action": { "command": "spotlight.server.app" } },
+      {
+        "icon": "mods/spotlight/icons/x.svg",
+        "tone": "dim",
+        "hover": "working",
+        "reveal": "hover",
+        "tooltip": "Turn off Spotlight and restore the root",
+        "action": { "exec": ["/usr/local/bin/spotlight", "toggle", "--workspace", "/Users/you/code/app"] }
       }
     ]
   }
