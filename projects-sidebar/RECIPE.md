@@ -44,8 +44,8 @@ across repos.
       row draws the moon in its place, so it shows no PR color.
     - Label: the branch on the main checkout. On the others, the branch's
       last segment (`user/feat-x` → `feat-x`), or the folder name when
-      detached. It is bright when the workspace has a space, `muted` with
-      none, and `dim` while asleep.
+      detached. It is bright when the workspace is awake and `dim` while
+      asleep, which a workspace with no space always is.
     - After the label, other plugins' badges, if any (see Badges from
       other plugins).
     - A dot on the right when a space is open there and it isn't asleep:
