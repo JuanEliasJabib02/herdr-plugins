@@ -14,6 +14,9 @@
 // Apagar Spotlight, Forzar sync, Entorno de Spotlight ▸), built by
 // menus-model.js and written the same way, only when it changes. Every item
 // runs the CLI (an exec), so no command reaches this copy from the menu.
+// And `removeHooks.spotlight` (D43): the `spotlight teardown` projects-sidebar
+// runs before it deletes a workspace or removes a project
+// (menus-model.js removeHooksOf), written the same way.
 //
 // `spotlight.server.<id>` (the server badge, and the CLI's error toasts)
 // reaches this copy's nextCommand() as "server.<id>" (probed 2026-11-06,
@@ -31,13 +34,15 @@ import { hasServerCommand, detectServerScripts } from "./server-plan.js";
 import { cliPathOf } from "./board-model.js";
 import { readFiles, watchState, openServer } from "./board.js";
 import { buildBadges, nextPublish, parseProjects, parseCache, attempt, taskModeGroups } from "./badges-model.js";
-import { buildMenus } from "./menus-model.js";
+import { buildMenus, removeHooksOf } from "./menus-model.js";
 import { openEnvPopup } from "./env-view.js";
 import { modIo } from "./server-view-model.js";
 import { followHolders } from "./autosync.js";
 
 const KEY = "badges.spotlight";
 export const MENU_KEY = "menus.spotlight";
+// projects-sidebar's config.js REMOVE_HOOK_KEYS reads it (D43).
+export const REMOVE_HOOKS_KEY = "removeHooks.spotlight";
 // projects-sidebar's lists and settings.json have no watch here: looked at this often.
 const REFRESH_MS = 15_000;
 // How long a repo's "has a server command" fact (its package.json) is kept.
@@ -141,6 +146,8 @@ async function refresh() {
   if (out.write) setShared(KEY, out.value);
   const menus = nextPublish(shared(MENU_KEY), buildMenus({ state, settings, projects, cache, enabled, registry, bin }));
   if (menus.write) setShared(MENU_KEY, menus.value);
+  const hooks = nextPublish(shared(REMOVE_HOOKS_KEY), removeHooksOf(bin));
+  if (hooks.write) setShared(REMOVE_HOOKS_KEY, hooks.value);
 }
 
 /** Runs a command meant for Spotlight; false when the name isn't one. */

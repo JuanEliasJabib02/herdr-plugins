@@ -1,8 +1,8 @@
 // Spotlight: Orca Pro Max's Spotlight and test queue for Herdr. One mod in
 // views; the layout and the overlays give each copy props { view }:
 //   footer (default)  the flask in the status row. The only copy that runs the
-//                     background loops (reaper, badges and workspace menu
-//                     items, auto-sync) and reads
+//                     background loops (reaper, badges, workspace menu
+//                     items and remove hooks, auto-sync) and reads
 //                     key commands, badge commands included.
 //   board             the "Cola de pruebas" popup
 //   settings          the settings dialog
@@ -20,7 +20,7 @@ import SettingsView from "./settings-view.js";
 import ServerView from "./server-view.js";
 import EnvView from "./env-view.js";
 import { startReaper } from "./reaper.js";
-import { startBadges, handleCommand, MENU_KEY } from "./badges.js";
+import { startBadges, handleCommand, MENU_KEY, REMOVE_HOOKS_KEY } from "./badges.js";
 import { startAutosync } from "./autosync.js";
 
 const VIEWS = {
@@ -62,16 +62,17 @@ export default class Spotlight extends View {
     });
   }
 
-  // The footer copy is the one that publishes badges.spotlight and
-  // menus.spotlight (badges.js). Once it goes (a layout switch, a reload)
-  // nothing keeps them current, so they go with it, each contract's clear
-  // (projects-sidebar RECIPE.md, "Lifetime"); a footer copy shown again
-  // publishes them anew.
+  // The footer copy is the one that publishes badges.spotlight,
+  // menus.spotlight and removeHooks.spotlight (badges.js). Once it goes (a
+  // layout switch, a reload) nothing keeps them current, so they go with it,
+  // each contract's clear (projects-sidebar RECIPE.md, "Lifetime"); a footer
+  // copy shown again publishes them anew.
   async close(cx) {
     await this.view?.close?.(cx);
     if (this.name === "footer") {
       setShared("badges.spotlight", null);
       setShared(MENU_KEY, null);
+      setShared(REMOVE_HOOKS_KEY, null);
     }
   }
 

@@ -12,6 +12,9 @@
 //   env --workspace p [--env e] [--variant v]   reap
 //   env --task KEY --group id --env e    the task's env, from its lane's pill (D32)
 //   continue [--terminal t] [--account id]  Continuar on a paused or idle agent (T11)
+//   teardown --workspace p | --repo r    Spotlight off before projects-sidebar
+//                                        deletes a workspace or removes a
+//                                        project (its remove hooks, D43)
 //   internal: light --task k [--force], classify --terminal t,
 //             continue --inline [--auto], env --task k --group id --inline,
 //             sync --repo r --auto (auto-sync's and the reap's: an
@@ -51,7 +54,7 @@ import {
 } from "./cli-format.mjs";
 import {
   markGranted, spawnLights, dropStaleMarkers, lightTask, syncRepo, deactivateRepo, ensureServer, waitForTurnServers,
-  recordServers, reap, rescuedNotes, errorNote, survivorsPhrase, writeEnv, applyEnv,
+  recordServers, reap, rescuedNotes, errorNote, survivorsPhrase, writeEnv, applyEnv, teardownWorkspace, teardownRepo,
 } from "./cli-work.mjs";
 import { setRootError } from "./server-errors.js";
 import { settleResumes, autoResume, continueTask, classifyTerminal } from "./cli-resume.mjs";
@@ -85,6 +88,8 @@ People and the mod
   spotlight continue [--terminal t] [--account id]
                                                  Continuar: resume a paused agent on the account with
                                                  limit left, or nudge an idle holder (Esc + message)
+  spotlight teardown --workspace p | --repo r    turn Spotlight off before the workspace is deleted or the
+                                                 project leaves the list (always exit 0)
 
 The terminal is --terminal or $HC_TERMINAL_ID. A repo is a path or its name.`;
 
@@ -699,6 +704,49 @@ async function verbEnvTask(cx, opts) {
   return code;
 }
 
+// ── teardown ───────────────────────────────────────────────────────────────
+
+// `spotlight teardown --workspace <W> | --repo <root>` (D43): projects-sidebar
+// runs it before it deletes a workspace or removes a project (Spotlight's
+// remove hooks, menus-model.js removeHooksOf), as Orca turns Spotlight off
+// before it removes a worktree or a repo. It prints what it did and always
+// exits 0, even refused, given up waiting or failing: a delete is never
+// blocked by Spotlight. A usage error alone exits 2. The work is
+// cli-work.mjs teardownWorkspace and teardownRepo.
+async function verbTeardown(cx, opts) {
+  if (Boolean(opts.workspace) === Boolean(opts.repo)) {
+    return usage("spotlight teardown: --workspace <path> or --repo <path>, one of them.");
+  }
+  try {
+    const lines = opts.workspace
+      ? await teardownWorkspace(cx, pathForms(opts.workspace))
+      : await teardownRepo(cx, await projectRoot(opts.repo));
+    for (const line of lines) out(line);
+  } catch (e) {
+    out(`spotlight teardown: ${e?.message ?? e}`);
+  }
+  return 0;
+}
+
+// A workspace path as given (absolute, no trailing slash), then its realpath
+// when that differs: holders are what git printed, the folder may still be
+// reached through a link. No git: the folder is about to go.
+function pathForms(value) {
+  const given = normRoot(path.resolve(value));
+  try {
+    return [...new Set([given, normRoot(fs.realpathSync(given))])];
+  } catch {
+    return [given];
+  }
+}
+
+// A project's root: the main checkout git names for it, or the path as given
+// when git can't (a folder gone already).
+async function projectRoot(value) {
+  const given = normRoot(path.resolve(value));
+  return (await repoRootOf(given)) ?? given;
+}
+
 // ── reap, light, continue, classify ────────────────────────────────────────
 
 // Settles Continuar's jobs, reaps, then starts auto-resume (D13, D15).
@@ -757,6 +805,7 @@ const VERBS = {
   light: verbLight,
   continue: verbContinue,
   classify: verbClassify,
+  teardown: verbTeardown,
 };
 
 export async function main(argv) {

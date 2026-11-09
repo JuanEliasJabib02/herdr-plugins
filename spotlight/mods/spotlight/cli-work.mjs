@@ -2,8 +2,8 @@
 // D33, D34): lighting a task's repos, syncing a holder, turning a root off,
 // the server (start, restart on a lockfile or command change, its end by
 // hand), the env per task (its picks and the restarts they ask for),
-// waiting for the servers to listen (port of Orca's waitForTurnServers), and
-// the reap. Node-only.
+// waiting for the servers to listen (port of Orca's waitForTurnServers), the
+// teardown before a delete (D43), and the reap. Node-only.
 //
 // Every git step runs under the repo's lock and reads the holder inside it,
 // so the last one to take the lock sees the latest holder (a sync racing a
@@ -15,7 +15,8 @@
 import path from "node:path";
 import crypto from "node:crypto";
 import {
-  activate, sync, deactivate, assertDeactivatable, readRefs, readOrcaHolds, toSpotlightError, ORCA_HOLDS_MESSAGE,
+  activate, sync, deactivate, assertDeactivatable, purgeRefs, readRefs, readOrcaHolds, toSpotlightError, ORCA_HOLDS_MESSAGE, REFS,
+  RESCUED_PREFIX,
 } from "./sync.js";
 import {
   emptyRepo, addNote, reconcileRepo, rememberVariant, rememberEnv, markBusy, clearBusy, setTaskBatch, clearTaskBatch,
@@ -1329,86 +1330,178 @@ export async function syncRepo(cx, root, { force = false, asked = false, onlyIf,
 // refusal, a server that didn't stop, a warning or rescued files still
 // toast. A root left detached toasts Orca's warning instead of the success
 // (D41, detachedToast), quiet or not.
-export async function deactivateRepo(cx, root, { force = false, quiet = false } = {}) {
+//
+// For `spotlight teardown` (D43), a workspace or a project about to go:
+//   silent         no success note, as Orca's teardown, and no refusal note
+//                  unless its error names a rescued ref (where the untracked
+//                  files went, L11); rescued files, a server that didn't
+//                  stop and a root left detached still toast. A refusal
+//                  still goes on the record.
+//   onlyIf(record) turn off only when it says so (the workspace's own
+//                  holder), read under this call's repo lock before the busy
+//                  mark, so a row it skips never spins; skipped → { ok:
+//                  true, skipped: true }, as syncRepo's onlyIf. Taking the
+//                  lock outside first would throw lock-reentry.
+//   lockTimeoutMs  how long to wait for the repo lock (teardown's time
+//                  left); past it, LockError "lock-timeout".
+//   purge          refused, the repo goes all the same (Orca's
+//                  purgeForTeardown), in this same lock: the server stopped
+//                  (unless the refusal came after its stop), the record and
+//                  the anchor refs dropped, the backup and rescued refs kept
+//                  (sync.js purgeRefs), and one warning note naming them
+//                  (purgeLines). → { ok: false, code, message, purged, lines }.
+export async function deactivateRepo(cx, root, { force = false, quiet = false, silent = false, onlyIf, lockTimeoutMs, purge = false } = {}) {
   const name = cx.nameOf(root);
-  // A refusal: the git error goes on the record (a root error, over the
-  // server error in force, F6) and toasts. `stopped`, stopServer's answer
-  // when the server was stopped before the restore refused: one that
-  // couldn't say the server stopped joins the same toast and message (G4),
-  // never the record (TURN_OFF_ERRORS, G9).
-  const fail = async (e, workspace, stopped = null) => {
+  const wait = lockTimeoutMs === undefined ? {} : { timeoutMs: lockTimeoutMs };
+  // The refusal as told: `stopped`, stopServer's answer when the server was
+  // stopped before the restore refused: one that couldn't say the server
+  // stopped joins the same toast and message (G4), never the record
+  // (TURN_OFF_ERRORS, G9).
+  const tell = (e, stopped) => {
     const error = toSpotlightError(e);
-    const notStopped = stopped && stopped.ok !== true;
+    const notStopped = Boolean(stopped && stopped.ok !== true);
     const told = notStopped ? { ...error, message: alsoNotStopped(error.message, stopped) } : error;
+    return { error, told, notStopped };
+  };
+  // A refusal: the git error goes on the record (a root error, over the
+  // server error in force, F6) and toasts.
+  const fail = async (e, workspace, stopped = null) => {
+    const { error, told, notStopped } = tell(e, stopped);
+    const noted = !silent || namesRescued(error.message);
     const now = cx.now();
     await cx.store.updateState((s) => {
       s.repos[root] = setRootError({ ...emptyRepo(), ...(s.repos[root] ?? {}) }, { ...error, at: now });
-      errorNote(s, { root, name, workspace, error: told, now, op: "off", also: notStopped ? stopFailure(stopped) : null });
+      if (noted) errorNote(s, { root, name, workspace, error: told, now, op: "off", also: notStopped ? stopFailure(stopped) : null });
     });
     return { ok: false, ...told, ...(stopped ? { stopped } : {}) };
   };
-  return withBusyRepo(cx, root, { op: "off", workspace: (r) => r?.holder ?? null }, async () => {
-    const record = cx.store.readState().repos[root] ?? null;
-    const holder = record?.holder ?? null;
-    try {
-      await assertDeactivatable(cx.gitCtx, root, { force });
-    } catch (e) {
-      if (e?.code !== "not-active") return fail(e, holder);
+  return cx.store.withRepoLock(root, async () => {
+    if (onlyIf && !onlyIf(cx.store.readState().repos[root] ?? null)) return { ok: true, skipped: true };
+    return withBusy(cx, root, { op: "off", workspace: (r) => r?.holder ?? null }, async () => {
+      const record = cx.store.readState().repos[root] ?? null;
+      const holder = record?.holder ?? null;
+      const logPath = record?.logPath ?? logPathFor(root);
+      // Every process the server was seen with while the repo was lit (F1,
+      // noteLive), and the ports the live server held (D26): a child that
+      // left the server's tree before the turn-off still dies when it holds
+      // one of those ports, or one of the identities' own (ports.js
+      // serverSnapshot adds them, G7), and is one of those processes.
+      const stop = async () => {
+        const procs = Array.isArray(record?.serverProcs) ? record.serverProcs : [];
+        const ports = Array.isArray(record?.ports) ? record.ports : [];
+        const head = { workspace: holder ? path.basename(holder) : null, branch: holder ? await branchOf(holder) : null };
+        const stopped = await serverOf(cx).stopServer(
+          { root, terminal: record?.serverTerminal ?? null, logPath, serverPid: record?.serverPid ?? null, ...head, ports, procs },
+          cx.serverDeps,
+        );
+        // H5: the toast and the error say why in Spanish only (G5);
+        // stopServer's own note, written before the restore, carries its
+        // cause in its own words (hc's or ps's), where `spotlight logs` reads
+        // it (K4/K5). An answer it wrote none for gets the turn-off's own
+        // line (L7).
+        const fallback = stopFallbackNote(stopped);
+        if (fallback) appendLogHeader(logPath, { ...head, at: cx.now(), event: fallback });
+        return stopped;
+      };
+      // D43: refused while purging, the server stops here when the refusal
+      // came before its stop (a restore conflict has stopped it already; a
+      // repo with no record has no server of Spotlight's to stop), then the
+      // purge, all in this lock.
+      const refuse = async (e, stopped = null) => {
+        if (!purge) return fail(e, holder, stopped);
+        return purgeRepo(e, stopped ?? (record ? await stop() : null));
+      };
+      const purgeRepo = async (e, stopped) => {
+        const { told, notStopped } = tell(e, stopped);
+        const purged = await purgeRefs(cx.gitCtx, root);
+        // Nothing of Spotlight's was there (no record, no refs): not on.
+        const kept = Boolean(purged.backupSha || purged.rescued.length > 0);
+        if (!record && !purged.originalHeadSha && !kept) return { ok: true, warning: null, notActive: true };
+        const lines = purgeLines(told, purged);
+        const now = cx.now();
+        await cx.store.updateState((s) => {
+          delete s.repos[root];
+          delete s.queue.lighting[`direct/${root}`];
+          if (kept || notStopped) addNote(s, purgeNote(root, name, lines), now);
+        });
+        return { ok: false, ...told, purged, lines, ...(stopped ? { stopped } : {}) };
+      };
+      try {
+        await assertDeactivatable(cx.gitCtx, root, { force });
+      } catch (e) {
+        if (e?.code !== "not-active") return refuse(e);
+        await cx.store.updateState((s) => {
+          delete s.repos[root];
+        });
+        return { ok: true, warning: null, notActive: true };
+      }
+      const stopped = await stop();
+      let res;
+      try {
+        res = await deactivate(cx.gitCtx, root, { force });
+      } catch (e) {
+        return refuse(e, stopped);
+      }
+      // stopServer couldn't say the server stopped (any ok: false: some of it
+      // lived through SIGKILL, hc couldn't reach or read its terminal, it kept
+      // running). The root is restored all the same (no git step waits on that
+      // process, and a turn-off never gets stuck on it), but the turn-off is an
+      // error that says why, never "root restaurado" (D26, F3): an error
+      // toast (D35).
+      const failed = stopped?.ok === true ? null : turnOffError(stopped);
+      const now = cx.now();
       await cx.store.updateState((s) => {
         delete s.repos[root];
+        delete s.queue.lighting[`direct/${root}`];
+        // D41: a turn-off's error (Orca's title), Orca's success, or, left
+        // detached, Orca's warning alone in its place, quiet or not. D43:
+        // silent drops the success alone.
+        if (failed) {
+          addNote(s, { repo: root, text: `${name}: ${failed.message}`, toast: true, level: "error", title: ERROR_TITLES.off(name), body: failed.message }, now);
+        } else if (!quiet && !silent && !res.warning) {
+          addNote(s, { repo: root, text: "Spotlight off — root restaurado", toast: true, level: "success", title: "Spotlight off — root del proyecto restaurado", body: "" }, now);
+        }
+        if (res.warning) addNote(s, { repo: root, text: `${name}: ${res.warning.message}`, ...detachedToast(res) }, now);
+        for (const text of rescuedNotes(res.rescued, res.discardedRepos)) addNote(s, herdrNote(root, name, text), now);
       });
-      return { ok: true, warning: null, notActive: true };
-    }
-    const logPath = record?.logPath ?? logPathFor(root);
-    // Every process the server was seen with while the repo was lit (F1,
-    // noteLive), and the ports the live server held (D26): a child that left
-    // the server's tree before the turn-off still dies when it holds one of
-    // those ports, or one of the identities' own (ports.js serverSnapshot
-    // adds them, G7), and is one of those processes.
-    const procs = Array.isArray(record?.serverProcs) ? record.serverProcs : [];
-    const ports = Array.isArray(record?.ports) ? record.ports : [];
-    const head = { workspace: holder ? path.basename(holder) : null, branch: holder ? await branchOf(holder) : null };
-    const stopped = await serverOf(cx).stopServer(
-      { root, terminal: record?.serverTerminal ?? null, logPath, serverPid: record?.serverPid ?? null, ...head, ports, procs },
-      cx.serverDeps,
-    );
-    // H5: the toast and the error say why in Spanish only (G5); stopServer's
-    // own note, written before the restore, carries its cause in its own
-    // words (hc's or ps's), where `spotlight logs` reads it (K4/K5). An
-    // answer it wrote none for gets the turn-off's own line (L7).
-    const fallback = stopFallbackNote(stopped);
-    if (fallback) appendLogHeader(logPath, { ...head, at: cx.now(), event: fallback });
-    let res;
-    try {
-      res = await deactivate(cx.gitCtx, root, { force });
-    } catch (e) {
-      return fail(e, holder, stopped);
-    }
-    // stopServer couldn't say the server stopped (any ok: false: some of it
-    // lived through SIGKILL, hc couldn't reach or read its terminal, it kept
-    // running). The root is restored all the same (no git step waits on that
-    // process, and a turn-off never gets stuck on it), but the turn-off is an
-    // error that says why, never "root restaurado" (D26, F3): an error
-    // toast (D35).
-    const failed = stopped?.ok === true ? null : turnOffError(stopped);
-    const now = cx.now();
-    await cx.store.updateState((s) => {
-      delete s.repos[root];
-      delete s.queue.lighting[`direct/${root}`];
-      // D41: a turn-off's error (Orca's title), Orca's success, or, left
-      // detached, Orca's warning alone in its place, quiet or not.
-      if (failed) {
-        addNote(s, { repo: root, text: `${name}: ${failed.message}`, toast: true, level: "error", title: ERROR_TITLES.off(name), body: failed.message }, now);
-      } else if (!quiet && !res.warning) {
-        addNote(s, { repo: root, text: "Spotlight off — root restaurado", toast: true, level: "success", title: "Spotlight off — root del proyecto restaurado", body: "" }, now);
-      }
-      if (res.warning) addNote(s, { repo: root, text: `${name}: ${res.warning.message}`, ...detachedToast(res) }, now);
-      for (const text of rescuedNotes(res.rescued, res.discardedRepos)) addNote(s, herdrNote(root, name, text), now);
+      const done = { warning: res.warning, stopped, rescued: res.rescued, discardedRepos: res.discardedRepos };
+      return failed ? { ok: false, ...failed, ...done } : { ok: true, ...done };
     });
-    const done = { warning: res.warning, stopped, rescued: res.rescued, discardedRepos: res.discardedRepos };
-    return failed ? { ok: false, ...failed, ...done } : { ok: true, ...done };
-  });
+  }, wait);
 }
+
+// D43: whether a turn-off's error names a rescued ref (sync.js deactivate's
+// "… a salvo en refs/herdr-spotlight/rescued/…" once it saved untracked
+// files): the one refusal a silent turn-off still toasts.
+const namesRescued = (message) => String(message ?? "").includes(RESCUED_PREFIX);
+
+// D43: what a purge says, a sentence each, in its note and in teardown's
+// output: why the root wasn't restored (the refusal as told, with a server
+// that didn't stop), where the root was (its original branch and commit),
+// the backup ref kept and, only when it holds uncommitted changes
+// (sync.js purgeRefs' `applies`), the line that brings them back; the
+// rescued refs kept. Spanish, as every toast.
+export function purgeLines(told, { originalBranch, originalHeadSha, backupSha, applies, rescued = [] }) {
+  const said = oneLine(told.message);
+  const lines = [`Spotlight se quitó sin restaurar el root (${told.code}): ${said}${/[.!?]$/.test(said) ? "" : "."}`];
+  if (originalHeadSha) {
+    const commit = originalHeadSha.slice(0, 7);
+    lines.push(originalBranch ? `El root estaba en la rama ${originalBranch}, commit ${commit}.` : `El root estaba detached en el commit ${commit}.`);
+  }
+  if (backupSha && applies) {
+    lines.push(`Sus cambios sin commit de antes de Spotlight quedan en ${REFS.backup}.`);
+    lines.push(`Para traerlos: git stash apply --index ${REFS.backup}`);
+  } else if (backupSha) {
+    lines.push(`El backup queda en ${REFS.backup} (el root no tenía cambios sin commit).`);
+  }
+  if (rescued.length > 0) lines.push(`Los archivos sin seguimiento rescatados quedan en ${rescued.join(", ")}.`);
+  return lines;
+}
+
+// D43: the purge's one note, a warning for 60 s (as a root left detached),
+// Herdr's own (Orca has no rescue): "Spotlight · <repo>" over its sentences.
+const PURGE_TOAST_MS = 60_000;
+const purgeNote = (root, name, lines) => ({ ...herdrNote(root, name, lines.join(" ")), level: "warning", timeout: PURGE_TOAST_MS });
 
 // D41: the toast of a turn-off that restored the root but couldn't put it
 // back on its branch (sync.js deactivate's branch-missing warning): Orca's
@@ -1534,6 +1627,102 @@ export function rescuedNotes(rescued, discardedRepos = []) {
     );
   }
   return lines;
+}
+
+// ── Teardown before a delete (D43) ─────────────────────────────────────────
+
+// How long `spotlight teardown` waits in all (a light in flight, then each
+// repo lock): under projects-sidebar's 120 s per hook, so the turn-off
+// itself still has time once the waiting ends, as `on` leaves its own
+// (J-001). A test shortens it through cx.teardownMs
+// (SPOTLIGHT_TEARDOWN_MS).
+export const TEARDOWN_MS = 80_000;
+
+const secondsOf = (ms) => `${Math.round(ms / 100) / 10}`;
+
+// A lighting marker's members that name one of `paths` as their workspace.
+const membersOf = (m, paths) => (m?.members ?? []).filter((x) => (x.workspaces ?? [x.workspace]).some((p) => paths.includes(p)));
+
+// Waits, polling, until no live lighting marker `pick` selects is left:
+// lightAlive, its `light` still runs. A finished one (a click's
+// `direct/<root>`, its process gone) stays in queue.lighting until its root
+// turns off and is never waited on. → every live marker it saw, or null
+// once `deadline` passed with one still live.
+async function waitOutLights(cx, pick, deadline) {
+  const seen = [];
+  for (;;) {
+    const live = Object.values(cx.store.readState().queue.lighting).filter((m) => pick(m) && lightAlive(m, { now: cx.now(), pidAlive }));
+    seen.push(...live);
+    if (live.length === 0) return seen;
+    if (cx.now() >= deadline) return null;
+    await cx.sleep(Math.min(cx.pollMs, Math.max(0, deadline - cx.now())));
+  }
+}
+
+// What one silent turn-off did, a line each, as `toggle --inline` prints it
+// (each rescued file's line and a purge's sentences under the repo's name);
+// none for a root it skipped.
+function turnedOffLines(name, r) {
+  if (r.skipped) return [];
+  if (r.purged) return r.lines.map((line) => `${name}: ${line}`);
+  const lines = [];
+  if (r.ok && r.notActive) lines.push(`Spotlight is not on in ${name}: nothing to turn off.`);
+  else if (r.ok) lines.push(`Spotlight off in ${name}: root restored.${r.warning ? ` ${r.warning.message}` : ""}`);
+  else lines.push(`${name}: ${r.code}: ${oneLine(r.message)}`);
+  for (const line of rescuedNotes(r.rescued, r.discardedRepos)) lines.push(`${name}: ${line}`);
+  return lines;
+}
+
+// One root's silent turn-off within teardown's deadline: its repo lock
+// waited on for the time left (one try once it passed). Never throws.
+async function teardownRoot(cx, root, { deadline, total, ...opts }) {
+  const name = cx.nameOf(root);
+  try {
+    const r = await deactivateRepo(cx, root, { ...opts, silent: true, lockTimeoutMs: Math.max(0, deadline - cx.now()) });
+    return turnedOffLines(name, r);
+  } catch (e) {
+    if (e instanceof LockError && e.code === "lock-timeout") return [`Gave up waiting for ${name}'s lock after ${secondsOf(total)} s: nothing turned off there.`];
+    return [`${name}: ${toSpotlightError(e).message}`];
+  }
+}
+
+// `spotlight teardown --workspace <W>` (D43), before W is deleted: every
+// root W holds goes off, without force. `paths`: W as given, then its
+// realpath when that differs. The roots come from state.json, never from git
+// on a folder about to go: a record whose holder is W, whose busy mark's
+// target is W (a light for W, its lock held), or that a light for W still
+// running will light. That light is waited out first, then each root turns
+// off only while W holds it (`onlyIf`, under deactivateRepo's own lock): a
+// root the light didn't end up holding, or another workspace holds, is left
+// alone and its row never spins. It never lights. → the lines to print.
+export async function teardownWorkspace(cx, paths) {
+  const total = cx.teardownMs ?? TEARDOWN_MS;
+  const deadline = cx.now() + total;
+  const label = path.basename(paths[0]);
+  const lights = await waitOutLights(cx, (m) => membersOf(m, paths).length > 0, deadline);
+  if (!lights) return [`Gave up waiting after ${secondsOf(total)} s for a Spotlight light of ${label} still running: nothing turned off.`];
+  const roots = new Set(lights.flatMap((m) => membersOf(m, paths).map((x) => x.root)));
+  for (const [root, r] of Object.entries(cx.store.readState().repos)) {
+    if (paths.includes(r.holder) || paths.includes(r.busy?.workspace)) roots.add(root);
+  }
+  const lines = [];
+  for (const root of [...roots].sort()) {
+    lines.push(...(await teardownRoot(cx, root, { onlyIf: (r) => paths.includes(r?.holder), deadline, total })));
+  }
+  return lines.length > 0 ? lines : [`Nothing to turn off: ${label} holds no Spotlight root.`];
+}
+
+// `spotlight teardown --repo <root>` (D43), before a project leaves the
+// list: a light still running with a member there is waited out, then the
+// root goes off without force or, refused, its server stops and it is
+// purged (deactivateRepo's `purge`): the project's terminals stay, its
+// Spotlight goes. → the lines to print.
+export async function teardownRepo(cx, root) {
+  const total = cx.teardownMs ?? TEARDOWN_MS;
+  const deadline = cx.now() + total;
+  const lights = await waitOutLights(cx, (m) => (m?.members ?? []).some((x) => x.root === root), deadline);
+  if (!lights) return [`Gave up waiting after ${secondsOf(total)} s for a Spotlight light of ${cx.nameOf(root)} still running: nothing turned off.`];
+  return teardownRoot(cx, root, { purge: true, deadline, total });
 }
 
 // ── Waiting for the servers (port of waitForTurnServers) ───────────────────

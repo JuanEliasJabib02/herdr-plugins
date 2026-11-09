@@ -1,7 +1,8 @@
 // Spotlight's items in projects-sidebar's workspace menu (D30, S21; Orca's
 // WorktreeSpotlightMenuItems.tsx and WorktreeSpotlightEnvSubMenu.tsx): what
 // badges.js publishes under the shared key `menus.spotlight`, beside the
-// badges. Pure: it imports only the plugin's other pure modules, so
+// badges; and its remove hooks (D43, removeHooksOf at the end), under
+// `removeHooks.spotlight`. Pure: it imports only the plugin's other pure modules, so
 // `node --test` loads it. The contract it codes against is projects-sidebar's
 // RECIPE.md "Menu items from other plugins":
 //   value  { [workspace path, as `git worktree list` prints it]: [item] }
@@ -128,4 +129,19 @@ export function buildMenus({ state, settings, projects = [], cache = {}, enabled
   const value = {};
   for (const at of [...rows.keys()].sort()) value[at] = rows.get(at);
   return value;
+}
+
+// Spotlight's remove hooks (D43, Orca turning Spotlight off before it
+// removes a worktree or a repo), published by badges.js under the shared key
+// `removeHooks.spotlight` from the same refresh as `menus.spotlight`. The
+// contract is projects-sidebar's RECIPE.md "Remove hooks from other
+// plugins": before a workspace is deleted it runs `spotlight teardown
+// --workspace <path>`, before a project leaves the list `spotlight teardown
+// --repo <path>`, each argument "{path}" replaced by the path as a whole
+// argument. `bin`: board-model.js cliPathOf(appHome()).
+export function removeHooksOf(bin) {
+  return {
+    workspace: [bin, "teardown", "--workspace", "{path}"],
+    project: [bin, "teardown", "--repo", "{path}"],
+  };
 }

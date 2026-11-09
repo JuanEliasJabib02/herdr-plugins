@@ -3009,3 +3009,371 @@ test("D41: a fresh light toasts 'Arrancando <command> — logs en <log>'; a take
   assert.match(logs.stdout, /^ {2}\d\d:\d\d:\d\d {2}Spotlight on · app ← ax-1 · server arrancando$/m);
   assert.match(logs.stdout, /^ {2}\d\d:\d\d:\d\d {2}Spotlight on · app ← ax-2 · server arrancando$/m);
 });
+
+// ── T36 (D43): `spotlight teardown`, projects-sidebar's remove hooks ───────
+
+test("D43: `teardown --workspace` on a non-holder does nothing and never lights; on the holder it turns the root off without force: refused, exit 0 and no note; through, the server stopped, no success note, a rescued file's note kept; a light whose process is gone isn't waited on", async () => {
+  const w = makeWorld();
+  const app = makeRepo(w, "app", { pkg: DEV, tasks: ["AX-80", "AX-81"], files: { "page.txt": "v1\n" } });
+  w.register([{ id: "g1", repos: [app] }]);
+  const [ws1, ws2] = [app.ws["AX-80"], app.ws["AX-81"]];
+  git(ws1, "rm", "-q", "page.txt");
+  git(ws1, "commit", "-q", "-m", "drop page");
+  assert.equal((await w.cli(["toggle", "--workspace", ws1])).code, 0);
+  await w.until((s) => s.queue.lighting[`direct/${app.root}`]?.phase === "done", { what: "lit" });
+  const refs = refsOf(app.root);
+  const lighting = Object.keys(w.state().queue.lighting);
+  const notes = w.state().notes.length;
+  // A light that wrongly waited would sit here for a minute.
+  const env = { extraEnv: { SPOTLIGHT_TEARDOWN_MS: "60000" } };
+
+  // ws2 holds nothing: nothing turned off, nothing lit, no note.
+  const other = await w.cli(["teardown", "--workspace", ws2], env);
+  assert.equal(other.code, 0, other.stderr + other.stdout);
+  assert.match(other.stdout, /^Nothing to turn off: ax-81 holds no Spotlight root\.$/m);
+  assert.equal(w.state().repos[app.root].holder, ws1);
+  assert.equal("busy" in w.state().repos[app.root], false);
+  assert.deepEqual(refsOf(app.root), refs);
+  assert.deepEqual(Object.keys(w.state().queue.lighting), lighting, "never lights");
+  assert.equal(w.state().notes.length, notes);
+
+  // The holder on a diverged root: refused without force, exit 0, no note.
+  git(app.root, "commit", "-q", "--allow-empty", "-m", "made in the root");
+  const refused = await w.cli(["teardown", "--workspace", ws1], env);
+  assert.equal(refused.code, 0, refused.stderr + refused.stdout);
+  assert.match(refused.stdout, /^app: root-diverged: /m);
+  assert.deepEqual(refsOf(app.root), refs, "never forced");
+  assert.equal(w.state().repos[app.root].lastError.code, "root-diverged");
+  assert.equal(w.state().notes.length, notes, "no refusal note");
+
+  // The click's marker, its light killed mid-way (its pid gone): not waited on.
+  const dead = spawnProc("true", []);
+  await dead.exited;
+  const s = w.state();
+  Object.assign(s.queue.lighting[`direct/${app.root}`], { phase: "running", pid: dead.pid });
+  w.writeState(s);
+
+  git(app.root, "reset", "-q", "--hard", "HEAD~1");
+  write(app.root, "page.txt", "mine\n");
+  const off = await w.cli(["teardown", "--workspace", ws1], env);
+  assert.equal(off.code, 0, off.stderr + off.stdout);
+  assert.ok(off.ms < 20_000, `took ${off.ms} ms: it waited on a light that wasn't running`);
+  assert.match(off.stdout, /^Spotlight off in app: root restored\.$/m);
+  assert.match(off.stdout, /^app: page\.txt quedó como cambio sin commit \(tu versión\)\. Copia en refs\/herdr-spotlight\/rescued\/\S+\.$/m);
+  assert.equal(w.state().repos[app.root], undefined);
+  assert.equal(git(app.root, "symbolic-ref", "--short", "HEAD"), "main");
+  assert.equal(readFileSync(join(app.root, "page.txt"), "utf8"), "mine\n");
+  assert.equal(w.serverTerminal(app.root).foreground.name, "zsh", "the server was stopped");
+  const added = w.state().notes.slice(notes);
+  assert.equal(added.length, 1, JSON.stringify(added));
+  assert.match(added[0].text, /^app: page\.txt quedó como cambio sin commit/);
+  assert.equal(added[0].title, "Spotlight · app");
+});
+
+test("D43: `teardown --workspace` while a light for W holds the repo lock waits it out, then turns the root off; a repo lock someone else holds is waited on too", async () => {
+  const w = makeWorld();
+  const app = makeRepo(w, "app", { pkg: DEV, tasks: ["AX-82"] });
+  w.register([{ id: "g1", repos: [app] }]);
+  const ws = app.ws["AX-82"];
+  w.slowGit("reset", 1.5);
+  assert.equal((await w.cli(["toggle", "--workspace", ws])).code, 0);
+  await w.until((s) => (s.repos[app.root]?.busy?.op === "light" ? s : null), { what: "the light holding the lock" });
+  const pending = w.cli(["teardown", "--workspace", ws]);
+  await sleep(200);
+  w.slowGit(null);
+  const off = await pending;
+  assert.equal(off.code, 0, off.stderr + off.stdout);
+  assert.match(off.stdout, /^Spotlight off in app: root restored\.$/m);
+  assert.deepEqual(refsOf(app.root), []);
+  assert.equal(w.state().repos[app.root], undefined);
+  assert.equal(w.state().queue.lighting[`direct/${app.root}`], undefined);
+  assert.equal(git(app.root, "symbolic-ref", "--short", "HEAD"), "main");
+  assert.ok(!w.state().notes.some((n) => /root restaurado/.test(n.text)), "no success note");
+
+  // Lit again, its repo lock taken by someone else for a while: waited on.
+  assert.equal((await w.cli(["toggle", "--workspace", ws])).code, 0);
+  await w.until((s) => s.queue.lighting[`direct/${app.root}`]?.phase === "done" && s.repos[app.root]?.holder === ws, { what: "lit again" });
+  const lock = lockDirOf(w, app.root);
+  const owner = await acquire(lock);
+  const waiting = w.cli(["teardown", "--workspace", ws]);
+  await sleep(1000);
+  assert.ok(refsOf(app.root).length > 0, "still lit while the lock is held");
+  unlock(lock, owner);
+  const r = await waiting;
+  assert.equal(r.code, 0, r.stderr + r.stdout);
+  assert.ok(r.ms >= 900, `returned after ${r.ms} ms, before the lock was let go`);
+  assert.match(r.stdout, /^Spotlight off in app: root restored\.$/m);
+  assert.deepEqual(refsOf(app.root), []);
+});
+
+test("D43: past the deadline (SPOTLIGHT_TEARDOWN_MS) a held repo lock or a light still running gives up: it says so and exits 0 before it, nothing turned off", async () => {
+  const w = makeWorld();
+  const app = makeRepo(w, "app", { pkg: DEV, tasks: ["AX-83"] });
+  w.register([{ id: "g1", repos: [app] }]);
+  const ws = app.ws["AX-83"];
+  assert.equal((await w.cli(["toggle", "--workspace", ws])).code, 0);
+  await w.until((s) => s.queue.lighting[`direct/${app.root}`]?.phase === "done", { what: "lit" });
+  const refs = refsOf(app.root);
+  const short = { extraEnv: { SPOTLIGHT_TEARDOWN_MS: "800" } };
+  const stillLit = (what) => {
+    assert.deepEqual(refsOf(app.root), refs, what);
+    assert.equal(w.state().repos[app.root].holder, ws, what);
+  };
+
+  const lock = lockDirOf(w, app.root);
+  const owner = await acquire(lock);
+  try {
+    for (const args of [["--workspace", ws], ["--repo", app.root]]) {
+      const r = await w.cli(["teardown", ...args], short);
+      assert.equal(r.code, 0, r.stderr + r.stdout);
+      assert.match(r.stdout, /^Gave up waiting for app's lock after 0\.8 s: nothing turned off there\.$/m, args.join(" "));
+      assert.ok(r.ms < 5000, `${args.join(" ")} took ${r.ms} ms`);
+      stillLit(args.join(" "));
+    }
+  } finally {
+    unlock(lock, owner);
+  }
+
+  // AX-83's light still running (its process alive): waited on, then given up.
+  const light = spawnProc("sleep", ["60"]);
+  const s = w.state();
+  s.queue.lighting["g1/AX-83"] = {
+    grantId: 1, phase: "running", pid: light.pid, startedAt: Date.now(), error: null, errors: {},
+    members: [{ root: app.root, name: "app", workspace: ws, workspaces: [ws] }], taskKey: "g1/AX-83", force: false,
+  };
+  w.writeState(s);
+  for (const [args, who] of [[["--workspace", ws], "ax-83"], [["--repo", app.root], "app"]]) {
+    const r = await w.cli(["teardown", ...args], short);
+    assert.equal(r.code, 0, r.stderr + r.stdout);
+    assert.match(r.stdout, new RegExp(`^Gave up waiting after 0\\.8 s for a Spotlight light of ${who} still running: nothing turned off\\.$`, "m"));
+    assert.ok(r.ms >= 700 && r.ms < 5000, `${args.join(" ")} took ${r.ms} ms`);
+    stillLit(args.join(" "));
+  }
+  process.kill(light.pid, "SIGKILL");
+});
+
+test("D43: `teardown --repo` turns a lit root off with no note; refused, it stops the server and purges: the record, snapshot, original-head and original-branch go, backup, rescued/* and rescued-pending stay; one warning note and the output name the original branch and commit and the backup, the apply line only when the root had uncommitted changes", async () => {
+  const w = makeWorld();
+  const clean = makeRepo(w, "clean", { pkg: DEV, tasks: ["AX-84"] });
+  const dirty = makeRepo(w, "dirty", { pkg: DEV, tasks: ["AX-85"] });
+  const plain = makeRepo(w, "plain", { pkg: DEV, tasks: ["AX-86"] });
+  const idle = makeRepo(w, "idle", { pkg: DEV });
+  w.register([{ id: "g1", repos: [clean, dirty, plain, idle] }]);
+  write(dirty.root, "README.md", "edited in the root\n");
+  for (const repo of [clean, dirty, plain]) {
+    const lit = await w.cli(["toggle", "--workspace", Object.values(repo.ws)[0], "--inline"]);
+    assert.equal(lit.code, 0, lit.stderr + lit.stdout);
+  }
+  const notes = w.state().notes.length;
+
+  // Not lit: nothing to do.
+  const none = await w.cli(["teardown", "--repo", idle.root]);
+  assert.equal(none.code, 0, none.stderr + none.stdout);
+  assert.match(none.stdout, /^Spotlight is not on in idle: nothing to turn off\.$/m);
+
+  // Lit and clean: an ordinary turn-off, silent.
+  const off = await w.cli(["teardown", "--repo", plain.root]);
+  assert.equal(off.code, 0, off.stderr + off.stdout);
+  assert.match(off.stdout, /^Spotlight off in plain: root restored\.$/m);
+  assert.equal(w.state().repos[plain.root], undefined);
+  assert.deepEqual(refsOf(plain.root), []);
+  assert.equal(w.state().notes.length, notes, "no success note");
+
+  const RESCUED = "refs/herdr-spotlight/rescued/2026-11-09T00-00-00-000Z-abc1234";
+  const APPLY = "git stash apply --index refs/herdr-spotlight/backup";
+  for (const [repo, applies] of [[clean, false], [dirty, true]]) {
+    const { root, name } = repo;
+    const originalHead = git(root, "rev-parse", "refs/herdr-spotlight/original-head");
+    const backup = git(root, "rev-parse", "refs/herdr-spotlight/backup");
+    assert.equal(backup !== originalHead, applies, name);
+    // A rescue an earlier turn-off left, and a commit made in the root: refused.
+    git(root, "update-ref", RESCUED, originalHead);
+    git(root, "update-ref", "refs/herdr-spotlight/rescued-pending", originalHead);
+    git(root, "commit", "-q", "--allow-empty", "-m", "made in the root");
+    const before = w.state().notes.length;
+
+    const r = await w.cli(["teardown", "--repo", root]);
+    assert.equal(r.code, 0, r.stderr + r.stdout);
+    assert.equal(w.state().repos[root], undefined, `${name}: the record is gone`);
+    assert.equal(w.state().queue.lighting[`direct/${root}`], undefined, name);
+    assert.deepEqual(refsOf(root).sort(), [
+      "refs/herdr-spotlight/backup", "refs/herdr-spotlight/rescued-pending", RESCUED,
+    ].sort(), name);
+    assert.equal(git(root, "rev-parse", "refs/herdr-spotlight/backup"), backup, name);
+    assert.equal(w.serverTerminal(root).foreground.name, "zsh", `${name}: the server was stopped`);
+
+    const added = w.state().notes.slice(before);
+    assert.equal(added.length, 1, `${name}: ${JSON.stringify(added)}`);
+    const [note] = added;
+    assert.equal(note.toast, true);
+    assert.equal(note.level, "warning");
+    assert.equal(note.title, `Spotlight · ${name}`);
+    assert.equal(note.text, `${name}: ${note.body}`);
+    assert.match(note.body, /root-diverged/, name);
+    assert.ok(note.body.includes(`rama main, commit ${originalHead.slice(0, 7)}`), `${name}: ${note.body}`);
+    assert.ok(note.body.includes("refs/herdr-spotlight/backup"), name);
+    assert.ok(note.body.includes(RESCUED), name);
+    assert.equal(note.body.includes(APPLY), applies, `${name}: ${note.body}`);
+    // The output says the same, a line each.
+    assert.match(r.stdout, new RegExp(`^${name}: El root estaba en la rama main, commit ${originalHead.slice(0, 7)}\\.$`, "m"));
+    assert.ok(r.stdout.includes("refs/herdr-spotlight/backup"), name);
+    assert.ok(r.stdout.includes(RESCUED), name);
+    assert.equal(r.stdout.split("\n").includes(`${name}: Para traerlos: ${APPLY}`), applies, `${name}: ${r.stdout}`);
+  }
+});
+
+test("D43: usage: one of --workspace or --repo (exit 2); USAGE lists teardown", async () => {
+  const w = makeWorld();
+  for (const args of [["teardown"], ["teardown", "--workspace", "/a", "--repo", "/b"]]) {
+    const r = await w.cli(args);
+    assert.equal(r.code, 2, `${args.join(" ")}: ${r.stderr}${r.stdout}`);
+    assert.match(r.stderr, /^spotlight teardown: --workspace <path> or --repo <path>/);
+  }
+  const help = await w.cli(["--help"]);
+  assert.match(help.stdout, /^ {2}spotlight teardown --workspace p \| --repo r {2,}/m);
+});
+
+// cli-work.mjs's deactivateRepo over a real store (its real locks: taking
+// the repo lock twice in one flow throws lock-reentry) and real git, with a
+// stub stopServer and a git that fails where a test says. Every git call and
+// stop records whether the repo lock was held then.
+const TEST_GIT_VARS = { GIT_CONFIG_GLOBAL: GIT_ENV.GIT_CONFIG_GLOBAL, GIT_CONFIG_NOSYSTEM: "1" };
+
+async function teardownFixture() {
+  const { createStore, emptyRepo } = await import("../mods/spotlight/store.js");
+  const { gitContext, runGit, activate } = await import("../mods/spotlight/sync.js");
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), "sl-teardown-")));
+  worlds.push({ dir });
+  const root = join(dir, "repos", "app");
+  const ws = join(dir, "ws", "app", "ax-90");
+  mkdirSync(root, { recursive: true });
+  git(root, "init", "-q", "-b", "main");
+  write(root, "a.txt", "a\n");
+  write(root, "to-delete.txt", "original\n");
+  git(root, "add", "-A");
+  git(root, "commit", "-q", "-m", "init");
+  git(root, "worktree", "add", "-q", "-b", "AX-90", ws);
+  git(ws, "rm", "-q", "to-delete.txt");
+  git(ws, "commit", "-q", "-m", "drop to-delete");
+  // Staged in the root before Spotlight: its backup is a stash commit.
+  write(root, "new.txt", "staged in root\n");
+  git(root, "add", "new.txt");
+  const appHome = join(dir, "app");
+  const lockDir = join(appHome, "spotlight", "locks", `repo-${sha1(root)}`);
+  const seen = { git: [], locks: [], stops: [], writes: 0, failOn: () => false };
+  const gitCtx = gitContext({
+    git: async (args, cwd, opts) => {
+      seen.git.push({ args, locked: existsSync(lockDir) });
+      if (seen.failOn(args)) throw Object.assign(new Error("simulated failure"), { stderr: "simulated failure" });
+      return runGit(args, cwd, { ...opts, env: { ...TEST_GIT_VARS, ...(opts?.env ?? {}) } });
+    },
+  });
+  await activate(gitCtx, root, ws);
+  const real = createStore({ appHome, hasServerCommand: () => false });
+  await real.updateState((s) => {
+    s.repos[root] = { ...emptyRepo(), holder: ws, serverTerminal: "t1", serverState: "listening" };
+  });
+  seen.git.length = 0;
+  const store = {
+    ...real,
+    withRepoLock: (r, fn, opts) => {
+      seen.locks.push({ root: r, timeoutMs: opts?.timeoutMs });
+      return real.withRepoLock(r, fn, opts);
+    },
+    updateState: (fn) => {
+      seen.writes += 1;
+      return real.updateState(fn);
+    },
+  };
+  const cx = {
+    store, gitCtx, nameOf: (r) => basename(r), now: Date.now, sleep, pollMs: 20, teardownMs: 5_000,
+    server: {
+      stopServer: async (a) => {
+        seen.stops.push({ terminal: a.terminal, locked: existsSync(lockDir) });
+        return { ok: true, stopped: true, terminal: a.terminal, forced: 0 };
+      },
+    },
+    serverDeps: {},
+  };
+  return { root, ws, cx, seen, state: () => real.readState() };
+}
+
+test("D43: deactivateRepo reads onlyIf under its own repo lock, before any busy mark; `silent` drops a refusal's note unless its error names a rescued ref", async () => {
+  const { deactivateRepo } = await import("../mods/spotlight/cli-work.mjs");
+  const f = await teardownFixture();
+  const holds = (r) => r?.holder === f.ws;
+
+  // Not the holder: skipped under the lock, with no write at all, so no busy mark.
+  const skipped = await deactivateRepo(f.cx, f.root, { silent: true, onlyIf: (r) => r?.holder === "/somewhere/else", lockTimeoutMs: 1000 });
+  assert.deepEqual(skipped, { ok: true, skipped: true });
+  assert.equal(f.seen.writes, 0, "nothing written");
+  assert.deepEqual(f.seen.locks, [{ root: f.root, timeoutMs: 1000 }]);
+  assert.deepEqual(f.seen.stops, []);
+  assert.equal(f.state().repos[f.root].holder, f.ws);
+
+  // The holder, refused (a commit made in the root): silent writes the record's error, no note.
+  git(f.root, "commit", "-q", "--allow-empty", "-m", "made in the root");
+  const refused = await deactivateRepo(f.cx, f.root, { silent: true, onlyIf: holds });
+  assert.equal(refused.code, "root-diverged");
+  assert.deepEqual(f.state().notes, []);
+  assert.equal(f.state().repos[f.root].lastError.code, "root-diverged");
+  // Not silent, the same refusal toasts as it always did.
+  await deactivateRepo(f.cx, f.root, {});
+  assert.deepEqual(f.state().notes.map((n) => [n.level, n.title]), [["error", "No se pudo apagar Spotlight en app"]]);
+
+  // Back on the snapshot, an untracked file in the way, a restore that
+  // conflicts: its error names the rescued ref, so silent keeps its note.
+  git(f.root, "reset", "-q", "--hard", "HEAD~1");
+  write(f.root, "to-delete.txt", "mine\n");
+  f.seen.failOn = (args) => args.includes("stash") && args.includes("apply");
+  const conflict = await deactivateRepo(f.cx, f.root, { silent: true, onlyIf: holds });
+  assert.equal(conflict.code, "restore-conflict");
+  assert.match(conflict.message, /a salvo en refs\/herdr-spotlight\/rescued\/\S+\.$/);
+  const added = f.state().notes.slice(1);
+  assert.equal(added.length, 1, JSON.stringify(added));
+  assert.equal(added[0].level, "error");
+  assert.match(added[0].text, /^app: .*a salvo en refs\/herdr-spotlight\/rescued\/\S+\.$/s);
+});
+
+test("D43: deactivateRepo's purge runs inside its own repo lock: one lock, the stop once (by the purge when the refusal came first), every git step under it; one warning note names the recovery refs", async () => {
+  const { deactivateRepo } = await import("../mods/spotlight/cli-work.mjs");
+  const APPLY = "git stash apply --index refs/herdr-spotlight/backup";
+
+  // Refused before the stop (a diverged root): the purge stops the server itself.
+  const a = await teardownFixture();
+  git(a.root, "commit", "-q", "--allow-empty", "-m", "made in the root");
+  const head = git(a.root, "rev-parse", "refs/herdr-spotlight/original-head");
+  const r = await deactivateRepo(a.cx, a.root, { silent: true, purge: true, lockTimeoutMs: 2000 });
+  assert.equal(r.ok, false);
+  assert.equal(r.code, "root-diverged");
+  assert.equal(r.purged?.originalHeadSha, head);
+  assert.deepEqual(a.seen.locks, [{ root: a.root, timeoutMs: 2000 }], "one repo lock");
+  assert.deepEqual(a.seen.stops, [{ terminal: "t1", locked: true }]);
+  assert.ok(a.seen.git.length > 0 && a.seen.git.every((c) => c.locked), "every git step under the lock");
+  assert.equal(a.state().repos[a.root], undefined);
+  assert.deepEqual(refsOf(a.root), ["refs/herdr-spotlight/backup"]);
+  const [note] = a.state().notes;
+  assert.equal(a.state().notes.length, 1);
+  assert.deepEqual([note.level, note.title, note.toast], ["warning", "Spotlight · app", true]);
+  assert.ok(note.body.includes(APPLY), note.body);
+
+  // Refused after the stop (a restore that conflicts once its files were rescued): no second stop.
+  const b = await teardownFixture();
+  write(b.root, "to-delete.txt", "mine\n");
+  b.seen.failOn = (args) => args.includes("stash") && args.includes("apply");
+  const r2 = await deactivateRepo(b.cx, b.root, { silent: true, purge: true });
+  assert.equal(r2.code, "restore-conflict");
+  assert.equal(b.seen.locks.length, 1);
+  assert.deepEqual(b.seen.stops, [{ terminal: "t1", locked: true }]);
+  assert.ok(b.seen.git.every((c) => c.locked));
+  const left = refsOf(b.root);
+  assert.ok(left.includes("refs/herdr-spotlight/backup") && left.includes("refs/herdr-spotlight/rescued-pending"), left.join(" "));
+  const rescued = left.filter((ref) => ref.startsWith("refs/herdr-spotlight/rescued/"));
+  assert.equal(rescued.length, 1, left.join(" "));
+  assert.equal(left.length, 3, left.join(" "));
+  // One note, the purge's: it names the rescued ref; the refusal's own isn't written beside it.
+  assert.equal(b.state().notes.length, 1, JSON.stringify(b.state().notes));
+  assert.equal(b.state().notes[0].level, "warning");
+  assert.ok(b.state().notes[0].body.includes(rescued[0]), b.state().notes[0].body);
+  assert.ok(b.state().notes[0].body.includes(APPLY));
+});

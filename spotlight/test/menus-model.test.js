@@ -272,3 +272,43 @@ test("nothing to offer: null, so menus.spotlight is cleared; an unchanged value 
   const value = build();
   assert.equal(nextPublish(JSON.parse(JSON.stringify(value)), build()).write, false);
 });
+
+// ── D43: Spotlight's remove hooks ──────────────────────────────────────────
+
+test("D43: removeHooksOf(bin) is projects-sidebar's remove hooks: `teardown --workspace {path}` and `teardown --repo {path}`, kept by its parser, {path} replaced as a whole argument", async () => {
+  const { removeHooksOf } = await import("../mods/spotlight/menus-model.js");
+  const { parseRemoveHooks, hookArgv } = await import("../../projects-sidebar/mods/projects/remove-workspace-model.js");
+  const { REMOVE_HOOK_KEYS } = await import("../../projects-sidebar/mods/projects/config.js");
+  assert.equal(typeof removeHooksOf, "function", "menus-model.js exports removeHooksOf");
+  const value = removeHooksOf(BIN);
+  assert.deepEqual(value, {
+    workspace: [BIN, "teardown", "--workspace", "{path}"],
+    project: [BIN, "teardown", "--repo", "{path}"],
+  });
+  // projects-sidebar reads this key and keeps both argv as published.
+  assert.ok(REMOVE_HOOK_KEYS.includes("removeHooks.spotlight"));
+  const parsed = parseRemoveHooks([value]);
+  assert.deepEqual(parsed, { workspace: [value.workspace], project: [value.project] });
+  // {path} is one whole element: the path goes in as one argument, never spliced into another.
+  assert.deepEqual(hookArgv(parsed.workspace[0], B1), [BIN, "teardown", "--workspace", B1]);
+  assert.deepEqual(hookArgv(parsed.project[0], BACK), [BIN, "teardown", "--repo", BACK]);
+  assert.ok(value.workspace.every((a) => a === "{path}" || !a.includes("{path}")));
+  // Published with nextPublish: the same value again writes nothing.
+  assert.equal(nextPublish(JSON.parse(JSON.stringify(value)), removeHooksOf(BIN)).write, false);
+});
+
+// badges.js and main.js import "herdr", which `node --test` can't load: their
+// wiring is asserted on the source, as projects-sidebar's smoke test does.
+test("D43: the footer copy publishes removeHooks.spotlight from the same refresh as menus.spotlight, only when it changes, and clears it when it closes", () => {
+  const badges = fs.readFileSync(path.join(MOD_DIR, "badges.js"), "utf8");
+  assert.match(badges, /export const REMOVE_HOOKS_KEY = "removeHooks\.spotlight";/);
+  assert.match(badges, /import \{ buildMenus, removeHooksOf \} from "\.\/menus-model\.js";/);
+  const refresh = badges.slice(badges.indexOf("async function refresh()"), badges.indexOf("export async function handleCommand"));
+  assert.match(refresh, /nextPublish\(shared\(MENU_KEY\)/);
+  assert.match(refresh, /const hooks = nextPublish\(shared\(REMOVE_HOOKS_KEY\), removeHooksOf\(bin\)\);/);
+  assert.match(refresh, /if \(hooks\.write\) setShared\(REMOVE_HOOKS_KEY, hooks\.value\);/);
+  const main = fs.readFileSync(path.join(MOD_DIR, "main.js"), "utf8");
+  assert.match(main, /import \{ startBadges, handleCommand, MENU_KEY, REMOVE_HOOKS_KEY \} from "\.\/badges\.js";/);
+  const close = main.slice(main.indexOf("async close(cx)"), main.indexOf("render(cx)"));
+  assert.match(close, /setShared\(MENU_KEY, null\);\s*setShared\(REMOVE_HOOKS_KEY, null\);/);
+});
