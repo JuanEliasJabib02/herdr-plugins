@@ -43,29 +43,36 @@ its own.
 - **The popup** (a click on the moon): the headline, whose tooltip ("fields:")
   says where it got each terminal's details; "Sleep idle agents"; "After 30
   min" with −/+; why a Claude stays asleep if one does, the next one due, the
-  last event; and Sleep now and Wake all. It opens as tall as those lines are
-  then. A line that appears later may be cut, never the buttons. The popup only
-  draws and asks: the moon's copy is the one that writes and types.
+  last event; "Sleep this workspace" with its Sleep button; and Sleep now and
+  Wake all. It opens as tall as those lines are then. A line that appears later
+  may be cut, never the rows or the buttons. The popup only draws and asks: the
+  moon's copy is the one that writes and types.
 - **Sleep now** puts every hidden, finished Claude to sleep at once, without
   the wait. **Wake all** resumes every sleeping one, except those of a
-  workspace you put to sleep (see below), which wake with it. Both work while
-  automatic sleep is off.
+  workspace you put to sleep (see below), which wake with it; it is greyed out
+  when it has nothing of its own to wake. Both work while automatic sleep is
+  off.
 - **The workspace's moon.** projects-sidebar also shows one after the label of
   a workspace that is awake with a sleeping Claude (reserved badge key
   `badges.hibernate`). A workspace you put to sleep has projects-sidebar's own
   moon instead.
-- **Sleep a workspace** (`agent-sleep.sleep-workspace`, Orca's "Sleep"): every
-  space of the shown workspace goes to sleep without closing, so its tabs,
-  splits, sizes, scrollback and terminal addresses are all there when it
-  wakes. It works whether automatic sleep is on or off.
+- **Sleep a workspace** (the popup's "Sleep this workspace", or
+  `agent-sleep.sleep-workspace`; Orca's "Sleep"): every space of the shown
+  workspace goes to sleep without closing, so its tabs, splits, sizes,
+  scrollback and terminal addresses are all there when it wakes. It works
+  whether automatic sleep is on or off.
   - **Which spaces.** A space belongs to the workspace its first pane with a
     folder is in (else the folder it was made in), as projects-sidebar
     decides. A space with no terminal pane, like Inicio, belongs to none.
   - **It asks first** when a Claude it would stop is working, or may have text
-    you haven't sent: "<N> agents are working or may have unsent text. Sleep
-    anyway?" Nothing changes until you answer, and Cancel changes nothing. A
-    hidden line of text gets the probe below; text on a tab you can see always
-    counts.
+    you haven't sent. A dialog in the middle of the window, titled with the
+    workspace, says "<N> agents are working or may have unsent text. Sleep
+    anyway?" ("1 agent is" for one), with Cancel and Sleep. It opens whether
+    the popup is open or not. Nothing changes until you answer, and Cancel
+    changes nothing; so does closing it any other way (Esc, a click beside it),
+    as in Orca. Asking again while it is open replaces it with the new
+    question. A hidden line of text gets the probe below; text on a tab you can
+    see always counts.
   - **What it does, in order.** Its tabs are put away at once (`tab.settle`),
     so its row shows the moon and projects-sidebar shows Inicio. The stops wait
     until none of its spaces is shown, for up to 3 seconds. Then, one terminal
@@ -99,12 +106,11 @@ its own.
   - **Until it wakes**, showing a tab of it doesn't resume its Claudes, and
     neither does Wake all. Its row has projects-sidebar's moon, and no moon of
     this mod after the label.
-  - The confirm itself is workspace-sleep's next task.
 
 **Keys** (projects layout): `cmd-alt-s` Sleep now, `cmd-alt-w` Wake all. Commands
 you can bind or run with `herdr-app do agent-sleep.<name>`: `sleep-now`,
 `wake-all`, `toggle` (automatic sleep), `less` and `more` (the wait), `panel`
-(the popup), `sleep-workspace` (no key, as in Orca).
+(the popup), `sleep-workspace` (no key, as in Orca; the popup's row runs it).
 
 **Files:** `<Herdr home>/agent-sleep/settings.json` (`enabled`, `idleMinutes`)
 and `sleeping.json` (one record per Claude: session id, folder, flags, and its
@@ -184,5 +190,5 @@ is in the shown layout, and projects-sidebar's status bar has it.
   copy whose write comes second drops that step. Nothing covers the rest: the
   probe's `x` is typed before any write, so both can type one, and each copy
   sees only its own window, so a Claude shown only in the other can be stopped.
-  A popup's clicks only reach the window that opened it, but its lines can be
-  the other window's.
+  A popup's clicks, and a confirm's answer, only reach the window that opened
+  it, but the popup's lines can be the other window's.

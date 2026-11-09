@@ -18,11 +18,12 @@
 //     log(line)                 optional
 //   }
 //
-// One copy runs it (D11): the one with no props().view and no
-// props().overlay, the moon in the status row. main.js calls pulse() every
-// PULSE_MS, and takeRequest(), observeNow() and viewToPublish() on every
-// render. It is the one writer (D14): the popup draws what viewToPublish gave
-// and asks by naming a command. A pulse is cheap unless there is work:
+// One copy runs it (D11): the moon's (view "moon", the one a copy with no
+// props().view gets, and no props().overlay), in the status row. main.js
+// calls pulse() every PULSE_MS, and takeRequest(), observeNow() and
+// viewToPublish() on every render. It is the one writer (D14): the popup and
+// the confirm draw what they are handed and ask by naming a command. A pulse
+// is cheap unless there is work:
 //   - a request the popup left is taken, and a settings change saved, first;
 //   - every TICK_MS a tick (D2): settings and records read again, Core's
 //     terminals gathered, records reconciled (D4), the folders a Claude's
@@ -120,8 +121,16 @@ const goneHold = (label) => `${label} stays asleep: its account folder is gone`;
 
 // ── Which copy runs the loop (D11) ─────────────────────────────────────────
 
-export function isLoopCopy(props) {
-  return !(isObject(props) && (props.view || props.overlay));
+// The view of the copy that runs it: the moon, in the status row with no
+// props. main.js's views table names each copy's view (props().view, else its
+// DEFAULT_VIEW), so `defaultView` is that line's: scripts/check-views.sh
+// rewrites it to draw the popup or the confirm, and those copies, an overlay
+// too, start no loop (workspace-sleep T7).
+export const LOOP_VIEW = "moon";
+
+export function isLoopCopy(props, defaultView = LOOP_VIEW) {
+  const p = isObject(props) ? props : {};
+  return (p.view ?? defaultView) === LOOP_VIEW && !p.overlay;
 }
 
 // Starts the pulse timer in the loop copy only. `timer` is cx.timer;
@@ -182,10 +191,15 @@ export function windowLabel(minutes) {
 //   debug     which path gave Core's fields ("fields: terminals()" or
 //             "fields: hc get ×N (…)"), the headline's tooltip in the popup, or
 //             null before the first tick
-//   asleep    how many are asleep (the moon's number; Wake all has nothing to
-//             do at 0)
-export function blockModel({ now, records, settings, due, labels, lastEvent, holds, fields }) {
-  const asleep = Object.values(isObject(records) ? records : {}).filter((r) => isObject(r) && r.state === "asleep");
+//   asleep    how many are asleep (the moon's number)
+//   wakeable  how many of them Wake all would wake: not those `slept` holds,
+//             the terminals of a workspace put to sleep as a whole, which wake
+//             with it (workspace-sleep D4). Wake all has nothing to do at 0
+export function blockModel({ now, records, settings, due, labels, lastEvent, holds, fields, slept }) {
+  const asleepEntries = Object.entries(isObject(records) ? records : {}).filter(([, r]) => isObject(r) && r.state === "asleep");
+  const asleep = asleepEntries.map(([, r]) => r);
+  const held = slept instanceof Set ? slept : new Set();
+  const wakeable = asleepEntries.filter(([address]) => !held.has(address)).length;
   const kb = asleep.reduce((sum, r) => sum + (Number.isFinite(r.rssKb) && r.rssKb > 0 ? r.rssKb : 0), 0);
   const mb = Math.round(kb / 1024);
   const parts = ["Agent sleep"];
@@ -214,6 +228,7 @@ export function blockModel({ now, records, settings, due, labels, lastEvent, hol
     holds: Object.values(isObject(holds) ? holds : {}).filter((h) => typeof h === "string").sort(),
     debug: typeof fields === "string" ? `fields: ${fields}` : null,
     asleep: asleep.length,
+    wakeable,
   };
 }
 
@@ -403,6 +418,7 @@ export class Coordinator {
       lastEvent: this.lastEvent,
       holds: { ...this.envHolds(), ...this.holds },
       fields: this.fields,
+      slept: this.sleptTerminals(),
     });
   }
 
