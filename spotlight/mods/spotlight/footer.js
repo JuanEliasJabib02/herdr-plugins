@@ -2,11 +2,11 @@
 // status row. A flask and how many tasks test or wait (paused agents never
 // count); dimmed when nothing is in line; "Nadie está probando" or "Cola de
 // pruebas" on hover; a click opens the board (board.js).
-// Its copy is the footer copy, the one that runs the background loops, so it
-// also keeps the state watch: on every state.json write (watchState) it
-// re-reads the queue for the flask, hands the reaper its terminals
-// (reaper.js setReapTargets), and posts the CLI's notes with `toast: true`
-// as toasts, each once, behind a high-water mark (D18). Herdr runs this copy
+// Its copy is the footer copy, so it also keeps the state watch: on every
+// state.json write (watchState) it re-reads the queue for the flask and
+// posts the CLI's notes with `toast: true` as toasts, each once, behind a
+// high-water mark (D18). The reap and auto-sync are no longer this copy's:
+// `spotlight watch` runs them in any layout (D44, main.js). Herdr runs this copy
 // only while `projects` is shown, so the mark is kept in shared state
 // (TOAST_KEY, D45): a copy that starts again, after another layout or a
 // restart, toasts the notes written meanwhile if under 10 minutes old; with
@@ -20,9 +20,8 @@
 import { div, svg } from "gpui-kit";
 import { h_flex } from "gpui-base";
 import { theme, notify, shared, setShared } from "herdr";
-import { MOD, TOAST_KEY, boardView, footerView, toastMark, takeToasts, reapTargets } from "./board-model.js";
+import { MOD, TOAST_KEY, boardView, footerView, toastMark, takeToasts } from "./board-model.js";
 import { openBoard, watchState } from "./board.js";
-import { setReapTargets } from "./reaper.js";
 
 export default class Footer {
   init(_props, cx) {
@@ -36,13 +35,11 @@ export default class Footer {
     this.alive = false;
   }
 
-  // One reading of state.json and settings.json: the flask, the reaper's
-  // terminals, and the toasts newer than the mark, whose new mark is
-  // written back for the next copy.
+  // One reading of state.json and settings.json: the flask, and the toasts
+  // newer than the mark, whose new mark is written back for the next copy.
   read({ state, settings }) {
     const now = Date.now();
     this.flask = footerView(boardView({ state, settings, now }));
-    setReapTargets(reapTargets(state));
     const { toasts, mark } = takeToasts(state.notes, this.mark, { now, stored: shared(TOAST_KEY) });
     this.mark = mark;
     if (toasts.length > 0) setShared(TOAST_KEY, mark);

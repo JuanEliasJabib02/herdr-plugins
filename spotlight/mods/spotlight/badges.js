@@ -1,10 +1,9 @@
 // badges.spotlight (D2, D17): Spotlight's icons on projects-sidebar's
 // workspace rows and Task-mode lane headers (D29, D31), and the badge
-// commands they hand out. Only the footer copy
-// runs it (main.js): startBadges keeps the value in step with state.json
-// (board.js watchState, whose readings also feed auto-sync's holders),
-// settings.json and projects-sidebar's lists, and writes it only when it
-// changes (setShared re-renders every mod). badges-model.js builds it,
+// commands they hand out. Only the footer copy runs it (main.js):
+// startBadges keeps the value in step with state.json (board.js
+// watchState), settings.json and projects-sidebar's lists, and writes it
+// only when it changes (setShared re-renders every mod). badges-model.js builds it,
 // told the time (D42: the holder's "Sincronizado hace <n> min", so a lit
 // repo's value changes, and is written, once a minute) and each lit root's
 // variants (D42: the holder's variant tag), detected from its package.json
@@ -37,7 +36,6 @@ import { buildBadges, nextPublish, parseProjects, parseCache, attempt, taskModeG
 import { buildMenus, removeHooksOf } from "./menus-model.js";
 import { openEnvPopup } from "./env-view.js";
 import { modIo } from "./server-view-model.js";
-import { followHolders } from "./autosync.js";
 
 const KEY = "badges.spotlight";
 export const MENU_KEY = "menus.spotlight";
@@ -65,14 +63,12 @@ export function startBadges(cx) {
     alive: () => true,
     read: (next) => {
       files = next;
-      followHolders(next.state);
       cx.spawn(async () => refresh());
     },
   });
   cx.timer.every(REFRESH_MS, (cx) => {
     cx.spawn(async () => {
       files = await readFiles();
-      followHolders(files.state);
       await refresh();
     });
   });

@@ -2,11 +2,11 @@
 // (T8, S1, S9, S13), ported from Orca's test-queue-board.ts and
 // TestQueuePopover.tsx (O/src/renderer/src/components/sidebar/test-queue/),
 // with the words of Orca's Spanish locale (tester case 14). Plus the footer
-// copy's three bookkeepers: the toasts' high-water mark (D18, kept in shared
-// state, D45), the state watch's batch filter (D18) and the reaper's
-// debounce (D13).
+// copy's bookkeepers: the toasts' high-water mark (D18, kept in shared
+// state, D45) and the state watch's batch filter (D18); and the terminals the
+// watcher's reap follows (D13, D44).
 // Pure: no herdr or gpui-kit import, so `node --test` loads it; footer.js,
-// board.js and reaper.js read the files and the live data and hand them in.
+// board.js and watch.mjs read the files and the live data and hand them in.
 //
 // The rows come from the CLI's own `status --json` model (cli-format.mjs
 // buildStatus, pure), fed with state.json and settings.json as the mod reads
@@ -24,9 +24,7 @@
 //                            as notify() takes them (an error for 60 s, D35;
 //                            the note's own title, body and timeout, D41)
 //   isStateBatch(dir, paths) whether a watchFolder batch touched state.json
-//   reapTargets(state), reapFingerprint(terminals, targets),
-//   reapClock(), reapTick(clock, { now, print }), reapDone(clock)
-//                            when the footer copy runs `spotlight reap`
+//   reapTargets(state)       the terminals whose changes make the watcher reap
 
 import { buildStatus } from "./cli-format.mjs";
 import { IDLE_MS } from "./cli-turns.mjs";
@@ -374,15 +372,11 @@ export function isStateBatch(dir, paths) {
   });
 }
 
-// ── The reaper (D13) ───────────────────────────────────────────────────────
-
-// A burst of terminals() changes is reaped once, this long after the last.
-export const REAP_DEBOUNCE_MS = 1_000;
-// With nothing changing, a reap this often (idle times, gone servers, grants).
-export const REAP_EVERY_MS = 30_000;
+// ── The reaper's targets (D13, D44) ────────────────────────────────────────
 
 // The terminals whose changes can end a turn or a server: every agent in
-// line and every repo's server terminal.
+// line and every repo's server terminal. The watcher (watch.mjs) reads them
+// every 3 s and reaps when one changes.
 export function reapTargets(state) {
   const ids = [
     ...state.queue.requests.map((r) => r.terminal),
@@ -390,40 +384,3 @@ export function reapTargets(state) {
   ].filter(isText);
   return [...new Set(ids)];
 }
-
-// What of terminals() a reap cares about: the targets' state, status word and
-// turn count (hc ls --json), so a title or an unrelated agent never wakes it.
-// A target that went away changes it too.
-export function reapFingerprint(terminals, targets) {
-  const want = new Set(targets);
-  return (Array.isArray(terminals) ? terminals : [])
-    .filter((t) => isObject(t) && (want.has(t.address) || want.has(t.name)))
-    .map((t) => `${t.address}|${t.state ?? ""}|${t.status ?? ""}|${t.turn ?? ""}`)
-    .sort()
-    .join("\n");
-}
-
-// The reaper's clock: the last fingerprint, when it last changed, the last
-// reap, and whether one runs now. The first look reaps (the copy just
-// started) and takes the fingerprint as its baseline.
-export const reapClock = () => ({ looked: false, print: null, changedAt: null, lastReapAt: null, running: false });
-
-/**
- * One look at terminals(): → { clock, reap }. `reap` is true when the
- * fingerprint has been still for REAP_DEBOUNCE_MS after a change (a trailing
- * debounce), or REAP_EVERY_MS passed since the last reap; never while one
- * runs (a change seen meanwhile is reaped once it ends). Call reapDone when
- * the reap ends.
- */
-export function reapTick(clock, { now, print }) {
-  const c = { ...clock };
-  if (!c.looked) Object.assign(c, { looked: true, print });
-  else if (print !== c.print) Object.assign(c, { print, changedAt: now });
-  if (c.running) return { clock: c, reap: false };
-  const settled = c.changedAt !== null && now - c.changedAt >= REAP_DEBOUNCE_MS;
-  const periodic = c.lastReapAt === null || now - c.lastReapAt >= REAP_EVERY_MS;
-  if (!settled && !periodic) return { clock: c, reap: false };
-  return { clock: { ...c, changedAt: null, lastReapAt: now, running: true }, reap: true };
-}
-
-export const reapDone = (clock) => ({ ...clock, running: false });

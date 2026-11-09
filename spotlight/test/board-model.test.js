@@ -11,7 +11,7 @@ import assert from "node:assert/strict";
 import { request, release, pause } from "../mods/spotlight/queue.js";
 import {
   readState, readSettings, boardView, footerView, toastMark, takeToasts, isStateBatch, reapTargets,
-  reapFingerprint, reapClock, reapTick, reapDone, stateDirOf, cliPathOf, REAP_DEBOUNCE_MS, REAP_EVERY_MS,
+  stateDirOf, cliPathOf,
   TOAST_KEY, TOAST_MAX_AGE_MS,
 } from "../mods/spotlight/board-model.js";
 
@@ -425,63 +425,8 @@ describe("the state watch", () => {
   });
 });
 
-describe("the reaper (D13)", () => {
-  // The terminals of the state above: the agents in line and the servers.
-  const TARGETS = reapTargets(caseFourteen());
-
-  test("watches the requesting agents and the server terminals only", () => {
-    assert.deepEqual(TARGETS, ["t1", "t2", "t3", "t9", "t8"]);
-    const terms = [
-      { address: "t1", state: "live", status: "working", turn: 3 },
-      { address: "t7", state: "live", status: "working", turn: 1 },
-      { address: "t8", name: "sl-orca", state: "live" },
-    ];
-    const before = reapFingerprint(terms, TARGETS);
-    // An unrelated terminal's status never wakes the reaper.
-    assert.equal(reapFingerprint([terms[0], { ...terms[1], status: "done" }, terms[2]], TARGETS), before);
-    assert.notEqual(reapFingerprint([{ ...terms[0], status: "done", turn: 4 }, terms[1], terms[2]], TARGETS), before);
-    // A server terminal that went away does.
-    assert.notEqual(reapFingerprint(terms.slice(0, 2), TARGETS), before);
-  });
-
-  test("a burst of 10 terminals() changes runs one reap, 1 s after the last", () => {
-    let clock = reapClock();
-    let reaps = 0;
-    const tick = (now, print) => {
-      const r = reapTick(clock, { now, print });
-      clock = r.clock;
-      if (r.reap) {
-        reaps += 1;
-        clock = reapDone(clock);
-      }
-      return r.reap;
-    };
-    // The first look reaps once (the copy just started) and sets the baseline.
-    assert.equal(tick(0, "p0"), true);
-    reaps = 0;
-    for (let i = 1; i <= 10; i++) tick(1_000 + i * 100, `p${i}`);
-    assert.equal(reaps, 0);
-    assert.equal(tick(2_000 + REAP_DEBOUNCE_MS - 1, "p10"), false);
-    assert.equal(tick(2_000 + REAP_DEBOUNCE_MS, "p10"), true);
-    for (let now = 3_500; now < REAP_EVERY_MS; now += 500) tick(now, "p10");
-    assert.equal(reaps, 1);
-  });
-
-  test("reaps every 30 s with nothing changing, and never two at once", () => {
-    let clock = reapClock();
-    let r = reapTick(clock, { now: 0, print: "" });
-    assert.equal(r.reap, true);
-    clock = r.clock;
-    // Still running at the next change and at the 30 s mark: no second reap.
-    r = reapTick(clock, { now: 500, print: "x" });
-    clock = r.clock;
-    assert.equal(reapTick(clock, { now: REAP_EVERY_MS, print: "x" }).reap, false);
-    clock = reapDone(clock);
-    // The change seen while it ran is reaped once it ends.
-    r = reapTick(clock, { now: REAP_EVERY_MS + 1, print: "x" });
-    assert.equal(r.reap, true);
-    clock = reapDone(r.clock);
-    assert.equal(reapTick(clock, { now: 2 * REAP_EVERY_MS, print: "x" }).reap, false);
-    assert.equal(reapTick(clock, { now: 2 * REAP_EVERY_MS + 1, print: "x" }).reap, true);
+describe("the reaper's targets (D13, D44)", () => {
+  test("the requesting agents and the server terminals only, each once", () => {
+    assert.deepEqual(reapTargets(caseFourteen()), ["t1", "t2", "t3", "t9", "t8"]);
   });
 });

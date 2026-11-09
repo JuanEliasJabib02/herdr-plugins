@@ -15,7 +15,13 @@
 //   teardown --workspace p | --repo r    Spotlight off before projects-sidebar
 //                                        deletes a workspace or removes a
 //                                        project (its remove hooks, D43)
+//   watch --ensure                       start the background watcher unless
+//                                        it runs (D44: the footer copy's
+//                                        start; `on` and every light call it
+//                                        too)
 //   internal: light --task k [--force], classify --terminal t,
+//             watch (the watcher itself: auto-sync, the server and queue
+//             checks every 3 s, the full reap every 30 s; watch.mjs),
 //             continue --inline [--auto], env --task k --group id --inline,
 //             sync --repo r --auto (auto-sync's and the reap's: an
 //             automatic sync, which leaves an env that couldn't run, N4),
@@ -58,6 +64,7 @@ import {
 import { setRootError } from "./server-errors.js";
 import { settleResumes, autoResume, continueTask, classifyTerminal } from "./cli-resume.mjs";
 import { toggleTask } from "./cli-task.mjs";
+import { ensureWatch, watchMain } from "./watch.mjs";
 
 // Orca's: under an agent shell's 2-minute command cap; `on` is rerun to keep waiting.
 export const DEFAULT_ON_TIMEOUT_MS = 100_000;
@@ -111,6 +118,7 @@ const FLAGS = {
   note: "bool",
   auto: "bool",
   "free-port": "bool",
+  ensure: "bool",
   help: "bool",
 };
 
@@ -238,6 +246,9 @@ async function verbOn(cx, opts) {
   // D13: turn ends are checked by `on` too, so a finished holder never blocks the line.
   await reapQueue(cx, { full: false, skip: terminal });
   let asked = await askQueue();
+  // D44: the watcher reaps this request's turn end and syncs its lit repos
+  // in any layout, the footer shown or not.
+  await ensureWatcher(cx);
   const skipped = [...task.skipped, ...asked.skipped];
   let turn = null;
   for (;;) {
@@ -425,6 +436,8 @@ async function verbToggle(cx, opts) {
     const failed = r.errors[root];
     if (failed) err(failed);
     else out(`Spotlight on: ${path.basename(workspace)} onto ${name}.`);
+    // D44: a lit root is watched, whoever lit it.
+    if (!failed) await ensureWatcher(cx);
     return failed ? 1 : 0;
   }
   await spawnLights(cx, [key]);
@@ -448,6 +461,8 @@ async function verbToggleTask(cx, opts) {
     return 0;
   }
   const r = await toggleTask(cx, { group: opts.group, task, terminals: await terminalFacts() });
+  // D44: the task's lit roots are watched.
+  if (r.op === "on" && r.ok) await ensureWatcher(cx);
   if (r.code === "no-group" || r.code === "no-task") return usage(`spotlight toggle: ${r.message}`);
   if (r.code) {
     err(`${r.code}: ${r.message}`);
@@ -767,6 +782,9 @@ async function verbReap(cx) {
 
 async function verbLight(cx, opts) {
   if (!opts.task) return usage("spotlight light: --task <key> is required.");
+  // D44: before the light, so `on` never returns ahead of it; its marker,
+  // at work until the holder is written, keeps a new watcher from leaving.
+  await ensureWatcher(cx);
   const r = await lightTask(cx, opts.task, { force: Boolean(opts.force) });
   if (!r.ran) out(`Nothing to light for ${opts.task}.`);
   for (const [root, message] of Object.entries(r.errors)) err(`${cx.nameOf(root)}: ${message}`);
@@ -795,6 +813,43 @@ async function verbClassify(cx, opts) {
   return 0;
 }
 
+// ── watch ──────────────────────────────────────────────────────────────────
+
+// D44: `--ensure` starts the watcher unless one of this build runs (and
+// replaces another build's); bare, it is the watcher (watch.mjs watchMain),
+// which hc runs in its hidden terminal.
+async function verbWatch(cx, opts) {
+  if (!opts.ensure) {
+    const r = await watchMain(cx);
+    out(r.reason === "another" ? "spotlight watch: another watcher runs." : `spotlight watch: stopped (${r.reason}).`);
+    return 0;
+  }
+  const r = await ensureWatch(cx);
+  if (r.action === "failed") {
+    err(`spotlight watch: couldn't start the watcher: ${r.message}`);
+    return 1;
+  }
+  const said = {
+    running: `running in ${r.terminal}`,
+    started: `started in ${r.terminal}`,
+    replaced: `replaced ${r.replaced}: started in ${r.terminal}`,
+    unknown: `hc can't say whether ${r.terminal} still runs it: left as it is`,
+  };
+  out(`spotlight watch: ${said[r.action] ?? r.action}.`);
+  return 0;
+}
+
+// `on`'s and the lights' ensure: never in their way. A failure is said on
+// stderr and the verb goes on.
+async function ensureWatcher(cx) {
+  try {
+    const r = await ensureWatch(cx);
+    if (r.action === "failed") err(`spotlight: the watcher didn't start: ${r.message}`);
+  } catch (e) {
+    err(`spotlight: the watcher didn't start: ${e?.message ?? e}`);
+  }
+}
+
 const VERBS = {
   on: verbOn,
   off: verbOff,
@@ -810,6 +865,7 @@ const VERBS = {
   continue: verbContinue,
   classify: verbClassify,
   teardown: verbTeardown,
+  watch: verbWatch,
 };
 
 export async function main(argv) {

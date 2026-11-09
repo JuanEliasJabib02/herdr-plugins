@@ -1,9 +1,11 @@
 // Spotlight: Orca Pro Max's Spotlight and test queue for Herdr. One mod in
 // views; the layout and the overlays give each copy props { view }:
-//   footer (default)  the flask in the status row. The only copy that runs the
-//                     background loops (reaper, badges, workspace menu
-//                     items and remove hooks, auto-sync) and reads
-//                     key commands, badge commands included.
+//   footer (default)  the flask in the status row. The only copy that runs
+//                     the badges loop (badges, workspace menu items and
+//                     remove hooks), posts the CLI's toasts and reads key
+//                     commands, badge commands included. At its start it
+//                     ensures `spotlight watch` (D44), the background
+//                     process that auto-syncs and reaps in any layout.
 //   board             the "Cola de pruebas" popup
 //   settings          the settings dialog
 //   server            a repo's server popup (env, variant, URLs, actions)
@@ -13,15 +15,14 @@
 // read its state.json and act by exec-ing it.
 
 import { View, div } from "gpui-kit";
-import { props, nextCommand, setShared } from "herdr";
+import { props, nextCommand, setShared, exec, appHome } from "herdr";
 import Footer from "./footer.js";
 import Board from "./board.js";
 import SettingsView from "./settings-view.js";
 import ServerView from "./server-view.js";
 import EnvView from "./env-view.js";
-import { startReaper } from "./reaper.js";
 import { startBadges, handleCommand, MENU_KEY, REMOVE_HOOKS_KEY } from "./badges.js";
-import { startAutosync } from "./autosync.js";
+import { cliPathOf } from "./board-model.js";
 
 const VIEWS = {
   footer: Footer,
@@ -31,6 +32,23 @@ const VIEWS = {
   env: EnvView,
 };
 
+// D44: `spotlight watch --ensure`, once per footer copy: it starts the
+// watcher unless one of this build runs, and replaces one of an earlier
+// build (a reinstall reloads this copy). The watcher syncs the holders and
+// reaps (turn ends, servers, idle times) while nothing of Spotlight's is
+// shown; it exits by itself once nothing is lit and the queue is empty, and
+// `spotlight on` or the next light starts it again.
+function ensureWatcher(cx) {
+  cx.spawn(async () => {
+    try {
+      const r = await exec(cliPathOf(appHome()), ["watch", "--ensure"]);
+      if (r.code !== 0) console.log(`spotlight: watch --ensure: ${r.stderr.trim() || `exit ${r.code}`}`);
+    } catch (e) {
+      console.log(`spotlight: watch --ensure: ${e}`);
+    }
+  });
+}
+
 export default class Spotlight extends View {
   init(p, cx) {
     const pr = props() ?? p ?? {};
@@ -39,9 +57,8 @@ export default class Spotlight extends View {
     this.view = V ? new V() : null;
     this.view?.init?.(pr, cx);
     if (this.name === "footer") {
-      startReaper(cx);
+      ensureWatcher(cx);
       startBadges(cx);
-      startAutosync(cx);
       this.listen(cx);
     }
   }

@@ -1,19 +1,19 @@
-// Auto-sync's filter (D9). Pure: no herdr, gpui-kit or node imports, so
-// `node --test` loads it; autosync.js uses it.
+// Auto-sync's filter (D9, D44). Pure: no herdr, gpui-kit or node imports, so
+// `node --test` loads it; the watcher (`spotlight watch`, watch.mjs) uses it.
 //
-// Herdr's watchFolder on macOS watches recursively, ignored folders
-// included, so the filter Orca's watcher applies before an event exists
+// The watcher's watch (Node's recursive fs.watch) sees every folder, ignored
+// ones included, so the filter Orca's watcher applies before an event exists
 // (WATCHER_IGNORE_DIRS, O/src/main/ipc/filesystem/watchers/
 // filesystem-watcher-ignore.ts) runs here on each path: a path with any of
-// those folder names in it, at any depth, is noise. On top of Orca's list,
-// test output (D9): a test run writes there while the holder's code stays
-// the same. What's left must lie inside the holder (Orca's
-// shouldRefreshGitStatusForFileChange); a batch holding the watched folder
-// itself means "too many changes, refresh everything" (watchFolder's
-// overflow), and syncs.
+// those folder names in it, at any depth, is noise. Then Orca's
+// shouldRefreshGitStatusForFileChange: a directory event is dropped, and
+// what's left must lie inside the holder; an event for the watched folder
+// itself means "too many changes, refresh everything" (an overflow), and
+// syncs. Herdr's extra test-output folders went with T37 (L31): Orca's list,
+// nothing more; a test run's output in a gitignored folder changes no tree,
+// so its sync is the engine's no-op.
 
 export const IGNORED_DIRS = Object.freeze([
-  // Orca's, verbatim.
   ".git",
   "node_modules",
   "dist",
@@ -23,11 +23,6 @@ export const IGNORED_DIRS = Object.freeze([
   "target",
   ".venv",
   "__pycache__",
-  // Test output.
-  "test-results",
-  "playwright-report",
-  "blob-report",
-  "coverage",
 ]);
 
 // Orca's: agents and editors write in bursts; one sync per burst is enough,
@@ -49,22 +44,30 @@ function relativeTo(p, dir) {
   return p.startsWith(prefix) ? p.slice(prefix.length) : null;
 }
 
-// Whether a watchFolder batch from the holder's folder should sync its
-// repo: the holder itself (overflow), or a path inside it that no ignored
-// folder holds.
-export function shouldSync(paths, holder) {
+// Whether one event of the holder's watch syncs. An event is a path (a
+// file's), or { path, isDirectory } where isDirectory is a boolean or a
+// function, asked only for a path the folder filter keeps (the watcher
+// stats nothing under node_modules).
+function eventSyncs(event, dir) {
+  const raw = typeof event === "string" ? event : event?.path;
+  const rel = relativeTo(normPath(raw), dir);
+  if (rel === null) return false;
+  if (rel === "") return true;
+  if (rel.split("/").some((segment) => IGNORED.has(segment))) return false;
+  const isDirectory = typeof event === "object" ? event.isDirectory : false;
+  return !(typeof isDirectory === "function" ? isDirectory() : isDirectory === true);
+}
+
+// Whether a batch of the holder's watch events should sync its repo: the
+// holder itself (overflow), or a file inside it that no ignored folder holds.
+export function shouldSync(events, holder) {
   const dir = normPath(holder);
-  if (!dir || !Array.isArray(paths)) return false;
-  return paths.some((raw) => {
-    const rel = relativeTo(normPath(raw), dir);
-    if (rel === null) return false;
-    if (rel === "") return true;
-    return !rel.split("/").some((segment) => IGNORED.has(segment));
-  });
+  if (!dir || !Array.isArray(events)) return false;
+  return events.some((event) => eventSyncs(event, dir));
 }
 
 // The holders to watch, one per lit repo: [{ root, holder }], from a parsed
-// state.json (board-model.js readState).
+// state.json.
 export function watchTargets(state) {
   const repos = state && typeof state.repos === "object" && state.repos !== null ? state.repos : {};
   return Object.entries(repos)
@@ -72,18 +75,19 @@ export function watchTargets(state) {
     .map(([root, r]) => ({ root, holder: normPath(r.holder) }));
 }
 
-// The sync auto-sync runs: detached, so the CLI answers at once (D18), and
-// automatic (`--auto`): it doesn't retry an env that couldn't run until
-// settings are saved, as a sync someone asked for does (cli-work.mjs
+// The CLI args of the sync the watcher spawns detached (D18) after a burst:
+// an automatic one (`--auto`), which doesn't retry an env that couldn't run
+// until settings are saved, as a sync someone asked for does (cli-work.mjs
 // syncRepo, N4).
-export const syncArgv = (bin, root) => [bin, "sync", "--repo", root, "--detach", "--auto"];
+export const syncArgs = (root) => ["sync", "--repo", root, "--auto"];
 
 // A debounce per key over an injected one-shot timer, `after(ms, fn)` →
-// { cancel() } (the mod passes cx.timer.after). Each call cancels the key's
-// pending one and schedules `fn` `ms` later, so a burst runs it once.
+// { cancel() } (the watcher passes setTimeout's). Each call cancels the
+// key's pending one and schedules `fn` `ms` later, so a burst runs it once.
+// `cancelAll()` drops every pending one (the watcher exiting).
 export function debouncer(after, ms) {
   const pending = new Map();
-  return (key, fn) => {
+  const bounce = (key, fn) => {
     pending.get(key)?.cancel();
     pending.set(
       key,
@@ -93,4 +97,9 @@ export function debouncer(after, ms) {
       }),
     );
   };
+  bounce.cancelAll = () => {
+    for (const timer of pending.values()) timer.cancel();
+    pending.clear();
+  };
+  return bounce;
 }
