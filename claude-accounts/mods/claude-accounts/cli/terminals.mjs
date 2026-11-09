@@ -36,9 +36,9 @@
 // reads the same moment from its Stop hook). { backgroundAgents } when the
 // last line that tells is Claude's end-of-turn line (type "system", subtype
 // "turn_duration", whose pendingBackgroundAgentCount says how many
-// background agents still ran), null while a turn is under way (a later
-// user or assistant line, or a queued message) or when the tail doesn't
-// tell. A Claude with background agents reads "busy" in its session file
+// background agents still ran) is the last line that isn't a subagent's or
+// about the session (QUIET_TYPES), null otherwise: a turn under way (a prompt, a queued message, a line
+// still being written, any other line) or a tail that doesn't tell. A Claude with background agents reads "busy" in its session file
 // and "working" in Herdr until they end (probe, Claude Code 2.1.319), so
 // this is what says its own turn is over. Never throws.
 //
@@ -225,32 +225,69 @@ export async function hasTranscript(configDir, sessionId) {
 // turn's end are short, so its end-of-turn line lies well inside.
 const TURN_CHUNK = 256 * 1024;
 
+// The lines Claude writes about the session rather than a turn (its title,
+// mode, cost, a PR link, an away summary…): they follow a turn's end while
+// Claude waits, so lastTurn looks past them. Seen in 150 transcripts of
+// Claude Code 2.1.x between a turn's end and the next turn. A turn's own
+// lines (a prompt, an API request, an attachment, a file snapshot) aren't
+// here, and neither is any kind this list doesn't know.
+const QUIET_TYPES = new Set([
+  "last-prompt", "ai-title", "custom-title", "mode", "permission-mode", "session-owner", "atis-latch",
+  "frame-link", "cost-state", "pr-link", "bridge-session", "history-suppression",
+  "artifact-autoreact-ledger", "artifact-comment-monitor",
+]);
+const QUIET_SYSTEM = new Set(["stop_hook_summary", "away_summary"]);
+const quiet = (row) => QUIET_TYPES.has(row.type) || (row.type === "system" && QUIET_SYSTEM.has(row.subtype));
+
+// lastTurn runs on every poll of a busy terminal: a transcript's path is
+// kept once found, and found again when it no longer opens.
+const turnFiles = new Map();
+
 export async function lastTurn(configDir, sessionId) {
+  const key = `${configDir}\0${sessionId}`;
   try {
-    const file = await findTranscript(configDir, sessionId);
-    if (!file) return null;
-    const handle = await open(file, "r");
+    let file = turnFiles.get(key) ?? null;
+    let handle = file ? await open(file, "r").catch(() => null) : null;
+    if (!handle) {
+      file = await findTranscript(configDir, sessionId);
+      if (!file) {
+        turnFiles.delete(key);
+        return null;
+      }
+      turnFiles.set(key, file);
+      handle = await open(file, "r");
+    }
     try {
       const size = (await handle.stat()).size;
       const start = Math.max(0, size - TURN_CHUNK);
       const chunk = Buffer.alloc(size - start);
       const { bytesRead } = await handle.read(chunk, 0, chunk.length, start);
-      const lines = chunk.subarray(0, bytesRead).toString("utf8").split("\n");
+      const text = chunk.subarray(0, bytesRead).toString("utf8");
+      // The last line still being written: whatever it is, it's newer.
+      if (!text.endsWith("\n")) return null;
+      const lines = text.split("\n");
       // The first line is cut by the chunk's start.
       if (start > 0) lines.shift();
+      // From the end, the first line that isn't a subagent's or about the
+      // session decides: the turn is over only when it's the end-of-turn
+      // line itself. Anything else (a prompt, a queued message, a line a
+      // later Claude Code adds) reads as a turn under way, so a format
+      // change makes it wait.
       for (let i = lines.length - 1; i >= 0; i--) {
+        if (!lines[i].trim()) continue;
         let row;
         try {
           row = JSON.parse(lines[i]);
         } catch {
-          continue;
+          return null;
         }
-        if (!row || typeof row !== "object" || row.isSidechain) continue;
+        if (!row || typeof row !== "object") return null;
+        if (row.isSidechain || quiet(row)) continue;
         if (row.type === "system" && row.subtype === "turn_duration") {
           const n = row.pendingBackgroundAgentCount;
           return { backgroundAgents: Number.isInteger(n) && n > 0 ? n : 0 };
         }
-        if (row.type === "user" || row.type === "assistant" || (row.type === "queue-operation" && row.operation === "enqueue")) return null;
+        return null;
       }
       return null;
     } finally {

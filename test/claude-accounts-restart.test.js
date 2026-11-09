@@ -1133,6 +1133,22 @@ test("a waiting restart still fires when Claude quits on its own (a /exit by han
   assert.equal(accountNow(s, "t1"), B);
 });
 
+test("a /exit by hand resumes the session Claude was in when it quit, not the one the switch saw (a /resume while it waited)", async () => {
+  const s = sandbox({ active: A, switchMode: "restart" });
+  const t1 = s.term("t1", { on: A, status: "busy", state: "working" });
+  s.json(["use", B]);
+  const item = await until(() => s.item((i) => i.state === "waitingIdle" && i.claimedBy), WAIT, "waitingIdle");
+  assert.equal(item.sessionId, t1.sessionId);
+  const other = randomUUID();
+  writeFileSync(join(dirname(t1.transcriptFile), `${other}.jsonl`), `${JSON.stringify({ sessionId: other, type: "user" })}\n`);
+  t1.setSession({ sessionId: other });
+  // Many polls (25 ms each), so the runner sees the new session before Claude quits.
+  await sleep(1500);
+  process.kill(t1.pid, "SIGKILL");
+  await until(() => s.item((i) => i.id === item.id && i.state === "done"), WAIT, "the restart", s.queue);
+  assert.deepEqual(s.typed("t1").map((x) => x.args), [["--resume", other]]);
+});
+
 test("a Claude that quits on its own with nothing to resume (no transcript) drops its waiting restart: nothing is typed", async () => {
   const s = sandbox({ active: A, switchMode: "restart" });
   const t1 = s.term("t1", { on: A, status: "busy", state: "working" });
@@ -1154,7 +1170,12 @@ test("Orca's 'not mid-turn': a Claude whose turn ended restarts while its subage
   const s = sandbox({ active: A, switchMode: "restart" });
   const records = { a1: subagent("Batch D T21: whole-task toggle"), a2: subagent("Fix r5"), a3: subagent("an old one", "idle") };
   const t1 = s.term("t1", { on: A, status: "busy", state: "working", records });
-  endTurn(t1, 2);
+  // Three ran at the turn's end; Herdr names two of them. What Claude writes
+  // about the session while it waits doesn't start a turn.
+  endTurn(t1, 3);
+  for (const row of [{ type: "ai-title" }, { type: "pr-link" }, { type: "system", subtype: "away_summary" }]) {
+    appendFileSync(t1.transcriptFile, `${JSON.stringify({ ...row, sessionId: t1.sessionId })}\n`);
+  }
   // Herdr lists none of t2's subagents: the count from the turn's end says it.
   const t2 = s.term("t2", { on: A, status: "busy", state: "working" });
   endTurn(t2, 1);
@@ -1165,7 +1186,7 @@ test("Orca's 'not mid-turn': a Claude whose turn ended restarts while its subage
   assert.equal(accountNow(s, "t2"), B);
   const [line1, told1] = s.sends("t1");
   assert.match(line1.text, / --resume /);
-  assert.match(told1.text, /^Claude Accounts restarted this session to move it to .+\. These subagents were still running and were stopped: "Batch D T21: whole-task toggle", "Fix r5"\. Launch them again\.$/);
+  assert.match(told1.text, /^Claude Accounts restarted this session to move it to .+\. These subagents were still running and were stopped: "Batch D T21: whole-task toggle", "Fix r5", and 1 more that Herdr didn't name\. Launch them again\.$/);
   const [line2, told2] = s.sends("t2");
   assert.match(line2.text, / --resume /);
   assert.match(told2.text, /\. 1 background subagent was still running and was stopped: launch again the ones that hadn't reported back\.$/);
@@ -1182,14 +1203,27 @@ test("a turn still under way (a later prompt or a queued message), or one blocke
   appendFileSync(t2.transcriptFile, `${JSON.stringify({ type: "queue-operation", operation: "enqueue", sessionId: t2.sessionId })}\n`);
   const t3 = s.term("t3", { on: A, status: "busy", state: "blocked" });
   endTurn(t3, 1);
+  // A line still being written after the turn's end: it's newer, whatever it is.
+  const t4 = s.term("t4", { on: A, status: "busy", state: "working" });
+  endTurn(t4, 1);
+  appendFileSync(t4.transcriptFile, `{"type":"user","sessionId":"${t4.sessionId}","mess`);
+  // A line kind this file doesn't know (a later Claude Code's), or one a
+  // turn writes (an API request), even under session lines: not over.
+  const t5 = s.term("t5", { on: A, status: "busy", state: "working" });
+  endTurn(t5, 1);
+  appendFileSync(t5.transcriptFile, `${JSON.stringify({ type: "something-new", sessionId: t5.sessionId })}\n`);
+  const t6 = s.term("t6", { on: A, status: "busy", state: "working" });
+  endTurn(t6, 1);
+  appendFileSync(t6.transcriptFile, `${JSON.stringify({ type: "api-request", sessionId: t6.sessionId })}\n${JSON.stringify({ type: "mode", sessionId: t6.sessionId })}\n`);
+  const terms = [t1, t2, t3, t4, t5, t6];
   s.json(["use", B]);
-  await until(() => s.queue().length === 3 && s.queue().every((i) => i.state === "waitingIdle" && i.claimedBy), WAIT, "all three waiting", s.queue);
+  await until(() => s.queue().length === 6 && s.queue().every((i) => i.state === "waitingIdle" && i.claimedBy), WAIT, "all six waiting", s.queue);
   // Dozens of polls (25 ms each): none of them may act.
   await sleep(1000);
-  assert.deepEqual(s.queue().map((i) => i.state), ["waitingIdle", "waitingIdle", "waitingIdle"]);
-  assert.ok([t1, t2, t3].every((t) => alive(t.pid)), "no Claude was stopped");
+  assert.deepEqual(s.queue().map((i) => i.state), Array(6).fill("waitingIdle"));
+  assert.ok(terms.every((t) => alive(t.pid)), "no Claude was stopped");
   assert.deepEqual(s.sends(), []);
-  for (const t of ["t1", "t2", "t3"]) s.json(["restart", "--cancel", t]);
+  for (const t of ["t1", "t2", "t3", "t4", "t5", "t6"]) s.json(["restart", "--cancel", t]);
 });
 
 test("timeouts: a shell that doesn't come back, and a new Claude that never reports idle, end as timeout (4) with the line to run by hand", async () => {
