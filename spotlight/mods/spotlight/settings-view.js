@@ -646,15 +646,18 @@ export default class SettingsView {
         .child(div().flex_1().min_w(0).text_size(11.5).text_color(t.blocked).child(trouble.message))
         .when(Boolean(trouble?.force), (r) => r.child(this.button(t, id("force"), HELP.forceOff, false,
           (cx) => this.forceOff(repo, cx), !this.busy)))))
-      .child(div().pt(6).text_size(12).font_medium().child(HELP.serverTitle))
-      .child(this.hint(t, HELP.server))
-      .when(Boolean(variant), (el) => el.child(this.hint(t, variant)))
-      .children(ENVS.map((env) => this.commandField(t, repo, env)))
-      .child(h_flex().gap(8).items_center()
-        .child(div().text_size(12).text_color(t.muted).child(HELP.portLabel))
-        .child(this.input(t, `${repo.root}:port`, 90)))
-      .child(this.hint(t, HELP.port))
-      .when(errs.length > 0, (el) => el.child(div().text_size(11.5).text_color(t.blocked).child(errs.join(" "))));
+      // Server shows only while the switch is on, as Orca's section
+      // (RepositorySpotlightSection.tsx:90-96).
+      .when(sw.on, (el) => el
+        .child(div().pt(6).text_size(12).font_medium().child(HELP.serverTitle))
+        .child(this.hint(t, HELP.server))
+        .when(Boolean(variant), (s) => s.child(this.hint(t, variant)))
+        .children(ENVS.map((env) => this.commandField(t, repo, env)))
+        .child(h_flex().gap(8).items_center()
+          .child(div().text_size(12).text_color(t.muted).child(HELP.portLabel))
+          .child(this.input(t, `${repo.root}:port`, 90)))
+        .child(this.hint(t, HELP.port))
+        .when(errs.length > 0, (s) => s.child(div().text_size(11.5).text_color(t.blocked).child(errs.join(" ")))));
   }
 
   render() {
