@@ -133,10 +133,16 @@ the same files and run the same commands: see [CONTRACT.md](CONTRACT.md).
     on System default also counts as a saved account signed in to the same
     login (same email and same org, as in Orca): it moves when you leave that
     account, and stays when you switch to it.
-  - A restart waits until that terminal's Claude is idle, however long it
-    takes, stops it, types `CLAUDE_ACCOUNTS_DIR=<folder> claude <its flags>
-    --resume <session>` in the same shell, and checks the new Claude landed
-    on the new account. Terminals restart independently.
+  - A restart waits until that terminal's Claude finishes its turn, however
+    long it takes, stops it, types `CLAUDE_ACCOUNTS_DIR=<folder> claude <its
+    flags> --resume <session>` in the same shell, and checks the new Claude
+    landed on the new account. Terminals restart independently.
+  - Background subagents don't hold the restart up, as in Orca: they stop
+    with Claude, and the resumed Claude gets a message naming the ones that
+    were still running, so it launches them again. A Claude waiting on a
+    question isn't restarted until it's answered.
+  - If you quit Claude yourself (`/exit`) while its restart waits, the
+    resume line goes in at once, on the new account.
   - Only safe flags are kept (`--model`, `--permission-mode`, `--effort`,
     `--settings`, `--add-dir`, `--dangerously-skip-permissions`), so a
     resumed agent never gets its first task again.

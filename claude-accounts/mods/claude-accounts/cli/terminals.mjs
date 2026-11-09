@@ -19,7 +19,7 @@
 //   2. <dir>/sessions/<foreground.pid>.json, searched over every config dir
 //      this Mac has (configDirs). The dir where it's found is the account.
 // Returns { terminal, kind, error, pid, foregroundPid, ownProgram, title,
-// app, state, argv, account, configDir, sessionId, session }:
+// app, state, argv, account, configDir, sessionId, session, agents }:
 //   kind: "claude" (a session file was found), "noSession" (Claude runs but
 //   has no readable session file yet), "notClaude" (the shell or another
 //   program is in the foreground), "missing" (no such live terminal) or
@@ -27,7 +27,20 @@
 //   ownProgram: Claude is the terminal's own program (pid == foreground.pid),
 //   so there is no shell to come back to: it can't move (D7, D8);
 //   session: the session file's status word, "idle" or "busy";
-//   state: Herdr's .status.state ("idle", "working", "done", "blocked", …).
+//   state: Herdr's .status.state ("idle", "working", "done", "blocked", …);
+//   agents: the titles of the subagents Herdr lists as working or blocked
+//   (.records, keyed by agent id): a restart stops them with Claude.
+//
+// lastTurn(configDir, sessionId): how the conversation's last turn ended,
+// read from the end of its transcript (Orca's isClaudePaneMidTurn, which
+// reads the same moment from its Stop hook). { backgroundAgents } when the
+// last line that tells is Claude's end-of-turn line (type "system", subtype
+// "turn_duration", whose pendingBackgroundAgentCount says how many
+// background agents still ran) is the last line that isn't a subagent's or
+// about the session (QUIET_TYPES), null otherwise: a turn under way (a prompt, a queued message, a line
+// still being written, any other line) or a tail that doesn't tell. A Claude with background agents reads "busy" in its session file
+// and "working" in Herdr until they end (probe, Claude Code 2.1.319), so
+// this is what says its own turn is over. Never throws.
 //
 // hasTranscript(configDir, sessionId): whether
 // <configDir>/projects/*/<sessionId>.jsonl exists, symlinks followed (every
@@ -49,7 +62,8 @@
 // is "claude-code" (D7 step 1). Terminals on other machines (`vps/t7`) are
 // left out: their logins are their own (Orca's rule).
 //
-// Every hc call runs with HC_TERMINAL_ID removed from its env (D7), and
+// Every hc call runs with HC_TERMINAL_ID and HC_SCOPE removed from its env
+// (D7), and
 // passes the terminal after `--`, so a name can't read as a flag.
 
 import { execFile } from "node:child_process";
@@ -69,11 +83,14 @@ const str = (value) => (typeof value === "string" && value ? value : null);
 
 // ── hc ──────────────────────────────────────────────────────────────────────
 
-// The env every hc call gets: this process's, minus HC_TERMINAL_ID, so hc
-// never takes the call for the terminal this CLI runs in (D7, probe b3).
+// The env every hc call gets: this process's, minus HC_TERMINAL_ID and
+// HC_SCOPE, so hc never takes the call for the terminal this CLI runs in
+// (D7, probe b3): with them, hc send wraps the text in <hc from=…>, and
+// Claude reads a typed line as another terminal's message.
 export function hcEnv(env = process.env) {
   const out = { ...env };
   delete out.HC_TERMINAL_ID;
+  delete out.HC_SCOPE;
   return out;
 }
 
@@ -202,6 +219,85 @@ export async function hasTranscript(configDir, sessionId) {
   return (await findTranscript(configDir, sessionId)) !== null;
 }
 
+// ── The last turn (Orca's "not mid-turn") ───────────────────────────────────
+
+// How much of the transcript lastTurn reads, from its end: the lines after a
+// turn's end are short, so its end-of-turn line lies well inside.
+const TURN_CHUNK = 256 * 1024;
+
+// The lines Claude writes about the session rather than a turn (its title,
+// mode, cost, a PR link, an away summary…): they follow a turn's end while
+// Claude waits, so lastTurn looks past them. Seen in 150 transcripts of
+// Claude Code 2.1.x between a turn's end and the next turn. A turn's own
+// lines (a prompt, an API request, an attachment, a file snapshot) aren't
+// here, and neither is any kind this list doesn't know.
+const QUIET_TYPES = new Set([
+  "last-prompt", "ai-title", "custom-title", "mode", "permission-mode", "session-owner", "atis-latch",
+  "frame-link", "cost-state", "pr-link", "bridge-session", "history-suppression",
+  "artifact-autoreact-ledger", "artifact-comment-monitor",
+]);
+const QUIET_SYSTEM = new Set(["stop_hook_summary", "away_summary"]);
+const quiet = (row) => QUIET_TYPES.has(row.type) || (row.type === "system" && QUIET_SYSTEM.has(row.subtype));
+
+// lastTurn runs on every poll of a busy terminal: a transcript's path is
+// kept once found, and found again when it no longer opens.
+const turnFiles = new Map();
+
+export async function lastTurn(configDir, sessionId) {
+  const key = `${configDir}\0${sessionId}`;
+  try {
+    let file = turnFiles.get(key) ?? null;
+    let handle = file ? await open(file, "r").catch(() => null) : null;
+    if (!handle) {
+      file = await findTranscript(configDir, sessionId);
+      if (!file) {
+        turnFiles.delete(key);
+        return null;
+      }
+      turnFiles.set(key, file);
+      handle = await open(file, "r");
+    }
+    try {
+      const size = (await handle.stat()).size;
+      const start = Math.max(0, size - TURN_CHUNK);
+      const chunk = Buffer.alloc(size - start);
+      const { bytesRead } = await handle.read(chunk, 0, chunk.length, start);
+      const text = chunk.subarray(0, bytesRead).toString("utf8");
+      // The last line still being written: whatever it is, it's newer.
+      if (!text.endsWith("\n")) return null;
+      const lines = text.split("\n");
+      // The first line is cut by the chunk's start.
+      if (start > 0) lines.shift();
+      // From the end, the first line that isn't a subagent's or about the
+      // session decides: the turn is over only when it's the end-of-turn
+      // line itself. Anything else (a prompt, a queued message, a line a
+      // later Claude Code adds) reads as a turn under way, so a format
+      // change makes it wait.
+      for (let i = lines.length - 1; i >= 0; i--) {
+        if (!lines[i].trim()) continue;
+        let row;
+        try {
+          row = JSON.parse(lines[i]);
+        } catch {
+          return null;
+        }
+        if (!row || typeof row !== "object") return null;
+        if (row.isSidechain || quiet(row)) continue;
+        if (row.type === "system" && row.subtype === "turn_duration") {
+          const n = row.pendingBackgroundAgentCount;
+          return { backgroundAgents: Number.isInteger(n) && n > 0 ? n : 0 };
+        }
+        return null;
+      }
+      return null;
+    } finally {
+      await handle.close();
+    }
+  } catch {
+    return null;
+  }
+}
+
 // ── The last prompt (D23) ───────────────────────────────────────────────────
 
 // Orca's AGENT_STATUS_MAX_FIELD_LENGTH: a prompt is a row's title, never a body.
@@ -290,6 +386,16 @@ export async function lastPrompt(configDir, sessionId) {
   }
 }
 
+// The titles of the subagents a terminal's records list as working or
+// blocked, each on one line.
+function runningAgents(records) {
+  if (!records || typeof records !== "object") return [];
+  return Object.values(records)
+    .filter((r) => r && (r.state === "working" || r.state === "blocked"))
+    .map((r) => (str(r.title) ?? "").replace(/\s+/g, " ").trim())
+    .filter(Boolean);
+}
+
 // The foreground looks like Claude Code: the native binary (`claude`,
 // `claude.exe`) or node running its bin.
 const CLAUDE_BIN = /(^|\/)claude(\.exe)?$/i;
@@ -316,6 +422,7 @@ export async function inspectTerminal(t, known) {
     configDir: null,
     sessionId: null,
     session: null,
+    agents: [],
   };
   let info;
   try {
@@ -328,6 +435,7 @@ export async function inspectTerminal(t, known) {
   result.title = str(info.title);
   result.app = str(info.status?.app);
   result.state = str(info.status?.state);
+  result.agents = runningAgents(info.records);
   const fg = info.foreground;
   if (!fg || !Number.isInteger(fg.pid)) return { ...result, kind: "notClaude" };
   result.foregroundPid = fg.pid;
