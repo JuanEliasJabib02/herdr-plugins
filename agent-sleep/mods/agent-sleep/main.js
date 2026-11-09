@@ -108,15 +108,21 @@ class Moon {
 
   // "agent-sleep.<name>" in keys.json, or `herdr-app do agent-sleep.<name>`.
   // Listening from the start, window or not, a command is taken when it is
-  // sent, never left queued for a later copy to run against whatever is
-  // shown then (F1). A command only sets what the next pulse does, and a
-  // pulse does nothing without a window.
+  // sent, never left for a later copy (F1). `panel` opens the popup at once;
+  // every other command only sets what the next pulse does, and a pulse does
+  // nothing without a window, so one sent before the window waits for it.
+  // A command that throws (the popup with no window) is logged, and the
+  // loop keeps listening.
   listen(cx) {
     cx.spawn(async (cx) => {
       for (;;) {
         const c = await nextCommand();
-        if (c === "panel") this.openPanel();
-        else this.co.command(c);
+        try {
+          if (c === "panel") this.openPanel();
+          else this.co.command(c);
+        } catch (e) {
+          console.log(`agent-sleep: ${c} failed: ${e}`);
+        }
         cx.notify();
       }
     });

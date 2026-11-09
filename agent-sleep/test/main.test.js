@@ -199,3 +199,23 @@ test("a copy that is no moon (the popup, an overlay) starts no timer and no list
     assert.equal(w.listens, 0, JSON.stringify(window));
   }
 });
+
+test("a command that throws (the popup opened with no window) is logged, and the listener keeps taking commands", async () => {
+  const w = world();
+  fake.openOverlay = () => {
+    throw new Error("no window");
+  };
+  const logged = [];
+  const log = console.log;
+  console.log = (...a) => logged.push(a.join(" "));
+  try {
+    moonCopy(w);
+    for (let i = 0; i < 5; i += 1) await new Promise(setImmediate);
+    await send(w, "panel");
+  } finally {
+    console.log = log;
+  }
+  assert.ok(logged.some((l) => l.includes("agent-sleep: panel failed")), JSON.stringify(logged));
+  assert.equal(w.listens, 2, "the loop went back to nextCommand()");
+  assert.equal(w.waiting.length, 1, "a next command still has someone waiting for it");
+});
