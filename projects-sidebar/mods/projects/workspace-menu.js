@@ -178,7 +178,7 @@ export default class WorkspaceMenu {
         .text_color(off ? t.dim : it.danger ? t.blocked : t.foreground)
         .when(i === this.at && !off, (el) => el.bg(t.selected))
         .when(!off, (el) => el.cursor_pointer().hover((s) => s.bg(t.hover)).on_click((_e, cx) => this.choose(it, cx)))
-        .when(off && Boolean(it.why), (el) => el.tooltip(it.why))
+        .when(Boolean((off && it.why) || it.tooltip), (el) => el.tooltip(off && it.why ? it.why : it.tooltip))
         .when(busy, (el) => el.opacity(0.6))
         .child(pic ? svg(pic).size(14).flex_none().text_color(tint) : div().size(14).flex_none())
         .child(div().flex_1().min_w(0).truncate().child(busy ? `${it.label}…` : it.label))

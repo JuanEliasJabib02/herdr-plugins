@@ -780,8 +780,8 @@ items. This section is the contract a publisher codes against.
   slash is ignored; two spellings of one path share its items and their
   cap). Any other key (a lane key included) is ignored; a value that isn't
   an object is no items; a path whose value isn't a list has none.
-- **An item:** `{ id, text, icon?, danger?, disabled?, why?, checked?,
-  action?, items? }`.
+- **An item:** `{ id, text, icon?, danger?, disabled?, why?, tooltip?,
+  checked?, action?, items? }`.
   - `id`: 1 to 64 of letters, digits, `.`, `_`, `:` and `-`, starting with
     a letter or digit. It names the row (the running one shows "…") and a
     submenu's item. A later item repeating an id in the same list is
@@ -799,6 +799,10 @@ items. This section is the contract a publisher codes against.
   - `why`: on a disabled item only, why it's off (e.g. "Sincronizando…"),
     shown on hover; at most 200 code points, one line. An enabled item's
     `why` is dropped.
+  - `tooltip`: on any item, what it does, shown on hover (e.g. agent-sleep's
+    "Close all active panels in this workspace to free up memory and CPU.");
+    at most 200 code points, one line. On a disabled item with a `why`, the
+    `why` is shown instead.
   - `checked: true`: a radio mark (a dot) at the row's end; publish it on
     the one picked of a group (e.g. the env in use).
   - `action`: exactly a badge's (see Badges from other plugins): `{

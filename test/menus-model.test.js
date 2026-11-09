@@ -113,6 +113,13 @@ test("a bad field drops alone, the item stays", () => {
   // why: one line, cut at 200 code points.
   assert.equal(one({ ...base, disabled: true, why: " Sincronizando…\n" }).why, "Sincronizando…");
   assert.equal([...one({ ...base, disabled: true, why: "w".repeat(250) }).why].length, 200);
+  // tooltip: on any item, one line, cut at 200 code points; anything else drops alone.
+  assert.deepEqual(one({ ...base, tooltip: " Close all active panels\n in this workspace " }), { ...plain, tooltip: "Close all active panels in this workspace" });
+  assert.deepEqual(one({ ...base, disabled: true, why: "Off", tooltip: "Tip" }), { ...plain, disabled: true, why: "Off", tooltip: "Tip" });
+  assert.equal([...one({ ...base, tooltip: "t".repeat(250) }).tooltip].length, 200);
+  for (const tooltip of [5, null, " \n ", ["x"]]) {
+    assert.deepEqual(one({ ...base, tooltip }), plain, `tooltip: ${JSON.stringify(tooltip)}`);
+  }
 
   // A submenu parent opens its submenu: its action and radio mark drop.
   assert.deepEqual(

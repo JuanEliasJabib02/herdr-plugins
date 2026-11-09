@@ -9,8 +9,8 @@
 //
 //   each key:  { [workspacePath]: [item] }
 //              workspacePath: absolute, as `git worktree list` prints it
-//   an item:   { id, text, icon?, danger?, disabled?, why?, checked?,
-//                action?, items? }
+//   an item:   { id, text, icon?, danger?, disabled?, why?, tooltip?,
+//                checked?, action?, items? }
 //   action:    a badge's (badges-model.js actionOf): { command } of the
 //              publisher's own mod, or { exec: [program, ...args] }
 //   items:     one submenu level: the same item, without `items`
@@ -69,6 +69,7 @@ function itemOf(raw, key, sub) {
   const action = parent ? null : actionOf(raw.action, publisherOf(key));
   const disabled = raw.disabled === true;
   const why = disabled ? textOf(raw.why, WHY_MAX) : null;
+  const tooltip = textOf(raw.tooltip, WHY_MAX);
   return {
     key,
     id,
@@ -77,6 +78,7 @@ function itemOf(raw, key, sub) {
     ...(raw.danger === true ? { danger: true } : {}),
     ...(disabled ? { disabled: true } : {}),
     ...(why ? { why } : {}),
+    ...(tooltip ? { tooltip } : {}),
     ...(!parent && raw.checked === true ? { checked: true } : {}),
     ...(action ? { action } : {}),
     ...(parent ? { items } : {}),
