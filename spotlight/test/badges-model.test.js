@@ -119,9 +119,12 @@ function assertContract(value) {
       if (b.text !== undefined) assert.ok(codePoints(b.text) <= 16 && !/\s{2}|\n/.test(b.text), `text "${b.text}"`);
       assert.ok(["accent", "dim", "working", "blocked", "done"].includes(b.tone), `tone ${b.tone}`);
       assert.ok(typeof b.tooltip === "string" && codePoints(b.tooltip) <= 200 && !/\n/.test(b.tooltip), `tooltip "${b.tooltip}"`);
+      // D29: `spin` is true or absent.
+      if (b.spin !== undefined) assert.equal(b.spin, true, `spin on ${b.icon}`);
       const { action } = b;
       if (action === undefined) {
-        assert.ok(["flask", "clock", "pause"].includes(path.basename(b.icon, ".svg")), "only queue badges click like their row");
+        // The queue badges click like their row; the busy ring (D33) has no action.
+        assert.ok(["flask", "clock", "pause", "spinner"].includes(path.basename(b.icon, ".svg")), "only queue badges and the ring have no action");
         continue;
       }
       assert.ok((action.command === undefined) !== (action.exec === undefined), "exactly one of command / exec");
@@ -295,6 +298,67 @@ test("a server error under a root error: the badges show the root error on top",
   assertContract(value);
 });
 
+// D33: while a light, a turn-off, a Forzar sync or a restart works on a
+// repo, its flashlight is M's own ring, spinning, with no action.
+const RING = { icon: "mods/spotlight/icons/spinner.svg", tone: "working", tooltip: "Sincronizando…", spin: true };
+
+test("D33: a busy repo: the ring replaces the flashlight on the holder's and the root's rows, and on the target's; it spins, reads 'Sincronizando…' and has no action", () => {
+  // A Forzar sync of the holder: its row and the root's spin; the server
+  // badge and the queue's flask stay; the other workspaces keep their dim
+  // flashlight, which still toggles.
+  const s = baseState();
+  s.repos[BACK].busy = { op: "sync", since: 5, pid: 4242, workspace: B1 };
+  const { value } = build(s);
+  assert.deepEqual(icons(value[B1]), ["spinner", "server", "flask"]);
+  assert.deepEqual(icons(value[BACK]), ["spinner", "server"]);
+  for (const at of [B1, BACK]) assert.deepEqual(value[at][0], RING, at);
+  assert.equal(value[B1][1].text, ":3000+1");
+  assert.deepEqual(icons(value[B2]), ["flashlight", "clock"]);
+  assert.deepEqual(value[B2][0].action, { exec: [BIN, "toggle", "--workspace", B2] });
+  assertContract(value);
+
+  // A takeover in flight: the target spins too, in its flashlight's place.
+  const takeover = baseState();
+  takeover.repos[BACK].busy = { op: "light", since: 5, pid: 4242, workspace: B2 };
+  const moving = build(takeover).value;
+  for (const at of [B1, BACK, B2]) assert.deepEqual(moving[at][0], RING, at);
+  assert.deepEqual(icons(moving[B2]), ["spinner", "clock"]);
+  assertContract(moving);
+
+  // A fresh light: no holder yet (the record made for the mark). The
+  // target's row spins before it holds; the root, not lit, has no badge.
+  const fresh = baseState();
+  fresh.repos[FRONT] = repo({ busy: { op: "light", since: 5, pid: 4242, workspace: F2 } });
+  const lighting = build(fresh).value;
+  assert.deepEqual(lighting[F2], [RING]);
+  assert.equal(lighting[FRONT], undefined);
+  assert.deepEqual(icons(lighting[F1]), ["flashlight", "flask"], "another workspace of the repo keeps its flashlight");
+  assertContract(lighting);
+
+  // A target the worktree cache doesn't list yet still spins.
+  const unlisted = `${WS}/front/brand-new`;
+  fresh.repos[FRONT].busy.workspace = unlisted;
+  assert.deepEqual(build(fresh).value[unlisted], [RING]);
+
+  // A refused fresh activation retried (Proyectar igual): the root's red
+  // flashlight spins until it's decided.
+  const retry = baseState();
+  retry.repos[FRONT] = repo({ lastError: { code: "untracked-collision", message: "x", at: 5 }, busy: { op: "light", since: 5, pid: 4242, workspace: F2 } });
+  const retried = build(retry).value;
+  assert.deepEqual(retried[FRONT], [RING]);
+  assert.deepEqual(retried[F2], [RING]);
+  assertContract(retried);
+
+  // A turn-off from the root's row (no workspace to name): the lit rows spin.
+  const off = baseState();
+  off.repos[BACK].busy = { op: "off", since: 5, pid: 4242, workspace: null };
+  const going = build(off).value;
+  for (const at of [B1, BACK]) assert.deepEqual(going[at][0], RING, at);
+
+  // The ring's rows still resolve the server popup's id.
+  assert.equal(build(fresh).servers[serverIdOf(unlisted)]?.root, FRONT);
+});
+
 // F9, G6: one oneLine, in text.js, for the mod's models and the CLI's
 // modules alike (ports.js folded ps's start times with a copy of it).
 test("G6: one oneLine (text.js) flattens whitespace to single spaces; the badges, the popup, ports.js and the CLI import it and fold none themselves", async () => {
@@ -315,9 +379,9 @@ test("G6: one oneLine (text.js) flattens whitespace to single spaces; the badges
 // (server-survived, server-not-stopped) are never on a record, so they are
 // another set: SERVER_ERRORS drives serverDown, the popup's actions and the
 // record's two-error stack, none of which they reach.
-test("G9: a record's server errors (port-busy, server-exited) are one constant, imported by the CLI, the badges and the popup; the turn-off's are another", async () => {
+test("G9: a record's server errors (port-busy, server-exited, server-start-failed) are one constant, imported by the CLI, the badges and the popup; the turn-off's are another", async () => {
   const { SERVER_ERRORS, TURN_OFF_ERRORS, isServerError, serverDown } = await import("../mods/spotlight/server-errors.js");
-  assert.deepEqual([...SERVER_ERRORS].sort(), ["port-busy", "server-exited"]);
+  assert.deepEqual([...SERVER_ERRORS].sort(), ["port-busy", "server-exited", "server-start-failed"]);
   assert.deepEqual([...(TURN_OFF_ERRORS ?? [])].sort(), ["server-not-stopped", "server-survived"]);
   for (const code of SERVER_ERRORS) {
     assert.equal(isServerError({ code }), true, code);

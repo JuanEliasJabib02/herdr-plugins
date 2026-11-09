@@ -2333,3 +2333,42 @@ test("F9: the survivors are phrased once (survivorsPhrase), for the turn-off's e
   assert.doesNotMatch(src, /siguió vivo|siguieron vivos/, "cli.mjs spells the survivors itself");
   assert.match(src, /survivorsPhrase/);
 });
+
+// ── D33: the busy mark, across processes ───────────────────────────────────
+
+test("D33: a light, a human's toggle or an agent's turn, marks its repo busy with the target workspace and the detached light's pid while it runs, and clears it after", async () => {
+  const w = makeWorld();
+  const app = makeRepo(w, "app", { pkg: DEV, tasks: ["AX-60", "AX-61"] });
+  w.register([{ id: "g1", repos: [app] }]);
+  w.listen(app.root, [3000]);
+  const [ws1, ws2] = [app.ws["AX-60"], app.ws["AX-61"]];
+  write(ws2, "ax61.txt", "from AX-61\n");
+  w.slowGit("reset", 1.5);
+
+  // A fresh light from the flashlight: the record is made for the mark, so
+  // the target's row spins before it holds.
+  const direct = `direct/${app.root}`;
+  assert.equal((await w.cli(["toggle", "--workspace", ws1])).code, 0);
+  const lighting = await w.until((s) => (s.repos[app.root]?.busy ? s : null), { what: "the toggle's busy mark" });
+  const busy = lighting.repos[app.root].busy;
+  assert.deepEqual({ op: busy.op, workspace: busy.workspace }, { op: "light", workspace: ws1 });
+  assert.equal(lighting.repos[app.root].holder, null);
+  assert.equal(busy.pid, lighting.queue.lighting[direct].pid, "the detached light marks it");
+  await w.until((s) => s.queue.lighting[direct]?.phase === "done", { what: "lit" });
+  assert.equal(w.state().repos[app.root].holder, ws1);
+  assert.equal("busy" in w.state().repos[app.root], false);
+
+  // An agent's turn takes the root over: its light marks too.
+  const t = w.agent(ws2);
+  const pending = w.cli(["on", "--timeout-ms", "30000"], { terminal: t, cwd: ws2 });
+  const taking = await w.until((s) => (s.repos[app.root]?.busy?.workspace === ws2 ? s : null), { what: "the turn's busy mark" });
+  assert.equal(taking.repos[app.root].busy.op, "light");
+  assert.equal(taking.repos[app.root].busy.pid, taking.queue.lighting["g1/AX-61"].pid);
+  w.slowGit(null);
+  const r = await pending;
+  assert.equal(r.code, 0, r.stderr + r.stdout);
+  assert.equal(w.state().repos[app.root].holder, ws2);
+  assert.equal("busy" in w.state().repos[app.root], false);
+});
+
+// ── T21 (D31): the whole-task toggle, through the CLI ──────────────────────

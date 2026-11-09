@@ -418,16 +418,38 @@ const notStopped = (done) => [...new Set([...done.survivors, ...done.refused])];
 // `{ refused }` for a result, only when some leftover was refused.
 const refusedOf = (done) => (done.refused.length > 0 ? { refused: done.refused } : {});
 
+// A Ctrl-C hc couldn't send, as the stop's notes say it (K5).
+const ctrlCFailed = (interruptError) => (interruptError ? `the Ctrl-C could not be sent: ${interruptError}` : null);
+
 // The stop's line in the log: stopped, by the Ctrl-C or after signalling
 // `forced` processes, or NOT stopped when some lived through the SIGKILL or
-// were never signalled (`refused`, counted among the survivors).
-function stopNote(logPath, head, { forced, survivors = [], refused = [] }, deps) {
-  const never = refused.length > 0 ? `; not signalled: ${refused.join(", ")}` : "";
-  const text =
-    survivors.length > 0
-      ? `Spotlight off — server NOT stopped: ${survivors.length} processes survived (pids ${survivors.join(", ")}${never})`
-      : `Spotlight off — server stopped (${forced > 0 ? `forced: ${forced} processes` : "interrupt sent"})`;
+// were never signalled (`refused`, counted among the survivors). A Ctrl-C hc
+// couldn't send (`interruptError`) is said in the same line (K5): "server
+// stopped (forced: 3 processes; the Ctrl-C could not be sent: …)", and
+// "nothing left to kill" in place of "interrupt sent" when the server was
+// gone without it.
+function stopNote(logPath, head, { forced, survivors = [], refused = [], interruptError = null }, deps) {
+  const ctrlC = ctrlCFailed(interruptError);
+  let text;
+  if (survivors.length > 0) {
+    const never = refused.length > 0 ? `not signalled: ${refused.join(", ")}` : null;
+    const detail = [`pids ${survivors.join(", ")}`, never, ctrlC].filter(Boolean).join("; ");
+    text = `Spotlight off — server NOT stopped: ${survivors.length} processes survived (${detail})`;
+  } else {
+    const how = forced > 0 ? `forced: ${forced} processes` : ctrlC ? "nothing left to kill" : "interrupt sent";
+    text = `Spotlight off — server stopped (${[how, ctrlC].filter(Boolean).join("; ")})`;
+  }
   note(logPath, head, text, deps);
+}
+
+// The line of a stop that couldn't say the server stopped for a reason
+// other than survivors (stopNote names those): `reason` and the cause in
+// stopServer's own words (hc's, ps's), plus a Ctrl-C hc couldn't send when
+// `message` doesn't say it already (K4). The CLI's error and toast stay
+// Spanish only; `spotlight logs` reads this.
+function notStoppedNote(logPath, head, { reason, message, interruptError = null }, deps) {
+  const ctrlC = ctrlCFailed(interruptError);
+  note(logPath, head, `Spotlight off — server NOT stopped (${reason}): ${[message, ctrlC].filter(Boolean).join("; ")}`, deps);
 }
 
 // Nothing runs in the terminal (its prompt is free, or there's no terminal):
@@ -479,11 +501,18 @@ async function stopEscaped({ root, rootPid, ports, procs, logPath, head, termina
 // couldn't send skips the wait: what was read before it is killed at once
 // (F3).
 //
+// The server log gets the stop's one note on every path that found the
+// server, or a leftover of it, and says why when it didn't stop: "server
+// stopped (interrupt sent)" or "(forced: <n> processes)", a Ctrl-C hc
+// couldn't send in the same parentheses; "server NOT stopped: <n> processes
+// survived (pids …)"; "server NOT stopped (<reason>): <message>" for the
+// other ok: false (K4, K5). The CLI writes no stop line of its own.
+//
 // Results. `ok: false` always means the server may still be up:
 //   { ok: true, stopped: true, terminal, forced } — `forced`: how many
 //     processes were signalled, 0 when the Ctrl-C was enough (the log says
 //     which); `interruptError` too when hc couldn't send the Ctrl-C and the
-//     server was killed instead
+//     server was killed instead (or was gone already: "nothing left to kill")
 //   { ok: true, stopped: false, reason: "not-running" | "terminal-gone",
 //     terminal, forced, escaped } — the prompt was free, or there's no
 //     terminal: nothing is interrupted, but a recorded listener (`procs`)
@@ -492,21 +521,21 @@ async function stopEscaped({ root, rootPid, ports, procs, logPath, head, termina
 //     those ({ pid, port, cwd }) and the log says it when there were any
 //   { ok: true, stopped: false, reason: "busy", terminal } — a process
 //     Spotlight didn't start in front: nothing is touched
-//   { ok: false, reason: "survived", terminal, forced, survivors, refused? }
-//     — some process of the server lived through the SIGKILL (not ours to
-//     signal, stuck in the kernel), or was never signalled because
-//     stopLeftovers refused it (its tree holds the CLI or the terminal's
-//     shell: `refused`, also counted in `survivors`): the server is not
-//     stopped, and the log says so with their pids (`escaped` too when the
-//     terminal ran nothing)
+//   { ok: false, reason: "survived", terminal, forced, survivors, refused?,
+//     interruptError? } — some process of the server lived through the
+//     SIGKILL (not ours to signal, stuck in the kernel), or was never
+//     signalled because stopLeftovers refused it (its tree holds the CLI or
+//     the terminal's shell: `refused`, also counted in `survivors`): the
+//     server is not stopped, and the log says so with their pids (`escaped`
+//     too when the terminal ran nothing)
 //   { ok: false, reason: "unreadable", terminal, message } — hc couldn't
 //     read the terminal: no server pid to read, so nothing is signalled
 //   { ok: false, reason: "interrupt-failed", terminal, forced: 0, message }
 //     — hc couldn't send the Ctrl-C and, after it, neither hc nor ps showed
 //     anything to kill or proved the server gone
-//   { ok: false, reason: "still-running", terminal, forced, pid, message } —
-//     its processes were killed, but hc still shows Spotlight's old `script`
-//     (`pid`) in front
+//   { ok: false, reason: "still-running", terminal, forced, pid, message,
+//     interruptError? } — its processes were killed, but hc still shows
+//     Spotlight's old `script` (`pid`) in front
 // `deps.kill` (process.kill's shape) is required: without it stopServer
 // throws before it reads or sends anything (F8).
 export async function stopServer({ root, terminal, logPath, serverPid, workspace, branch, ports, procs: known } = {}, deps) {
@@ -516,6 +545,7 @@ export async function stopServer({ root, terminal, logPath, serverPid, workspace
   const head = { workspace, branch };
   if (seen.kind === "unknown") {
     const message = `the Spotlight terminal could not be read (${seen.error ?? "no foreground"}): the server may still be running`;
+    notStoppedNote(logPath, head, { reason: "unreadable", message }, deps);
     return { ok: false, reason: "unreadable", terminal: t, message };
   }
   if (seen.kind === "foreign") return { ok: true, stopped: false, reason: "busy", terminal: t };
@@ -553,21 +583,23 @@ export async function stopServer({ root, terminal, logPath, serverPid, workspace
     forced = done.pids.length;
     const survivors = notStopped(done);
     if (survivors.length > 0) {
-      stopNote(logPath, head, { forced, survivors, refused: done.refused }, deps);
+      stopNote(logPath, head, { forced, survivors, refused: done.refused, interruptError }, deps);
       return { ok: false, reason: "survived", terminal: t, forced, survivors, ...refusedOf(done), ...failed };
     }
     const after = await inspectUntil(look, deps, (s) => !oldInFront(s, snapshot), PROMPT_MS);
     if (oldInFront(after, snapshot)) {
       const message = `Spotlight's server (pid ${after.pid}) still leads the terminal after it was killed: the server may still be running`;
+      notStoppedNote(logPath, head, { reason: "still-running", message, interruptError }, deps);
       return { ok: false, reason: "still-running", terminal: t, forced, pid: after.pid, message, ...failed };
     }
   } else if (interruptError && front.kind === "unknown") {
     // No Ctrl-C, no reading of the terminal after it, nothing ps could name:
     // nothing shows the server gone.
     const message = `the Ctrl-C could not be sent (${interruptError}) and the terminal can't be read: the server may still be running`;
+    notStoppedNote(logPath, head, { reason: "interrupt-failed", message }, deps);
     return { ok: false, reason: "interrupt-failed", terminal: t, forced: 0, message };
   }
-  stopNote(logPath, head, { forced }, deps);
+  stopNote(logPath, head, { forced, interruptError }, deps);
   return { ok: true, stopped: true, terminal: t, forced, ...failed };
 }
 

@@ -16,10 +16,10 @@
 //             engine's message only when those words don't carry it
 //             (root-diverged's hint over git's message); null without one
 //   actions   Ver server, Reiniciar, Apagar; on a server that didn't come up
-//             and isn't up now (port-busy, server-exited over a server
-//             stopped or gone: D24, D25, server-errors.js serverDown) the
-//             first two read Ver log (the server terminal holds what it
-//             printed) and Reintentar
+//             and isn't up now (port-busy, server-exited, server-start-failed
+//             over a server stopped or gone: D24, D25, K3, server-errors.js
+//             serverDown) the first two read Ver log (the server terminal
+//             holds what it printed) and Reintentar
 //   force     on root-diverged / untracked-collision only: Forzar sync (the
 //             holder's tree over the root), Proyectar igual (a refused
 //             takeover or fresh activation, forced), Apagar igual; on
@@ -39,7 +39,7 @@
 import { normRoot, repoSettings } from "./settings.js";
 import { serverEnvsWithCommand, commandTemplate, isSafeVariant, formatVariant, inferredVariantNote } from "./server-plan.js";
 import { pickPort, portUrl } from "./ports.js";
-import { serverDown } from "./server-errors.js";
+import { serverDown, PORT_BUSY } from "./server-errors.js";
 import { errorText } from "./badges-model.js";
 import { oneLine } from "./text.js";
 
@@ -151,7 +151,7 @@ export function serverViewModel({ state, settings, repo, workspace, detection, b
     if (holder) force.push({ id: "off-anyway", label: "Apagar igual", argv: [bin, "toggle", "--workspace", holder, "--force"], danger: true });
   }
   // D24: the only path that stops a process Spotlight didn't start, a click.
-  if (error?.code === "port-busy" && holder) {
+  if (error?.code === PORT_BUSY && holder) {
     force.push({ id: "free-port", label: "Liberar puerto y arrancar", argv: [bin, "restart", "--repo", root, "--free-port"], danger: true });
   }
 

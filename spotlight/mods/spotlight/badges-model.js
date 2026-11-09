@@ -3,11 +3,12 @@
 // imports only the plugin's other pure modules, so `node --test` loads it.
 // The contract it codes against is projects-sidebar's RECIPE.md "Badges
 // from other plugins":
-//   value  { [workspace path, as `git worktree list` prints it]: [badge] }
+//   value  { [workspace path, as `git worktree list` prints it]: [badge],
+//            [`<groupId>/task:<KEY>`, a Task-mode group's lane (D29)]: [badge] }
 //   badge  { icon: "mods/spotlight/icons/<name>.svg", text? (≤ 16 code
 //            points), tone: accent|dim|working|blocked|done, tooltip
-//            (≤ 200, one line), action: { exec: [absolute bin, …] } |
-//            { command: "spotlight.<…>" } }
+//            (≤ 200, one line), action?: { exec: [absolute bin, …] } |
+//            { command: "spotlight.<…>" }, spin?: true (its icon spins, D29) }
 //   at most 3 per plugin on a row; a value with no rows is null (the key
 //   cleared); written only when it changes (setShared re-renders every mod).
 //
@@ -17,6 +18,11 @@
 //                  dim on the other workspaces of an enabled
 //                  repo, blocked (red) on an error. A click toggles that
 //                  workspace (`spotlight toggle --workspace <path>`).
+//                  While a light, a turn-off, a Forzar sync or a restart
+//                  works on the repo (its record's `busy`, D33), the
+//                  holder's and the root's flashlight, and the target
+//                  workspace's, is the ring instead: spinning,
+//                  "Sincronizando…", no action.
 //   2. server      on the holder's and the root's rows while Spotlight is on
 //                  there: ":3000" / ":3000+1" listening, "…" starting, red
 //                  when stopped or gone, with the error as its tooltip when
@@ -173,17 +179,25 @@ export async function attempt(check, fallback) {
 
 export const errorText = (error) => ERROR_TEXT[error?.code] ?? `Spotlight: ${oneLine(error?.message ?? error?.code ?? "error")}`;
 
-function badge({ icon, text, tone, tooltip, action }) {
+function badge({ icon, text, tone, tooltip, action, spin }) {
   const b = { icon: iconPath(icon) };
   if (text) b.text = cut(oneLine(text), TEXT_MAX);
   b.tone = tone;
   b.tooltip = cut(oneLine(tooltip), TOOLTIP_MAX);
   if (action) b.action = action;
+  if (spin) b.spin = true;
   return b;
 }
 
 const toggle = (bin, workspace) => ({ exec: [bin, "toggle", "--workspace", workspace] });
 const popup = (workspace) => ({ command: `${MOD}.server.${serverIdOf(workspace)}` });
+
+// D33: a busy repo's flashlight. No action: the work holds the repo's lock,
+// and a click would only queue behind it.
+const ring = () => badge({ icon: "spinner", tone: "working", tooltip: "Sincronizando…", spin: true });
+
+// A record's busy mark, or null.
+const busyOf = (record) => (isObject(record?.busy) ? record.busy : null);
 
 // 1. The flashlight of a lit repo's holder or root row.
 function litFlashlight(record, at, { bin, root }) {
@@ -300,28 +314,38 @@ export function buildBadges({ state, settings, projects = [], cache = {}, enable
 
   const repos = state?.repos ?? {};
   const lit = new Map(); // root → holder
+  const spun = new Set(); // target rows of a busy repo, the ring in their flashlight's place (D33)
   for (const [root, record] of Object.entries(repos)) {
+    const busy = busyOf(record);
     if (isAbsolute(record.holder)) {
       const holder = normRoot(record.holder);
       lit.set(root, holder);
       const configured = repoSettings(settings, root).port;
       for (const at of [holder, root]) {
-        add(at, litFlashlight(record, at, { bin, root }));
+        add(at, busy ? ring() : litFlashlight(record, at, { bin, root }));
         add(at, serverBadge(record, at, configured));
         know(at, root);
       }
     } else if (record.lastError) {
       // A refused fresh activation leaves an error and no holder: the root's
       // row shows it, and its click opens the popup (Proyectar igual).
-      add(root, badge({ icon: "flashlight", tone: "blocked", tooltip: errorText(record.lastError), action: popup(root) }));
+      add(root, busy ? ring() : badge({ icon: "flashlight", tone: "blocked", tooltip: errorText(record.lastError), action: popup(root) }));
       know(root, root);
+    }
+    // The workspace the work is for: a fresh light's (no holder yet, as
+    // Orca's optimistic holder) or a takeover's spins in its own row too.
+    const target = busy && isAbsolute(busy.workspace) ? normRoot(busy.workspace) : null;
+    if (target && target !== lit.get(root) && target !== root) {
+      add(target, ring());
+      spun.add(target);
+      know(target, root);
     }
   }
 
   for (const { root } of projects) {
     for (const c of cache[root] ?? []) {
       know(c.path, root);
-      if (enabled[root] !== true || c.main || c.path === lit.get(root)) continue;
+      if (enabled[root] !== true || c.main || c.path === lit.get(root) || spun.has(c.path)) continue;
       const holder = lit.get(root);
       const tooltip = holder ? `Spotlight · proyectar aquí (ahora ${baseName(holder)})` : "Spotlight · encender aquí";
       add(c.path, badge({ icon: "flashlight", tone: "dim", tooltip, action: toggle(bin, c.path) }));

@@ -18,15 +18,22 @@
 //   { version: 1,
 //     repos: { <root>: emptyRepo() fields, plus envOverride? (the env picked
 //              in the server popup, `spotlight env --env`; it wins over
-//              settings' env until `toggle` off drops the record, J-002) and
+//              settings' env until `toggle` off drops the record, J-002),
 //              envFailed? and envFailedAt? (the env a start or restart
 //              couldn't run, and when: the reap doesn't try it again until
 //              settings.json is saved after that, J-009, J-011; a started
-//              server clears both) },
+//              server clears both) and busy? { op, since, pid, workspace }
+//              (D33: a light, turn-off, Forzar sync or restart works on
+//              the repo right now; set and cleared under its repo lock by
+//              the process `pid` since `since` (ms), `workspace` the
+//              target, absolute or null; markBusy, clearBusy) },
 //     queue: { requests: [{ terminal, taskKey, lane, members, skipped, requestedAt, requestTurn,
 //                           fgPid, state, slotOnly, grantedAt, pausedAt, pauseReason, pauseMsg,
 //                           resumingUntil, handledTurn, autoResumes, lastActivityAt, outputHash }],
-//              lighting: { <lane>/<taskKey>: { grantId, phase, pid, startedAt, error } } },
+//              lighting: { <lane>/<taskKey>: { grantId, phase, pid, startedAt, error } },
+//              taskBatch?: { <groupId>/<KEY>: { op, since, pid } } (D31: a
+//                          whole-task toggle running; setTaskBatch,
+//                          clearTaskBatch; absent when none runs) },
 //     notes: [≤ 200 { at, repo, text, toast, action? }],
 //     variants: { <lane>/<taskKey>::<root>: <variant> } }   ≤ 500, oldest dropped first
 // A task is keyed `<lane>/<taskKey>` in the queue and lighting (D12).
@@ -85,13 +92,23 @@ export function emptyRepo() {
   };
 }
 
+// A batch marker (D31: queue.taskBatch's entries): who runs it, since when.
+const isBatchMark = (m) =>
+  isObject(m) && typeof m.op === "string" && m.op !== "" && Number.isFinite(m.since) && Number.isInteger(m.pid) && m.pid > 0;
+
+// A repo's busy mark (D33): a batch marker's fields plus the target
+// workspace, an absolute path or null.
+const isBusyMark = (m) => isBatchMark(m) && (m.workspace === null || (typeof m.workspace === "string" && m.workspace.startsWith("/")));
+
 // A stored value as a v1 state, or null when it isn't one. Shapes are
 // enforced (repos and lighting entries are objects, requests and notes
 // arrays of objects, at most NOTES_MAX notes, the newest kept; variants a
 // map of non-empty strings, at most VARIANTS_MAX, the last inserted kept;
 // a missing field reads as empty); repo records get emptyRepo()'s missing
-// fields; repo keys are normalized (normRoot), a relative one dropped, a
-// root listed twice kept the first time.
+// fields, and lose a busy mark that isn't one; repo keys are normalized
+// (normRoot), a relative one dropped, a root listed twice kept the first
+// time. queue.taskBatch keeps its well-formed entries, and stays absent
+// when the state has none.
 export function normalizeState(value) {
   if (!isObject(value) || value.version !== STATE_VERSION) return null;
   const repos = {};
@@ -99,6 +116,7 @@ export function normalizeState(value) {
     const key = normRoot(root);
     if (!key.startsWith("/") || !isObject(record) || key in repos) continue;
     repos[key] = { ...emptyRepo(), ...record };
+    if ("busy" in record && !isBusyMark(record.busy)) delete repos[key].busy;
   }
   const q = isObject(value.queue) ? value.queue : {};
   const lighting = {};
@@ -106,6 +124,10 @@ export function normalizeState(value) {
     if (isObject(entry)) lighting[key] = entry;
   }
   const queue = { ...q, requests: Array.isArray(q.requests) ? q.requests.filter(isObject) : [], lighting };
+  if ("taskBatch" in q) {
+    if (isObject(q.taskBatch)) queue.taskBatch = Object.fromEntries(Object.entries(q.taskBatch).filter(([, m]) => isBatchMark(m)));
+    else delete queue.taskBatch;
+  }
   const notes = (Array.isArray(value.notes) ? value.notes.filter(isObject) : []).slice(-NOTES_MAX);
   const kept = Object.entries(isObject(value.variants) ? value.variants : {}).filter(([, v]) => typeof v === "string" && v !== "");
   const variants = Object.fromEntries(kept.slice(-VARIANTS_MAX));
@@ -148,6 +170,62 @@ export function rememberVariant(state, key, variant) {
   const keys = Object.keys(state.variants);
   for (const k of keys.slice(0, Math.max(0, keys.length - VARIANTS_MAX))) delete state.variants[k];
   return state;
+}
+
+// ── Busy marks (D33) and task batches (D31) ────────────────────────────────
+
+// The same mark: one process's, from one moment (a reused pid starts later).
+const sameMark = (a, b) => isObject(a) && isObject(b) && a.pid === b.pid && a.since === b.since;
+
+// A record that holds nothing but emptyRepo()'s values.
+function isBlankRepo(record) {
+  const blank = emptyRepo();
+  return Object.keys(record).every((k) => k in blank && JSON.stringify(record[k]) === JSON.stringify(blank[k]));
+}
+
+// Marks `root`'s record busy with `mark` ({ op, since, pid, workspace }).
+// Called by whoever holds the repo's lock, so a mark already there from
+// another process is a dead one's, and replaced; one of the same process
+// is an outer call's (a restart inside a light), and left to it. No record:
+// with `create` (a fresh light, whose target's row spins before it holds)
+// one is made for the mark, else nothing is marked. Mutates `state`; → true
+// when `mark` was set.
+export function markBusy(state, root, mark, { create = false } = {}) {
+  const record = state.repos[root];
+  if (!record && !create) return false;
+  if (record?.busy?.pid === mark.pid) return false;
+  state.repos[root] = { ...(record ?? emptyRepo()), busy: { ...mark } };
+  return true;
+}
+
+// Clears `root`'s busy mark when it is still `mark` (same pid and since): a
+// mark a later process set stays. A record left with nothing of its own
+// (one made only for the mark, by a light that wrote nothing) goes with it.
+// Mutates `state`; → true when `mark` was cleared.
+export function clearBusy(state, root, mark) {
+  const record = state.repos[root];
+  if (!record || !sameMark(record.busy, mark)) return false;
+  delete record.busy;
+  if (isBlankRepo(record)) delete state.repos[root];
+  return true;
+}
+
+// Marks the whole-task toggle `key` (`<groupId>/<KEY>`) running with `mark`
+// ({ op, since, pid }). Mutates `state`.
+export function setTaskBatch(state, key, mark) {
+  state.queue.taskBatch ??= {};
+  state.queue.taskBatch[key] = { ...mark };
+  return state;
+}
+
+// Clears batch `key` when it is still `mark`; the last one cleared drops
+// queue.taskBatch. Mutates `state`; → true when `mark` was cleared.
+export function clearTaskBatch(state, key, mark) {
+  const batches = state.queue.taskBatch;
+  if (!isObject(batches) || !sameMark(batches[key], mark)) return false;
+  delete batches[key];
+  if (Object.keys(batches).length === 0) delete state.queue.taskBatch;
+  return true;
 }
 
 // ── Reconcile ──────────────────────────────────────────────────────────────

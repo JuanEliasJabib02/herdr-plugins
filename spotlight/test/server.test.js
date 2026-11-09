@@ -18,6 +18,9 @@ import {
   isShellForeground, ownsForeground, classifyTerminal, ensureServerTerminal, inspectServer, readServerState,
   startServer, restartServer, stopServer, serverLogs, peekArgv, peekServer, STOP_WAIT_MS,
 } from "../mods/spotlight/server.js";
+// ports.js runs every lstart read as `/usr/bin/env LC_ALL=C TZ=UTC ps …`
+// (H7): unwrapEnv gives the program and args under the env words.
+import { unwrapEnv } from "./fake-ps.mjs";
 
 const ROOT = "/Users/demo/code/app";
 const tmp = () => realpathSync(mkdtempSync(join(tmpdir(), "sl-server-")));
@@ -25,14 +28,6 @@ const tmp = () => realpathSync(mkdtempSync(join(tmpdir(), "sl-server-")));
 // How zsh splits a typed line into argv (quote removal, nothing run).
 const zshWords = (line) =>
   execFileSync("/bin/zsh", ["-f", "-c", `print -rN -- ${line}`], { encoding: "utf8" }).split("\0").slice(0, -1);
-
-// ports.js runs every lstart read as `/usr/bin/env LC_ALL=C TZ=UTC ps …`
-// (H7): the program and args under the env words.
-function unwrapEnv(file, args = []) {
-  if (file !== "/usr/bin/env") return { file, args };
-  const i = args.findIndex((a) => !/^[A-Za-z_]\w*=/.test(a));
-  return { file: args[i], args: args.slice(i + 1) };
-}
 
 // ── A fake hc ──────────────────────────────────────────────────────────────
 // Terminals by address, names unique among live ones, the JSON shapes and
@@ -1010,7 +1005,8 @@ test("stopServer (F3): a Ctrl-C hc couldn't send is no reason to leave the serve
   assert.deepEqual(sd.signals.map(({ pid, sig }) => [pid, sig]).sort(), [[7001, "SIGTERM"], [s.pid, "SIGTERM"]].sort());
   assert.ok(sd.elapsed() < 1000, `waited ${sd.elapsed()} ms`);
   assert.ok(!hc.signals.some((x) => x.pid === shell), "the terminal's shell is never signalled");
-  assert.match(readFileSync(logPath, "utf8"), stopNote("forced: 2 processes"));
+  // K5: the note says the Ctrl-C couldn't be sent, in the same line.
+  assert.match(readFileSync(logPath, "utf8"), stopNote("forced: 2 processes; the Ctrl-C could not be sent: herdr-core unreachable"));
   assert.equal(hc.terms.get(s.terminal).foreground.pid, shell, "the prompt is back");
 
   // Nothing could be read after it either (hc down, ps can't say): nothing
@@ -1064,6 +1060,109 @@ test("stopServer (F3): an unreadable terminal, or a server still in front after 
     message: `Spotlight's server (pid ${s.pid}) still leads the terminal after it was killed: the server may still be running`,
   });
   assert.deepEqual(sd.signals.map(({ pid, sig }) => [pid, sig]), [[s.pid, "SIGTERM"]]);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+// ── K4/K5: the stop's own note says why, on every path ────────────────────
+
+// The last line of a log, and that it is the only stop note there.
+const lastLine = (path) => readFileSync(path, "utf8").trimEnd().split("\n").at(-1);
+const stopNotes = (path) => readFileSync(path, "utf8").split("\n").filter((l) => l.includes("Spotlight off —")).length;
+
+test("stopServer (K4): every NOT stopped return writes its cause in its own note, once: unreadable, interrupt-failed, still-running (with the Ctrl-C hc couldn't send)", async () => {
+  const dir = tmp();
+  const notStopped = (reason, cause) =>
+    new RegExp(`^── Spotlight: login \\(feat/login\\) · Spotlight off — server NOT stopped \\(${reason}\\): ${cause} · \\d\\d:\\d\\d:\\d\\d ──$`);
+  const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+  // Unreadable: hc shows the terminal live with no foreground.
+  const unreadableLog = join(dir, "unreadable.log");
+  const hc = fakeHc();
+  const t = hc.add({ name: serverTerminalName(ROOT), labels: { [SERVER_LABEL]: ROOT } });
+  t.foreground = null;
+  const r = await stopServer({ root: ROOT, terminal: t.address, logPath: unreadableLog, ...HEAD }, stopDeps(hc).deps);
+  assert.equal(r.reason, "unreadable");
+  assert.match(lastLine(unreadableLog), notStopped("unreadable", esc(r.message)));
+  assert.equal(stopNotes(unreadableLog), 1);
+  assert.match(r.message, /^the Spotlight terminal could not be read \(no foreground\): the server may still be running$/);
+
+  // Interrupt-failed: no Ctrl-C, and nothing read after it.
+  const ifLog = join(dir, "interrupt.log");
+  const down = fakeHc();
+  const dd = stopDeps(down);
+  const s2 = await startServer({ root: ROOT, line: "pnpm dev", logPath: ifLog, ...HEAD }, dd.deps);
+  let sent = false;
+  const blind = async (file, args) => {
+    if (unwrapEnv(file, args).file === "ps") return { code: 2, stdout: "", stderr: "ps: bad" };
+    if (file === "hc" && args[0] === "interrupt") sent = true;
+    if (sent && file === "hc" && args[0] === "get") return { code: 1, stdout: "", stderr: "hc: can't reach herdr-core" };
+    return interruptFails(down)(file, args);
+  };
+  const r2 = await stopServer({ root: ROOT, terminal: s2.terminal, logPath: ifLog, serverPid: s2.pid, ...HEAD }, { ...dd.deps, exec: blind });
+  assert.equal(r2.reason, "interrupt-failed");
+  assert.match(lastLine(ifLog), notStopped("interrupt-failed", esc(r2.message)));
+  assert.equal(stopNotes(ifLog), 1);
+
+  // Still-running, with the Ctrl-C hc couldn't send: one note says both.
+  for (const ctrlC of [true, false]) {
+    const srLog = join(dir, `still-${ctrlC}.log`);
+    const stale = fakeHc({ lingers: Infinity });
+    const sd = stopDeps(stale);
+    const s = await startServer({ root: ROOT, line: "pnpm dev", logPath: srLog, ...HEAD }, sd.deps);
+    const before = JSON.parse((await stale.exec("hc", ["get", s.terminal, "--json"])).stdout);
+    let interrupted = false;
+    const exec = async (file, args) => {
+      if (file === "hc" && args[0] === "interrupt") {
+        interrupted = true;
+        if (ctrlC) return { code: 1, stdout: "", stderr: JSON.stringify({ error: { kind: "failed", message: "herdr-core\nunreachable" } }) };
+      }
+      if (interrupted && file === "hc" && args[0] === "get") return { code: 0, stdout: JSON.stringify(before), stderr: "" };
+      return stale.exec(file, args);
+    };
+    const r3 = await stopServer({ root: ROOT, terminal: s.terminal, logPath: srLog, serverPid: s.pid, ...HEAD }, { ...sd.deps, exec });
+    assert.equal(r3.reason, "still-running", String(ctrlC));
+    const tail = ctrlC ? "; the Ctrl-C could not be sent: herdr-core unreachable" : "";
+    assert.match(lastLine(srLog), notStopped("still-running", esc(r3.message + tail)), String(ctrlC));
+    assert.equal(stopNotes(srLog), 1, String(ctrlC));
+  }
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("stopServer (K5): a Ctrl-C hc couldn't send is in the stop's one note, stopped or not: (forced: …; the Ctrl-C could not be sent: …), and a survivor's NOT stopped line", async () => {
+  const dir = tmp();
+  // Survived: a child that isn't ours to signal, and no Ctrl-C.
+  const logPath = join(dir, "survived.log");
+  const hc = fakeHc({ procs: { 7001: { cwd: ROOT, eperm: true } } });
+  const sd = stopDeps(hc);
+  const s = await startServer({ root: ROOT, line: "pnpm dev", logPath, ...HEAD }, sd.deps);
+  hc.children[s.pid] = [7001];
+  const r = await stopServer({ root: ROOT, terminal: s.terminal, logPath, serverPid: s.pid, ...HEAD }, { ...sd.deps, exec: interruptFails(hc) });
+  assert.equal(r.reason, "survived");
+  assert.equal(r.interruptError, "herdr-core unreachable");
+  assert.match(
+    lastLine(logPath),
+    /^── Spotlight: login \(feat\/login\) · Spotlight off — server NOT stopped: 1 processes survived \(pids 7001; the Ctrl-C could not be sent: herdr-core unreachable\) · \d\d:\d\d:\d\d ──$/,
+  );
+  assert.equal(stopNotes(logPath), 1);
+
+  // Nothing left to kill once read, and no Ctrl-C: stopped, never "interrupt sent".
+  const goneLog = join(dir, "gone.log");
+  const quick = fakeHc();
+  const qd = stopDeps(quick);
+  const s2 = await startServer({ root: ROOT, line: "pnpm dev", logPath: goneLog, ...HEAD }, qd.deps);
+  const exec = async (file, args) => {
+    if (file === "hc" && args[0] === "interrupt") {
+      // The server exits on its own as the Ctrl-C fails.
+      const term = quick.terms.get(s2.terminal);
+      quick.dead.add(term.foreground.pid);
+      term.foreground = { argv: ["/bin/zsh", "-l"], cwd: ROOT, name: "zsh", pid: term.pid };
+      return { code: 1, stdout: "", stderr: JSON.stringify({ error: { kind: "failed", message: "herdr-core unreachable" } }) };
+    }
+    return quick.exec(file, args);
+  };
+  const r2 = await stopServer({ root: ROOT, terminal: s2.terminal, logPath: goneLog, serverPid: s2.pid, ...HEAD }, { ...qd.deps, exec });
+  assert.deepEqual(r2, { ok: true, stopped: true, terminal: s2.terminal, forced: 0, interruptError: "herdr-core unreachable" });
+  assert.match(lastLine(goneLog), /· Spotlight off — server stopped \(nothing left to kill; the Ctrl-C could not be sent: herdr-core unreachable\) · /);
   rmSync(dir, { recursive: true, force: true });
 });
 

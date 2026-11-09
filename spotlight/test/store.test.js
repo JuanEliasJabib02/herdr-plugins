@@ -15,12 +15,17 @@ import {
   createStore, emptyState, emptyRepo, parseState, reconcileRepo, addNote, NOTES_MAX,
   rememberVariant, variantKey, VARIANTS_MAX,
 } from "../mods/spotlight/store.js";
+import * as storeModule from "../mods/spotlight/store.js";
 import { withLock, LockError, OWNER_FILE } from "../mods/spotlight/locks.js";
 import {
   parseSettings, defaultSettings, repoSettings, perSpaceLimit, repoEnabledFrom,
 } from "../mods/spotlight/settings.js";
 
 const STORE_URL = new URL("../mods/spotlight/store.js", import.meta.url).href;
+
+// Destructured, not named in the imports: a helper that's missing fails its
+// own tests, not the whole file's load.
+const { markBusy, clearBusy, setTaskBatch, clearTaskBatch } = storeModule;
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -368,6 +373,90 @@ test("state.json keeps a repo's envOverride (the server popup's env, J-002): an 
   assert.equal(store.readState().repos["/code/app"].envOverride, "dev");
   const text = JSON.stringify({ version: 1, repos: { "/code/app": { envOverride: "prod" } } });
   assert.equal(parseState(text).state.repos["/code/app"].envOverride, "prod");
+});
+
+// ── D33: the busy mark; D31: the task batch marker ─────────────────────────
+
+const MARK = { op: "light", since: 10, pid: 4242, workspace: "/code/app-wt" };
+
+test("busy (D33): a record's { op, since, pid, workspace } mark is an additive v1 field, kept through a write; a malformed one is dropped", async () => {
+  const read = (busy) =>
+    parseState(JSON.stringify({ version: 1, repos: { "/code/app": { holder: "/code/app-wt", busy } } })).state.repos["/code/app"];
+  assert.deepEqual(read(MARK).busy, MARK);
+  // A fresh light's target, or a turn-off of refs with no holder.
+  assert.deepEqual(read({ ...MARK, workspace: null }).busy, { ...MARK, workspace: null });
+  for (const bad of [null, "light", [MARK], { ...MARK, pid: 0 }, { ...MARK, pid: "4242" }, { ...MARK, pid: 1.5 }, { ...MARK, since: "10" },
+    { ...MARK, since: null }, { ...MARK, op: "" }, { ...MARK, op: 3 }, { ...MARK, workspace: "code/app-wt" }, { ...MARK, workspace: 5 }]) {
+    const record = read(bad);
+    assert.equal("busy" in record, false, JSON.stringify(bad));
+    assert.equal(record.holder, "/code/app-wt", "the rest of the record stays");
+  }
+  // Not one of emptyRepo's fields: a record that isn't busy has none.
+  assert.equal("busy" in emptyRepo(), false);
+  const dir = tmp();
+  const store = createStore({ stateDir: dir, hasServerCommand: noServer });
+  await store.updateState((s) => {
+    s.repos["/code/app"] = { ...emptyRepo(), holder: "/code/app-wt", busy: MARK };
+  });
+  assert.deepEqual(store.readState().repos["/code/app"].busy, MARK);
+});
+
+test("markBusy / clearBusy (D33): one mark per repo, set by whoever holds its lock, cleared only by the same (pid, since); a record made only for the mark goes with it", () => {
+  const s = emptyState();
+  const root = "/code/app";
+  assert.equal(markBusy(s, root, MARK), false, "no record, and not asked to make one");
+  assert.equal(s.repos[root], undefined);
+  // A fresh light: its record is made for the mark, so its target's row can spin.
+  assert.equal(markBusy(s, root, MARK, { create: true }), true);
+  assert.deepEqual(s.repos[root], { ...emptyRepo(), busy: MARK });
+  // The same process marking again (a nested call) leaves the outer call's mark.
+  assert.equal(markBusy(s, root, { ...MARK, op: "restart", since: 11 }), false);
+  assert.deepEqual(s.repos[root].busy, MARK);
+  // Another process's mark under the repo lock is a dead one's: replaced.
+  const next = { op: "off", since: 12, pid: 4343, workspace: "/code/app-wt" };
+  assert.equal(markBusy(s, root, next), true);
+  assert.deepEqual(s.repos[root].busy, next);
+  // Only the mark that is there is cleared.
+  assert.equal(clearBusy(s, root, MARK), false);
+  assert.equal(clearBusy(s, root, { ...next, since: 13 }), false);
+  assert.deepEqual(s.repos[root].busy, next);
+  // Cleared, the record holds nothing but emptyRepo's values: it goes.
+  assert.equal(clearBusy(s, root, next), true);
+  assert.equal(s.repos[root], undefined);
+  assert.equal(clearBusy(s, root, next), false, "nothing to clear");
+  // A record with anything of its own stays, without the mark.
+  for (const own of [{ holder: "/code/app-wt" }, { envOverride: "dev" }, { lastError: { code: "git-failed", message: "x", at: 1 } }]) {
+    s.repos[root] = { ...emptyRepo(), ...own };
+    assert.equal(markBusy(s, root, MARK), true);
+    assert.equal(clearBusy(s, root, MARK), true);
+    assert.deepEqual(s.repos[root], { ...emptyRepo(), ...own }, JSON.stringify(own));
+  }
+});
+
+test("queue.taskBatch (D31): { op, since, pid } per <groupId>/<KEY> while a batch runs; set and cleared by the same rule; malformed entries dropped, absent stays absent", () => {
+  const batch = { op: "on", since: 10, pid: 4242 };
+  const s = emptyState();
+  setTaskBatch(s, "g1/AX-50", batch);
+  assert.deepEqual(s.queue.taskBatch, { "g1/AX-50": batch });
+  assert.equal(clearTaskBatch(s, "g1/AX-50", { ...batch, since: 11 }), false);
+  assert.equal(clearTaskBatch(s, "g1/AX-50", { ...batch, pid: 4343 }), false);
+  assert.deepEqual(s.queue.taskBatch, { "g1/AX-50": batch });
+  setTaskBatch(s, "g2/AX-50", { ...batch, op: "off" });
+  assert.equal(clearTaskBatch(s, "g1/AX-50", batch), true);
+  assert.deepEqual(s.queue.taskBatch, { "g2/AX-50": { ...batch, op: "off" } });
+  assert.equal(clearTaskBatch(s, "g2/AX-50", { ...batch, op: "off" }), true);
+  assert.equal("taskBatch" in s.queue, false, "the last one cleared leaves the queue as it was");
+  assert.equal(clearTaskBatch(s, "g2/AX-50", batch), false);
+
+  const queueOf = (taskBatch) =>
+    parseState(JSON.stringify({ version: 1, queue: { requests: [], lighting: {}, ...(taskBatch === undefined ? {} : { taskBatch }) } })).state.queue;
+  assert.deepEqual(
+    queueOf({ "g1/AX-1": batch, "g1/AX-2": { op: "on" }, "g1/AX-3": 5, "g1/AX-4": { ...batch, pid: -1 }, "g1/AX-5": { ...batch, op: "" } }).taskBatch,
+    { "g1/AX-1": batch },
+  );
+  assert.equal("taskBatch" in queueOf([batch]), false);
+  assert.equal("taskBatch" in queueOf(undefined), false, "a state from before the field reads as it was");
+  assert.deepEqual(emptyState().queue, { requests: [], lighting: {} });
 });
 
 // ── reconcile ──────────────────────────────────────────────────────────────

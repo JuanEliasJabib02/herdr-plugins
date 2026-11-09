@@ -1,4 +1,4 @@
-// The CLI's work on repos and the queue (D7, D8, D10–D13, D18, D19):
+// The CLI's work on repos and the queue (D7, D8, D10–D13, D18, D19, D33):
 // lighting a task's repos, syncing a holder, turning a root off, the server
 // (start, restart on a lockfile or command change), waiting for the servers
 // to listen (port of Orca's waitForTurnServers), and the reap. Node-only.
@@ -6,15 +6,19 @@
 // Every git step runs under the repo's lock and reads the holder inside it,
 // so the last one to take the lock sees the latest holder (a sync racing a
 // takeover syncs the new holder). state.json is written only through
-// updateState, under the state lock, never across git (D7).
+// updateState, under the state lock, never across git (D7). A light, a
+// turn-off, a Forzar sync and a server restart mark the repo busy while they
+// hold its lock (withBusy, D33).
 
 import path from "node:path";
 import crypto from "node:crypto";
 import {
   activate, sync, deactivate, assertDeactivatable, readRefs, readOrcaHolds, toSpotlightError, ORCA_HOLDS_MESSAGE,
 } from "./sync.js";
-import { emptyRepo, addNote, reconcileRepo, rememberVariant } from "./store.js";
-import { pidAlive, LockError } from "./locks.js";
+import {
+  emptyRepo, addNote, reconcileRepo, rememberVariant, markBusy, clearBusy, setTaskBatch, clearTaskBatch,
+} from "./store.js";
+import { pidAlive, isStale, LockError } from "./locks.js";
 import { repoSettings, normRoot } from "./settings.js";
 import {
   planServer, lockfileInstalls, missingInstalls, installsFor, chainInstall, detectServerScripts, commandTemplate, expectedPort,
@@ -28,8 +32,8 @@ import {
 } from "./cli-turns.mjs";
 import { branchOf, hcGet, hcReadText, registeredRoots } from "./cli-env.mjs";
 import {
-  SERVER_ERRORS, SERVER_SURVIVED, SERVER_NOT_STOPPED, isServerError, serverErrorOf, setRootError, setServerError, clearRootError,
-  clearServerError,
+  SERVER_ERRORS, PORT_BUSY, SERVER_EXITED, SERVER_START_FAILED, SERVER_SURVIVED, SERVER_NOT_STOPPED, isServerError, serverErrorOf,
+  setRootError, setServerError, clearRootError, clearServerError,
 } from "./server-errors.js";
 import { oneLine } from "./text.js";
 
@@ -50,8 +54,9 @@ const serverOf = (cx) => ({ readServerState, stopServer, ...(cx.server ?? {}) })
 // lastError holds a root error and a server error, each written and cleared
 // on its own (server-errors.js): a sync that goes through leaves a server
 // error and ends a root error; a start that goes through ends a server error
-// (D24), and so does the server coming up to listen after it (D25), and a
-// takeover whose server needs no start (ensureServer's `takeover`, H3).
+// (D24), and so does the server coming up to listen after it (D25), a
+// takeover whose server needs no start (ensureServer's `takeover`, H3, K2)
+// and a plan with no command (K1); a start that fails writes its own (K3).
 const POPUP_CODES = new Set(["root-diverged", "untracked-collision", ...SERVER_ERRORS]);
 
 const qctxOf = (cx) => ({ now: cx.now(), ...cx.settings.queue });
@@ -77,6 +82,83 @@ const shownAlready = (record, error) => {
   const shown = serverErrorOf(record?.lastError);
   return shown?.code === error.code && shown?.message === error.message;
 };
+
+// ── Busy (D33) and the task batch (D31) ────────────────────────────────────
+
+// Runs `fn` with `root`'s record marked busy, `{ op, since, pid, workspace }`
+// (the badges' spinning ring in place of its flashlight; the workspace
+// menu's toggle and Forzar sync disabled), cleared in `finally` whatever fn
+// does. Call it under the repo's lock: the mark is the lock holder's
+// (store.js markBusy, which leaves a nested call's to the outer one, and
+// makes a record for the mark only with `create`: a fresh light, whose
+// target's row spins before it holds). `workspace` is the target, or a
+// function of the record as the mark is written (a turn-off's or a Forzar
+// sync's holder). A clear that can't be written, or a process that dies
+// first, leaves a mark the reap clears once its process is gone (staleMarks).
+async function withBusy(cx, root, { op, workspace = null, create = false }, fn) {
+  const since = cx.now();
+  const set = await cx.store.updateState((s) => {
+    const target = typeof workspace === "function" ? workspace(s.repos[root] ?? null) : workspace;
+    const mark = { op, since, pid: process.pid, workspace: target ?? null };
+    return markBusy(s, root, mark, { create }) ? mark : null;
+  });
+  const mark = set.result;
+  if (!mark) return fn();
+  try {
+    return await fn();
+  } finally {
+    try {
+      await cx.store.updateState((s) => {
+        clearBusy(s, root, mark);
+      });
+    } catch {
+      // Left for the reap: the work's own outcome is what the caller needs.
+    }
+  }
+}
+
+// The repo's lock, held with the repo marked busy while `fn` runs.
+// `wait`: withRepoLock's options.
+const withBusyRepo = (cx, root, busy, fn, wait = {}) => cx.store.withRepoLock(root, () => withBusy(cx, root, busy, fn), wait);
+
+// `spotlight toggle --task` (T21): runs the whole-task batch `fn` with
+// queue.taskBatch[key] (`<groupId>/<KEY>`) set to `{ op, since, pid }`, so
+// the task lane's flashlight spins and takes no click (D31), cleared in
+// `finally` only while it is still this batch's. It takes no repo lock: the
+// batch takes each member's in turn (lightTask, deactivateRepo). A process
+// that dies first leaves a marker the reap clears (staleMarks).
+export async function withTaskBatch(cx, key, op, fn) {
+  const mark = { op, since: cx.now(), pid: process.pid };
+  await cx.store.updateState((s) => {
+    setTaskBatch(s, key, mark);
+  });
+  try {
+    return await fn();
+  } finally {
+    try {
+      await cx.store.updateState((s) => {
+        clearTaskBatch(s, key, mark);
+      });
+    } catch {
+      // Left for the reap, as withBusy's.
+    }
+  }
+}
+
+// The busy marks and task batches of `state` whose process is gone: dead, or
+// its pid now another process that started after the mark (locks.js
+// isStale, which runs `ps`; a test's cx stands in for it as cx.isStale).
+// Read before the state lock, so `ps` never runs under it (D7); the reap's
+// write clears each only while it is still the mark read here (store.js
+// clearBusy, clearTaskBatch), so one a new light set meanwhile stays.
+// → { repos: [[root, mark]], batches: [[key, mark]] }.
+function staleMarks(cx, state) {
+  const gone = (m) => (cx.isStale ?? isStale)({ pid: m.pid, startedAt: m.since });
+  return {
+    repos: Object.entries(state.repos).filter(([, r]) => r.busy && gone(r.busy)).map(([root, r]) => [root, r.busy]),
+    batches: Object.entries(state.queue.taskBatch ?? {}).filter(([, m]) => gone(m)),
+  };
+}
 
 // ── Lighting hand-off (D12, D18) ───────────────────────────────────────────
 
@@ -120,8 +202,11 @@ export function dropStaleMarkers(s, now) {
 // `spotlight light --task <k> [--force]` (internal, detached): lights every
 // member of lighting[k], each under its repo lock. Claims the marker first,
 // so two lights never work one grant; a light whose marker was re-marked
-// meanwhile (its repos grew) leaves the result to the newer one.
-export async function lightTask(cx, key, { force = false } = {}) {
+// meanwhile (its repos grew) leaves the result to the newer one. `quiet`
+// (the whole-task toggle, D31, whose summary says it once): no "Spotlight on
+// · …" note per repo; errors still toast. A call option like `force`, never
+// stored on the marker, so a later `light --force` of it speaks again.
+export async function lightTask(cx, key, { force = false, quiet = false } = {}) {
   const me = process.pid;
   const claimed = await cx.store.updateState((s) => {
     const m = s.queue.lighting[key];
@@ -138,7 +223,7 @@ export async function lightTask(cx, key, { force = false } = {}) {
   const errors = {};
   for (const member of marker.members) {
     try {
-      const r = await lightMember(cx, member, { force: force || marker.force, taskKey: marker.taskKey });
+      const r = await lightMember(cx, member, { force: force || marker.force, taskKey: marker.taskKey, quiet });
       if (!r.ok) errors[member.root] = r.message;
     } catch (e) {
       errors[member.root] = toSpotlightError(e).message;
@@ -167,11 +252,13 @@ const SERVER_WORDS = {
 };
 
 // One repo of a lighting: activate (fresh or takeover), or sync when the
-// workspace already holds it; then the server.
-async function lightMember(cx, member, { force, taskKey }) {
+// workspace already holds it; then the server. The repo is busy all along,
+// its target `workspace` (D33); a fresh light's record is made for the mark,
+// and reads as no record until the light writes one.
+async function lightMember(cx, member, { force, taskKey, quiet = false }) {
   const { root, workspace } = member;
   const name = member.name ?? cx.nameOf(root);
-  return cx.store.withRepoLock(root, async () => {
+  return withBusyRepo(cx, root, { op: "light", workspace, create: true }, async () => {
     const before = cx.store.readState().repos[root] ?? null;
     const refs = await readRefs(root);
     const same = before?.holder === workspace && refs.active;
@@ -211,13 +298,15 @@ async function lightMember(cx, member, { force, taskKey }) {
       r.pendingInstalls = installsFor(r.pendingInstalls, changed, missing);
       s.repos[root] = r;
     });
-    // The server error is ensureServer's to decide (H3). On a takeover (the
-    // holder changed: another workspace, a fresh activation) the last
-    // holder's dead start or busy port says nothing of the new one (G1); the
-    // same holder lit again keeps it unless a start ends it, as a sync does
-    // (H1, D24).
-    const server = await ensureServer(cx, root, { workspace, branch, taskKey, keepVariant: !switched && !taskKey, takeover: switched });
-    if (switched) {
+    // The server error is ensureServer's to decide (H3). On a takeover (a
+    // fresh activation: another workspace, or the one the record already
+    // names whose refs were gone, K2) the last holder's dead start or busy
+    // port says nothing of the new one (G1); the holder lit again on its own
+    // live refs (a sync) keeps it unless a start ends it, as a sync does
+    // (H1, D24). The variant follows the holder, so it is kept only when the
+    // holder didn't change.
+    const server = await ensureServer(cx, root, { workspace, branch, taskKey, keepVariant: !switched && !taskKey, takeover: !same });
+    if (switched && !quiet) {
       await cx.store.updateState((s) => {
         const text = `Spotlight on · ${name} ← ${path.basename(workspace)} · ${SERVER_WORDS[server.state] ?? server.state}`;
         addNote(s, { repo: root, text, toast: true }, cx.now());
@@ -229,11 +318,34 @@ async function lightMember(cx, member, { force, taskKey }) {
 
 // ── The server (D10) ───────────────────────────────────────────────────────
 
-function serverFailure(r) {
-  if (r.reason === "busy") return "la terminal del server corre algo que Spotlight no arrancó: no se tocó";
-  if (r.reason === "still-running") return "el server sigue corriendo: no paró con Ctrl-C y no se reinició";
-  return `el server no arrancó (${r.reason}${r.message ? `: ${r.message}` : ""})`;
+// Why a start didn't go through, in Spanish, by startServer's or
+// restartServer's reason (K3): the words after "El server no arrancó: ".
+const START_FAILURES = {
+  busy: "la terminal del server corre algo que Spotlight no arrancó: no se tocó",
+  "invalid-command": "su comando no es una sola línea que se pueda escribir",
+  "name-taken": "otra terminal viva tiene el nombre de la suya",
+  "terminal-failed": "hc no pudo crear su terminal",
+  unreadable: "hc no pudo leer su terminal",
+  "terminal-gone": "su terminal se cerró",
+  "send-failed": "hc no pudo escribir en su terminal",
+  "interrupt-failed": "hc no pudo mandarle Ctrl-C al server que corría",
+};
+
+// The server error of a start that didn't go through (K3): its own, which
+// replaces whatever server error the record had, so it never blames another
+// start's pid or port. hc's own words, when it gave some, in parentheses; a
+// reason this doesn't know yet is named as it came. "El server no arrancó:
+// hc no pudo leer su terminal (hc: no route to core)".
+export function startFailedError(r) {
+  const words = typeof r?.message === "string" && r.message.trim() ? ` (${oneLine(r.message)})` : "";
+  const why = START_FAILURES[r?.reason] ?? r?.reason ?? "sin respuesta";
+  return { code: SERVER_START_FAILED, message: `El server no arrancó: ${why}${words}` };
 }
+
+// A restart whose old server ignored the Ctrl-C (restartServer's
+// still-running): that server still runs, so no start failed (K3) and no
+// server error is written; its toast says so.
+const STILL_RUNNING = "el server sigue corriendo: no paró con Ctrl-C y no se reinició";
 
 // The env a repo's server should run (J-002): the one picked in the server
 // popup (`spotlight env --env`, the record's envOverride, kept until `toggle`
@@ -257,9 +369,23 @@ export async function envDrift(cx, root, record) {
   return commandTemplate({ settings: repoSettings(cx.settings, root), detected, env }) !== null;
 }
 
+// Which busy mark a server call makes (D33): a restart (`spotlight
+// restart`, Liberar puerto y arrancar), an env or a variant picked now
+// (`spotlight env`). The server work of a light or a sync makes none: it
+// runs inside the light's mark, and a sync's (auto-sync's, `on`'s) would
+// flash on every save.
+function serverBusyOp({ restart = false, envName, chosenVariant }) {
+  if (restart) return "restart";
+  if (envName != null) return "env";
+  if (chosenVariant != null) return "variant";
+  return null;
+}
+
 // Plans the repo's server for `workspace` (T5a) and starts it, restarts it
 // (its command or env changed, installs are pending, or `restart`), or
-// leaves it. Call under the repo's lock. Options:
+// leaves it. Call under the repo's lock. Given `restart`, `envName` or
+// `chosenVariant`, the repo is busy while it works (serverBusyOp, D33), its
+// target `workspace`; a repo with no record is never marked. Options:
 //   taskKey      `<lane>/<taskKey>` whose remembered variant applies
 //   envName      the env to run (else effectiveEnv's)
 //   chosenVariant  a variant picked now (`spotlight env --variant`)
@@ -268,20 +394,31 @@ export async function envDrift(cx, root, record) {
 //   ifRunning    touch only a server Spotlight runs now (a sync's installs)
 //   freePort     Liberar puerto y arrancar: stop the process the recorded
 //                port-busy error names when it still holds the port (D24)
-//   takeover     the holder changed (lightMember: another workspace, a
-//                fresh activation, Proyectar igual)
+//   takeover     a fresh activation (lightMember: another workspace, or the
+//                one the record names whose refs were gone, K2; Proyectar
+//                igual)
 // Nothing is typed while a process outside the server terminal's tree holds
 // the port the start takes (D23, D24): lastError port-busy, a toast that
 // opens the popup, and { state: "port-busy", error }.
 // The server error in force is decided here, never by the caller (H3): a
-// start that goes through ends it, a busy port writes it again, a start that
-// fails keeps it (no new server runs, and the record still says why, H2). The
-// rest (no command, a variant to pick, the same server already running)
-// starts nothing new and records nothing new: that ends the last holder's
-// on a takeover only (G1); otherwise it stays (H1: a port-busy a refused
-// restart left over a server that kept listening, D24).
+// start that goes through ends it, a busy port writes it again, and a start
+// that fails writes its own, server-start-failed, over it (K3: no new server
+// runs, and the record says why, H2; one toast per new error). A plan with
+// no command ends it whoever lights: there is no server to be wrong about
+// (K1). The rest (a variant to pick, the same server already running, an
+// old server that ignored the Ctrl-C and still runs) starts nothing new and
+// records nothing new: that ends the last holder's on a takeover only (G1);
+// otherwise it stays (H1: a port-busy a refused restart left over a server
+// that kept listening, D24).
 // → { state: started | running | needs-variant | none | pending | failed | port-busy, … }
 export async function ensureServer(cx, root, opts = {}) {
+  const op = serverBusyOp(opts);
+  if (!op) return planAndStart(cx, root, opts);
+  return withBusy(cx, root, { op, workspace: opts.workspace ?? null }, () => planAndStart(cx, root, opts));
+}
+
+// ensureServer's work, under the busy mark its caller asked for, if any.
+async function planAndStart(cx, root, opts) {
   const { workspace, branch = null, taskKey = null, envName, restart = false, ifRunning = false, takeover = false } = opts;
   const state = cx.store.readState();
   const record = state.repos[root];
@@ -303,7 +440,8 @@ export async function ensureServer(cx, root, opts = {}) {
     return { state: "needs-variant", candidates: plan.candidates };
   }
   if (plan.kind !== "command") {
-    if (takeover && serverErrorOf(record.lastError)) {
+    // No command: no server to be wrong about, whoever lights (K1).
+    if (serverErrorOf(record.lastError)) {
       await cx.store.updateState((s) => {
         if (s.repos[root]) clearServerError(s.repos[root]);
       });
@@ -339,6 +477,8 @@ export async function ensureServer(cx, root, opts = {}) {
     }
     r = seen.kind === "spotlight" ? await restartServer(args, cx.serverDeps) : await startServer(args, cx.serverDeps);
   }
+  const ran = r.ok && (r.started || r.reason === "already-running");
+  const failure = ran || r.reason === "still-running" ? null : startFailedError(r);
   await cx.store.updateState((s) => {
     const rec = s.repos[root];
     if (!rec) return;
@@ -366,16 +506,27 @@ export async function ensureServer(cx, root, opts = {}) {
       if (r.pid) rec.serverPid = r.pid;
       rec.variantCandidates = [];
       if (takeover) clearServerError(rec);
-    } else {
-      // The start didn't go through: the server error in force stays (H2).
-      // A server that ignored Ctrl-C keeps the state it had: it's still up.
-      if (r.reason !== "still-running") rec.serverState = r.reason === "terminal-gone" ? "gone" : "stopped";
+    } else if (!failure) {
+      // The old server ignored the Ctrl-C and still runs, in the state it
+      // had: no start failed (K3). As over a server already running, a
+      // takeover ends the last holder's server error (G1) and the same
+      // holder keeps it (H1). Its toast says so, each time.
       if (rec.serverEnv !== plan.env) Object.assign(rec, { envFailed: plan.env, envFailedAt: now });
-      addNote(s, { repo: root, text: `${cx.nameOf(root)}: ${serverFailure(r)}`, toast: true }, now);
+      if (takeover) clearServerError(rec);
+      addNote(s, { repo: root, text: `${cx.nameOf(root)}: ${STILL_RUNNING}`, toast: true }, now);
+    } else {
+      // The start didn't go through: its own server error over whatever was
+      // there (K3, H2; under a root error the record has, F7), toasted once
+      // per new error, opening the popup (Ver log, Reintentar).
+      rec.serverState = r.reason === "terminal-gone" ? "gone" : "stopped";
+      if (rec.serverEnv !== plan.env) Object.assign(rec, { envFailed: plan.env, envFailedAt: now });
+      const known = shownAlready(rec, failure);
+      setServerError(rec, { ...failure, at: now });
+      if (!known) errorNote(s, { root, name: cx.nameOf(root), workspace: workspace ?? rec.holder, error: failure, now, top: rec.lastError });
     }
   });
   const word = r.ok && r.started ? "started" : r.ok && r.reason === "already-running" ? "running" : "failed";
-  return { state: word, result: r, plan, freed };
+  return { state: word, result: r, plan, freed, ...(failure ? { error: failure } : {}) };
 }
 
 // ── A busy port (D23, D24) ─────────────────────────────────────────────────
@@ -385,10 +536,10 @@ export async function ensureServer(cx, root, opts = {}) {
 export function portBusyError({ port, pid = null, command = null, cwd = null }) {
   if (!Number.isInteger(pid)) {
     const which = Number.isInteger(port) ? `El puerto ${port}` : "El puerto del server";
-    return { code: "port-busy", port: port ?? null, pid: null, command: null, cwd: null, message: `${which} estaba ocupado al arrancar el server.` };
+    return { code: PORT_BUSY, port: port ?? null, pid: null, command: null, cwd: null, message: `${which} estaba ocupado al arrancar el server.` };
   }
   const where = cwd ? `pid ${pid}, en ${cwd}` : `pid ${pid}`;
-  return { code: "port-busy", port, pid, command, cwd, message: `El puerto ${port} lo tiene ${command ?? "otro proceso"} (${where}).` };
+  return { code: PORT_BUSY, port, pid, command, cwd, message: `El puerto ${port} lo tiene ${command ?? "otro proceso"} (${where}).` };
 }
 
 // Who holds the port this start takes, from outside the server terminal's
@@ -401,7 +552,7 @@ export function portBusyError({ port, pid = null, command = null, cwd = null }) 
 // is still the one holding that port: whatever took it since is shown, not
 // stopped. → { busy: { port, pid, command, cwd } | null, freed }.
 async function checkPort(cx, root, { command, settings, rootPid, freePort, shown }) {
-  const recorded = shown?.code === "port-busy" && Number.isInteger(shown.port) ? shown.port : null;
+  const recorded = shown?.code === PORT_BUSY && Number.isInteger(shown.port) ? shown.port : null;
   const port = (await expectedPort({ root, command, settings, io: cx.io })) ?? recorded;
   if (port === null) return { busy: null, freed: null };
   const holder = async () => {
@@ -409,7 +560,7 @@ async function checkPort(cx, root, { command, settings, rootPid, freePort, shown
     return found ? { port, ...found } : null;
   };
   let busy = await holder();
-  if (!busy || !freePort || shown?.code !== "port-busy" || shown.port !== port || shown.pid !== busy.pid) return { busy, freed: null };
+  if (!busy || !freePort || shown?.code !== PORT_BUSY || shown.port !== port || shown.pid !== busy.pid) return { busy, freed: null };
   // Signals go through cx.serverDeps.kill only (R5).
   const stopped = await stopProcessTree(busy.pid, cx.serverDeps, { protect: [process.pid, rootPid].filter(Number.isInteger) });
   const freed = { ...busy, ...stopped };
@@ -459,7 +610,7 @@ const diedAtStart = (record, live) =>
   record?.serverState === "starting" && live?.state === "stopped" && live.owner === null;
 
 function serverExitedError(line) {
-  return { code: "server-exited", message: line ? `El server se cayó al arrancar: ${line}` : "El server se cayó al arrancar." };
+  return { code: SERVER_EXITED, message: line ? `El server se cayó al arrancar: ${line}` : "El server se cayó al arrancar." };
 }
 
 // Why a dead start died, from its log since the last start marker: a port
@@ -592,10 +743,15 @@ const restartFailure = (server) =>
 // effective one (J-002: a settings change, picked up by the next `on`,
 // auto-sync, or the reap's detached sync). `lockTimeoutMs`: how long to wait
 // for the repo lock (`on`'s time left, J-001); past it, LockError
-// "lock-timeout".
+// "lock-timeout". Forced (Forzar sync), the repo is busy while it works, its
+// holder the target (D33); a sync that isn't forced (auto-sync, `on`) never
+// marks it: it would flash on every save.
 export async function syncRepo(cx, root, { force = false, onlyIf, lockTimeoutMs } = {}) {
   const wait = lockTimeoutMs === undefined ? {} : { timeoutMs: lockTimeoutMs };
-  return cx.store.withRepoLock(root, async () => {
+  const locked = force
+    ? (fn) => withBusyRepo(cx, root, { op: "sync", workspace: (r) => r?.holder ?? null }, fn, wait)
+    : (fn) => cx.store.withRepoLock(root, fn, wait);
+  return locked(async () => {
     const record = cx.store.readState().repos[root] ?? null;
     if (!record?.holder) return { ok: false, code: "not-active", message: `Spotlight is not on in ${cx.nameOf(root)}.` };
     if (onlyIf && !onlyIf(record)) return { ok: true, skipped: true, notLit: true, holder: record.holder };
@@ -640,7 +796,7 @@ export async function syncRepo(cx, root, { force = false, onlyIf, lockTimeoutMs 
     let server = null;
     if (installs.length > 0 || (await envDrift(cx, root, record))) server = await refreshServer();
     return { ok: true, skipped: false, holder, installs, restarted: server?.state === "started", restartFailed: restartFailure(server) };
-  }, wait);
+  });
 }
 
 // ── Turning a root off (toggle) ────────────────────────────────────────────
@@ -651,9 +807,13 @@ export async function syncRepo(cx, root, { force = false, onlyIf, lockTimeoutMs 
 // true, … }, or { ok: false, code, message }: refused (the root untouched;
 // when the server's stop had failed before the restore refused, its message
 // says that too, G4), or server-survived / server-not-stopped (the root
-// restored, the server not stopped: turnOffError). A stop that failed
-// leaves its own cause in the server log either way (stopCauseNote, H5).
-export async function deactivateRepo(cx, root, { force = false } = {}) {
+// restored, the server not stopped: turnOffError). The stop's cause, in its
+// own words, is in the server log either way: stopServer's own note says it
+// (server.js, K4/K5); the turn-off adds no line. The repo is busy all along, its holder the target (D33). `quiet` (the
+// whole-task toggle, D31, whose summary says it once): no "Spotlight off —
+// root restaurado" note; a refusal, a server that didn't stop, a warning or
+// rescued files still toast.
+export async function deactivateRepo(cx, root, { force = false, quiet = false } = {}) {
   const name = cx.nameOf(root);
   // A refusal: the git error goes on the record (a root error, over the
   // server error in force, F6) and toasts. `stopped`, stopServer's answer
@@ -670,7 +830,7 @@ export async function deactivateRepo(cx, root, { force = false } = {}) {
     });
     return { ok: false, ...told, ...(stopped ? { stopped } : {}) };
   };
-  return cx.store.withRepoLock(root, async () => {
+  return withBusyRepo(cx, root, { op: "off", workspace: (r) => r?.holder ?? null }, async () => {
     const record = cx.store.readState().repos[root] ?? null;
     const holder = record?.holder ?? null;
     try {
@@ -696,11 +856,8 @@ export async function deactivateRepo(cx, root, { force = false } = {}) {
       cx.serverDeps,
     );
     // H5: the toast and the error say why in Spanish only (G5); stopServer's
-    // own cause (hc's or ps's words) goes into the server log with the
-    // turn-off note, where `spotlight logs` reads it, whatever the restore
-    // does next.
-    const cause = stopCauseNote(stopped);
-    if (cause) appendLogHeader(logPath, { ...head, at: cx.now(), event: cause });
+    // own note, written before the restore, carries its cause in its own
+    // words (hc's or ps's), where `spotlight logs` reads it (K4/K5).
     let res;
     try {
       res = await deactivate(cx.gitCtx, root, { force });
@@ -718,7 +875,7 @@ export async function deactivateRepo(cx, root, { force = false } = {}) {
       delete s.repos[root];
       delete s.queue.lighting[`direct/${root}`];
       if (failed) addNote(s, { repo: root, text: `${name}: ${failed.message}`, toast: true }, now);
-      else addNote(s, { repo: root, text: "Spotlight off — root restaurado", toast: true }, now);
+      else if (!quiet) addNote(s, { repo: root, text: "Spotlight off — root restaurado", toast: true }, now);
       if (res.warning) addNote(s, { repo: root, text: `${name}: ${res.warning.message}`, toast: true }, now);
       for (const text of rescuedNotes(res.rescued, res.discardedRepos)) addNote(s, { repo: root, text: `${name}: ${text}`, toast: true }, now);
     });
@@ -791,23 +948,6 @@ function stopFailure(stopped) {
 export function turnOffError(stopped) {
   if (stopped?.reason === "survived") return survivedError(stopped.survivors, stopped.refused);
   return { code: SERVER_NOT_STOPPED, message: `El server no paró al apagar Spotlight: ${stopFailure(stopped)} (el root sí se restauró).` };
-}
-
-// The server log's turn-off note for a stop without ok: true, with the cause
-// stopServer gave in its own words, which the Spanish error leaves out (G5,
-// H5): its message, and the Ctrl-C hc couldn't send when the message doesn't
-// say it already, each on one line. "Spotlight off — server NOT stopped
-// (unreadable): the Spotlight terminal could not be read (hc: no route to
-// core): …". null when the stop went through, or when it gave no cause and
-// its reason is `survived`: stopServer's own line names those pids.
-function stopCauseNote(stopped) {
-  if (stopped?.ok === true) return null;
-  const message = typeof stopped?.message === "string" ? oneLine(stopped.message) : "";
-  const interrupt = typeof stopped?.interruptError === "string" ? oneLine(stopped.interruptError) : "";
-  const parts = [message, interrupt && !message.includes(interrupt) ? `the Ctrl-C could not be sent (${interrupt})` : ""].filter(Boolean);
-  const reason = stopped?.reason ?? "no answer";
-  if (parts.length === 0) return reason === "survived" ? null : `Spotlight off — server NOT stopped (${reason})`;
-  return `Spotlight off — server NOT stopped (${reason}): ${parts.join("; ")}`;
 }
 
 // A refused restore's message when the server's stop had failed before it
@@ -927,15 +1067,18 @@ const merges = (sv, r) =>
 // died was recorded already, as the reap records it, when describeServer
 // settled it (D25, R10); one whose repo lock was busy stays `starting`, so
 // the next look still sees it. Only the records it writes get goneOf's ps
-// (H8): the same rule (merges) picks them before the read and in the write.
+// (H8): the same rule (merges) picks them before the read and in the write,
+// and the write merges only a root the read picked (K6): a record that turned
+// mergeable between the two (a variant picked, a dead start settled) has no
+// ps behind it, so it waits for the next round.
 export async function recordServers(cx, servers) {
   const repos = cx.store.readState().repos;
-  const looked = servers.filter((sv) => merges(sv, repos[sv.root])).map((sv) => sv.root);
-  const gone = await goneOf(cx, repos, looked);
+  const looked = new Set(servers.filter((sv) => merges(sv, repos[sv.root])).map((sv) => sv.root));
+  const gone = await goneOf(cx, repos, [...looked]);
   await cx.store.updateState((s) => {
     for (const sv of servers) {
       const r = s.repos[sv.root];
-      if (merges(sv, r)) noteLive(r, { state: sv.serverState, ports: sv.ports, procs: sv.procs }, gone);
+      if (looked.has(sv.root) && merges(sv, r)) noteLive(r, { state: sv.serverState, ports: sv.ports, procs: sv.procs }, gone);
     }
   });
 }
@@ -1041,8 +1184,9 @@ export function applyTurnEnd(queue, cur, d, qctx) {
 // is seen with (noteLive, F1; the remembered ones that died dropped, G3),
 // log rotation and a
 // detached sync for a server running another env than the effective one
-// (J-002); a regrant (a raised cap); and lights for turns whose marker is
-// missing or whose light died.
+// (J-002); a regrant (a raised cap); lights for turns whose marker is
+// missing or whose light died; and busy marks and task batches whose
+// process is gone (staleMarks, D33, D31).
 // `on` and `off` run the queue part only (`full: false`: turn ends, the
 // regrant, the lights; D13 "checked by on, off and reap"), so the line moves
 // while the footer isn't running; `skip` is the caller's own terminal, whose
@@ -1052,6 +1196,8 @@ export async function reap(cx, { full = true, skip = null } = {}) {
   const reconciled = full ? await reconcileFree(cx) : [];
   const state = cx.store.readState();
   const requests = state.queue.requests;
+  // Read before the state lock: its `ps` never runs under it (D7).
+  const stale = full ? staleMarks(cx, state) : { repos: [], batches: [] };
 
   const asked = requests.filter((r) => r.terminal !== skip);
   const facts = new Map();
@@ -1154,6 +1300,9 @@ export async function reap(cx, { full = true, skip = null } = {}) {
       const r = s.repos[sv.root];
       if (r) noteLive(r, sv, gone);
     }
+    // Only while each is still the mark read (a new light's stays).
+    for (const [root, mark] of stale.repos) clearBusy(s, root, mark);
+    for (const [key, mark] of stale.batches) clearTaskBatch(s, key, mark);
 
     const keys = markGranted(s, granted, now);
     for (const turn of snapshot(s.queue).turns) {

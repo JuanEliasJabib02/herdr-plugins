@@ -14,6 +14,10 @@ import {
   childPids, insideRoot, serverSnapshot, serverLeftovers, stopLeftovers, LEFTOVER_GRACE_MS, validPort,
   processStates, treeListening,
 } from "../mods/spotlight/ports.js";
+// ports.js runs every lstart read as `/usr/bin/env LC_ALL=C TZ=UTC ps …`
+// (H7): unwrapEnv gives the program and args under the env words, and those
+// words (`env`, null for a call that isn't wrapped).
+import { unwrapEnv } from "./fake-ps.mjs";
 
 // Review r3 helpers, destructured so a missing one fails its own tests only.
 const { goneIdentities, identityKey } = portsMod;
@@ -32,21 +36,6 @@ const LSOF_FIXTURE = [
 // The server terminal's tree: zsh -l (100) → script (101) → node (102) →
 // esbuild (103). 702 (postgres) and 593 are someone else's.
 const CHILDREN = { 100: [101], 101: [102], 102: [103] };
-
-// ports.js runs every lstart read as `/usr/bin/env LC_ALL=C TZ=UTC ps …`
-// (H7): the program and args under the env words, and those words (`env`,
-// null for a call that isn't wrapped).
-function unwrapEnv(file, args = []) {
-  if (file !== "/usr/bin/env") return { file, args, env: null };
-  const env = {};
-  let i = 0;
-  while (i < args.length && /^[A-Za-z_]\w*=/.test(args[i])) {
-    const at = args[i].indexOf("=");
-    env[args[i].slice(0, at)] = args[i].slice(at + 1);
-    i += 1;
-  }
-  return { file: args[i], args: args.slice(i + 1), env };
-}
 
 // A fake exec answering `pgrep -P <pid>` from a child map and `lsof` with a
 // fixture; records every call.
@@ -627,24 +616,49 @@ test("G2: every ps read that records or checks an identity runs with LC_ALL=C an
   for (const c of reads) assert.deepEqual({ env: c.env, opts: c.opts }, PINNED, c.args.join(" "));
 });
 
-test("G2: an identity reads the same whatever the caller's TZ and locale: the real ps through the CLI's exec", async () => {
-  const { exec } = await import("../mods/spotlight/cli-env.mjs");
-  const pinned = execFileSync("ps", ["-o", "lstart=", "-p", String(process.pid)], {
-    encoding: "utf8", env: { ...process.env, LC_ALL: "C", TZ: "UTC" },
-  }).replace(/\s+/g, " ").trim();
-  const saved = { TZ: process.env.TZ, LC_ALL: process.env.LC_ALL, LANG: process.env.LANG };
+// K9: the real ps runs under a caller's own TZ and locale handed to a child
+// process (execFile's `env`), never written into this test process's env;
+// the locales must be installed (`locale -a`), else those checks are skipped
+// with the reason.
+const CALLER_ENVS = [["Pacific/Kiritimati", "es_ES.UTF-8"], ["America/Bogota", "fr_FR.UTF-8"]];
+const callerEnv = (tz, lc) => ({ ...process.env, TZ: tz, LC_ALL: lc, LANG: lc });
+function missingLocales() {
   try {
-    for (const [tz, lc] of [["Pacific/Kiritimati", "es_ES.UTF-8"], ["America/Bogota", "fr_FR.UTF-8"]]) {
-      Object.assign(process.env, { TZ: tz, LC_ALL: lc, LANG: lc });
-      const states = await processStates([process.pid], { exec });
-      assert.equal(states?.get(process.pid)?.start, pinned, `${tz} ${lc}`);
-    }
-  } finally {
-    for (const [k, v] of Object.entries(saved)) {
-      if (v === undefined) delete process.env[k];
-      else process.env[k] = v;
-    }
+    const have = new Set(execFileSync("locale", ["-a"], { encoding: "utf8" }).split("\n").map((l) => l.trim()));
+    const missing = CALLER_ENVS.map(([, lc]) => lc).filter((lc) => !have.has(lc));
+    return missing.length > 0 ? `locale -a lacks ${missing.join(", ")}` : false;
+  } catch (e) {
+    return `locale -a failed: ${e.message}`;
   }
+}
+const LOCALES_SKIP = missingLocales();
+// ps's lstart of `pid` under `env`, spaces folded.
+const lstartUnder = (pid, env) =>
+  execFileSync("ps", ["-o", "lstart=", "-p", String(pid)], { encoding: "utf8", env }).replace(/\s+/g, " ").trim();
+
+test("G2, K9: an identity reads the same whatever the caller's TZ and locale: the real ps through the CLI's exec, in a CLI process started with that env", { skip: LOCALES_SKIP }, () => {
+  const url = (rel) => JSON.stringify(new URL(rel, import.meta.url).href);
+  // The CLI's exec passes no env: its children inherit the CLI process's.
+  const script = `
+    import { execFileSync } from "node:child_process";
+    import { exec } from ${url("../mods/spotlight/cli-env.mjs")};
+    import { processStates } from ${url("../mods/spotlight/ports.js")};
+    const read = (env) => execFileSync("ps", ["-o", "lstart=", "-p", String(process.pid)], { encoding: "utf8", env }).replace(/\\s+/g, " ").trim();
+    const states = await processStates([process.pid], { exec });
+    process.stdout.write(JSON.stringify({
+      start: states?.get(process.pid)?.start ?? null,
+      pinned: read({ ...process.env, LC_ALL: "C", TZ: "UTC" }),
+      own: read(process.env),
+    }));
+  `;
+  const before = { TZ: process.env.TZ, LC_ALL: process.env.LC_ALL, LANG: process.env.LANG };
+  for (const [tz, lc] of CALLER_ENVS) {
+    const out = JSON.parse(execFileSync(process.execPath, ["--input-type=module", "-e", script], { encoding: "utf8", env: callerEnv(tz, lc) }));
+    // The child really ran under that env: its own words differ from C/UTC's.
+    assert.notEqual(out.own, out.pinned, `${tz} ${lc}`);
+    assert.equal(out.start, out.pinned, `${tz} ${lc}`);
+  }
+  assert.deepEqual({ TZ: process.env.TZ, LC_ALL: process.env.LC_ALL, LANG: process.env.LANG }, before, "this process's env untouched");
 });
 
 test("H7: the pinned locale and time zone ride in ps's argv (/usr/bin/env LC_ALL=C TZ=UTC ps …), so an exec of Herdr's shape, which takes no env, reads C/UTC too", async () => {
@@ -656,31 +670,27 @@ test("H7: the pinned locale and time zone ride in ps's argv (/usr/bin/env LC_ALL
   };
   await processStates([101, 103], { exec: herdrShaped });
   assert.deepEqual(calls, [["/usr/bin/env", ["LC_ALL=C", "TZ=UTC", "ps", "-o", "pid=,ppid=,stat=,lstart=", "-p", "101,103"]]]);
+});
 
-  // The real ps through an exec that passes no env at all: the caller's own
-  // TZ and locale reach the child, and the argv still pins them.
-  const bare = (file, args) =>
-    new Promise((resolve) => {
-      execFile(file, args, { encoding: "utf8" }, (err, stdout, stderr) =>
-        resolve({ code: err ? (typeof err.code === "number" ? err.code : 1) : 0, stdout, stderr }),
-      );
-    });
-  const pinned = execFileSync("ps", ["-o", "lstart=", "-p", String(process.pid)], {
-    encoding: "utf8", env: { ...process.env, LC_ALL: "C", TZ: "UTC" },
-  }).replace(/\s+/g, " ").trim();
-  const saved = { TZ: process.env.TZ, LC_ALL: process.env.LC_ALL, LANG: process.env.LANG };
-  try {
-    for (const [tz, lc] of [["Pacific/Kiritimati", "es_ES.UTF-8"], ["America/Bogota", "fr_FR.UTF-8"]]) {
-      Object.assign(process.env, { TZ: tz, LC_ALL: lc, LANG: lc });
-      const states = await processStates([process.pid], { exec: bare });
-      assert.equal(states?.get(process.pid)?.start, pinned, `${tz} ${lc}`);
-    }
-  } finally {
-    for (const [k, v] of Object.entries(saved)) {
-      if (v === undefined) delete process.env[k];
-      else process.env[k] = v;
-    }
+test("H7, K9: the real ps through an exec that adds no env of its own reads C/UTC under any caller's TZ and locale (the child's env, never this process's)", { skip: LOCALES_SKIP }, async () => {
+  const pinned = lstartUnder(process.pid, { ...process.env, LC_ALL: "C", TZ: "UTC" });
+  const before = { TZ: process.env.TZ, LC_ALL: process.env.LC_ALL, LANG: process.env.LANG };
+  for (const [tz, lc] of CALLER_ENVS) {
+    const env = callerEnv(tz, lc);
+    // That env reaches the child: ps's own words under it differ from C/UTC's.
+    assert.notEqual(lstartUnder(process.pid, env), pinned, `${tz} ${lc}`);
+    // An exec that adds nothing: its child runs under the caller's env, and
+    // the argv still pins them.
+    const bare = (file, args) =>
+      new Promise((resolve) => {
+        execFile(file, args, { encoding: "utf8", env }, (err, stdout, stderr) =>
+          resolve({ code: err ? (typeof err.code === "number" ? err.code : 1) : 0, stdout, stderr }),
+        );
+      });
+    const states = await processStates([process.pid], { exec: bare });
+    assert.equal(states?.get(process.pid)?.start, pinned, `${tz} ${lc}`);
   }
+  assert.deepEqual({ TZ: process.env.TZ, LC_ALL: process.env.LC_ALL, LANG: process.env.LANG }, before, "this process's env untouched");
 });
 
 test("G3: goneIdentities names the identities that no longer run as that process, from one ps with the pinned env; doubt forgets none", async () => {

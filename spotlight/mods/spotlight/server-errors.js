@@ -4,17 +4,26 @@
 // Pure.
 //
 // SERVER_ERRORS, the server errors a record's lastError holds:
-//   port-busy           a process outside the server's terminal held the
-//                       port its start takes (D24), or the server found it
-//                       taken (D25)
-//   server-exited       the server died at start (D25)
+//   port-busy            a process outside the server's terminal held the
+//                        port its start takes (D24), or the server found it
+//                        taken (D25)
+//   server-exited        the server died at start (D25)
+//   server-start-failed  Spotlight couldn't start it: hc couldn't read,
+//                        make or type into its terminal, or the terminal
+//                        runs something Spotlight didn't start (K3)
 // A sync that goes through leaves them, and so does the same holder lit
 // again; a start that goes through, or the server coming up to listen, ends
 // them, and so does a takeover whose server needs no start (cli-work.mjs
-// ensureServer's `takeover`, G1, H3); a start that fails leaves them (H2).
-// They drive serverDown, the popup's actions, the toasts' popup action and
-// the record's two-error stack below.
-export const SERVER_ERRORS = new Set(["port-busy", "server-exited"]);
+// ensureServer's `takeover`, G1, H3, K2) and a plan with no command at all
+// (K1: no server to be wrong about). A start that fails writes its own
+// server-start-failed over any of them, so the record never blames another
+// start's pid or port (K3, H2). They drive serverDown, the popup's actions
+// (Ver log, Reintentar), the toasts' popup action and the record's two-error
+// stack below.
+export const PORT_BUSY = "port-busy";
+export const SERVER_EXITED = "server-exited";
+export const SERVER_START_FAILED = "server-start-failed";
+export const SERVER_ERRORS = new Set([PORT_BUSY, SERVER_EXITED, SERVER_START_FAILED]);
 
 // TURN_OFF_ERRORS, a turn-off whose server didn't stop (D26, cli-work.mjs
 // turnOffError, which takes its codes from here, H9):
@@ -82,7 +91,8 @@ export function clearRootError(record) {
 }
 
 // The server error ends (a start goes through, the server comes up to
-// listen, a takeover whose server needs no start), wherever it is.
+// listen, a takeover whose server needs no start, a plan with no command),
+// wherever it is.
 export function clearServerError(record) {
   if (isServerError(record.lastError)) {
     record.lastError = null;
