@@ -180,6 +180,9 @@ export function show(w, tab) {
 
 export function liveTerminals(w) {
   const all = Object.values(w.core);
+  // A live Herdr (2026-11-09) gives every field but status_ms, which it
+  // sends as null even for a Claude: Core's `hc get` has the real one.
+  if (w.statusMsNull) return all.map((t) => ({ ...t, status: t.status?.state ?? null, status_ms: null }));
   if (!w.summary) return all.map((t) => ({ ...t, status: t.status?.state ?? null }));
   return all.map((t) => ({
     address: t.address,

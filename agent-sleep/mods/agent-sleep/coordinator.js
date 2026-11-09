@@ -147,9 +147,13 @@ export function startLoop(props, timer, onPulse) {
 // summary (address, agent, cwd, state, status word, turn, where), but a live
 // Herdr also gives pid, foreground and status_ms (the popup's headline then has
 // "fields: terminals()" as its tooltip). A terminal with all three is used as is; any other one the
-// plan needs is completed with `hc get <t> --json`.
+// plan needs is completed with `hc get <t> --json`. A status_ms of null only
+// counts for a terminal with no status (a shell): the live Herdr of 2026-11-09
+// sends null for every Claude too, and an idle clock without its status time
+// starts again at each tick, so no Claude ever slept.
 const hasCoreFields = (t) =>
-  Number.isInteger(t.pid) && Object.hasOwn(t, "foreground") && Object.hasOwn(t, "status_ms");
+  Number.isInteger(t.pid) && Object.hasOwn(t, "foreground") && Object.hasOwn(t, "status_ms") &&
+  (Number.isFinite(t.status_ms) || (t.status ?? null) === null);
 
 const appOf = (v) => (isObject(v) && typeof v.app === "string" ? v.app : null);
 
