@@ -18,6 +18,7 @@ import {
   isShellForeground, ownsForeground, classifyTerminal, ensureServerTerminal, inspectServer, readServerState,
   startServer, restartServer, stopServer, serverLogs, peekArgv, peekServer, STOP_WAIT_MS,
 } from "../mods/spotlight/server.js";
+import * as serverModule from "../mods/spotlight/server.js";
 // ports.js runs every lstart read as `/usr/bin/env LC_ALL=C TZ=UTC ps …`
 // (H7): unwrapEnv gives the program and args under the env words.
 import { unwrapEnv } from "./fake-ps.mjs";
@@ -50,16 +51,28 @@ const zshWords = (line) =>
 // answers each live pid's parent and start time (`starts[pid]`, else one
 // fixed time: a test reuses a pid by giving it another), `ps -o
 // pid=,command=` its `procs[pid].command`, else its foreground's argv.
+// Herdr's screens (D38), with `herdr: true`: `herdr-app ls` answers `world`,
+// its spaces → tabs → terminals in the shape the live Herdr printed
+// (`addSpace` builds them over terminals of this fake). A terminal given
+// `herdr.space` (`hc run --label`, `hc label`) shows at once in a new tab at
+// the end of that space, or of a new space when Herdr doesn't know the id; a
+// killed terminal leaves its tab, a tab left with no terminal goes, and so
+// does a space left with no tab. `herdr-app do` applies tab.rename and
+// tab.move and records each call in `did`. Without `herdr`, `herdr-app ls`
+// answers "{}": a Herdr that can't say where anything is.
 const FAKE_START = "Sun Nov  8 22:00:00 2026";
 function fakeHc({
   lingers = 1, ports = {}, readText = "", shellReads = null, startupFg = null, children = {}, procs = {}, fgIgnoresTerm = false,
-  starts = {},
+  starts = {}, herdr = false,
 } = {}) {
   const terms = new Map();
   const calls = [];
   const sent = [];
   const dead = new Set();
   const signals = [];
+  const world = herdr ? [] : null;
+  const did = [];
+  let nextTab = 1;
   const frontOf = (pid) => [...terms.values()].find((t) => t.foreground && t.foreground.pid === pid && t.foreground.pid !== t.pid);
   const exists = (pid) =>
     !dead.has(pid) &&
@@ -98,9 +111,77 @@ function fakeHc({
     terms.set(t.address, t);
     return t;
   };
+  // Herdr's view of a terminal in a tab.
+  const shown = (t, app = null) => ({ terminal: t.address, pane: `p-${t.address}`, status: app ? "idle" : null, app, name: t.name, sub_agents: [] });
+  // A terminal given herdr.space=<id> shows in a new tab at the end of it.
+  const showIn = (t, id) => {
+    if (!world || world.some((s) => s.tabs.some((tab) => tab.terminals.some((x) => x.terminal === t.address)))) return;
+    let s = world.find((x) => x.id === id);
+    if (!s) {
+      s = { id, name: t.cwd.split("/").pop(), folder: t.cwd, machine: null, active: false, tabs: [] };
+      world.push(s);
+    }
+    const tab = { id: `tbn${nextTab++}`, name: String(s.tabs.length + 1), active: false, settled: false, terminals: [shown(t)] };
+    s.tabs.push(tab);
+    t.labels = { ...t.labels, "herdr.tab": tab.id };
+  };
+  const unshow = (address) => {
+    if (!world) return;
+    for (const s of world) {
+      for (const tab of s.tabs) {
+        const before = tab.terminals.length;
+        tab.terminals = tab.terminals.filter((x) => x.terminal !== address);
+        if (before > 0 && tab.terminals.length === 0) tab.gone = true;
+      }
+      s.tabs = s.tabs.filter((tab) => !tab.gone);
+    }
+    world.splice(0, world.length, ...world.filter((s) => s.tabs.length > 0));
+  };
+  // A space of Herdr's: `tabs` lists each tab's terminals ({ cwd, app, fg,
+  // labels, name }), made as this fake's terminals labelled with the space
+  // and the tab; `active` is the active tab's place (0 = first).
+  const addSpace = ({ id, folder = ROOT, active = 0, tabs = [] }) => {
+    const s = { id, name: folder.split("/").pop(), folder, machine: null, active: false, tabs: [] };
+    tabs.forEach((list, i) => {
+      const tab = { id: `${id}-tb${i + 1}`, name: String(i + 1), active: i === active, settled: false, terminals: [] };
+      for (const { cwd = folder, app = null, fg, labels = {}, name = null } of list) {
+        const t = add({ name, cwd, fg, labels: { ...labels, "herdr.space": id, "herdr.tab": tab.id } });
+        tab.terminals.push(shown(t, app));
+      }
+      s.tabs.push(tab);
+    });
+    world.push(s);
+    return s;
+  };
+  const labelsOf = (args) => {
+    const out = {};
+    args.forEach((a, i) => {
+      if (a !== "--label") return;
+      const [k, ...v] = args[i + 1].split("=");
+      out[k] = v.join("=");
+    });
+    return out;
+  };
   const exec = async (rawFile, rawArgs) => {
     const { file, args } = unwrapEnv(rawFile, rawArgs);
     calls.push([file, ...args]);
+    if (file === "herdr-app" && args[0] === "ls") return world ? ok({ spaces: world }) : { code: 0, stdout: "{}", stderr: "" };
+    if (file === "herdr-app" && args[0] === "do") {
+      let a = {};
+      try {
+        a = JSON.parse(args[2] ?? "{}");
+      } catch {
+        // `--name value` words (terminal.peek): recorded as given.
+      }
+      did.push({ command: args[1], args: a });
+      for (const s of world ?? []) {
+        const i = s.tabs.findIndex((tab) => tab.id === a.id);
+        if (i < 0) continue;
+        if (args[1] === "tab.rename") s.tabs[i].name = a.name;
+        if (args[1] === "tab.move") s.tabs.splice(a.index - 1, 0, ...s.tabs.splice(i, 1));
+      }
+      return { code: 0, stdout: "{}", stderr: "" };
+    }
     if (file === "herdr-app") return { code: 0, stdout: "{}", stderr: "" };
     if (file === "ps") {
       const fields = args[args.indexOf("-o") + 1];
@@ -144,14 +225,36 @@ function fakeHc({
         if ([...terms.values()].some((x) => x.name === name && x.state === "live")) {
           return fail(1, "name_taken", `a live terminal is already named "${name}"`);
         }
-        const [k, ...v] = opt("--label").split("=");
-        const made = add({ name, labels: { [k]: v.join("=") }, cwd: opt("--cwd") });
+        const made = add({ name, labels: labelsOf(args), cwd: opt("--cwd") });
         if (shellReads !== null) {
           made.foreground = startupFg;
           made.pendingShell = shellReads;
         }
+        if (made.labels["herdr.space"]) showIn(made, made.labels["herdr.space"]);
         return ok({ address: made.address, agent: "zsh", cwd: made.cwd, name, state: "live", turn: 0 });
       }
+      case "ls":
+        return ok({
+          hidden_finished: 0,
+          terminals: [...terms.values()].filter((x) => x.state === "live").map((x) => ({ address: x.address, agent: "zsh", cwd: x.cwd, name: x.name, state: x.state, turn: 0 })),
+        });
+      case "label": {
+        if (!t) return fail(3, "not_found", "no terminal");
+        for (const kv of rest.slice(1).filter((w) => w !== "--json")) {
+          const [k, ...v] = kv.split("=");
+          if (v.join("=") === "") delete t.labels[k];
+          else t.labels = { ...t.labels, [k]: v.join("=") };
+        }
+        if (t.state === "live" && t.labels["herdr.space"]) showIn(t, t.labels["herdr.space"]);
+        return ok({ address: t.address, labels: t.labels });
+      }
+      case "kill":
+        if (!t) return fail(3, "not_found", "no terminal");
+        if (t.foreground && t.foreground.pid !== t.pid) dead.add(t.foreground.pid);
+        t.state = "finished";
+        t.reason = "killed";
+        unshow(t.address);
+        return ok({ killed: t.address });
       case "send": {
         if (!t) return fail(3, "not_found", "no terminal");
         if (t.state !== "live") return fail(11, "finished", `${t.address} has finished`);
@@ -197,7 +300,7 @@ function fakeHc({
     return true;
   };
   return {
-    exec, kill, calls, sent, terms, add, ports, children, procs, starts, dead, signals,
+    exec, kill, calls, sent, terms, add, ports, children, procs, starts, dead, signals, world, did, addSpace,
     verbs: () => calls.filter((c) => c[0] === "hc").map((c) => c[1]),
   };
 }
@@ -382,7 +485,235 @@ test("ensureServerTerminal: a finished one is removed and replaced; a name taken
   assert.equal(other.verbs().includes("run"), false);
 });
 
-// ── Start ─────────────────────────────────────────────────────────────────
+// ── Where the server shows (D38, T29) ─────────────────────────────────────
+// The server runs in the root's main terminal, as Orca: Spotlight's own
+// terminal is reused; else it replaces the root's active (or first) plain
+// terminal, killing what ran there; else it gets a tab of its own. Its tab
+// is named "Spotlight" and never takes focus. Herdr's side is the fake
+// world above (`herdr: true`).
+
+// The new names T29 exports, read off the module so a missing one fails its
+// own tests, not the whole file's load.
+const { SPACE_LABEL, TAB_NAME, findRootSpace, showServerTerminal, serverTerminalHidden, showServer } = serverModule;
+
+const SPACE_ID = /^sp[0-9a-f]{32}$/;
+// Where in hc.calls the first call matching `pred` sits (-1: none).
+const at = (hc, pred) => hc.calls.findIndex(pred);
+const hcCall = (verb) => (c) => c[0] === "hc" && c[1] === verb;
+const doCall = (command) => (c) => c[0] === "herdr-app" && c[1] === "do" && c[2] === command;
+const didOf = (hc, command) => hc.did.filter((d) => d.command === command).map((d) => d.args);
+const labelOf = (argv, key) => argv[argv.findIndex((a, i) => argv[i - 1] === "--label" && a.startsWith(`${key}=`))]?.slice(key.length + 1);
+
+test("findRootSpace (D38): the root's space is the one whose first pane lives in the root, not the one whose stale `folder` says so", async () => {
+  assert.equal(SPACE_LABEL, "herdr.space");
+  assert.equal(TAB_NAME, "Spotlight");
+  const hc = fakeHc({ herdr: true });
+  hc.addSpace({ id: "spStale", folder: ROOT, tabs: [[{ cwd: "/Users/demo/elsewhere" }]] });
+  hc.addSpace({ id: "spLive", folder: "/Users/demo/old-name", tabs: [[{ cwd: ROOT }, { cwd: "/Users/demo/elsewhere" }]] });
+  const found = await findRootSpace(ROOT, { exec: hc.exec });
+  assert.equal(found.ok, true);
+  assert.equal(found.space?.id, "spLive");
+
+  // A space whose terminals hc doesn't list goes by the folder it was made in.
+  const folder = fakeHc({ herdr: true });
+  const s = folder.addSpace({ id: "spFolder", folder: ROOT, tabs: [[{ cwd: "/somewhere" }]] });
+  folder.terms.delete(s.tabs[0].terminals[0].terminal);
+  assert.equal((await findRootSpace(ROOT, { exec: folder.exec })).space?.id, "spFolder");
+
+  // No space there: none. Herdr that can't say (no spaces list): not ok.
+  const none = fakeHc({ herdr: true });
+  none.addSpace({ id: "spOther", folder: "/Users/demo/other", tabs: [[{ cwd: "/Users/demo/other" }]] });
+  assert.deepEqual(await findRootSpace(ROOT, { exec: none.exec }), { ok: true, space: null });
+  assert.equal((await findRootSpace(ROOT, { exec: fakeHc().exec })).ok, false);
+});
+
+test("ensureServerTerminal (D38): the active tab's plain terminal is replaced: hc run with herdr.space=<its space>, then tab.rename Spotlight, tab.move to its tab's place, then hc kill of it, in that order", async () => {
+  const hc = fakeHc({ herdr: true });
+  const s = hc.addSpace({ id: "spRoot", active: 1, tabs: [[{ app: "claude" }], [{ fg: { ...VIM_FG } }], [{}]] });
+  const adopted = s.tabs[1].terminals[0].terminal;
+  const r = await ensureServerTerminal({ root: ROOT }, { exec: hc.exec, ...fakeClock() });
+  assert.equal(r.ok, true);
+  assert.equal(r.created, true);
+  assert.equal(r.space, "spRoot");
+  assert.equal(r.adopted, adopted);
+
+  const run = at(hc, hcCall("run"));
+  const rename = at(hc, doCall("tab.rename"));
+  const move = at(hc, doCall("tab.move"));
+  const kill = at(hc, hcCall("kill"));
+  assert.ok(run >= 0 && run < rename && rename < move && move < kill, JSON.stringify(hc.calls));
+  assert.deepEqual(hc.calls[run], createTerminalArgv(ROOT, { space: "spRoot" }));
+  assert.deepEqual(didOf(hc, "tab.rename"), [{ id: r.tab, name: "Spotlight" }]);
+  assert.deepEqual(didOf(hc, "tab.move"), [{ id: r.tab, index: 2 }]);
+  assert.deepEqual(hc.calls[kill], ["hc", "kill", adopted, "--json"]);
+  assert.equal(hc.calls.filter(hcCall("kill")).length, 1, "only that terminal goes");
+  // What Juan sees: tab 2 is "Spotlight" in the old one's place; the agent's tab and tab 3 untouched; no focus asked.
+  assert.deepEqual(hc.world[0].tabs.map((t) => t.name), ["1", "Spotlight", "3"]);
+  assert.equal(hc.terms.get(adopted).state, "finished");
+  assert.equal(hc.terms.get(s.tabs[0].terminals[0].terminal).state, "live");
+  assert.deepEqual([...didOf(hc, "space.select"), ...didOf(hc, "tab.select")], []);
+  assert.deepEqual(hc.sent, [], "ensuring types nothing");
+});
+
+test("ensureServerTerminal (D38): the active tab holding an agent → the first plain terminal in tab order is the one replaced; an active tab with a plain one beside its agent gives that one", async () => {
+  const hc = fakeHc({ herdr: true });
+  const s = hc.addSpace({ id: "spRoot", active: 1, tabs: [[{}], [{ app: "claude" }]] });
+  const first = s.tabs[0].terminals[0].terminal;
+  const r = await ensureServerTerminal({ root: ROOT }, { exec: hc.exec, ...fakeClock() });
+  assert.equal(r.adopted, first);
+  assert.deepEqual(didOf(hc, "tab.move"), [{ id: r.tab, index: 1 }]);
+  assert.deepEqual(hc.calls.filter(hcCall("kill")), [["hc", "kill", first, "--json"]]);
+  assert.equal(hc.terms.get(s.tabs[1].terminals[0].terminal).state, "live", "the agent lives");
+  assert.deepEqual(hc.world[0].tabs.map((t) => t.name), ["Spotlight", "2"]);
+
+  const beside = fakeHc({ herdr: true });
+  const b = beside.addSpace({ id: "spRoot", active: 1, tabs: [[{}], [{ app: "claude" }, {}]] });
+  const plain = b.tabs[1].terminals[1].terminal;
+  const r2 = await ensureServerTerminal({ root: ROOT }, { exec: beside.exec, ...fakeClock() });
+  assert.equal(r2.adopted, plain);
+  assert.deepEqual(didOf(beside, "tab.move"), [{ id: r2.tab, index: 2 }]);
+  // Only that terminal goes: the agent stays, in its tab.
+  assert.deepEqual(beside.world[0].tabs.map((t) => [t.name, t.terminals.length]), [["1", 1], ["Spotlight", 1], ["2", 1]]);
+});
+
+test("ensureServerTerminal (D38): the terminal Spotlight was called from is never the one replaced: the next plain one is, or with none a new tab, so `spotlight restart` typed in the root's shell doesn't kill itself", async () => {
+  const hc = fakeHc({ herdr: true });
+  const s = hc.addSpace({ id: "spRoot", active: 0, tabs: [[{}], [{}]] });
+  const self = s.tabs[0].terminals[0].terminal;
+  const next = s.tabs[1].terminals[0].terminal;
+  const r = await ensureServerTerminal({ root: ROOT }, { exec: hc.exec, self, ...fakeClock() });
+  assert.equal(r.adopted, next);
+  assert.deepEqual(hc.calls.filter(hcCall("kill")), [["hc", "kill", next, "--json"]]);
+  assert.equal(hc.terms.get(self).state, "live", "the caller's shell lives");
+
+  const alone = fakeHc({ herdr: true });
+  const a = alone.addSpace({ id: "spRoot", tabs: [[{}]] });
+  const only = a.tabs[0].terminals[0].terminal;
+  const r2 = await ensureServerTerminal({ root: ROOT }, { exec: alone.exec, self: only, ...fakeClock() });
+  assert.deepEqual({ created: r2.created, adopted: r2.adopted }, { created: true, adopted: null });
+  assert.equal(alone.verbs().includes("kill"), false);
+  assert.deepEqual(alone.world[0].tabs.map((t) => t.name), ["1", "Spotlight"]);
+});
+
+test("ensureServerTerminal (D38): no plain terminal in the root's space → only a new tab named Spotlight, at the end: no move, no kill", async () => {
+  const hc = fakeHc({ herdr: true });
+  hc.addSpace({ id: "spRoot", tabs: [[{ app: "claude" }], [{ app: "codex" }]] });
+  const r = await ensureServerTerminal({ root: ROOT }, { exec: hc.exec, ...fakeClock() });
+  assert.deepEqual({ ok: r.ok, created: r.created, space: r.space, adopted: r.adopted }, { ok: true, created: true, space: "spRoot", adopted: null });
+  assert.deepEqual(hc.calls.find(hcCall("run")), createTerminalArgv(ROOT, { space: "spRoot" }));
+  assert.deepEqual(didOf(hc, "tab.rename"), [{ id: r.tab, name: "Spotlight" }]);
+  assert.deepEqual(didOf(hc, "tab.move"), []);
+  assert.equal(hc.verbs().includes("kill"), false);
+  assert.deepEqual(hc.world[0].tabs.map((t) => t.name), ["1", "2", "Spotlight"]);
+});
+
+test("ensureServerTerminal (D38): no space for the root → a fresh sp… id, so Herdr makes one; its tab is named Spotlight; nothing moved or killed", async () => {
+  const hc = fakeHc({ herdr: true });
+  hc.addSpace({ id: "spOther", folder: "/Users/demo/other", tabs: [[{ cwd: "/Users/demo/other" }]] });
+  const r = await ensureServerTerminal({ root: ROOT }, { exec: hc.exec, ...fakeClock() });
+  const run = hc.calls.find(hcCall("run"));
+  const space = labelOf(run, "herdr.space");
+  assert.match(space, SPACE_ID);
+  assert.deepEqual(run, createTerminalArgv(ROOT, { space }));
+  assert.deepEqual({ ok: r.ok, created: r.created, space: r.space, adopted: r.adopted }, { ok: true, created: true, space, adopted: null });
+  assert.deepEqual(didOf(hc, "tab.rename"), [{ id: r.tab, name: "Spotlight" }]);
+  assert.deepEqual(didOf(hc, "tab.move"), []);
+  assert.equal(hc.verbs().includes("kill"), false);
+  assert.deepEqual(hc.world.find((x) => x.id === space).tabs.map((t) => t.name), ["Spotlight"]);
+  // Two roots with no space never share an id.
+  const again = fakeHc({ herdr: true });
+  await ensureServerTerminal({ root: ROOT }, { exec: again.exec, ...fakeClock() });
+  assert.notEqual(labelOf(again.calls.find(hcCall("run")), "herdr.space"), space);
+});
+
+test("ensureServerTerminal (D38): a live spotlight.repo terminal in the root's space is reused as it is: nothing created, labelled, renamed or killed", async () => {
+  const hc = fakeHc({ herdr: true });
+  const s = hc.addSpace({ id: "spRoot", tabs: [[{}], [{ name: serverTerminalName(ROOT), labels: { [SERVER_LABEL]: ROOT } }]] });
+  const mine = s.tabs[1].terminals[0].terminal;
+  for (const terminal of [mine, undefined]) {
+    const r = await ensureServerTerminal({ root: ROOT, terminal }, { exec: hc.exec, ...fakeClock() });
+    assert.deepEqual(r, { ok: true, terminal: mine, created: false });
+  }
+  for (const verb of ["run", "label", "kill"]) assert.equal(hc.verbs().includes(verb), false, verb);
+  assert.deepEqual(hc.did, []);
+  assert.deepEqual(hc.world[0].tabs.map((t) => t.name), ["1", "2"]);
+});
+
+test("showServerTerminal (D38): Spotlight's live terminal with no herdr.space (lit before T29) → hc label <t> herdr.space=<root's space> and its tab renamed, once: no restart, no other terminal touched", async () => {
+  const hc = fakeHc({ herdr: true });
+  const s = hc.addSpace({ id: "spRoot", tabs: [[{}]] });
+  const plain = s.tabs[0].terminals[0].terminal;
+  const t = hc.add({ name: serverTerminalName(ROOT), labels: { [SERVER_LABEL]: ROOT }, fg: { ...SCRIPT_FG } });
+  const deps = { exec: hc.exec, ...fakeClock() };
+  assert.equal(await serverTerminalHidden({ root: ROOT, terminal: t.address }, deps), true);
+  const r = await showServerTerminal({ root: ROOT, terminal: t.address }, deps);
+  assert.equal(r.shown, true);
+  assert.deepEqual(hc.calls.filter(hcCall("label")), [["hc", "label", t.address, "herdr.space=spRoot"]]);
+  assert.deepEqual(didOf(hc, "tab.rename"), [{ id: r.tab, name: "Spotlight" }]);
+  assert.deepEqual(hc.world[0].tabs.map((x) => x.name), ["1", "Spotlight"]);
+  for (const verb of ["run", "kill", "interrupt", "send"]) assert.equal(hc.verbs().includes(verb), false, verb);
+  assert.deepEqual(didOf(hc, "tab.move"), []);
+  assert.equal(hc.terms.get(plain).state, "live");
+  assert.equal(hc.terms.get(t.address).foreground.name, "script", "the server still runs");
+
+  // Once: shown, it is left alone.
+  assert.equal(await serverTerminalHidden({ root: ROOT, terminal: t.address }, deps), false);
+  assert.equal((await showServerTerminal({ root: ROOT, terminal: t.address }, deps)).shown, false);
+  assert.equal(hc.calls.filter(hcCall("label")).length, 1);
+  assert.equal(didOf(hc, "tab.rename").length, 1);
+  // Another repo's terminal, or one hc doesn't know, is never touched.
+  const other = hc.add({ name: "sl-other-000000", labels: { [SERVER_LABEL]: "/Users/demo/other" } });
+  assert.equal(await serverTerminalHidden({ root: ROOT, terminal: other.address }, deps), false);
+  assert.equal((await showServerTerminal({ root: ROOT, terminal: other.address }, deps)).shown, false);
+  assert.equal(await serverTerminalHidden({ root: ROOT, terminal: "t404" }, deps), false);
+  assert.equal(hc.calls.filter(hcCall("label")).length, 1);
+});
+
+test("ensureServerTerminal (D38): a hidden Spotlight terminal it finds is shown the same way (label + rename) and reused: nothing created or killed", async () => {
+  const hc = fakeHc({ herdr: true });
+  hc.addSpace({ id: "spRoot", tabs: [[{}]] });
+  const t = hc.add({ name: serverTerminalName(ROOT), labels: { [SERVER_LABEL]: ROOT } });
+  const r = await ensureServerTerminal({ root: ROOT, terminal: t.address }, { exec: hc.exec, ...fakeClock() });
+  assert.deepEqual(r, { ok: true, terminal: t.address, created: false });
+  assert.deepEqual(hc.calls.filter(hcCall("label")), [["hc", "label", t.address, "herdr.space=spRoot"]]);
+  assert.equal(didOf(hc, "tab.rename").length, 1);
+  for (const verb of ["run", "kill"]) assert.equal(hc.verbs().includes(verb), false, verb);
+});
+
+test("ensureServerTerminal (D38): another repo's Spotlight terminal is never picked: the next plain one is, and with none left only a tab is made", async () => {
+  const otherRepo = { name: "sl-other-123456", labels: { [SERVER_LABEL]: "/Users/demo/other" } };
+  const hc = fakeHc({ herdr: true });
+  const s = hc.addSpace({ id: "spRoot", active: 0, tabs: [[otherRepo], [{}]] });
+  const [theirs, plain] = s.tabs.map((tab) => tab.terminals[0].terminal);
+  const r = await ensureServerTerminal({ root: ROOT }, { exec: hc.exec, ...fakeClock() });
+  assert.equal(r.adopted, plain);
+  assert.equal(hc.terms.get(theirs).state, "live");
+
+  const only = fakeHc({ herdr: true });
+  const o = only.addSpace({ id: "spRoot", tabs: [[otherRepo]] });
+  const r2 = await ensureServerTerminal({ root: ROOT }, { exec: only.exec, ...fakeClock() });
+  assert.equal(r2.adopted, null);
+  assert.equal(only.verbs().includes("kill"), false);
+  assert.equal(only.terms.get(o.tabs[0].terminals[0].terminal).state, "live");
+});
+
+test("startServer (D38): through an adopted terminal the server line, the log mirror and the terminal's argv are those of D10, unchanged", async () => {
+  const dir = tmp();
+  const logPath = join(dir, "app.log");
+  const hc = fakeHc({ herdr: true });
+  hc.addSpace({ id: "spRoot", tabs: [[{}]] });
+  const r = await startServer({ root: ROOT, line: "pnpm dev", logPath, workspace: "login", branch: "feat/login" }, { exec: hc.exec, ...fakeClock() });
+  assert.deepEqual({ ok: r.ok, started: r.started, created: r.created }, { ok: true, started: true, created: true });
+  // D10's argv, with the space's label after the repo's.
+  const base = createTerminalArgv(ROOT);
+  const i = base.indexOf(`${SERVER_LABEL}=${ROOT}`) + 1;
+  assert.deepEqual(hc.calls.find(hcCall("run")), [...base.slice(0, i), "--label", `${SPACE_LABEL}=spRoot`, ...base.slice(i)]);
+  assert.deepEqual(hc.sent, [{ terminal: r.terminal, text: wrapServerLine("pnpm dev", logPath) }]);
+  assert.equal(readFileSync(logPath, "utf8"), "\n── Spotlight: login (feat/login) · started: pnpm dev · 22:58:04 ──\n");
+  // The kill came before the line was typed.
+  assert.ok(at(hc, hcCall("kill")) < at(hc, hcCall("send")));
+  rmSync(dir, { recursive: true, force: true });
+});
 
 test("startServer: in a fresh terminal it types the wrapped line, logs a header, and reports the script's pid", async () => {
   const dir = tmp();
@@ -1255,4 +1586,50 @@ test("peek: `herdr-app do terminal.peek --terminal <server t>`", async () => {
   assert.deepEqual(hc.calls, [peekArgv("t2b")]);
   const failing = async () => ({ code: 1, stdout: "", stderr: '{"error":"no window"}' });
   assert.deepEqual(await peekServer("t2b", { exec: failing }), { ok: false, message: '{"error":"no window"}' });
+});
+
+test("showServer (D38, Ver server): a server terminal in a tab → space.select + tab.select of it, no peek; with no tab → the peek overlay as before", async () => {
+  const hc = fakeHc({ herdr: true });
+  const s = hc.addSpace({ id: "spRoot", tabs: [[{}], [{ name: serverTerminalName(ROOT), labels: { [SERVER_LABEL]: ROOT } }]] });
+  const mine = s.tabs[1].terminals[0].terminal;
+  for (const terminal of [mine, serverTerminalName(ROOT)]) {
+    hc.did.length = 0;
+    assert.deepEqual(await showServer(terminal, { exec: hc.exec }), { ok: true, how: "tab" });
+    assert.deepEqual(hc.did, [
+      { command: "space.select", args: { id: "spRoot" } },
+      { command: "tab.select", args: { id: s.tabs[1].id } },
+    ]);
+  }
+  assert.equal(hc.calls.some((c) => c[2] === "terminal.peek"), false);
+
+  // Hidden (no tab): Herdr's peek, the argv of before.
+  const hidden = fakeHc({ herdr: true });
+  const t = hidden.add({ name: serverTerminalName(ROOT), labels: { [SERVER_LABEL]: ROOT } });
+  assert.deepEqual(await showServer(t.address, { exec: hidden.exec }), { ok: true, how: "peek" });
+  assert.deepEqual(hidden.calls.filter((c) => c[1] === "do"), [peekArgv(t.address)]);
+  // Herdr that can't say where it is: the peek too.
+  const blind = fakeHc();
+  const b = blind.add({ name: serverTerminalName(ROOT), labels: { [SERVER_LABEL]: ROOT } });
+  assert.deepEqual(await showServer(b.address, { exec: blind.exec }), { ok: true, how: "peek" });
+  assert.deepEqual(blind.calls.filter((c) => c[1] === "do"), [peekArgv(b.address)]);
+});
+
+test("stopServer (D38): the turn-off of a server in its Spotlight tab is D26's, unchanged: no Herdr call, no label, no kill; the terminal and its tab stay", async () => {
+  const dir = tmp();
+  const logPath = join(dir, "app.log");
+  const hc = fakeHc({ herdr: true });
+  hc.addSpace({ id: "spRoot", tabs: [[{}]] });
+  const sd = stopDeps(hc);
+  const s = await startServer({ root: ROOT, line: "pnpm dev", logPath, ...HEAD }, sd.deps);
+  hc.ports[s.pid] = [3000];
+  const from = hc.calls.length;
+  const r = await stopServer({ root: ROOT, terminal: s.terminal, logPath, serverPid: s.pid, ...HEAD }, sd.deps);
+  assert.deepEqual(r, { ok: true, stopped: true, terminal: s.terminal, forced: 0 });
+  const during = hc.calls.slice(from);
+  assert.equal(during.some((c) => c[0] === "herdr-app"), false, JSON.stringify(during));
+  for (const verb of ["label", "kill", "run", "rm"]) assert.equal(during.some(hcCall(verb)), false, verb);
+  assert.match(readFileSync(logPath, "utf8"), stopNote("interrupt sent"));
+  assert.equal(hc.terms.get(s.terminal).state, "live");
+  assert.deepEqual(hc.world[0].tabs.map((t) => t.name), ["Spotlight"]);
+  rmSync(dir, { recursive: true, force: true });
 });

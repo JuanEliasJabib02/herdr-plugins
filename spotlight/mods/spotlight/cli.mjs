@@ -32,7 +32,7 @@ import { emptyRepo, rememberVariant } from "./store.js";
 import { pidAlive, LockError } from "./locks.js";
 import { normRoot } from "./settings.js";
 import { isSafeVariant, isServerEnv, SERVER_ENVS } from "./server-plan.js";
-import { serverTerminalName, serverLogs, peekServer } from "./server.js";
+import { serverTerminalName, serverLogs, showServer } from "./server.js";
 import { logPathFor, logDir, repoSlug, formatClock } from "./server-log.js";
 import {
   CLI_PATH, makeContext, terminalFacts, hcGet, repoRootOf, checkoutOf, branchOf, taskKeyOfWorkspace, registeredRoots,
@@ -70,7 +70,7 @@ People and the mod
   spotlight toggle --workspace p [--force]       turn a workspace's Spotlight on or off, outside the queue
   spotlight toggle --task KEY --group id         turn a whole task's Spotlight on or off in that space
   spotlight sync --repo r [--force] [--detach]   bring the root in step with its holder
-  spotlight peek --workspace p | --repo r        look at the server's terminal
+  spotlight peek --workspace p | --repo r        show the server's Spotlight tab (or peek at its terminal)
   spotlight env --workspace p [--env local|dev|prod] [--variant v]
   spotlight reap                                 turn ends, gone servers, idle times, grants
   spotlight continue [--terminal t] [--account id]
@@ -538,11 +538,13 @@ async function workspaceRoot(opts) {
   return workspace ? { workspace, root: await repoRootOf(workspace) } : { workspace: null, root: null };
 }
 
+// "Ver server" (D38): shows the server's Spotlight tab (its space, then the
+// tab); Herdr's peek for a server terminal in no tab.
 async function verbPeek(cx, opts) {
   const root = opts.workspace ? (await workspaceRoot(opts)).root : await repoOrCwd(cx, opts);
   if (!root) return usage("spotlight peek: --workspace <path> or --repo <path or name>.");
   const terminal = cx.store.readState().repos[root]?.serverTerminal ?? serverTerminalName(root);
-  const r = await peekServer(terminal, cx.serverDeps);
+  const r = await showServer(terminal, cx.serverDeps);
   if (!r.ok) {
     err(`spotlight peek: ${r.message}`);
     return 1;

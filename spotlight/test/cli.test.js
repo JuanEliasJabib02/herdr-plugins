@@ -228,8 +228,12 @@ process.stdout.write(kids.map((k) => k + "\\n").join(""));
 process.exitCode = kids.length ? 0 : 1;
 `;
 
+// It records its argv; `herdr-app ls` prints $FAKE_HC_STATE.herdr-ls when a
+// test wrote one (Herdr's spaces, tabs and terminals, D38), else nothing: a
+// Herdr that can't say, so a server terminal is made hidden, as before T29.
 const FAKE_HERDR_APP = `#!/bin/sh
 printf '%s\\n' "$*" >> "$FAKE_HC_STATE.herdr-app"
+if [ "$1" = ls ] && [ -f "$FAKE_HC_STATE.herdr-ls" ]; then cat "$FAKE_HC_STATE.herdr-ls"; fi
 `;
 
 // git, slowed down before the subcommand named in $FAKE_GIT_SLOW ("reset 2").
@@ -1148,10 +1152,22 @@ test("logs --path, logs after the notes, peek, and env --variant checked before 
   const fromCwd = await w.cli(["logs", "--path"], { cwd: ws });
   assert.equal(fromCwd.stdout.trim(), logPath);
 
+  // A server terminal in no tab: Herdr's peek, as before T29.
   const peek = await w.cli(["peek", "--workspace", ws]);
   assert.equal(peek.code, 0, peek.stderr);
   const server = w.serverTerminal(app.root);
-  assert.equal(readFileSync(`${w.hcPath}.herdr-app`, "utf8").trim(), `do terminal.peek --terminal ${server.address}`);
+  const herdrDone = () => readFileSync(`${w.hcPath}.herdr-app`, "utf8").split("\n").filter((l) => l.startsWith("do "));
+  assert.deepEqual(herdrDone(), [`do terminal.peek --terminal ${server.address}`]);
+  // D38: in its Spotlight tab, Ver server shows that space and tab instead.
+  const tab = (id, name, terminal) => ({
+    id, name, active: id === "tb1", settled: false, terminals: [{ terminal, pane: `p-${terminal}`, status: null, app: null, name: null, sub_agents: [] }],
+  });
+  writeFileSync(`${w.hcPath}.herdr-ls`, JSON.stringify({
+    spaces: [{ id: "spApp", name: "app", folder: app.root, machine: null, active: false, tabs: [tab("tb1", "1", "t900"), tab("tbS", "Spotlight", server.address)] }],
+  }));
+  const shown = await w.cli(["peek", "--repo", app.root]);
+  assert.equal(shown.code, 0, shown.stderr);
+  assert.deepEqual(herdrDone().slice(1), ['do space.select {"id":"spApp"}', 'do tab.select {"id":"tbS"}']);
 
   const bad = await w.cli(["env", "--workspace", ws, "--variant", "co;rm -rf x"]);
   assert.equal(bad.code, 2);

@@ -23,14 +23,16 @@ import { repoSettings, normRoot } from "./settings.js";
 import {
   planServer, lockfileInstalls, missingInstalls, installsFor, chainInstall, detectServerScripts, commandTemplate, expectedPort,
 } from "./server-plan.js";
-import { inspectServer, readServerState, startServer, restartServer, stopServer } from "./server.js";
+import {
+  inspectServer, readServerState, startServer, restartServer, stopServer, ensureServerTerminal, serverTerminalHidden, showServerTerminal,
+} from "./server.js";
 import { logPathFor, appendLogHeader, rotateLog, readStartFailure } from "./server-log.js";
 import { portUrl, foreignListener, stopProcessTree, goneIdentities, identityKey, isIdentity } from "./ports.js";
 import { release, pause, regrant, snapshot } from "./queue.js";
 import {
   decideTurnEnd, activityUpdate, lightingMarker, lightAlive, needsLight, memberLit, classifyStep,
 } from "./cli-turns.mjs";
-import { branchOf, hcGet, hcReadText, registeredRoots } from "./cli-env.mjs";
+import { branchOf, hcGet, hcReadText, registeredRoots, sleep } from "./cli-env.mjs";
 import {
   SERVER_ERRORS, PORT_BUSY, SERVER_EXITED, SERVER_START_FAILED, SERVER_SURVIVED, SERVER_NOT_STOPPED, isServerError, serverErrorOf,
   setRootError, setServerError, clearRootError, clearServerError,
@@ -42,10 +44,11 @@ const sha1 = (text) => crypto.createHash("sha1").update(text).digest("hex");
 // D17: the server badge's command id of a workspace's row.
 export const serverId = (workspace) => sha1(normRoot(workspace)).slice(0, 12);
 
-// server.js's look at the server (readServerState: its ports and processes)
-// and its stop, whose answers the reap, `on` and the turn-off act on. A
-// test's cx stands in for them (cx.server) with the shapes they answer.
-const serverOf = (cx) => ({ readServerState, stopServer, ...(cx.server ?? {}) });
+// server.js's look at the server (readServerState: its ports and processes),
+// its stop, whose answers the reap, `on` and the turn-off act on, and the
+// reap's showing of a hidden server terminal (D38). A test's cx stands in
+// for them (cx.server) with the shapes they answer.
+const serverOf = (cx) => ({ readServerState, stopServer, serverTerminalHidden, showServerTerminal, ...(cx.server ?? {}) });
 
 // Errors whose toast opens the server popup (Forzar sync, Apagar igual, D22;
 // Liberar puerto y arrancar, D24; Ver log and Reintentar, D25: the server
@@ -467,15 +470,27 @@ async function planAndStart(cx, root, opts) {
     // one running something Spotlight didn't start, refuses the start on its
     // own; and without the terminal's pid, Spotlight's own server would read
     // as a stranger holding the port.
+    let ensured;
     if (TYPES_INTO.has(seen.kind)) {
-      const port = await checkPort(cx, root, {
+      // D38: the terminal comes first. Taking the root's main terminal kills
+      // what ran there, so a server started by hand in it frees its port
+      // before the check; a listener anywhere else is still D24's. The check
+      // runs whatever the terminal's answer, as before T29: a busy port is
+      // said before a terminal that couldn't be made.
+      ensured = await ensureServerTerminal({ root, terminal: record.serverTerminal }, cx.serverDeps);
+      const port = await checkPortAfter(cx, root, {
         command: plan.command, settings: repoSet, rootPid: seen.rootPid ?? null, freePort: opts.freePort,
         shown: serverErrorOf(record.lastError),
-      });
+      }, Boolean(ensured.adopted));
       freed = port.freed;
-      if (port.busy) return refusePort(cx, root, { busy: port.busy, freed, plan, seen, logPath, workspace, branch, now });
+      if (port.busy) {
+        const terminal = ensured.ok ? ensured.terminal : null;
+        return refusePort(cx, root, { busy: port.busy, freed, plan, seen, logPath, workspace, branch, now, terminal });
+      }
     }
-    r = seen.kind === "spotlight" ? await restartServer(args, cx.serverDeps) : await startServer(args, cx.serverDeps);
+    const start = { ...args, ensured };
+    if (ensured && !ensured.ok) r = ensured;
+    else r = seen.kind === "spotlight" ? await restartServer(start, cx.serverDeps) : await startServer(start, cx.serverDeps);
   }
   const ran = r.ok && (r.started || r.reason === "already-running");
   const failure = ran || r.reason === "still-running" ? null : startFailedError(r);
@@ -568,6 +583,23 @@ async function checkPort(cx, root, { command, settings, rootPid, freePort, shown
   return { busy, freed };
 }
 
+// After D38 killed the root's main terminal for the server (`adopted`), a
+// server that ran in it may hold its port a moment after hc reads the
+// terminal finished: checkPort asks again, every PORT_SETTLE_POLL_MS for up
+// to PORT_SETTLE_MS, before it calls the port busy. Otherwise once.
+const PORT_SETTLE_MS = 3000;
+const PORT_SETTLE_POLL_MS = 250;
+async function checkPortAfter(cx, root, opts, adopted) {
+  const now = cx.serverDeps.now ?? Date.now;
+  const wait = cx.serverDeps.sleep ?? sleep;
+  const until = now() + (adopted ? PORT_SETTLE_MS : 0);
+  for (;;) {
+    const port = await checkPort(cx, root, opts);
+    if (!port.busy || port.freed || now() >= until) return port;
+    await wait(PORT_SETTLE_POLL_MS);
+  }
+}
+
 // What a stopped holder leaves in the notes.
 function freedText({ port, pid, command, killed }) {
   const forced = killed?.length > 0 ? `; ${killed.length} no paró con SIGTERM y se mató con SIGKILL` : "";
@@ -576,13 +608,15 @@ function freedText({ port, pid, command, killed }) {
 
 // The start refused: the server error port-busy (under a root error the
 // record has, F7), one toast per new holder (it opens the popup), a line in
-// the server's log, nothing typed.
-async function refusePort(cx, root, { busy, freed, plan, seen, logPath, workspace, branch, now }) {
+// the server's log, nothing typed. `terminal`: the server terminal ensured
+// before the check (D38: it may be a new one), kept on the record.
+async function refusePort(cx, root, { busy, freed, plan, seen, logPath, workspace, branch, now, terminal = null }) {
   const error = portBusyError(busy);
   const name = cx.nameOf(root);
   await cx.store.updateState((s) => {
     const rec = s.repos[root];
     if (!rec) return;
+    if (terminal) rec.serverTerminal = terminal;
     const known = shownAlready(rec, error);
     setServerError(rec, { ...error, at: now });
     // A server Spotlight runs keeps its state: the restart didn't touch it.
@@ -665,6 +699,23 @@ async function settleDeadStart(cx, root) {
       },
       { timeoutMs: DEAD_START_LOCK_MS },
     );
+  } catch (e) {
+    if (e instanceof LockError && e.code === "lock-timeout") return null;
+    throw e;
+  }
+}
+
+// D38: a server lit before T29 runs in a terminal Herdr shows nowhere. The
+// reap makes it the root's "Spotlight" tab as it runs (server.js
+// showServerTerminal: no restart, no other terminal touched), under the
+// repo's lock, since two looks at once could each make a space for it; a
+// lock held past DEAD_START_LOCK_MS leaves it for the next reap. The cheap
+// look (one hc get) runs first, without the lock.
+async function showHiddenServer(cx, root, terminal) {
+  const server = serverOf(cx);
+  if (!terminal || !(await server.serverTerminalHidden({ root, terminal }, cx.serverDeps))) return null;
+  try {
+    return await cx.store.withRepoLock(root, () => server.showServerTerminal({ root, terminal }, cx.serverDeps), { timeoutMs: DEAD_START_LOCK_MS });
   } catch (e) {
     if (e instanceof LockError && e.code === "lock-timeout") return null;
     throw e;
@@ -1243,6 +1294,7 @@ export async function reap(cx, { full = true, skip = null } = {}) {
       await settleDeadStart(cx, root);
       continue;
     }
+    if (live.state && live.state !== "gone") await showHiddenServer(cx, root, live.terminal ?? rec.serverTerminal);
     if (live.state) servers.push({ root, state: live.state, ports: live.ports, procs: live.procs });
     // J-002: a server in another env than the effective one restarts through
     // a detached sync (D18: a restart outlasts the reap's second). Only

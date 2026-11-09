@@ -1,10 +1,15 @@
 // A repo's Spotlight server terminal (D10). Node-only (it writes the log
 // through server-log.js): the CLI uses it, the mod never imports it.
 //
-// One hidden hc terminal per repo, created in the repo root:
-//   hc run --bg --no-parent --keep --name sl-<slug> --label spotlight.repo=<root> --cwd <root> -- /bin/zsh -l
-// No herdr.space label, so no space shows it; "Ver server" peeks at it. The
-// server line is typed into its shell wrapped for the log (D11):
+// One hc terminal per repo, created in the repo root:
+//   hc run --bg --no-parent --keep --name sl-<slug> --label spotlight.repo=<root> [--label herdr.space=<id>] --cwd <root> -- /bin/zsh -l
+// It runs in the root's main terminal, as Orca's (D38): Herdr shows a
+// terminal labelled herdr.space=<id> as a tab of that space, and Spotlight
+// takes the place of the root's active (or first) plain terminal, killing
+// what ran there, in a tab named "Spotlight" that never takes focus.
+// "Ver server" selects that tab (showServer); Herdr's peek is the fallback
+// for a terminal in no tab. The server line is typed into its shell wrapped
+// for the log (D11):
 //   script -F -q -a '<logPath>' /bin/zsh -c '<line>'
 // -F flushes every write; `-c`, not `-lc`, so the outer login shell's PATH
 // (nvm's Node) is the one the server runs on; `script` keeps a pty, so the
@@ -21,17 +26,24 @@
 // reached through an injected `exec(file, args) → { code, stdout, stderr }`
 // and the clock through injected `now()` / `sleep(ms)`, so tests run on a
 // fake hc. The probe that pinned hc's shapes is in RECIPE.md "Server
-// terminal probe".
+// terminal probe"; Herdr's side (herdr-app ls, the labels, tab.rename,
+// tab.move) is in RECIPE.md "Where the server shows".
 
+import crypto from "node:crypto";
 import {
   repoSlug, appendLogHeader, rotateLog, tailLog, stripTerminalSequences, DEFAULT_TAIL_LINES,
 } from "./server-log.js";
 import {
   treeListening, pickPort, portLabel, portUrl, serverSnapshot, serverLeftovers, stopLeftovers, requireKill,
 } from "./ports.js";
+import { normRoot } from "./settings.js";
 
 // The label that ties a server terminal to its repo root.
 export const SERVER_LABEL = "spotlight.repo";
+// Herdr shows a terminal with this label as a tab of that space (D38).
+export const SPACE_LABEL = "herdr.space";
+// The server tab's title, as Orca's.
+export const TAB_NAME = "Spotlight";
 // The terminal's program: a login zsh (absolute: `hc run --` takes no shell).
 const SHELL_ARGV = ["/bin/zsh", "-l"];
 
@@ -51,6 +63,10 @@ const INTERRUPT_WATCH_S = 5;
 // prompt back, no process of it left, its ports free) before what's left of
 // it is killed.
 export const STOP_WAIT_MS = 8000;
+// D38: how long Herdr may take to show a terminal given herdr.space as a
+// tab, and a killed adopted terminal to read finished.
+const TAB_MS = 3000;
+const KILLED_MS = 5000;
 
 // Start decisions that typed nothing leave a line in the log, as Orca's
 // spotlight-server-start-notes.ts does.
@@ -100,10 +116,14 @@ export function wrapServerLine(line, logPath) {
 }
 
 // `hc run …` for a repo's server terminal (D10), with --json for its address.
-export function createTerminalArgv(root) {
+// With `space` (D38), labelled herdr.space=<space>: Herdr shows it in a new
+// tab of that space, or of a new space when it doesn't know the id, and
+// leaves the focus where it is. Without, hidden.
+export function createTerminalArgv(root, { space = null } = {}) {
   return [
     "hc", "run", "--bg", "--no-parent", "--keep", "--name", serverTerminalName(root),
-    "--label", `${SERVER_LABEL}=${root}`, "--cwd", root, "--json", "--", ...SHELL_ARGV,
+    "--label", `${SERVER_LABEL}=${root}`, ...(space ? ["--label", `${SPACE_LABEL}=${space}`] : []),
+    "--cwd", root, "--json", "--", ...SHELL_ARGV,
   ];
 }
 
@@ -111,6 +131,16 @@ export function createTerminalArgv(root) {
 export function peekArgv(terminal) {
   return ["herdr-app", "do", "terminal.peek", "--terminal", terminal];
 }
+
+// `herdr-app do <command> <args as JSON>` (tab.move's index is a number,
+// which `--index` words can't say).
+export function herdrDoArgv(command, args) {
+  return ["herdr-app", "do", command, JSON.stringify(args)];
+}
+
+// A space id Herdr doesn't know yet: it makes the space when a terminal
+// carries it (D38), named after the terminal's folder.
+export const freshSpaceId = () => `sp${crypto.randomBytes(16).toString("hex")}`;
 
 // ── Reading a terminal ─────────────────────────────────────────────────────
 
@@ -257,23 +287,246 @@ export async function readServerState({ root, terminal, logPath, serverPid, port
   };
 }
 
+// ── Where the server shows (D38) ───────────────────────────────────────────
+
+// An hc call whose answer is only whether it went through (`hc label`, `hc
+// kill`): { ok } or { ok: false, message }.
+async function hcRan(deps, args) {
+  let r;
+  try {
+    r = await deps.exec("hc", args);
+  } catch (e) {
+    return { ok: false, message: String(e?.message ?? e) };
+  }
+  const json = parseJson(r?.stdout) ?? parseJson(r?.stderr);
+  if (r?.code === 0 && !json?.error) return { ok: true };
+  return { ok: false, message: String(json?.error?.message ?? (r?.stderr || r?.stdout || `hc exited ${r?.code}`)).trim() };
+}
+
+// One herdr-app call: { ok: true, value } with its JSON (null when it printed
+// none), or { ok: false, message } (`{ "error": "…" }` and exit 1, or why it
+// couldn't run).
+async function herdrApp(deps, args) {
+  let r;
+  try {
+    r = await deps.exec("herdr-app", args);
+  } catch (e) {
+    return { ok: false, message: String(e?.message ?? e) };
+  }
+  const json = parseJson(r?.stdout);
+  if (r?.code === 0 && !(json && "error" in json)) return { ok: true, value: json };
+  return { ok: false, message: String(json?.error ?? (r?.stderr || r?.stdout || `herdr-app exited ${r?.code}`)).trim() };
+}
+
+const herdrDo = (deps, command, args) => herdrApp(deps, herdrDoArgv(command, args).slice(1));
+
+// `herdr-app ls`'s spaces (each { id, folder, machine, tabs: [{ id, active,
+// terminals: [{ terminal, app, … }] }] }), or null when Herdr can't say.
+async function herdrSpaces(deps) {
+  const r = await herdrApp(deps, ["ls"]);
+  return r.ok && Array.isArray(r.value?.spaces) ? r.value.spaces : null;
+}
+
+const tabsOf = (space) => (Array.isArray(space?.tabs) ? space.tabs.filter((t) => t && typeof t.id === "string") : []);
+const terminalsOf = (tab) => (Array.isArray(tab?.terminals) ? tab.terminals.filter((t) => t && typeof t.terminal === "string") : []);
+
+// Where a space is now, projects-sidebar's rule (lib.js placeOf): its first
+// terminal's live folder (`cwds`: address → cwd, from `hc ls`), else the
+// folder it was made in.
+function placeOfSpace(space, cwds) {
+  for (const tab of tabsOf(space)) {
+    for (const t of terminalsOf(tab)) {
+      if (cwds.get(t.terminal)) return cwds.get(t.terminal);
+    }
+  }
+  return typeof space?.folder === "string" ? space.folder : null;
+}
+
+// The root's space (D38): the first space of this machine in `herdr-app ls`
+// whose place is the root. → { ok: true, space } (null: none there) or
+// { ok: false } when Herdr can't say.
+export async function findRootSpace(root, deps) {
+  const spaces = await herdrSpaces(deps);
+  if (!spaces) return { ok: false };
+  const listed = await hc(deps, ["ls", "--json"]);
+  const cwds = new Map();
+  for (const t of listed.ok && Array.isArray(listed.value.terminals) ? listed.value.terminals : []) {
+    if (typeof t?.address === "string" && typeof t.cwd === "string") cwds.set(t.address, t.cwd);
+  }
+  const want = normRoot(root);
+  const space = spaces.find((s) => s && !s.machine && typeof s.id === "string" && normRoot(placeOfSpace(s, cwds)) === want);
+  return { ok: true, space: space ?? null };
+}
+
+// The tab Herdr shows `terminal` in: { space, tab, index } (index: the tab's
+// place in its space, 1 = first, as tab.move takes it), or null.
+function tabOf(spaces, terminal) {
+  for (const s of spaces ?? []) {
+    const tabs = tabsOf(s);
+    const i = tabs.findIndex((tab) => terminalsOf(tab).some((t) => t.terminal === terminal));
+    if (i >= 0) return { space: s.id, tab: tabs[i].id, index: i + 1 };
+  }
+  return null;
+}
+
+// Asks Herdr until it shows `terminal` in a tab, up to TAB_MS: { at, spaces }.
+async function waitForTab(terminal, deps) {
+  const until = nowOf(deps) + TAB_MS;
+  for (;;) {
+    const spaces = await herdrSpaces(deps);
+    const at = spaces ? tabOf(spaces, terminal) : null;
+    if (at || nowOf(deps) >= until) return { at, spaces };
+    await sleepOf(deps, POLL_MS);
+  }
+}
+
+// The terminal Spotlight replaces in the root's space (D38, Orca's order):
+// the active tab's first plain terminal (`app: null`: a shell, whatever runs
+// in it), else the first plain one in tab order. Never an agent's (`app`
+// set, or not said), nor a Spotlight terminal of any repo (its
+// spotlight.repo label), nor one hc can't show live, nor the terminal this
+// Spotlight runs from (`deps.self`, else $HC_TERMINAL_ID): `spotlight
+// restart` typed in the root's shell would kill itself halfway.
+// → { terminal, index } or null.
+async function adoptable(space, deps) {
+  const tabs = tabsOf(space);
+  const order = [...tabs.filter((t) => t.active === true), ...tabs];
+  const self = deps?.self ?? globalThis.process?.env?.HC_TERMINAL_ID ?? null;
+  const looked = new Set();
+  for (const tab of order) {
+    for (const t of terminalsOf(tab)) {
+      if (t.app !== null || looked.has(t.terminal) || (self && t.terminal === self)) continue;
+      looked.add(t.terminal);
+      const got = await getTerminal(t.terminal, deps);
+      if (got.terminal?.state !== "live" || got.terminal.labels?.[SERVER_LABEL]) continue;
+      return { terminal: t.terminal, index: tabs.indexOf(tab) + 1 };
+    }
+  }
+  return null;
+}
+
+// The adopted terminal goes, whatever ran in it (S23): `hc kill`, then up to
+// KILLED_MS for hc to read it finished, so what ran there is gone before the
+// port check. → { killed: true } or { killed: false, message }.
+async function killAdopted(terminal, deps) {
+  const r = await hcRan(deps, ["kill", terminal, "--json"]);
+  if (!r.ok) return { killed: false, message: r.message };
+  const until = nowOf(deps) + KILLED_MS;
+  for (;;) {
+    const got = await getTerminal(terminal, deps);
+    if (got.missing || (got.terminal && got.terminal.state !== "live") || nowOf(deps) >= until) return { killed: true };
+    await sleepOf(deps, POLL_MS);
+  }
+}
+
+// Names the tab Herdr shows `terminal` in "Spotlight", once it does: { at,
+// spaces } of waitForTab.
+async function nameTab(terminal, deps) {
+  const seen = await waitForTab(terminal, deps);
+  if (seen.at) await herdrDo(deps, "tab.rename", { id: seen.at.tab, name: TAB_NAME });
+  return seen;
+}
+
+// A live terminal of Spotlight's for `root` that Herdr shows nowhere (no
+// herdr.space): lit before T29, or made while Herdr couldn't say.
+const isHidden = (term, root) => term?.state === "live" && term.labels?.[SERVER_LABEL] === root && !term.labels?.[SPACE_LABEL];
+
+// D38 (1): a hidden server terminal joins the root's space (a fresh id when
+// it has none) through `hc label <t> herdr.space=<id>`, and its tab is named
+// "Spotlight". Nothing is restarted, moved or killed. → { shown: true,
+// space, tab } or { shown: false, reason }.
+async function showHidden(term, root, deps) {
+  const found = await findRootSpace(root, deps);
+  if (!found.ok) return { shown: false, reason: "unreadable" };
+  const space = found.space?.id ?? freshSpaceId();
+  const labeled = await hcRan(deps, ["label", term.address, `${SPACE_LABEL}=${space}`]);
+  if (!labeled.ok) return { shown: false, reason: "label-failed", message: labeled.message };
+  const { at } = await nameTab(term.address, deps);
+  return { shown: true, space, tab: at?.tab ?? null };
+}
+
+// Whether the repo's server terminal (`terminal`, else sl-<slug>) is one of
+// Spotlight's that Herdr shows nowhere: the reap's cheap look before it takes
+// the repo's lock to show it (showServerTerminal).
+export async function serverTerminalHidden({ root, terminal } = {}, deps) {
+  const got = await getTerminal(terminal ?? serverTerminalName(root), deps);
+  return isHidden(got.terminal, root);
+}
+
+// D38 (1) for a server terminal Spotlight runs already (the reap): hidden,
+// it becomes the root's "Spotlight" tab as it runs, with no restart and no
+// other terminal touched; otherwise nothing happens. Call under the repo's
+// lock (two looks at once could make two spaces). → showHidden's answer, or
+// { shown: false, reason: "not-hidden" }.
+export async function showServerTerminal({ root, terminal } = {}, deps) {
+  const got = await getTerminal(terminal ?? serverTerminalName(root), deps);
+  if (!isHidden(got.terminal, root)) return { shown: false, reason: "not-hidden" };
+  return showHidden(got.terminal, root, deps);
+}
+
+// D38 (2, 3): a new server terminal for `root`, in the root's space:
+// labelled with its id (a fresh one when the root has no space, so Herdr
+// makes one), its tab named "Spotlight". Over the root's plain terminal
+// (adoptable), the tab is moved to that terminal's tab's place and that
+// terminal is killed, in that order: made before the kill, the space never
+// empties (an emptied space closes), and only that terminal goes (another
+// pane of its tab stays). Nothing asks for focus. When Herdr can't say
+// where the root is, the terminal is made hidden, as before T29: the reap
+// shows it once Herdr answers. A tab Herdr doesn't show within TAB_MS is
+// neither moved nor anything killed. `raced`: the name taken by another CLI
+// a moment ago → theirs.
+async function makeServerTerminal(root, deps, raced) {
+  const found = await findRootSpace(root, deps);
+  const space = found.ok ? found.space?.id ?? freshSpaceId() : null;
+  const adopt = found.space ? await adoptable(found.space, deps) : null;
+  const made = await hc(deps, createTerminalArgv(root, { space }).slice(1));
+  if (!made.ok || typeof made.value.address !== "string") {
+    // Another CLI created it a moment ago: use theirs.
+    const theirs = !made.ok && made.error.kind === "name_taken" ? await raced() : null;
+    return theirs ?? { ok: false, reason: "terminal-failed", message: made.ok ? "hc run printed no address" : made.error.message };
+  }
+  const terminal = made.value.address;
+  if (!space) return { ok: true, terminal, created: true };
+  const { at, spaces } = await nameTab(terminal, deps);
+  let adopted = null;
+  let adoptFailed = null;
+  if (adopt && at) {
+    // Its place now (a tab Herdr put before it would have moved it).
+    const index = tabOf(spaces, adopt.terminal)?.index ?? adopt.index;
+    await herdrDo(deps, "tab.move", { id: at.tab, index });
+    const killed = await killAdopted(adopt.terminal, deps);
+    if (killed.killed) adopted = adopt.terminal;
+    else adoptFailed = killed.message;
+  }
+  return {
+    ok: true, terminal, created: true, space, tab: at?.tab ?? null, adopted, ...(adoptFailed ? { adoptFailed } : {}),
+  };
+}
+
 // ── The terminal ───────────────────────────────────────────────────────────
 
-// The repo's live server terminal, created when there's none: `terminal`
+// The repo's live server terminal, made when there's none (D38: in the
+// root's space, over its plain terminal; makeServerTerminal): `terminal`
 // (the recorded address) when it's still live and labeled for this root,
-// else the one named sl-<slug>, else a new one. A finished one is removed
-// first. A live terminal holding the name but labeled for something else is
-// never used: { ok: false, reason: "name-taken" }.
+// else the one named sl-<slug>, else a new one. One found hidden is shown
+// in the root's space first (showHidden). A finished one is removed first. A
+// live terminal holding the name but labeled for something else is never
+// used: { ok: false, reason: "name-taken" }. → { ok: true, terminal,
+// created } (a made one: also space, tab, adopted).
 export async function ensureServerTerminal({ root, terminal } = {}, deps) {
   const name = serverTerminalName(root);
   const mine = (term) => term?.labels?.[SERVER_LABEL] === root;
   const unreadable = (message) => ({ ok: false, reason: "unreadable", message });
+  const reuse = async (term) => {
+    if (isHidden(term, root)) await showHidden(term, root, deps);
+    return { ok: true, terminal: term.address, created: false };
+  };
 
   if (terminal && terminal !== name) {
     const got = await getTerminal(terminal, deps);
     if (got.error) return unreadable(got.error);
     if (got.terminal && mine(got.terminal)) {
-      if (got.terminal.state === "live") return { ok: true, terminal: got.terminal.address, created: false };
+      if (got.terminal.state === "live") return reuse(got.terminal);
       await hc(deps, ["rm", got.terminal.address, "--json"]);
     }
   }
@@ -283,7 +536,7 @@ export async function ensureServerTerminal({ root, terminal } = {}, deps) {
     if (got.missing) return null;
     if (got.terminal.state === "live") {
       return mine(got.terminal)
-        ? { ok: true, terminal: got.terminal.address, created: false }
+        ? reuse(got.terminal)
         : { ok: false, reason: "name-taken", message: `a live terminal named ${name} isn't Spotlight's for ${root}` };
     }
     // Finished: it no longer holds the name. Clear ours out of the list.
@@ -292,17 +545,7 @@ export async function ensureServerTerminal({ root, terminal } = {}, deps) {
   };
   const found = await byName();
   if (found) return found;
-
-  const made = await hc(deps, createTerminalArgv(root).slice(1));
-  if (made.ok && typeof made.value.address === "string") {
-    return { ok: true, terminal: made.value.address, created: true };
-  }
-  // Another CLI created it a moment ago: use theirs.
-  if (!made.ok && made.error.kind === "name_taken") {
-    const raced = await byName();
-    if (raced) return raced;
-  }
-  return { ok: false, reason: "terminal-failed", message: made.ok ? "hc run printed no address" : made.error.message };
+  return makeServerTerminal(root, deps, byName);
 }
 
 // ── Start, restart, stop ───────────────────────────────────────────────────
@@ -362,11 +605,13 @@ async function interruptAndWait(terminal, { logPath, serverPid }, deps) {
 //   { ok: true, started: false, reason: "already-running" | "busy", terminal, … }
 //   { ok: false, reason: "invalid-command" | "name-taken" | "terminal-failed"
 //     | "unreadable" | "terminal-gone" | "send-failed", … }
-// `workspace` / `branch` label the log header.
-export async function startServer({ root, terminal, line, logPath, serverPid, workspace, branch } = {}, deps) {
+// `workspace` / `branch` label the log header. `ensured`: the caller's
+// ensureServerTerminal answer, when it ensured the terminal first (the CLI
+// does, so an adopted terminal dies before its port check, D38).
+export async function startServer({ root, terminal, line, logPath, serverPid, workspace, branch, ensured: given } = {}, deps) {
   const wrapped = wrapServerLine(line, logPath);
   if (!wrapped) return { ok: false, reason: "invalid-command" };
-  const ensured = await ensureServerTerminal({ root, terminal }, deps);
+  const ensured = given ?? (await ensureServerTerminal({ root, terminal }, deps));
   if (!ensured.ok) return ensured;
   return typeWhenIdle({
     terminal: ensured.terminal, created: ensured.created, command: normalizeServerLine(line), wrapped,
@@ -378,10 +623,11 @@ export async function startServer({ root, terminal, line, logPath, serverPid, wo
 // interrupt Spotlight's own server, wait for the prompt, type `line`. A gone
 // terminal is recreated and started; a foreign foreground is left alone.
 // `restarted: true` when a running server was interrupted and replaced.
-export async function restartServer({ root, terminal, line, logPath, serverPid, workspace, branch } = {}, deps) {
+// `ensured`: as startServer's.
+export async function restartServer({ root, terminal, line, logPath, serverPid, workspace, branch, ensured: given } = {}, deps) {
   const wrapped = wrapServerLine(line, logPath);
   if (!wrapped) return { ok: false, reason: "invalid-command" };
-  const ensured = await ensureServerTerminal({ root, terminal }, deps);
+  const ensured = given ?? (await ensureServerTerminal({ root, terminal }, deps));
   if (!ensured.ok) return ensured;
   const t = ensured.terminal;
   const seen = await inspectServer({ terminal: t, logPath, serverPid }, deps);
@@ -624,7 +870,8 @@ export async function serverLogs({ logPath, terminal, lines = DEFAULT_TAIL_LINES
   return { source: "terminal", text: last.length > 0 ? `${last.join("\n")}\n` : "" };
 }
 
-// "Ver server": Herdr's peek over the tab at the server terminal.
+// Herdr's peek over the tab at the server terminal: "Ver server" for a
+// terminal in no tab (showServer).
 export async function peekServer(terminal, deps) {
   const [file, ...args] = peekArgv(terminal);
   try {
@@ -634,4 +881,24 @@ export async function peekServer(terminal, deps) {
   } catch (e) {
     return { ok: false, message: String(e?.message ?? e) };
   }
+}
+
+// "Ver server" (D38): the server terminal's space and tab are shown
+// (`space.select`, then `tab.select`), as in Orca, where the server is a tab;
+// a terminal Herdr shows in no tab (hidden), or a Herdr that can't say,
+// gets the peek over the tab instead (peekServer). `terminal`: an address or
+// the sl-<slug> name. → { ok: true, how: "tab" | "peek" } or { ok: false,
+// message }.
+export async function showServer(terminal, deps) {
+  const got = await getTerminal(terminal, deps);
+  const address = typeof got.terminal?.address === "string" ? got.terminal.address : terminal;
+  const spaces = await herdrSpaces(deps);
+  const at = spaces ? tabOf(spaces, address) : null;
+  if (at) {
+    const space = await herdrDo(deps, "space.select", { id: at.space });
+    const tab = space.ok ? await herdrDo(deps, "tab.select", { id: at.tab }) : space;
+    if (tab.ok) return { ok: true, how: "tab" };
+  }
+  const r = await peekServer(address, deps);
+  return r.ok ? { ok: true, how: "peek" } : r;
 }

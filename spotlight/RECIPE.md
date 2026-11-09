@@ -43,6 +43,33 @@ Probed 2026-11-06 against Herdr's hc, on a throwaway terminal `sl-probe` (create
   - `hc send` to a finished terminal exits 11 with `finished`.
   - After `hc kill`, the terminal reads `state: "finished"`, `reason: "killed"`, with no `foreground`. `hc get <name>` still finds it until `hc rm`, so `server.js` removes a finished server terminal before creating a new one.
   - `hc run --json` prints the new terminal's `address`.
+- The probe's terminal was hidden. Since T29 the server terminal also carries `--label herdr.space=<id>` whenever Herdr says where the root is, and shows as the root's "Spotlight" tab; the rest of its argv, the typed line and the log are the ones above. See "Where the server shows".
+
+## Where the server shows
+
+The server runs in the root's main terminal, as in Orca (D38): a tab named "Spotlight" in the root's space. Orca types the server line into that terminal after a Ctrl-C; here Spotlight's own terminal takes its place, so the agents' log keeps its `script -F` mirror from the terminal's first line.
+
+- The root's space is the first space of this machine in `herdr-app ls` whose place is the root: its first terminal's live folder (the `cwd` of `hc ls --json`), else the folder it was made in, projects-sidebar's rule. With none, Spotlight uses a fresh id (`sp` + 32 hex characters) and Herdr makes a space named after the root's folder.
+- Which terminal, in Orca's order:
+  1. Spotlight's own (labelled `spotlight.repo=<root>`: the recorded address, else `sl-<slug>`), when live, is reused as it is. One Herdr shows nowhere (no `herdr.space`: lit before T29, or made while Herdr couldn't say) is shown first: `hc label <t> herdr.space=<id>`, then its tab is renamed "Spotlight". No restart, no other terminal touched. The reap does this for a lit repo's running server, and every start or restart does it for the terminal it uses.
+  2. Otherwise, in the root's space, the active tab's first plain terminal, else the first plain one in tab order. Plain means `app: null` in `herdr-app ls`: a shell, whatever runs in it. Never an agent's terminal (`app` set, or not given), never any repo's Spotlight terminal (its `spotlight.repo` label, read with `hc get`), never one hc doesn't read as live.
+  3. Otherwise (no plain terminal, or no space yet), a new tab.
+- Replacing a terminal, in this order: Spotlight's terminal is made as always plus `--label herdr.space=<id>`; its tab is renamed "Spotlight" (`tab.rename`) and moved to the replaced terminal's tab's place (`tab.move`); then the replaced terminal is killed (`hc kill`), whatever ran in it, and Spotlight waits up to 5 s for hc to read it finished. Being made before the kill, the new tab keeps the space from emptying (an emptied space closes). Only that terminal goes: another pane of its tab stays, in its tab. Its scrollback goes with it, a difference from Orca.
+- A new tab is named "Spotlight" and left where Herdr puts it, at the end.
+- Nothing asks for the focus while lighting: no `space.select`, `tab.select` or `pane.focus`.
+- The kill comes before the port check (D24). A server started by hand in the replaced terminal dies with it, and the check asks again for up to 3 s while it lets go of its port. A listener anywhere else is still `port-busy`, with nothing typed; the record keeps the new terminal.
+- When `herdr-app ls` fails or lists no spaces, Herdr can't say where the root is: the terminal is made hidden, as before T29, and the next reap shows it. When Herdr doesn't show a new terminal in a tab within 3 s, it isn't renamed or moved and nothing is killed.
+- "Ver server" (the popup, `spotlight peek`) selects the server's space, then its tab (`space.select`, `tab.select`, by id), instead of opening the peek. A server terminal in no tab still gets Herdr's peek over the tab.
+- Closing the tab, or its space, ends the server terminal. The reap reads it `gone`, and Reiniciar makes the tab again by the same rule.
+- The turn-off, the log mirror and `spotlight logs` are unchanged (see "Turning the server off"): the terminal and its tab stay, at a free prompt, for the next start.
+- Herdr commands go as `herdr-app do <command> '<args as JSON>'`, since `tab.move`'s index (1 = first) is a number.
+- Probed live on 2026-11-08 (D38):
+  - `herdr-app ls` lists spaces → tabs → terminals; each terminal is `{terminal, pane, name, status, app, sub_agents}`, with `app` null for a plain shell.
+  - `hc run --bg --keep --no-parent … --label herdr.space=<id>` puts the terminal in a new tab of that space and leaves the focused space alone. An id Herdr doesn't know makes a space named after the cwd's folder, also without focus.
+  - `hc label <t> herdr.space=<id>` on a running hidden terminal shows it as a tab at once. `herdr-app do tab.rename {id, name}` names it.
+  - Killing a terminal removes its tab, and a space left with no tab closes.
+  - Not probed: whether `tab.move` counts settled tabs. Spotlight counts every tab `herdr-app ls` lists.
+- The pieces are `server.js` (`findRootSpace`, `ensureServerTerminal`, `serverTerminalHidden`, `showServerTerminal`, `showServer`), `cli-work.mjs` (`ensureServer`, which ensures the terminal before the port check, and the reap's `showHiddenServer`) and `cli.mjs` (`peek`).
 
 ## Badge command probe
 

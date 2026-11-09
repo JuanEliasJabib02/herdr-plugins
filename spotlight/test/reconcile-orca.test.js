@@ -1267,3 +1267,149 @@ test("D31: withTaskBatch marks queue.taskBatch[<groupId>/<KEY>] { op, since, pid
   });
   assert.deepEqual(state.queue.taskBatch, { "g1/AX-50": other });
 });
+
+// ── D38 (T29): the server runs in the root's main terminal ─────────────────
+// A fake Herdr and hc around the root: its space spRoot (made in the root)
+// with tab "1" holding Juan's plain terminal t5, where a server he started
+// by hand (pid 7001) listens on 3008 for as long as t5 lives. Spotlight's own
+// terminals are made by `hc run` (t9, t10…); a terminal given herdr.space
+// (`hc run --label`, `hc label`) shows as a new tab at the end of spRoot, and
+// a killed one leaves its tab (an emptied tab goes). `hidden`: a terminal of
+// Spotlight's lit before T29, with no herdr.space. `trace` keeps each call's
+// words, in order; ps answers as psExec's. `lingers`: how many more port
+// reads still see 7001 on 3008 after t5 died (a dying server lets go of its
+// port a moment after its terminal reads finished); `elsewhere`: 3008 is
+// held by another process, outside t5, that never goes.
+function rootWorld({ hidden = null, lingers = 0, elsewhere = false } = {}) {
+  const trace = [];
+  const ps = psExec(new Map());
+  const terms = {
+    t5: {
+      address: "t5", pid: 500, state: "live", cwd: root, labels: { "herdr.space": "spRoot", "herdr.tab": "tb1" },
+      foreground: { pid: 7000, name: "npm", argv: ["npm", "run", "dev"] },
+    },
+  };
+  if (hidden) terms[hidden.address] = hidden;
+  const shown = (t) => ({ terminal: t.address, pane: `p-${t.address}`, status: null, app: null, name: t.name ?? null, sub_agents: [] });
+  const space = { id: "spRoot", name: "root", folder: root, machine: null, active: true, tabs: [{ id: "tb1", name: "1", active: true, settled: false, terminals: [shown(terms.t5)] }] };
+  const show = (t) => space.tabs.push({ id: `tb-${t.address}`, name: String(space.tabs.length + 1), active: false, settled: false, terminals: [shown(t)] });
+  const json = (v) => ({ code: 0, stdout: JSON.stringify(v), stderr: "" });
+  const labelsOf = (words) => Object.fromEntries(words.map((kv) => kv.split("=")).map(([k, ...v]) => [k, v.join("=")]));
+  let next = 9;
+  const exec = async (file, args, opts) => {
+    trace.push([file, ...args].join(" "));
+    if (file === "herdr-app" && args[0] === "ls") return json({ spaces: [space] });
+    if (file === "herdr-app" && args[0] === "do") {
+      const a = JSON.parse(args[2]);
+      const i = space.tabs.findIndex((t) => t.id === a.id);
+      if (args[1] === "tab.rename" && i >= 0) space.tabs[i].name = a.name;
+      if (args[1] === "tab.move" && i >= 0) space.tabs.splice(a.index - 1, 0, ...space.tabs.splice(i, 1));
+      return json({});
+    }
+    if (file === "hc") {
+      const term = terms[args[1]] ?? Object.values(terms).find((x) => x.name === args[1] && x.state === "live");
+      switch (args[0]) {
+        case "get":
+          return term ? json(term) : { code: 3, stdout: "", stderr: JSON.stringify({ error: { kind: "not_found", message: "no terminal" } }) };
+        case "ls":
+          return json({ terminals: Object.values(terms).filter((x) => x.state === "live").map(({ address, cwd }) => ({ address, cwd })) });
+        case "run": {
+          const address = `t${next++}`;
+          const labels = labelsOf(args.filter((_, i) => args[i - 1] === "--label"));
+          const pid = 900 + next;
+          terms[address] = { address, name: args[args.indexOf("--name") + 1], pid, state: "live", cwd: root, labels, foreground: { pid, name: "zsh", argv: ["/bin/zsh", "-l"] } };
+          if (labels["herdr.space"]) show(terms[address]);
+          return json({ address, state: "live" });
+        }
+        case "label":
+          Object.assign(term.labels, labelsOf(args.slice(2).filter((w) => w !== "--json")));
+          if (term.labels["herdr.space"]) show(term);
+          return json({ address: term.address });
+        case "kill":
+          Object.assign(term, { state: "finished", reason: "killed" });
+          delete term.foreground;
+          for (const tab of space.tabs) tab.terminals = tab.terminals.filter((x) => x.terminal !== term.address);
+          space.tabs = space.tabs.filter((tab) => tab.terminals.length > 0);
+          return json({ killed: term.address });
+        case "send": {
+          const logPath = /^script -F -q -a '([^']*)'/.exec(args[2])?.[1];
+          term.foreground = { pid: 950, name: "script", argv: ["script", "-F", "-q", "-a", logPath, "/bin/zsh", "-c", "the server"] };
+          return json({ started: null });
+        }
+        default:
+          return { code: 2, stdout: "", stderr: `fake hc: ${args[0]}` };
+      }
+    }
+    if (file === "lsof" && args.includes("-iTCP:3008")) {
+      const held = elsewhere || terms.t5.state === "live" || lingers-- > 0;
+      return held ? { code: 0, stdout: "p7001\ncnode\nf20\nn*:3008\n", stderr: "" } : { code: 1, stdout: "", stderr: "" };
+    }
+    if (file === "lsof" && args.includes("-d")) return { code: 0, stdout: `p7001\nfcwd\nn${root}\n`, stderr: "" };
+    if (file === "pgrep") return { code: 1, stdout: "", stderr: "" };
+    return ps.exec(file, args, opts);
+  };
+  return { exec, trace, terms, space, first: (prefix) => trace.findIndex((l) => l.startsWith(prefix)) };
+}
+
+test("D38: lighting a root whose main terminal runs a server Juan started by hand: Spotlight's terminal takes that tab's place, the old one is killed, and only then is the port checked: no port-busy", async () => {
+  const w = rootWorld();
+  let t = 0;
+  const clock = { now: () => t, sleep: async (ms) => { t += ms; } };
+  await lightOnto({ "package.json": JSON.stringify({ scripts: { local: "next dev -p 3008" } }) }, { serverDeps: { exec: w.exec, ...clock } });
+  const rec = state.repos[root];
+  assert.equal(rec.lastError, null, JSON.stringify(rec.lastError));
+  assert.equal(rec.serverState, "starting");
+  assert.equal(rec.serverTerminal, "t9");
+  assert.equal(w.terms.t9.labels["herdr.space"], "spRoot");
+  assert.equal(w.terms.t5.state, "finished");
+  assert.deepEqual(w.space.tabs.map((x) => x.name), ["Spotlight"]);
+  const order = ["hc run", "herdr-app do tab.rename", "herdr-app do tab.move", "hc kill t5", "lsof -nP -iTCP:3008", "hc send t9"].map(w.first);
+  assert.ok(order.every((i, k) => i >= 0 && (k === 0 || i > order[k - 1])), JSON.stringify(w.trace));
+});
+
+test("D38: the reap shows a server lit before T29 (its terminal hidden) as the root's Spotlight tab, once: no restart, no kill, no other terminal touched", async () => {
+  const logPath = join(base, "root.log");
+  const hidden = {
+    address: "t3", name: "sl-root", pid: 300, state: "live", cwd: root, labels: { "spotlight.repo": root },
+    foreground: { pid: 301, name: "script", argv: ["script", "-F", "-q", "-a", logPath, "/bin/zsh", "-c", "npm run local --"] },
+  };
+  const w = rootWorld({ hidden });
+  Object.assign(state.repos[root], {
+    serverTerminal: "t3", serverPid: 301, serverState: "listening", serverCommand: "npm run local --", serverEnv: "local", ports: [3008], logPath,
+  });
+  const live = { terminal: "t3", owner: "spotlight", pid: 301, state: "listening", ports: [3008], procs: [], port: 3008, url: "http://localhost:3008", label: ":3008" };
+  const rx = fullCx({ serverDeps: { exec: w.exec }, server: { readServerState: async () => live } });
+  await reap(rx);
+  assert.deepEqual(w.trace.filter((l) => l.startsWith("hc label")), ["hc label t3 herdr.space=spRoot"]);
+  assert.deepEqual(w.space.tabs.map((x) => x.name), ["1", "Spotlight"]);
+  for (const verb of ["run", "kill", "send", "interrupt"]) assert.equal(w.first(`hc ${verb}`), -1, verb);
+  assert.equal(w.terms.t5.state, "live");
+  // Once: the next reap leaves it as it is.
+  await reap(rx);
+  assert.equal(w.trace.filter((l) => l.startsWith("hc label")).length, 1);
+  assert.equal(w.trace.filter((l) => l.startsWith("herdr-app do tab.rename")).length, 1);
+  assert.equal(state.repos[root].serverTerminal, "t3");
+  assert.equal(state.repos[root].serverState, "listening");
+});
+
+test("D38: a server started by hand in the adopted terminal that lets go of its port a moment after the kill is no busy port: the check asks again", async () => {
+  const w = rootWorld({ lingers: 2 });
+  let t = 0;
+  const clock = { now: () => t, sleep: async (ms) => { t += ms; } };
+  await lightOnto({ "package.json": JSON.stringify({ scripts: { local: "next dev -p 3008" } }) }, { serverDeps: { exec: w.exec, ...clock } });
+  assert.equal(state.repos[root].lastError, null, JSON.stringify(state.repos[root].lastError));
+  assert.equal(state.repos[root].serverState, "starting");
+  assert.ok(w.trace.filter((l) => l.startsWith("lsof -nP -iTCP:3008")).length >= 3, JSON.stringify(w.trace));
+});
+
+test("D38: a port held outside the adopted terminal is still D24's port-busy, and the record keeps the new Spotlight terminal", async () => {
+  const w = rootWorld({ elsewhere: true });
+  let t = 0;
+  const clock = { now: () => t, sleep: async (ms) => { t += ms; } };
+  await lightOnto({ "package.json": JSON.stringify({ scripts: { local: "next dev -p 3008" } }) }, { serverDeps: { exec: w.exec, ...clock } });
+  const rec = state.repos[root];
+  assert.equal(rec.lastError?.code, "port-busy");
+  assert.equal(rec.serverTerminal, "t9");
+  assert.equal(w.first("hc send"), -1, "nothing typed");
+  assert.deepEqual(w.space.tabs.map((x) => x.name), ["Spotlight"]);
+});
