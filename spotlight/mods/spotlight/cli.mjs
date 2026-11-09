@@ -486,7 +486,11 @@ async function verbRestart(cx, opts) {
     return 1;
   }
   if (r.state === "started") out(`Restarted ${cx.nameOf(root)}'s server: ${r.plan.command}`);
-  else if (r.state === "needs-variant") out(`${cx.nameOf(root)}: needs a variant: pick it in the server popup (spotlight env --variant <v>).`);
+  else if (r.state === "still-running") {
+    // The old server ignored the Ctrl-C, or never got it: no start failed (M3).
+    err(`${cx.nameOf(root)}: the server did not restart: the old one still runs (${r.result?.reason}).`);
+    return 1;
+  } else if (r.state === "needs-variant") out(`${cx.nameOf(root)}: needs a variant: pick it in the server popup (spotlight env --variant <v>).`);
   else if (r.state === "none") out(`${cx.nameOf(root)} has no server command for this env.`);
   else {
     err(`${cx.nameOf(root)}: the server did not restart (${r.result?.reason ?? r.state}).`);
@@ -586,6 +590,11 @@ async function verbEnv(cx, opts) {
   if (r.state === "started") out(`${cx.nameOf(root)}: ${what}; the server restarted: ${r.plan.command}`);
   else if (r.state === "port-busy") {
     err(`${cx.nameOf(root)}: ${what} saved; the server did not start. ${portBusyLine(r)}`);
+    return 1;
+  } else if (r.state === "still-running") {
+    // The old server ignored the Ctrl-C, or never got it, and still runs in
+    // the env of before: no start failed (M3).
+    err(`${cx.nameOf(root)}: ${what} saved; the server did not restart: the old one still runs (${r.result?.reason}).`);
     return 1;
   } else if (r.state === "failed") {
     err(`${cx.nameOf(root)}: ${what} saved; the server did not start (${r.result?.reason}).`);

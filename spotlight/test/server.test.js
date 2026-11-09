@@ -1590,6 +1590,12 @@ test("startServer, restartServer (L2): a start that didn't go through leaves one
     { root: ROOT, line: "pnpm dev", logPath: logOf("made"), ...HEAD }, { exec: failing(made, "run", 1, "io", "hc: no route to core"), ...fakeClock() },
   );
   check("made", r2, "terminal-failed", "Server not started — hc could not make the server terminal (hc: no route to core)");
+  // M9: hc's words that are only control bytes say nothing: no empty "( )".
+  const mute2 = fakeHc();
+  const r2b = await startServer(
+    { root: ROOT, line: "pnpm dev", logPath: logOf("made2"), ...HEAD }, { exec: failing(mute2, "run", 1, "io", "\u0007\r\n"), ...fakeClock() },
+  );
+  check("made2", r2b, "terminal-failed", "Server not started — hc could not make the server terminal");
 
   // unreadable: hc can't read the terminal, before typing or as it would type.
   const blind = fakeHc();
@@ -1644,6 +1650,63 @@ test("startServer, restartServer (L2): a start that didn't go through leaves one
   const r9 = await startServer({ root: ROOT, line: "pnpm dev\nrm -rf ~", logPath: logOf("invalid"), ...HEAD }, { exec: fakeHc().exec, ...fakeClock() });
   assert.deepEqual(r9, { ok: false, reason: "invalid-command" });
   assert.equal(existsSync(logOf("invalid")), false);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+// ── M4: a Ctrl-C hc couldn't send, looked at again ─────────────────────────
+
+test("restartServer (M4): a Ctrl-C hc couldn't send is an old server still running only while hc still shows it in front, or can't say; a terminal that closed meanwhile is a failed start (terminal-gone), and one back at its prompt starts", async () => {
+  const dir = tmp();
+  const logPath = join(dir, "app.log");
+  const refused = (message) => ({ code: 11, stdout: "", stderr: JSON.stringify({ error: { kind: "finished", message } }) });
+
+  // It closed between the look and the Ctrl-C.
+  const closing = fakeHc();
+  const deps = { exec: closing.exec, ...fakeClock() };
+  const s = await startServer({ root: ROOT, line: "pnpm dev", logPath, ...HEAD }, deps);
+  const closes = async (file, args) => {
+    if (file === "hc" && args[0] === "interrupt") {
+      closing.terms.get(s.terminal).state = "finished";
+      return refused(`${s.terminal} has finished`);
+    }
+    return closing.exec(file, args);
+  };
+  const r1 = await restartServer({ root: ROOT, terminal: s.terminal, line: "pnpm dev", logPath, serverPid: s.pid, ...HEAD }, { ...deps, exec: closes });
+  assert.deepEqual({ ok: r1.ok, reason: r1.reason, oldServerRuns: r1.oldServerRuns }, { ok: false, reason: "terminal-gone", oldServerRuns: undefined });
+  assert.match(lastLine(logPath), /Server not started — the Spotlight terminal closed/);
+
+  // Its server let go of the prompt by itself: the line is typed.
+  const ended = fakeHc();
+  const ed = { exec: ended.exec, ...fakeClock() };
+  const s2 = await startServer({ root: ROOT, line: "pnpm dev", logPath, ...HEAD }, ed);
+  const lets = async (file, args) => {
+    if (file === "hc" && args[0] === "interrupt") {
+      const t = ended.terms.get(s2.terminal);
+      t.foreground = { argv: ["/bin/zsh", "-l"], cwd: t.cwd, name: "zsh", pid: t.pid };
+      return refused("hc: no route to core");
+    }
+    return ended.exec(file, args);
+  };
+  const r2 = await restartServer({ root: ROOT, terminal: s2.terminal, line: "pnpm dev", logPath, serverPid: s2.pid, ...HEAD }, { ...ed, exec: lets });
+  assert.deepEqual({ ok: r2.ok, started: r2.started }, { ok: true, started: true });
+  assert.equal(ended.sent.length, 2);
+
+  // hc can't read the terminal after it either: doubt is never death.
+  const blind = fakeHc();
+  const bd = { exec: blind.exec, ...fakeClock() };
+  const s3 = await startServer({ root: ROOT, line: "pnpm dev", logPath, ...HEAD }, bd);
+  let dark = false;
+  const darkens = async (file, args) => {
+    if (file === "hc" && args[0] === "interrupt") {
+      dark = true;
+      return refused("hc: no route to core");
+    }
+    if (dark && file === "hc" && args[0] === "get") return { code: 1, stdout: "", stderr: "core restarting" };
+    return blind.exec(file, args);
+  };
+  const r3 = await restartServer({ root: ROOT, terminal: s3.terminal, line: "pnpm dev", logPath, serverPid: s3.pid, ...HEAD }, { ...bd, exec: darkens });
+  assert.deepEqual({ ok: r3.ok, reason: r3.reason, oldServerRuns: r3.oldServerRuns }, { ok: false, reason: "interrupt-failed", oldServerRuns: true });
+  assert.equal(blind.sent.length, 1);
   rmSync(dir, { recursive: true, force: true });
 });
 

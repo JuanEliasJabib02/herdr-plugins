@@ -31,7 +31,7 @@
 
 import crypto from "node:crypto";
 import {
-  repoSlug, appendLogHeader, rotateLog, tailLog, stripTerminalSequences, DEFAULT_TAIL_LINES,
+  repoSlug, appendLogHeader, rotateLog, tailLog, stripTerminalSequences, causeWords, DEFAULT_TAIL_LINES,
 } from "./server-log.js";
 import {
   treeListening, pickPort, portLabel, portUrl, serverSnapshot, serverLeftovers, stopLeftovers, requireKill,
@@ -569,11 +569,12 @@ function note(logPath, { workspace, branch }, event, deps) {
 }
 
 // A start that didn't go through, `r`: its line in the log (NOT_STARTED; a
-// reason this doesn't know yet is named as it came), then `r` as it came.
+// reason this doesn't know yet is named as it came), hc's words after it
+// when it gave some (causeWords), then `r` as it came.
 function notStarted(logPath, head, r, deps) {
   if (r.reason === "invalid-command") return r;
-  const words = typeof r.message === "string" && r.message.trim() ? ` (${r.message.trim()})` : "";
-  note(logPath, head, `${NOT_STARTED[r.reason] ?? `Server not started (${r.reason ?? "no reason"})`}${words}`, deps);
+  const said = causeWords(r.message);
+  note(logPath, head, `${NOT_STARTED[r.reason] ?? `Server not started (${r.reason ?? "no reason"})`}${said ? ` (${said})` : ""}`, deps);
   return r;
 }
 
@@ -613,10 +614,20 @@ async function typeWhenIdle(a, deps) {
 
 // Interrupts Spotlight's server and waits for the prompt. A server that
 // never let go of it, because hc couldn't send the Ctrl-C or it ignored it,
-// still runs: `oldServerRuns` (L1).
+// still runs: `oldServerRuns` (L1). hc failing the Ctrl-C may be the terminal
+// closing between the look and it, so the terminal is looked at again first,
+// as stopServer does (M4): only Spotlight's server still in front, or a
+// terminal hc can't read (doubt is never death), is an old server that still
+// runs; a gone terminal, a free prompt or another program runs none of
+// Spotlight's, and the start goes on as any other (typeWhenIdle answers it:
+// terminal-gone, the line typed, busy).
 async function interruptAndWait(terminal, { logPath, serverPid }, deps) {
   const r = await hc(deps, ["interrupt", terminal, "--timeout", String(INTERRUPT_WATCH_S), "--json"]);
-  if (!r.ok) return { ok: false, reason: "interrupt-failed", terminal, message: r.error.message, oldServerRuns: true };
+  if (!r.ok) {
+    const after = await inspectServer({ terminal, logPath, serverPid }, deps);
+    if (after.kind !== "spotlight" && after.kind !== "unknown") return { ok: true, seen: after };
+    return { ok: false, reason: "interrupt-failed", terminal, message: r.error.message, oldServerRuns: true };
+  }
   const seen = await inspectUntil({ terminal, logPath, serverPid }, deps, (s) => s.kind !== "spotlight", PROMPT_MS);
   if (seen.kind === "spotlight") return { ok: false, reason: "still-running", terminal, oldServerRuns: true };
   return { ok: true, seen };
@@ -653,8 +664,9 @@ export async function startServer({ root, terminal, line, logPath, serverPid, wo
 // `restarted: true` when a running server was interrupted and replaced. Its
 // answers are startServer's, plus { ok: false, reason: "interrupt-failed" |
 // "still-running", oldServerRuns: true, … }: the old server never let go of
-// the prompt and still runs (L1). Each ok: false is logged as startServer's
-// (notStarted). `ensured`: as startServer's.
+// the prompt and still runs (L1; after a Ctrl-C hc couldn't send, only while
+// hc still shows it in front or can't read the terminal, M4). Each ok: false
+// is logged as startServer's (notStarted). `ensured`: as startServer's.
 export async function restartServer({ root, terminal, line, logPath, serverPid, workspace, branch, ensured: given } = {}, deps) {
   const wrapped = wrapServerLine(line, logPath);
   if (!wrapped) return { ok: false, reason: "invalid-command" };
@@ -732,8 +744,8 @@ function stopNote(logPath, head, { forced, survivors = [], refused = [], interru
 // `message` doesn't say it already (K4). The CLI's error and toast stay
 // Spanish only; `spotlight logs` reads this.
 function notStoppedNote(logPath, head, { reason, message, interruptError = null }, deps) {
-  const ctrlC = ctrlCFailed(interruptError);
-  note(logPath, head, `Spotlight off — server NOT stopped (${reason}): ${[message, ctrlC].filter(Boolean).join("; ")}`, deps);
+  const said = [causeWords(message), ctrlCFailed(interruptError)].filter(Boolean).join("; ");
+  note(logPath, head, `Spotlight off — server NOT stopped (${reason})${said ? `: ${said}` : ""}`, deps);
 }
 
 // Nothing runs in the terminal (its prompt is free, or there's no terminal):

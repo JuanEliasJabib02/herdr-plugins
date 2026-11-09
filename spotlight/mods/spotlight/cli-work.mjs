@@ -28,7 +28,7 @@ import {
   inspectServer, readServerState, startServer, restartServer, stopServer, ensureServerTerminal, serverTerminalHidden, showServerTerminal,
   NOTED_STOP_FAILURES,
 } from "./server.js";
-import { logPathFor, appendLogHeader, rotateLog, readStartFailure } from "./server-log.js";
+import { logPathFor, appendLogHeader, rotateLog, readStartFailure, causeWords } from "./server-log.js";
 import { portUrl, foreignListener, stopProcessTree, goneIdentities, identityKey, isIdentity } from "./ports.js";
 import { release, pause, regrant, snapshot } from "./queue.js";
 import {
@@ -254,6 +254,8 @@ const SERVER_WORDS = {
   none: "sin server",
   pending: "server sin tocar",
   failed: "el server no arrancó",
+  // The old server never let go of the prompt and still runs (M3).
+  "still-running": "server sin reiniciar",
   "port-busy": "puerto ocupado",
 };
 
@@ -286,12 +288,12 @@ async function lightMember(cx, member, { force, taskKey, quiet = false }) {
     // light (L6): its header, its toast, and its server's takeover below.
     const switched = !same;
     const logPath = before?.logPath ?? logPathFor(root);
-    // The lockfiles are compared from what the root had: its own HEAD on an
-    // activation that found no refs (sync.js activate's alreadyActive:
-    // false), else the last snapshot projected there (L6).
-    const fromSha = result.alreadyActive === false
-      ? result.originalHeadSha ?? null
-      : before?.lastSnapshotSha ?? result.originalHeadSha ?? null;
+    // The lockfiles are compared from what the root had, as the refs read
+    // under this lock say (L6, M7): the snapshot they projected there when
+    // they were active (a sync, a takeover; orphan refs with no record, and
+    // a record whose lastSnapshotSha is stale, too), else the root's own HEAD
+    // (a fresh activation: sync.js activate's originalHeadSha).
+    const fromSha = refs.active ? refs.snapshotSha : result.originalHeadSha ?? null;
     const changed = result.skipped ? [] : await lockfileInstalls({ git: cx.planGit, root, fromSha, toSha: result.snapshotSha });
     const missing = await missingInstalls(root, cx.io);
     const branch = await branchOf(workspace);
@@ -336,7 +338,7 @@ async function lightMember(cx, member, { force, taskKey, quiet = false }) {
 // Why a start didn't go through, in Spanish, by startServer's or
 // restartServer's reason (K3): the words after "El server no arrancó: ".
 const START_FAILURES = {
-  busy: "su terminal corre algo que Spotlight no arrancó (no se tocó)",
+  busy: "su terminal corre otro programa (no se tocó)",
   "invalid-command": "su comando no es una sola línea que se pueda escribir",
   "name-taken": "otra terminal viva tiene el nombre de la suya",
   "terminal-failed": "hc no pudo crear su terminal",
@@ -360,8 +362,9 @@ export function startFailedError(r) {
 
 // A restart whose old server never let go of the prompt (restartServer's
 // oldServerRuns: it ignored the Ctrl-C, or hc couldn't send it): that server
-// still runs, so no start failed (K3, L1) and no server error is written;
-// its toast says so, each time.
+// still runs, so no start failed (K3, L1, M3) and no server error is
+// written; its toast says so each time someone asked for that restart, and
+// once per cause for a sync (the record's restartStuck, M1).
 const stillRunningText = (r) =>
   `el server sigue corriendo: ${r.reason === "interrupt-failed" ? "hc no pudo mandarle Ctrl-C" : "no paró con Ctrl-C"} y no se reinició`;
 
@@ -387,6 +390,16 @@ export async function envDrift(cx, root, record) {
   return commandTemplate({ settings: repoSettings(cx.settings, root), detected, env }) !== null;
 }
 
+// The effective env is one a start or restart couldn't run (the record's
+// envFailed: a failed start, or an old server that never let go of the
+// prompt), and settings.json wasn't saved after that (`savedAt`, the store's
+// settingsSavedAt, J-011). Neither the reap (J-009) nor a sync (auto-sync,
+// `on`, M1) tries it again until then, so a server that ignores Ctrl-C isn't
+// sent another one after every save; Reiniciar, a picked env and a light
+// always do.
+const envGaveUp = (cx, root, record, savedAt) =>
+  record?.envFailed === effectiveEnv(cx, root, record) && !(savedAt > (record.envFailedAt ?? 0));
+
 // Which busy mark a server call makes (D33): a restart (`spotlight
 // restart`, Liberar puerto y arrancar), an env or a variant picked now
 // (`spotlight env`). The server work of a light or a sync makes none: it
@@ -411,7 +424,8 @@ function serverBusyOp({ restart = false, envName, chosenVariant }) {
 //   restart      restart even when nothing changed (`spotlight restart`)
 //   ifRunning    touch only a server Spotlight runs now (a sync's installs)
 //   syncing      a sync's server work (auto-sync, `on`, the reap's detached
-//                sync): a failed start it repeats doesn't toast again (L3)
+//                sync): a failed start it repeats doesn't toast again (L3),
+//                nor an old server still running for the same cause (M1)
 //   freePort     Liberar puerto y arrancar: stop the process the recorded
 //                port-busy error names when it still holds the port (D24)
 //   takeover     a fresh activation (lightMember: another workspace, or the
@@ -426,6 +440,9 @@ function serverBusyOp({ restart = false, envName, chosenVariant }) {
 // runs, and the record says why, H2). That failure toasts every time someone
 // asked for this start (a light, Reiniciar, Reintentar, Liberar puerto, env,
 // variant), the same failure too; a sync toasts it once per new error (L3).
+// An old server that never let go of the prompt is no failed start: its own
+// state, still-running (M3), toasted as a failure is (the record's
+// restartStuck says the cause a sync already told, M1).
 // A plan with no command ends it on a takeover, and for the same holder once
 // no server of Spotlight's may run there any more (oursMayRun): with none,
 // there is no server to be wrong about (K1), but one of before still running
@@ -435,7 +452,7 @@ function serverBusyOp({ restart = false, envName, chosenVariant }) {
 // that ends the last holder's on a takeover only (G1); otherwise it stays
 // (H1: a port-busy a refused restart left over a server that kept
 // listening, D24).
-// → { state: started | running | needs-variant | none | pending | failed | port-busy, … }
+// → { state: started | running | still-running | needs-variant | none | pending | failed | port-busy, … }
 export async function ensureServer(cx, root, opts = {}) {
   const op = serverBusyOp(opts);
   if (!op) return planAndStart(cx, root, opts);
@@ -444,11 +461,12 @@ export async function ensureServer(cx, root, opts = {}) {
 
 // Whether a server of Spotlight's may still run for `record` (L5): its
 // server terminal shows Spotlight's own server in front, or hc can't say
-// (doubt is never death). A record with no server terminal never ran one.
+// (doubt is never death). With no terminal on the record, hc is asked by the
+// terminal's name (sl-<slug>), as inspectServer and every start look for it
+// (M5); none by that name runs none.
 async function oursMayRun(cx, root, record) {
-  if (!record.serverTerminal) return false;
   const seen = await inspectServer(
-    { root, terminal: record.serverTerminal, logPath: record.logPath ?? logPathFor(root), serverPid: record.serverPid },
+    { root, terminal: record.serverTerminal ?? null, logPath: record.logPath ?? logPathFor(root), serverPid: record.serverPid },
     cx.serverDeps,
   );
   return seen.kind === "spotlight" || seen.kind === "unknown";
@@ -550,6 +568,7 @@ async function planAndStart(cx, root, opts) {
       });
       delete rec.envFailed;
       delete rec.envFailedAt;
+      delete rec.restartStuck;
       clearServerError(rec);
       if (taskKey && plan.variant && (plan.source === "inferred" || plan.source === "chosen")) {
         rememberVariant(s, `${taskKey}::${normRoot(root)}`, plan.variant);
@@ -564,10 +583,16 @@ async function planAndStart(cx, root, opts) {
       // The old server ignored the Ctrl-C, or never got it, and still runs,
       // in the state it had: no start failed (K3, L1). As over a server
       // already running, a takeover ends the last holder's server error (G1)
-      // and the same holder keeps it (H1). Its toast says so, each time.
+      // and the same holder keeps it (H1). The env it couldn't run is
+      // envFailed, which neither a sync nor the reap tries again until
+      // settings are saved (envGaveUp, M1). Its toast says so every time it
+      // was asked for; a sync repeating the cause in force (restartStuck, the
+      // reason the last restart left that old server running for) doesn't.
       if (rec.serverEnv !== plan.env) Object.assign(rec, { envFailed: plan.env, envFailedAt: now });
       if (takeover) clearServerError(rec);
-      addNote(s, { repo: root, text: `${cx.nameOf(root)}: ${stillRunningText(r)}`, toast: true }, now);
+      const repeat = syncing && rec.restartStuck?.reason === r.reason;
+      rec.restartStuck = { reason: r.reason, at: now };
+      if (!repeat) addNote(s, { repo: root, text: `${cx.nameOf(root)}: ${stillRunningText(r)}`, toast: true }, now);
     } else {
       // The start didn't go through: its own server error over whatever was
       // there (K3, H2; under a root error the record has, F7), opening the
@@ -575,12 +600,15 @@ async function planAndStart(cx, root, opts) {
       // sync's repeat of the error in force isn't (L3).
       rec.serverState = r.reason === "terminal-gone" ? "gone" : "stopped";
       if (rec.serverEnv !== plan.env) Object.assign(rec, { envFailed: plan.env, envFailedAt: now });
+      // No old server runs now: the cause of a stuck restart is no more.
+      delete rec.restartStuck;
       const repeat = syncing && shownAlready(rec, failure);
       setServerError(rec, { ...failure, at: now });
       if (!repeat) errorNote(s, { root, name: cx.nameOf(root), workspace: workspace ?? rec.holder, error: failure, now, top: rec.lastError });
     }
   });
-  const word = r.ok && r.started ? "started" : r.ok && r.reason === "already-running" ? "running" : "failed";
+  // An old server still running is its own state, never a failed start (M3).
+  const word = ran ? (r.started ? "started" : "running") : failure ? "failed" : "still-running";
   return { state: word, result: r, plan, freed, ...(failure ? { error: failure } : {}) };
 }
 
@@ -883,9 +911,13 @@ const goneOf = (cx, repos, roots) =>
 
 // ── sync ───────────────────────────────────────────────────────────────────
 
-// Why the restart a sync asked for didn't happen, for `spotlight sync`'s line.
-const restartFailure = (server) =>
-  server?.state === "failed" ? server.result.reason : server?.state === "port-busy" ? "port-busy" : null;
+// Why the restart a sync asked for didn't happen, for `spotlight sync`'s line:
+// a failed start's reason, the old server's (still-running's: it ignored the
+// Ctrl-C, or never got it), or port-busy.
+const restartFailure = (server) => {
+  if (server?.state === "failed" || server?.state === "still-running") return server.result.reason;
+  return server?.state === "port-busy" ? "port-busy" : null;
+};
 
 // Brings the root in step with its holder (`spotlight sync`, auto-sync, and
 // `on` for each lit member). Under the repo lock; the holder is read inside
@@ -894,7 +926,8 @@ const restartFailure = (server) =>
 // pnpm-lock.yaml / uv.lock restarts Spotlight's running server with the
 // install chained (D10), and so does a server running another env than the
 // effective one (J-002: a settings change, picked up by the next `on`,
-// auto-sync, or the reap's detached sync). `lockTimeoutMs`: how long to wait
+// auto-sync, or the reap's detached sync), unless that env already couldn't
+// run and settings weren't saved since (envGaveUp, M1). `lockTimeoutMs`: how long to wait
 // for the repo lock (`on`'s time left, J-001); past it, LockError
 // "lock-timeout". Forced (Forzar sync), the repo is busy while it works, its
 // holder the target (D33); a sync that isn't forced (auto-sync, `on`) never
@@ -926,16 +959,21 @@ export async function syncRepo(cx, root, { force = false, onlyIf, lockTimeoutMs 
       return { ok: false, holder, ...error };
     }
     // Spotlight's running server only, with its variant (D10); a failed
-    // start it repeats doesn't toast again (L3).
+    // start it repeats doesn't toast again (L3), nor an old server still
+    // running for the same cause (M1).
     const refreshServer = async () =>
       ensureServer(cx, root, { workspace: holder, branch: await branchOf(holder), keepVariant: true, ifRunning: true, syncing: true });
+    // An env to restart into, unless it already couldn't run and settings
+    // weren't saved since (M1): every save would send another Ctrl-C.
+    const drifted = async () =>
+      !envGaveUp(cx, root, record, cx.store.settingsSavedAt?.() ?? 0) && (await envDrift(cx, root, record));
     if (result.skipped) {
       if (record.lastError && !isServerError(record.lastError)) {
         await cx.store.updateState((s) => {
           if (s.repos[root]) clearRootError(s.repos[root]);
         });
       }
-      const server = (await envDrift(cx, root, record)) ? await refreshServer() : null;
+      const server = (await drifted()) ? await refreshServer() : null;
       return { ok: true, skipped: true, holder, restarted: server?.state === "started", restartFailed: restartFailure(server) };
     }
     const installs = await lockfileInstalls({ git: cx.planGit, root, fromSha: record.lastSnapshotSha, toSha: result.snapshotSha });
@@ -948,7 +986,7 @@ export async function syncRepo(cx, root, { force = false, onlyIf, lockTimeoutMs 
       r.pendingInstalls = installsFor(r.pendingInstalls, installs);
     });
     let server = null;
-    if (installs.length > 0 || (await envDrift(cx, root, record))) server = await refreshServer();
+    if (installs.length > 0 || (await drifted())) server = await refreshServer();
     return { ok: true, skipped: false, holder, installs, restarted: server?.state === "started", restartFailed: restartFailure(server) };
   });
 }
@@ -1117,8 +1155,8 @@ export function turnOffError(stopped) {
 // stopServer's note says it already, or the stop went through.
 function stopFallbackNote(stopped) {
   if (stopped?.ok === true || NOTED_STOP_FAILURES.has(stopped?.reason)) return null;
-  const words = typeof stopped?.message === "string" && stopped.message.trim() ? `: ${stopped.message.trim()}` : "";
-  return `Spotlight off — server NOT stopped (${stopped?.reason ?? "no answer"})${words}`;
+  const said = causeWords(stopped?.message);
+  return `Spotlight off — server NOT stopped (${stopped?.reason ?? "no answer"})${said ? `: ${said}` : ""}`;
 }
 
 // A refused restore's message when the server's stop had failed before it
@@ -1237,13 +1275,17 @@ export async function waitForTurnServers(cx, { members, key, deadline, syncError
 // death at start (L4), as settleDeadStart checks too.
 const sameStart = (sv, r) => (sv.serverStartedAt ?? null) === (r.serverStartedAt ?? null);
 
+// Whether a look at a server (`on`'s describeServer, the reap's) goes into
+// its record `r` as written: not one waiting for a variant (a plan asked for
+// one since the look, M6), nor a start that looked dead and wasn't settled
+// (its lock was busy), which stays `starting`, nor a record restarted since
+// the look (sameStart). The reap's write and `on`'s both judge by it (M6).
+const mergesInto = (sv, r) =>
+  Boolean(r) && r.serverState !== "needs-variant" && !(sv.deadStart && r.serverState === "starting") && sameStart(sv, r);
+
 // Whether `on`'s look at a lit server (describeServer's `sv`) goes into its
-// record `r`: not one waiting for a variant, nor a start that looked dead and
-// wasn't settled (its lock was busy), which stays `starting`, nor a record
-// restarted since the look (sameStart).
-const merges = (sv, r) =>
-  Boolean(sv.lit && sv.serverState && r) && r.serverState !== "needs-variant" && !(sv.deadStart && r.serverState === "starting") &&
-  sameStart(sv, r);
+// record `r`: one it saw lit and in a state, by mergesInto's rule.
+const merges = (sv, r) => Boolean(sv.lit && sv.serverState) && mergesInto(sv, r);
 
 // What `on` saw of each lit server goes back to state.json (badges, status,
 // and the processes the turn-off may have to kill: noteLive). A start that
@@ -1448,9 +1490,10 @@ export async function reap(cx, { full = true, skip = null } = {}) {
     // a detached sync (D18: a restart outlasts the reap's second). Only
     // Spotlight's own server, never a foreign process holding a port. A root
     // with an error waits for it to clear: its sync would fail first. An env
-    // that couldn't run isn't tried again from here (J-009) until settings
-    // are saved after that (J-011); `on`, a sync or Reiniciar always do.
-    const gaveUp = rec.envFailed === effectiveEnv(cx, root, rec) && !(savedAt > (rec.envFailedAt ?? 0));
+    // that couldn't run isn't tried again from here (J-009) nor by a sync
+    // (M1) until settings are saved after that (J-011); Reiniciar, a picked
+    // env and a light always do.
+    const gaveUp = envGaveUp(cx, root, rec, savedAt);
     if (
       live.owner === "spotlight" && !rec.lastError && !gaveUp &&
       (await envDrift(cx, root, { ...rec, serverState: live.state }))
@@ -1496,10 +1539,11 @@ export async function reap(cx, { full = true, skip = null } = {}) {
     granted.push(...o.granted);
     s.queue = queue;
 
-    // Only into a record still on the start the look was of (L4).
+    // Only into a record still on the start the look was of (L4), and not
+    // one that turned to wait for a variant since: `on`'s whole rule (M6).
     for (const sv of servers) {
       const r = s.repos[sv.root];
-      if (r && sameStart(sv, r)) noteLive(r, sv, gone);
+      if (mergesInto(sv, r)) noteLive(r, sv, gone);
     }
     // Only while each is still the mark read (a new light's stays).
     for (const [root, mark] of stale.repos) clearBusy(s, root, mark);

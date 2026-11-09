@@ -7,6 +7,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFile, execFileSync } from "node:child_process";
+import { existsSync } from "node:fs";
 import * as portsMod from "../mods/spotlight/ports.js";
 import {
   LSOF_ARGV, parseLsofListen, processTree, treePorts, pickPort, portLabel, portUrl,
@@ -618,11 +619,20 @@ test("G2: every ps read that records or checks an identity runs with LC_ALL=C an
 
 // K9, L8: the real ps runs under a caller's own TZ and locale handed to a
 // child process (execFile's `env`), never written into this test process's
-// env. The time zones are checked under LC_ALL=C always (TZ_ENVS); the
-// locales (LOCALE_ENVS) only where `locale -a` has them, else those cases
-// are skipped with the reason.
+// env. The time zones are checked under LC_ALL=C (TZ_ENVS) wherever the
+// system has their tzdata, else those cases are skipped with the reason
+// (M8: without /usr/share/zoneinfo/<zone>, TZ=<zone> reads as UTC and the
+// case proves nothing); the locales (LOCALE_ENVS) only where `locale -a` has
+// them, and their zones too.
 const TZ_ENVS = [["Pacific/Kiritimati", "C"], ["America/Bogota", "C"]];
 const LOCALE_ENVS = [["Pacific/Kiritimati", "es_ES.UTF-8"], ["America/Bogota", "fr_FR.UTF-8"]];
+const ZONEINFO = "/usr/share/zoneinfo";
+// The zones of `envs` whose tzdata `dir` lacks, as a skip reason, or false.
+function missingZones(envs, dir = ZONEINFO) {
+  const missing = [...new Set(envs.map(([tz]) => tz))].filter((tz) => !existsSync(`${dir}/${tz}`));
+  return missing.length > 0 ? `no tzdata for ${missing.join(", ")} in ${dir}` : false;
+}
+const TZ_SKIP = missingZones(TZ_ENVS);
 const callerEnv = (tz, lc) => ({ ...process.env, TZ: tz, LC_ALL: lc, LANG: lc });
 function missingLocales() {
   try {
@@ -633,7 +643,7 @@ function missingLocales() {
     return `locale -a failed: ${e.message}`;
   }
 }
-const LOCALES_SKIP = missingLocales();
+const LOCALES_SKIP = missingLocales() || missingZones(LOCALE_ENVS);
 // ps's lstart of `pid` under `env`, spaces folded.
 const lstartUnder = (pid, env) =>
   execFileSync("ps", ["-o", "lstart=", "-p", String(pid)], { encoding: "utf8", env }).replace(/\s+/g, " ").trim();
@@ -667,7 +677,13 @@ function cliReadsPinned(envs) {
   assert.deepEqual(ownEnv(), before, "this process's env untouched");
 }
 
-test("G2, K9, L8: an identity reads the same whatever the caller's time zone (under LC_ALL=C): the real ps through the CLI's exec, in a CLI process started with that env", () => {
+test("M8: a time zone the system has no tzdata for skips its cases with the reason, never fails them", () => {
+  assert.equal(missingZones([["Not/AZone", "C"], ["Not/AZone", "C"]], ZONEINFO), `no tzdata for Not/AZone in ${ZONEINFO}`);
+  assert.equal(missingZones(TZ_ENVS, "/nonexistent-zoneinfo"), "no tzdata for Pacific/Kiritimati, America/Bogota in /nonexistent-zoneinfo");
+  assert.equal(missingZones([]), false);
+});
+
+test("G2, K9, L8: an identity reads the same whatever the caller's time zone (under LC_ALL=C): the real ps through the CLI's exec, in a CLI process started with that env", { skip: TZ_SKIP }, () => {
   cliReadsPinned(TZ_ENVS);
 });
 
@@ -709,7 +725,7 @@ async function bareExecReadsPinned(envs) {
   assert.deepEqual(ownEnv(), before, "this process's env untouched");
 }
 
-test("H7, K9, L8: the real ps through an exec that adds no env of its own reads C/UTC under any caller's time zone (under LC_ALL=C)", async () => {
+test("H7, K9, L8: the real ps through an exec that adds no env of its own reads C/UTC under any caller's time zone (under LC_ALL=C)", { skip: TZ_SKIP }, async () => {
   await bareExecReadsPinned(TZ_ENVS);
 });
 

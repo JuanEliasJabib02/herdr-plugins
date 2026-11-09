@@ -101,6 +101,13 @@ export function formatClock(ms) {
 // eslint-disable-next-line no-control-regex
 const oneLine = (s) => String(s).replace(/[\u0000-\u001f\u007f]+/g, " ").trim();
 
+// A cause in its own words (hc's, ps's) for a log line, on one line as
+// headerLine writes it; null when it says nothing: not a string, or only
+// spaces and control bytes. The one rule for the start's, the stop's and the
+// turn-off's notes (server.js notStarted, notStoppedNote; cli-work.mjs
+// stopFallbackNote, M9), so none writes an empty "( )" or ": ".
+export const causeWords = (message) => (typeof message === "string" ? oneLine(message) || null : null);
+
 // The CLI's marker line in the log, like Orca's holder-switch headers:
 // "── Spotlight: login (feat/login) · 22:58:04 ──", with the event (started,
 // restarted, stopped, a start left alone) before the time when there is one.

@@ -21,8 +21,12 @@
 //              settings' env until `toggle` off drops the record, J-002),
 //              envFailed? and envFailedAt? (the env a start or restart
 //              couldn't run, and when: the reap doesn't try it again until
-//              settings.json is saved after that, J-009, J-011; a started
-//              server clears both) and busy? { op, since, pid, workspace }
+//              settings.json is saved after that, nor a sync, J-009,
+//              J-011, M1; a started server clears both), restartStuck?
+//              { reason, at } (the last restart left the old server running:
+//              it ignored the Ctrl-C, or never got it; a sync repeating that
+//              reason doesn't toast again, M1; a start, or one that failed,
+//              drops it) and busy? { op, since, pid, workspace }
 //              (D33: a light, turn-off, Forzar sync or restart works on
 //              the repo right now; set and cleared under its repo lock by
 //              the process `pid` since `since` (ms), `workspace` the

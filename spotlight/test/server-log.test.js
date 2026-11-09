@@ -10,6 +10,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import * as serverLog from "../mods/spotlight/server-log.js";
 import {
   stripTerminalSequences, repoSlug, logDir, logPathFor, formatClock, headerLine, appendLogHeader,
   rotateLog, tailLog, MAX_LOG_BYTES, KEEP_LOG_BYTES, TRIM_MARKER,
@@ -73,6 +74,13 @@ test("headerLine: Orca's holder-switch header, with an optional event", () => {
   assert.equal(headerLine({ workspace: "login", branch: "feat/login", event: "stopped", at }), "── Spotlight: login (feat/login) · stopped · 22:58:04 ──");
   assert.equal(headerLine({ workspace: "app", event: "started: pnpm dev", at }), "── Spotlight: app · started: pnpm dev · 22:58:04 ──");
   assert.equal(headerLine({ event: "stopped", at }), "── Spotlight: stopped · 22:58:04 ──");
+});
+
+test("causeWords (M9): a cause's own words on one line as headerLine writes them; null when there are none (not a string, empty, or only spaces and control bytes)", () => {
+  const { causeWords } = serverLog;
+  assert.equal(causeWords("hc: spawn failed\nexit 1\r\n"), "hc: spawn failed exit 1");
+  assert.equal(causeWords("  t1 has finished  "), "t1 has finished");
+  for (const none of [undefined, null, 7, {}, "", "   ", "\u0007\r\n", "\t\u001b"]) assert.equal(causeWords(none), null, JSON.stringify(none));
 });
 
 test("appendLogHeader creates the log folder and puts the header on its own line", () => {

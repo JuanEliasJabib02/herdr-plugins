@@ -1448,26 +1448,39 @@ test("J-009: env drift the reap can't resolve isn't retried: a foreign process i
   await sleep(1500);
   assert.equal(interrupts(), 1, "the reap didn't interrupt it again");
 
-  // A sync tries it again and says so when it didn't take.
+  // A sync (auto-sync, `on`) doesn't try it again either (M1): no Ctrl-C,
+  // nothing said of a restart.
   const retried = await w.cli(["sync", "--repo", app.root]);
   assert.equal(retried.code, 0, retried.stderr + retried.stdout);
-  assert.match(retried.stdout, /^Nothing to sync: .* The server did not restart \(still-running\)\.$/m);
+  assert.match(retried.stdout, /^Nothing to sync: /m);
+  assert.doesNotMatch(retried.stdout, /did not restart/);
+  assert.equal(interrupts(), 1, "a sync doesn't interrupt it again");
 
   // J-011: back to Local, then Dev saved again: a save after the failure is a
   // new ask, so the reap tries it once more (and only once).
-  assert.equal(interrupts(), 2, "the sync's own try");
   w.settings({ repos: { [app.root]: { env: "local" } } });
   assert.equal((await w.cli(["reap"])).code, 0);
   await sleep(1500);
-  assert.equal(interrupts(), 2, "Local runs already: the reap left it");
+  assert.equal(interrupts(), 1, "Local runs already: the reap left it");
   const savedAt = Date.now();
   w.settings({ repos: { [app.root]: { env: "dev" } } });
   assert.equal((await w.cli(["reap"])).code, 0);
   await w.until((s) => s.repos[app.root]?.envFailedAt >= savedAt, { what: "the reap's retry after the save" });
-  assert.equal(interrupts(), 3);
+  assert.equal(interrupts(), 2);
   assert.equal((await w.cli(["reap"])).code, 0);
   await sleep(1500);
-  assert.equal(interrupts(), 3, "no second retry without another save");
+  assert.equal(interrupts(), 2, "no second retry without another save");
+
+  // Reiniciar and a picked env always try it; each says the old server still
+  // runs, never that a start failed (M3).
+  const stuck = await w.cli(["restart", "--repo", app.root]);
+  assert.equal(stuck.code, 1, stuck.stderr + stuck.stdout);
+  assert.match(stuck.stderr, /app: the server did not restart: the old one still runs \(still-running\)\./);
+  const picked = await w.cli(["env", "--workspace", ws, "--env", "dev"]);
+  assert.equal(picked.code, 1, picked.stderr + picked.stdout);
+  assert.match(picked.stderr, /app: env dev saved; the server did not restart: the old one still runs \(still-running\)\./);
+  assert.doesNotMatch(picked.stderr, /did not start/);
+  assert.equal(interrupts(), 4);
 
   // Ctrl-C works again: Reiniciar runs the env asked for, and the mark goes.
   w.hcUpdate((s) => {
