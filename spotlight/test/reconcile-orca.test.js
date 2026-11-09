@@ -3,14 +3,14 @@
 // the usual rules once Orca lets go. Over the same real git and in-memory
 // store: how a record's root and server errors stack (F6, F7), what the reap
 // and `on` remember of the server's processes for the turn-off (F1, G3), a
-// turn-off whose server didn't stop (F3, G4, G5), and what a lighting does
-// with a server error the last holder left (G1). server.js's reads and stop
-// are stubbed (cx.server) with the shapes they answer; `ps` is a fake
-// (psExec) answering for the pids a test says are alive.
+// turn-off whose server didn't stop (F3, G4, G5, H5), and what a lighting
+// does with a server error (G1, H1–H3). server.js's reads and stop are
+// stubbed (cx.server) with the shapes they answer; `ps` is a fake (psExec)
+// answering for the pids a test says are alive.
 import { test, beforeEach, afterEach, after } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, realpathSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, existsSync, realpathSync } from "node:fs";
 import fsp from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
@@ -79,13 +79,30 @@ beforeEach(async () => {
   cx = { reapStore: store, store, shared: {}, now: () => now++ };
 });
 
+// ports.js runs every lstart read as `/usr/bin/env LC_ALL=C TZ=UTC ps …`
+// (H7): the program and args under the env words, and those words (`env`,
+// null for a call that isn't wrapped).
+function unwrapEnv(file, args = []) {
+  if (file !== "/usr/bin/env") return { file, args, env: null };
+  const env = {};
+  let i = 0;
+  while (i < args.length && /^[A-Za-z_]\w*=/.test(args[i])) {
+    const at = args[i].indexOf("=");
+    env[args[i].slice(0, at)] = args[i].slice(at + 1);
+    i += 1;
+  }
+  return { file: args[i], args: args.slice(i + 1), env };
+}
+
 // A fake `ps -o pid=,ppid=,stat=,lstart= -p <list>` (ports.js processStates):
 // it lists the pids of `alive` (pid → start time, as ps prints it) and no
-// other. `calls` keeps each call's file, args and options (G2: its env).
+// other. `calls` keeps each call's program and args (unwrapEnv's), the env
+// words it ran under (G2, H7) and any exec options it was given.
 function psExec(alive) {
   const calls = [];
-  const exec = async (file, args, opts) => {
-    calls.push({ file, args, opts });
+  const exec = async (rawFile, rawArgs, opts) => {
+    const { file, args, env } = unwrapEnv(rawFile, rawArgs);
+    calls.push({ file, args, env, opts });
     if (file !== "ps") return { code: 1, stdout: "", stderr: `no fake ${file}` };
     const pids = args[args.indexOf("-p") + 1].split(",").map(Number).filter((p) => alive.has(p));
     const rows = pids.map((p) => `${p} 1 S ${alive.get(p)}\n`);
@@ -423,7 +440,8 @@ test("F3, G5: a turn-off whose server didn't stop, for any reason, restores the 
       snapshot = (await activate(gitContext(), root, wt)).snapshotSha;
       state.repos[root] = { ...emptyRepo(), holder: wt, lastSnapshotSha: snapshot };
     }
-    state.repos[root].serverTerminal = "t1";
+    // The log stays under the test's folder (H5 writes the stop's cause there).
+    Object.assign(state.repos[root], { serverTerminal: "t1", logPath: join(base, "root.log") });
     state.notes = [];
     const r = await deactivateRepo(fullCx({ server: { stopServer: async () => stopped } }), root);
     assert.equal(r.ok, false, stopped.reason);
@@ -452,7 +470,7 @@ test("F3, G5: a turn-off whose server didn't stop, for any reason, restores the 
 // ── G4: a turn-off whose server didn't stop and whose git step failed ──────
 
 test("G4: a turn-off whose server didn't stop and whose restore then fails reports both in one toast, with the git error's code", async () => {
-  state.repos[root].serverTerminal = "t1";
+  Object.assign(state.repos[root], { serverTerminal: "t1", logPath: join(base, "root.log") });
   const ox = fullCx({
     server: {
       stopServer: async () => {
@@ -482,11 +500,62 @@ test("G4: a turn-off whose server didn't stop and whose restore then fails repor
   assert.deepEqual(state.notes.filter((n) => n.toast).map((n) => n.text), [`root: ${gitMessage}`]);
 });
 
+// ── H5: the stop's own cause reaches the server log ────────────────────────
+
+test("H5: a turn-off whose server didn't stop writes stopServer's own cause (hc's, ps's words) into the server log with the turn-off note; the toast and the error stay Spanish only", async () => {
+  const logPath = join(base, "root.log");
+  const readLog = () => (existsSync(logPath) ? readFileSync(logPath, "utf8") : "");
+  const cause = "the Spotlight terminal could not be read (hc: no route to core): the server may still be running";
+  Object.assign(state.repos[root], { serverTerminal: "t1", logPath });
+  const r = await deactivateRepo(fullCx({ server: { stopServer: async () => ({ ok: false, reason: "unreadable", terminal: "t1", message: cause }) } }), root);
+  assert.equal(r.code, "server-not-stopped");
+  assert.doesNotMatch(r.message, /no route to core/);
+  assert.ok(state.notes.filter((n) => n.toast).every((n) => !n.text.includes("no route to core")), JSON.stringify(state.notes));
+  // One header line: the holder, the turn-off note with the cause, the time.
+  const line = readLog().split("\n").find((l) => l.includes("no route to core"));
+  assert.match(line ?? "", /^── Spotlight: wt \(feature\) · Spotlight off — server NOT stopped \(unreadable\): the Spotlight terminal could not be read \(hc: no route to core\): the server may still be running · \d\d:\d\d:\d\d ──$/);
+
+  // The restore refused too (G4): the cause reaches the log all the same, a
+  // Ctrl-C hc couldn't send with it, each on one line.
+  snapshot = (await activate(gitContext(), root, wt)).snapshotSha;
+  state.repos[root] = { ...emptyRepo(), holder: wt, lastSnapshotSha: snapshot, serverTerminal: "t1", logPath };
+  const running = {
+    ok: false, reason: "still-running", terminal: "t1", forced: 1, pid: 50010, interruptError: "herdr-core\nunreachable",
+    message: "Spotlight's server (pid 50010) still leads the terminal after it was killed: the server may still be running",
+  };
+  const refused = await deactivateRepo(fullCx({
+    server: {
+      stopServer: async () => {
+        write(root, "a.txt", "edited in the root meanwhile\n");
+        return running;
+      },
+    },
+  }), root);
+  assert.equal(refused.code, "root-diverged");
+  assert.doesNotMatch(refused.message, /still leads|herdr-core/);
+  assert.match(
+    readLog(),
+    /Spotlight off — server NOT stopped \(still-running\): Spotlight's server \(pid 50010\) still leads the terminal after it was killed: the server may still be running; the Ctrl-C could not be sent \(herdr-core unreachable\) · /,
+  );
+
+  // A stop that went through, or a survivor stopServer's own line names
+  // already: nothing more from the turn-off.
+  const ok = { ok: true, stopped: true, terminal: "t1", forced: 0 };
+  assert.equal((await deactivateRepo(fullCx({ server: { stopServer: async () => ok } }), root, { force: true })).ok, true);
+  for (const stopped of [ok, { ok: false, reason: "survived", terminal: "t1", forced: 1, survivors: [50013] }]) {
+    rmSync(logPath, { force: true });
+    snapshot = (await activate(gitContext(), root, wt)).snapshotSha;
+    state.repos[root] = { ...emptyRepo(), holder: wt, lastSnapshotSha: snapshot, serverTerminal: "t1", logPath };
+    await deactivateRepo(fullCx({ server: { stopServer: async () => stopped } }), root);
+    assert.equal(readLog(), "", stopped.reason ?? "ok");
+  }
+});
+
 // ── G1: a lighting ends the server error the last holder left ──────────────
-// A lighting that goes through clears both errors; its ensureServer decides
-// the server error again: a start ends it, a busy port writes it again, and
-// anything else (no command, a variant to pick, the same server already
-// running) leaves none.
+// A takeover that goes through clears the root error; its ensureServer
+// decides the server error again: a start ends it, a busy port writes it
+// again, and a server that starts nothing new (no command, a variant to
+// pick, the same server already running) leaves none.
 
 // A second worktree, `wt2`, takes the root from `wt` through lightTask (a
 // takeover), with `files` written into it (uncommitted: the snapshot carries
@@ -547,6 +616,67 @@ test("G1: a new holder over the same server already running leaves no server err
   assert.equal(state.repos[root].lastError, null);
 });
 
+// ── H1–H3: ensureServer decides the server error a lighting leaves ─────────
+// Only a takeover ends the last holder's server error when its server
+// starts nothing new (G1, above). The same holder lit again keeps it unless
+// a start ends it (H1), and a start that fails keeps it, whoever lights (H2).
+
+// A port-busy a refused `spotlight restart` left over a server that kept
+// listening (D24: it stays, as a sync keeps it).
+const REFUSED = {
+  code: "port-busy", port: 3000, pid: 4242, command: "next-server (v16.0.1)", cwd: "/Users/u/other",
+  message: "El puerto 3000 lo tiene next-server (v16.0.1) (pid 4242, en /Users/u/other).", at: 7,
+};
+
+test("H1: the same holder lit again over its server already running keeps the port-busy a refused restart left (D24), with or without a root error over it", async () => {
+  const pkg = JSON.stringify({ packageManager: "pnpm@9.0.0", scripts: { local: "vite" } });
+  const pkgDir = join(base, "pkg");
+  write(pkgDir, "package.json", pkg);
+  const same = await planServer({
+    root: pkgDir, workspace: pkgDir, settings: repoSettings(readSettings(JSON.stringify({ version: 1 })), root), env: "local", io: nodeIo(fsp), git: planGit,
+  });
+  assert.equal(same.kind, "command", JSON.stringify(same));
+  const logPath = join(base, "root.log");
+  // hc shows Spotlight's own server in front of the server terminal.
+  const ps = psExec(new Map());
+  const exec = async (file, args, opts) => {
+    if (file === "hc" && args[0] === "get") {
+      const term = { address: "t1", pid: 100, state: "live", foreground: { pid: 101, name: "script", argv: ["script", "-F", "-q", "-a", logPath, "/bin/zsh", "-c", same.command] } };
+      return { code: 0, stdout: JSON.stringify(term), stderr: "" };
+    }
+    return ps.exec(file, args, opts);
+  };
+  write(wt, "package.json", pkg);
+  for (const lastError of [REFUSED, { ...DIVERGED, serverError: REFUSED }]) {
+    Object.assign(state.repos[root], {
+      serverTerminal: "t1", serverPid: 101, serverState: "listening", serverCommand: same.command, serverEnv: same.env, ports: [3000], logPath, lastError,
+    });
+    const key = `direct/${root}`;
+    state.queue.lighting[key] = { grantId: "g", phase: "pending", pid: null, members: [{ root, name: "root", workspace: wt, workspaces: [wt] }], taskKey: null, force: false };
+    const r = await lightTask(fullCx({ serverDeps: { exec } }), key);
+    assert.deepEqual(r.errors, {}, JSON.stringify(r));
+    assert.equal(state.repos[root].holder, wt);
+    assert.equal(state.repos[root].serverState, "listening");
+    // The lighting ends the root error; the server error stays on top.
+    assert.deepEqual(state.repos[root].lastError, REFUSED, lastError.code);
+  }
+});
+
+test("H2: a takeover whose start fails keeps the server error: no server runs, and the record still says why", async () => {
+  Object.assign(state.repos[root], { serverState: "stopped", lastError: { ...EXITED } });
+  // hc can't read the server terminal: the start fails (unreadable).
+  const exec = async (file) =>
+    file === "hc"
+      ? { code: 1, stdout: "", stderr: JSON.stringify({ error: { kind: "io", message: "hc: no route to core" } }) }
+      : { code: 1, stdout: "", stderr: `no fake ${file}` };
+  await lightOnto({ "package.json": JSON.stringify({ packageManager: "pnpm@9.0.0", scripts: { local: "vite" } }) }, { serverDeps: { exec } });
+  assert.notEqual(state.repos[root].serverState, "starting");
+  assert.deepEqual(state.repos[root].lastError, EXITED);
+  const toasts = state.notes.filter((n) => n.toast).map((n) => n.text);
+  assert.ok(toasts.includes("root: el server no arrancó (unreadable: hc: no route to core)"), JSON.stringify(toasts));
+  assert.ok(toasts.includes("Spotlight on · root ← wt2 · el server no arrancó"), JSON.stringify(toasts));
+});
+
 // ── G3: the identities the reap and `on` keep are the live ones ────────────
 
 test("G3: the reap forgets remembered identities that no longer run before it merges (one ps, pinned env), so a watch server's respawns never push out a live escaped listener", async () => {
@@ -575,7 +705,8 @@ test("G3: the reap forgets remembered identities that no longer run before it me
   assert.deepEqual(state.repos[root].serverProcs, [ESCAPED, { pid: 52000 + RESPAWNS, start: start(RESPAWNS), port: 3000 }]);
   const reads = ps.calls.filter((c) => c.file === "ps");
   assert.equal(reads.length, RESPAWNS, "one ps per reap");
-  for (const c of reads) assert.deepEqual(c.opts?.env, { LC_ALL: "C", TZ: "UTC" });
+  // H7: the env rides in the argv, never in an exec option.
+  for (const c of reads) assert.deepEqual({ env: c.env, opts: c.opts }, { env: { LC_ALL: "C", TZ: "UTC" }, opts: undefined });
 });
 
 test("G3: `on` forgets the dead identities too (recordServers), read with one ps before its write; doubt forgets none", async () => {
@@ -597,6 +728,25 @@ test("G3: `on` forgets the dead identities too (recordServers), read with one ps
   assert.deepEqual(state.repos[root].serverProcs, [DEAD, ESCAPED, NOW]);
 });
 
+test("H8: `on` runs no ps for a root its write then skips: one waiting for a variant, or a dead start left `starting` (its lock was busy)", async () => {
+  const ps = psExec(new Map([[P3000.pid, P3000.start]]));
+  const ox = fullCx({ serverDeps: { exec: ps.exec } });
+  Object.assign(state.repos[root], { serverTerminal: "t1", serverState: "needs-variant", serverProcs: [P3000] });
+  await recordServers(ox, [{ root, lit: true, serverState: "stopped", ports: [], procs: [] }]);
+  assert.equal(state.repos[root].serverState, "needs-variant");
+  state.repos[root].serverState = "starting";
+  await recordServers(ox, [{ root, lit: true, serverState: "stopped", ports: [], procs: [], deadStart: true }]);
+  assert.equal(state.repos[root].serverState, "starting");
+  // A look at a repo with no record, or one not lit, asks nothing either.
+  await recordServers(ox, [{ root: join(base, "elsewhere"), lit: true, serverState: "listening", ports: [3000], procs: [P3000] }, { root, lit: false }]);
+  assert.deepEqual(ps.calls, []);
+  assert.deepEqual(state.repos[root].serverProcs, [P3000]);
+  // A look its write merges still gets its one ps.
+  await recordServers(ox, [{ root, lit: true, serverState: "listening", ports: [3000], procs: [P3000] }]);
+  assert.equal(ps.calls.length, 1);
+  assert.equal(state.repos[root].serverState, "listening");
+});
+
 // ── G10: a server error toasted under a root error ─────────────────────────
 
 test("G10: a server error toasted under a root error says the root goes first; it opens the popup only when the popup can act on that root error", () => {
@@ -612,6 +762,13 @@ test("G10: a server error toasted under a root error says the root goes first; i
   errorNote(s, { root, name: "root", workspace: wt, error: DIVERGED, now: 6 });
   assert.deepEqual(s.notes.map((n) => n.text), [`root: ${BUSY.message}`, `root: ${DIVERGED.message}`]);
   assert.ok(s.notes.every((n) => n.action?.name === `spotlight.server.${serverId(wt)}`));
+});
+
+test("H6: the root error a server error's toast names reads on one line, whatever lines git gave it", () => {
+  const top = { ...FAILED, message: "git exploded:\n  fatal: bad object HEAD\r\n\tcould not read\n", serverError: BUSY };
+  const s = { notes: [] };
+  errorNote(s, { root, name: "root", workspace: wt, error: BUSY, now: 5, top });
+  assert.equal(s.notes[0].text, `root: ${BUSY.message} Antes resuelve el root: git exploded: fatal: bad object HEAD could not read`);
 });
 
 // ── G11: a server stopped by hand ──────────────────────────────────────────

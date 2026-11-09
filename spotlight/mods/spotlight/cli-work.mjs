@@ -28,7 +28,8 @@ import {
 } from "./cli-turns.mjs";
 import { branchOf, hcGet, hcReadText, registeredRoots } from "./cli-env.mjs";
 import {
-  SERVER_ERRORS, isServerError, serverErrorOf, setRootError, setServerError, clearRootError, clearServerError,
+  SERVER_ERRORS, SERVER_SURVIVED, SERVER_NOT_STOPPED, isServerError, serverErrorOf, setRootError, setServerError, clearRootError,
+  clearServerError,
 } from "./server-errors.js";
 import { oneLine } from "./text.js";
 
@@ -49,7 +50,8 @@ const serverOf = (cx) => ({ readServerState, stopServer, ...(cx.server ?? {}) })
 // lastError holds a root error and a server error, each written and cleared
 // on its own (server-errors.js): a sync that goes through leaves a server
 // error and ends a root error; a start that goes through ends a server error
-// (D24), and so does the server coming up to listen after it (D25).
+// (D24), and so does the server coming up to listen after it (D25), and a
+// takeover whose server needs no start (ensureServer's `takeover`, H3).
 const POPUP_CODES = new Set(["root-diverged", "untracked-collision", ...SERVER_ERRORS]);
 
 const qctxOf = (cx) => ({ now: cx.now(), ...cx.settings.queue });
@@ -60,11 +62,12 @@ const qctxOf = (cx) => ({ now: cx.now(), ...cx.settings.queue });
 // (POPUP_CODES); orca-holds and orca-active toast with no action. A server
 // error that went under a root error (`top`) can't be acted on before that
 // root error is resolved, and the popup shows the root error: its toast says
-// so, "<server error> Antes resuelve el root: <root error>" (G10).
+// so, "<server error> Antes resuelve el root: <root error>" (G10), the root
+// error on one line whatever lines git gave it (H6).
 export function errorNote(s, { root, name, workspace, error, now, top = null }) {
   const shown = top ?? error;
   const action = POPUP_CODES.has(shown.code) && workspace ? { action: { name: `spotlight.server.${serverId(workspace)}` } } : {};
-  const under = top && isServerError(error) && !isServerError(top) ? ` Antes resuelve el root: ${top.message}` : "";
+  const under = top && isServerError(error) && !isServerError(top) ? ` Antes resuelve el root: ${oneLine(top.message)}` : "";
   addNote(s, { repo: root, text: `${name}: ${error.message}${under}`, toast: true, ...action }, now);
 }
 
@@ -197,8 +200,8 @@ async function lightMember(cx, member, { force, taskKey }) {
       const r = { ...emptyRepo(), ...(s.repos[root] ?? {}) };
       r.holder = workspace;
       // The root is lit: a root error ends. A server error stays for
-      // ensureServer below (its checkPort reads the port a recorded
-      // port-busy names, and its toast is one per new error), then ends too.
+      // ensureServer below, which decides it (its checkPort reads the port a
+      // recorded port-busy names, and its toast is one per new error).
       clearRootError(r);
       r.logPath = logPath;
       if (!result.skipped || !r.lastSnapshotSha) {
@@ -208,20 +211,18 @@ async function lightMember(cx, member, { force, taskKey }) {
       r.pendingInstalls = installsFor(r.pendingInstalls, changed, missing);
       s.repos[root] = r;
     });
-    const server = await ensureServer(cx, root, { workspace, branch, taskKey, keepVariant: !switched && !taskKey });
-    // G1: the lighting went through, so it ends the server error too (the
-    // last holder's dead start or busy port), unless ensureServer decided it
-    // again: a start ended it already, a busy port wrote it again. A server
-    // that needs no start (no command, a variant to pick, the same server
-    // already running) leaves none.
-    const decided = server.state === "port-busy";
-    await cx.store.updateState((s) => {
-      if (!decided && s.repos[root]) clearServerError(s.repos[root]);
-      if (switched) {
+    // The server error is ensureServer's to decide (H3). On a takeover (the
+    // holder changed: another workspace, a fresh activation) the last
+    // holder's dead start or busy port says nothing of the new one (G1); the
+    // same holder lit again keeps it unless a start ends it, as a sync does
+    // (H1, D24).
+    const server = await ensureServer(cx, root, { workspace, branch, taskKey, keepVariant: !switched && !taskKey, takeover: switched });
+    if (switched) {
+      await cx.store.updateState((s) => {
         const text = `Spotlight on · ${name} ← ${path.basename(workspace)} · ${SERVER_WORDS[server.state] ?? server.state}`;
         addNote(s, { repo: root, text, toast: true }, cx.now());
-      }
-    });
+      });
+    }
     return { ok: true, server };
   });
 }
@@ -267,12 +268,21 @@ export async function envDrift(cx, root, record) {
 //   ifRunning    touch only a server Spotlight runs now (a sync's installs)
 //   freePort     Liberar puerto y arrancar: stop the process the recorded
 //                port-busy error names when it still holds the port (D24)
+//   takeover     the holder changed (lightMember: another workspace, a
+//                fresh activation, Proyectar igual)
 // Nothing is typed while a process outside the server terminal's tree holds
 // the port the start takes (D23, D24): lastError port-busy, a toast that
 // opens the popup, and { state: "port-busy", error }.
+// The server error in force is decided here, never by the caller (H3): a
+// start that goes through ends it, a busy port writes it again, a start that
+// fails keeps it (no new server runs, and the record still says why, H2). The
+// rest (no command, a variant to pick, the same server already running)
+// starts nothing new and records nothing new: that ends the last holder's
+// on a takeover only (G1); otherwise it stays (H1: a port-busy a refused
+// restart left over a server that kept listening, D24).
 // → { state: started | running | needs-variant | none | pending | failed | port-busy, … }
 export async function ensureServer(cx, root, opts = {}) {
-  const { workspace, branch = null, taskKey = null, envName, restart = false, ifRunning = false } = opts;
+  const { workspace, branch = null, taskKey = null, envName, restart = false, ifRunning = false, takeover = false } = opts;
   const state = cx.store.readState();
   const record = state.repos[root];
   if (!record) return { state: "none" };
@@ -288,10 +298,18 @@ export async function ensureServer(cx, root, opts = {}) {
       const r = s.repos[root];
       if (!r) return;
       Object.assign(r, { serverState: "needs-variant", variantCandidates: plan.candidates });
+      if (takeover) clearServerError(r);
     });
     return { state: "needs-variant", candidates: plan.candidates };
   }
-  if (plan.kind !== "command") return { state: "none" };
+  if (plan.kind !== "command") {
+    if (takeover && serverErrorOf(record.lastError)) {
+      await cx.store.updateState((s) => {
+        if (s.repos[root]) clearServerError(s.repos[root]);
+      });
+    }
+    return { state: "none" };
+  }
 
   const pending = installsFor(record.pendingInstalls);
   const logPath = record.logPath ?? logPathFor(root);
@@ -347,7 +365,9 @@ export async function ensureServer(cx, root, opts = {}) {
       if (rec.serverState !== "listening") rec.serverState = "starting";
       if (r.pid) rec.serverPid = r.pid;
       rec.variantCandidates = [];
+      if (takeover) clearServerError(rec);
     } else {
+      // The start didn't go through: the server error in force stays (H2).
       // A server that ignored Ctrl-C keeps the state it had: it's still up.
       if (r.reason !== "still-running") rec.serverState = r.reason === "terminal-gone" ? "gone" : "stopped";
       if (rec.serverEnv !== plan.env) Object.assign(rec, { envFailed: plan.env, envFailedAt: now });
@@ -631,7 +651,8 @@ export async function syncRepo(cx, root, { force = false, onlyIf, lockTimeoutMs 
 // true, … }, or { ok: false, code, message }: refused (the root untouched;
 // when the server's stop had failed before the restore refused, its message
 // says that too, G4), or server-survived / server-not-stopped (the root
-// restored, the server not stopped: turnOffError).
+// restored, the server not stopped: turnOffError). A stop that failed
+// leaves its own cause in the server log either way (stopCauseNote, H5).
 export async function deactivateRepo(cx, root, { force = false } = {}) {
   const name = cx.nameOf(root);
   // A refusal: the git error goes on the record (a root error, over the
@@ -669,14 +690,17 @@ export async function deactivateRepo(cx, root, { force = false } = {}) {
     // adds them, G7), and is one of those processes.
     const procs = Array.isArray(record?.serverProcs) ? record.serverProcs : [];
     const ports = Array.isArray(record?.ports) ? record.ports : [];
+    const head = { workspace: holder ? path.basename(holder) : null, branch: holder ? await branchOf(holder) : null };
     const stopped = await serverOf(cx).stopServer(
-      {
-        root, terminal: record?.serverTerminal ?? null, logPath, serverPid: record?.serverPid ?? null,
-        workspace: holder ? path.basename(holder) : null, branch: holder ? await branchOf(holder) : null,
-        ports, procs,
-      },
+      { root, terminal: record?.serverTerminal ?? null, logPath, serverPid: record?.serverPid ?? null, ...head, ports, procs },
       cx.serverDeps,
     );
+    // H5: the toast and the error say why in Spanish only (G5); stopServer's
+    // own cause (hc's or ps's words) goes into the server log with the
+    // turn-off note, where `spotlight logs` reads it, whatever the restore
+    // does next.
+    const cause = stopCauseNote(stopped);
+    if (cause) appendLogHeader(logPath, { ...head, at: cx.now(), event: cause });
     let res;
     try {
       res = await deactivate(cx.gitCtx, root, { force });
@@ -732,7 +756,7 @@ function survivedDetail(survivors, refused = []) {
 // A turn-off whose server didn't die: its error, naming the pids.
 export function survivedError(survivors, refused = []) {
   return {
-    code: "server-survived",
+    code: SERVER_SURVIVED,
     message: `El server no paró al apagar Spotlight: ${survivedDetail(survivors, refused)} (el root sí se restauró).`,
   };
 }
@@ -762,10 +786,28 @@ function stopFailure(stopped) {
 // without ok: true): server-survived when some of it lived through SIGKILL
 // or was never signalled (survivedError), else server-not-stopped saying
 // why (stopFailure). A reason this doesn't know yet still fails the
-// turn-off. Both codes are TURN_OFF_ERRORS (server-errors.js): never stored.
+// turn-off. Both codes are TURN_OFF_ERRORS (server-errors.js, which defines
+// them, H9): never stored.
 export function turnOffError(stopped) {
   if (stopped?.reason === "survived") return survivedError(stopped.survivors, stopped.refused);
-  return { code: "server-not-stopped", message: `El server no paró al apagar Spotlight: ${stopFailure(stopped)} (el root sí se restauró).` };
+  return { code: SERVER_NOT_STOPPED, message: `El server no paró al apagar Spotlight: ${stopFailure(stopped)} (el root sí se restauró).` };
+}
+
+// The server log's turn-off note for a stop without ok: true, with the cause
+// stopServer gave in its own words, which the Spanish error leaves out (G5,
+// H5): its message, and the Ctrl-C hc couldn't send when the message doesn't
+// say it already, each on one line. "Spotlight off — server NOT stopped
+// (unreadable): the Spotlight terminal could not be read (hc: no route to
+// core): …". null when the stop went through, or when it gave no cause and
+// its reason is `survived`: stopServer's own line names those pids.
+function stopCauseNote(stopped) {
+  if (stopped?.ok === true) return null;
+  const message = typeof stopped?.message === "string" ? oneLine(stopped.message) : "";
+  const interrupt = typeof stopped?.interruptError === "string" ? oneLine(stopped.interruptError) : "";
+  const parts = [message, interrupt && !message.includes(interrupt) ? `the Ctrl-C could not be sent (${interrupt})` : ""].filter(Boolean);
+  const reason = stopped?.reason ?? "no answer";
+  if (parts.length === 0) return reason === "survived" ? null : `Spotlight off — server NOT stopped (${reason})`;
+  return `Spotlight off — server NOT stopped (${reason}): ${parts.join("; ")}`;
 }
 
 // A refused restore's message when the server's stop had failed before it
@@ -874,20 +916,26 @@ export async function waitForTurnServers(cx, { members, key, deadline, syncError
   }
 }
 
+// Whether `on`'s look at a lit server (describeServer's `sv`) goes into its
+// record `r`: not one waiting for a variant, nor a start that looked dead and
+// wasn't settled (its lock was busy), which stays `starting`.
+const merges = (sv, r) =>
+  Boolean(sv.lit && sv.serverState && r) && r.serverState !== "needs-variant" && !(sv.deadStart && r.serverState === "starting");
+
 // What `on` saw of each lit server goes back to state.json (badges, status,
 // and the processes the turn-off may have to kill: noteLive). A start that
 // died was recorded already, as the reap records it, when describeServer
 // settled it (D25, R10); one whose repo lock was busy stays `starting`, so
-// the next look still sees it.
+// the next look still sees it. Only the records it writes get goneOf's ps
+// (H8): the same rule (merges) picks them before the read and in the write.
 export async function recordServers(cx, servers) {
-  const looked = servers.filter((sv) => sv.lit && sv.serverState).map((sv) => sv.root);
-  const gone = await goneOf(cx, cx.store.readState().repos, looked);
+  const repos = cx.store.readState().repos;
+  const looked = servers.filter((sv) => merges(sv, repos[sv.root])).map((sv) => sv.root);
+  const gone = await goneOf(cx, repos, looked);
   await cx.store.updateState((s) => {
     for (const sv of servers) {
       const r = s.repos[sv.root];
-      if (!sv.lit || !sv.serverState || !r || r.serverState === "needs-variant") continue;
-      if (sv.deadStart && r.serverState === "starting") continue;
-      noteLive(r, { state: sv.serverState, ports: sv.ports, procs: sv.procs }, gone);
+      if (merges(sv, r)) noteLive(r, { state: sv.serverState, ports: sv.ports, procs: sv.procs }, gone);
     }
   });
 }

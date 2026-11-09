@@ -26,6 +26,14 @@ const tmp = () => realpathSync(mkdtempSync(join(tmpdir(), "sl-server-")));
 const zshWords = (line) =>
   execFileSync("/bin/zsh", ["-f", "-c", `print -rN -- ${line}`], { encoding: "utf8" }).split("\0").slice(0, -1);
 
+// ports.js runs every lstart read as `/usr/bin/env LC_ALL=C TZ=UTC ps …`
+// (H7): the program and args under the env words.
+function unwrapEnv(file, args = []) {
+  if (file !== "/usr/bin/env") return { file, args };
+  const i = args.findIndex((a) => !/^[A-Za-z_]\w*=/.test(a));
+  return { file: args[i], args: args.slice(i + 1) };
+}
+
 // ── A fake hc ──────────────────────────────────────────────────────────────
 // Terminals by address, names unique among live ones, the JSON shapes and
 // exit codes the real hc printed in the T5b probe (RECIPE.md "Server terminal
@@ -95,7 +103,8 @@ function fakeHc({
     terms.set(t.address, t);
     return t;
   };
-  const exec = async (file, args) => {
+  const exec = async (rawFile, rawArgs) => {
+    const { file, args } = unwrapEnv(rawFile, rawArgs);
     calls.push([file, ...args]);
     if (file === "herdr-app") return { code: 0, stdout: "{}", stderr: "" };
     if (file === "ps") {
@@ -913,7 +922,7 @@ test("readServerState (F2): `procs` names each listener under Spotlight's own se
   ]);
 
   // ps can't say who they are: the ports still read, no identity is made up.
-  const blind = async (file, args) => (file === "ps" ? { code: 2, stdout: "", stderr: "ps: bad" } : hc.exec(file, args));
+  const blind = async (file, args) => (unwrapEnv(file, args).file === "ps" ? { code: 2, stdout: "", stderr: "ps: bad" } : hc.exec(file, args));
   const unsure = await readServerState({ terminal: t.address, logPath: LOG }, { exec: blind });
   assert.deepEqual({ ports: unsure.ports, procs: unsure.procs }, { ports: [3000, 3001, 8080], procs: [] });
 
@@ -1011,7 +1020,7 @@ test("stopServer (F3): a Ctrl-C hc couldn't send is no reason to leave the serve
   const s2 = await startServer({ root: ROOT, line: "pnpm dev", logPath, ...HEAD }, dd.deps);
   let sent = false;
   const exec = async (file, args) => {
-    if (file === "ps") return { code: 2, stdout: "", stderr: "ps: bad" };
+    if (unwrapEnv(file, args).file === "ps") return { code: 2, stdout: "", stderr: "ps: bad" };
     if (file === "hc" && args[0] === "interrupt") sent = true;
     if (sent && file === "hc" && args[0] === "get") return { code: 1, stdout: "", stderr: "hc: can't reach herdr-core" };
     return interruptFails(down)(file, args);

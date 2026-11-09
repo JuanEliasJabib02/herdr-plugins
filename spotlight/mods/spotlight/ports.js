@@ -1,8 +1,8 @@
 // The listening ports of a repo's Spotlight server (D10). Pure: shared by
 // the mod and the CLI, it imports only text.js and reaches lsof, ps and pgrep
-// only through an injected `exec(file, args[, { env }]) → { code, stdout,
-// stderr }` (the shape of Herdr's exec; the CLI's merges `env` over its own,
-// cli-env.mjs). The server runs in its own hc terminal, so its
+// only through an injected `exec(file, args) → { code, stdout, stderr }` (the
+// shape of Herdr's exec, which takes no env: a read that needs one carries it
+// in its argv, PS_ENV). The server runs in its own hc terminal, so its
 // ports are the TCP listeners of the process tree under that terminal's
 // `pid` (the `zsh -l`): zsh → script → /bin/zsh -c → the dev server and its
 // children. Anything else listening on the machine (a database, another
@@ -145,18 +145,23 @@ export async function processTree(rootPid, { exec }) {
 // in the caller's time zone, with words of its locale ("Sun Nov  8 …", "dom
 // 8 nov …"), and an identity is recorded by one process (the reap, `on`) and
 // checked by another (the detached turn-off): every read that records or
-// checks one runs ps with PS_ENV, so all of them print the same string. It
+// checks one runs ps under PS_ENV, so all of them print the same string. It
 // is still compared as read, never parsed. A zombie (state Z) has died and
 // only waits for its parent to reap it: kill 0 still answers for it, but it
 // is gone.
 
 // The env of every ps read of a start time: the C locale, UTC (G2; locks.js
-// pins LC_ALL=C the same way for its own lstart).
+// pins LC_ALL=C for its own lstart through Node's execFile).
 export const PS_ENV = Object.freeze({ LC_ALL: "C", TZ: "UTC" });
 
-// `ps` for the parent, state and start time of `pids`; lstart goes last, so
-// whatever its words, the rest of the line is it.
-export const psStatesArgv = (pids) => ["ps", "-o", "pid=,ppid=,stat=,lstart=", "-p", pids.join(",")];
+// `ps` for the parent, state and start time of `pids`, run as `/usr/bin/env
+// LC_ALL=C TZ=UTC ps …` (H7): PS_ENV rides in the argv, so whatever exec runs
+// it, Herdr's (no env option) or the CLI's, ps reads C/UTC. lstart goes last,
+// so whatever its words, the rest of the line is it.
+export const psStatesArgv = (pids) => [
+  "/usr/bin/env", ...Object.entries(PS_ENV).map(([k, v]) => `${k}=${v}`),
+  "ps", "-o", "pid=,ppid=,stat=,lstart=", "-p", pids.join(","),
+];
 
 // psStatesArgv's output → Map pid → { ppid, zombie, start } (start on one
 // line, its runs of spaces folded: the one form it is compared in).
@@ -172,14 +177,15 @@ export function parsePsStates(text) {
 
 // psStates of `pids` that ps still lists (a pid it doesn't list is gone);
 // null when ps can't run or fails (can't tell). ps exits 1, saying nothing,
-// when none of them is there. Run with PS_ENV (G2).
+// when none of them is there (env passes its exit on). Run under PS_ENV
+// (psStatesArgv: G2, H7).
 export async function processStates(pids, { exec }) {
   const list = [...new Set(pids)].filter(validPid);
   if (list.length === 0) return new Map();
   const argv = psStatesArgv(list);
   let r;
   try {
-    r = await exec(argv[0], argv.slice(1), { env: { ...PS_ENV } });
+    r = await exec(argv[0], argv.slice(1));
   } catch {
     return null;
   }

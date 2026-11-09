@@ -2303,6 +2303,11 @@ test("F3: a turn-off whose server terminal hc can't read restores the root, exit
   assert.ok(!notes.some((n) => n.text === "Spotlight off — root restaurado"), JSON.stringify(notes));
   assert.equal(git(app.root, "symbolic-ref", "--short", "HEAD"), "main");
   assert.equal(w.state().repos[app.root], undefined);
+  // H5: hc's own words stay out of the Spanish error, and `spotlight logs` shows them.
+  assert.doesNotMatch(line, /socket closed/);
+  const logs = await w.cli(["logs", "--repo", "app"]);
+  assert.equal(logs.code, 0, logs.stderr);
+  assert.match(logs.stdout, /Spotlight off — server NOT stopped \(unreadable\): the Spotlight terminal could not be read \(socket closed\)/);
 });
 
 // ── F9: one phrasing of the survivors ──────────────────────────────────────

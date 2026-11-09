@@ -6,7 +6,7 @@
 // to the lowest port).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import * as portsMod from "../mods/spotlight/ports.js";
 import {
   LSOF_ARGV, parseLsofListen, processTree, treePorts, pickPort, portLabel, portUrl,
@@ -32,6 +32,21 @@ const LSOF_FIXTURE = [
 // The server terminal's tree: zsh -l (100) → script (101) → node (102) →
 // esbuild (103). 702 (postgres) and 593 are someone else's.
 const CHILDREN = { 100: [101], 101: [102], 102: [103] };
+
+// ports.js runs every lstart read as `/usr/bin/env LC_ALL=C TZ=UTC ps …`
+// (H7): the program and args under the env words, and those words (`env`,
+// null for a call that isn't wrapped).
+function unwrapEnv(file, args = []) {
+  if (file !== "/usr/bin/env") return { file, args, env: null };
+  const env = {};
+  let i = 0;
+  while (i < args.length && /^[A-Za-z_]\w*=/.test(args[i])) {
+    const at = args[i].indexOf("=");
+    env[args[i].slice(0, at)] = args[i].slice(at + 1);
+    i += 1;
+  }
+  return { file: args[i], args: args.slice(i + 1), env };
+}
 
 // A fake exec answering `pgrep -P <pid>` from a child map and `lsof` with a
 // fixture; records every call.
@@ -228,7 +243,8 @@ function processWorld(table) {
     }
     return 1;
   };
-  const exec = async (file, args) => {
+  const exec = async (rawFile, rawArgs) => {
+    const { file, args } = unwrapEnv(rawFile, rawArgs);
     if (file === "ps") {
       const fields = args[args.indexOf("-o") + 1];
       const pids = args[args.indexOf("-p") + 1].split(",").map(Number).filter((p) => alive.has(p));
@@ -467,7 +483,7 @@ test("serverLeftovers (R1, C7): each process of the server still alive as the sa
   assert.deepEqual(await serverLeftovers(snap, APP, w.deps), { procs: [], escaped });
 
   // ps can't run: doubt never kills.
-  const blind = async (file, args) => (file === "ps" ? Promise.reject(new Error("spawn ps ENOENT")) : w.deps.exec(file, args));
+  const blind = async (file, args) => (unwrapEnv(file, args).file === "ps" ? Promise.reject(new Error("spawn ps ENOENT")) : w.deps.exec(file, args));
   assert.deepEqual(await serverLeftovers(snap, APP, { exec: blind }), { procs: [], escaped: [] });
 });
 
@@ -583,17 +599,20 @@ test("F8: stopProcessTree and stopLeftovers need an injected kill: without one t
 
 // ── Review r3: identities read the same in every process (G2, G3) ──────────
 
-// serverWorld's exec, recording each call's file, args and options.
+// serverWorld's exec, recording each call's program and args (unwrapEnv's),
+// the env words it ran under and any exec options it was given.
 function recordingWorld(over) {
   const w = serverWorld(over);
   const calls = [];
   const exec = async (file, args, opts) => {
-    calls.push({ file, args, opts });
+    calls.push({ ...unwrapEnv(file, args), opts });
     return w.deps.exec(file, args);
   };
   return { w, calls, deps: { ...w.deps, exec } };
 }
 const lstartReads = (calls) => calls.filter((c) => c.file === "ps" && c.args.some((a) => a.includes("lstart")));
+// H7: the pinned env rides in the argv, never in an exec option.
+const PINNED = { env: { LC_ALL: "C", TZ: "UTC" }, opts: undefined };
 
 test("G2: every ps read that records or checks an identity runs with LC_ALL=C and TZ=UTC", async () => {
   const { calls, deps } = recordingWorld();
@@ -605,7 +624,7 @@ test("G2: every ps read that records or checks an identity runs with LC_ALL=C an
   await serverLeftovers(snap, APP, deps);
   const reads = lstartReads(calls);
   assert.ok(reads.length >= 4, `${reads.length} lstart reads`);
-  for (const c of reads) assert.deepEqual(c.opts?.env, { LC_ALL: "C", TZ: "UTC" }, c.args.join(" "));
+  for (const c of reads) assert.deepEqual({ env: c.env, opts: c.opts }, PINNED, c.args.join(" "));
 });
 
 test("G2: an identity reads the same whatever the caller's TZ and locale: the real ps through the CLI's exec", async () => {
@@ -618,6 +637,42 @@ test("G2: an identity reads the same whatever the caller's TZ and locale: the re
     for (const [tz, lc] of [["Pacific/Kiritimati", "es_ES.UTF-8"], ["America/Bogota", "fr_FR.UTF-8"]]) {
       Object.assign(process.env, { TZ: tz, LC_ALL: lc, LANG: lc });
       const states = await processStates([process.pid], { exec });
+      assert.equal(states?.get(process.pid)?.start, pinned, `${tz} ${lc}`);
+    }
+  } finally {
+    for (const [k, v] of Object.entries(saved)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  }
+});
+
+test("H7: the pinned locale and time zone ride in ps's argv (/usr/bin/env LC_ALL=C TZ=UTC ps …), so an exec of Herdr's shape, which takes no env, reads C/UTC too", async () => {
+  // Herdr's exec is (command, args, { cwd, on, timeout }): an env option would be dropped.
+  const calls = [];
+  const herdrShaped = async (...call) => {
+    calls.push(call);
+    return { code: 1, stdout: "", stderr: "" };
+  };
+  await processStates([101, 103], { exec: herdrShaped });
+  assert.deepEqual(calls, [["/usr/bin/env", ["LC_ALL=C", "TZ=UTC", "ps", "-o", "pid=,ppid=,stat=,lstart=", "-p", "101,103"]]]);
+
+  // The real ps through an exec that passes no env at all: the caller's own
+  // TZ and locale reach the child, and the argv still pins them.
+  const bare = (file, args) =>
+    new Promise((resolve) => {
+      execFile(file, args, { encoding: "utf8" }, (err, stdout, stderr) =>
+        resolve({ code: err ? (typeof err.code === "number" ? err.code : 1) : 0, stdout, stderr }),
+      );
+    });
+  const pinned = execFileSync("ps", ["-o", "lstart=", "-p", String(process.pid)], {
+    encoding: "utf8", env: { ...process.env, LC_ALL: "C", TZ: "UTC" },
+  }).replace(/\s+/g, " ").trim();
+  const saved = { TZ: process.env.TZ, LC_ALL: process.env.LC_ALL, LANG: process.env.LANG };
+  try {
+    for (const [tz, lc] of [["Pacific/Kiritimati", "es_ES.UTF-8"], ["America/Bogota", "fr_FR.UTF-8"]]) {
+      Object.assign(process.env, { TZ: tz, LC_ALL: lc, LANG: lc });
+      const states = await processStates([process.pid], { exec: bare });
       assert.equal(states?.get(process.pid)?.start, pinned, `${tz} ${lc}`);
     }
   } finally {
@@ -647,7 +702,7 @@ test("G3: goneIdentities names the identities that no longer run as that process
   assert.equal(identityKey(alive[1]), identityKey({ pid: 610, start: "Sun Nov 8 10:00:00 2026" }));
   const reads = lstartReads(calls);
   assert.equal(reads.length, 1, "one ps for the whole list");
-  assert.deepEqual(reads[0].opts?.env, { LC_ALL: "C", TZ: "UTC" });
+  assert.deepEqual({ env: reads[0].env, opts: reads[0].opts }, PINNED);
   assert.deepEqual(reads[0].args.at(-1).split(",").map(Number).sort((a, b) => a - b), [103, 104, 600, 610, 640]);
 
   // Nothing to check: no ps at all.
@@ -656,7 +711,7 @@ test("G3: goneIdentities names the identities that no longer run as that process
   assert.deepEqual([...(await goneIdentities(junk, deps))], []);
   assert.deepEqual(calls, []);
   // ps can't run, or fails: nothing is gone.
-  const blind = async (file) => (file === "ps" ? Promise.reject(new Error("spawn ps ENOENT")) : { code: 1, stdout: "", stderr: "" });
+  const blind = async (file, args) => (unwrapEnv(file, args).file === "ps" ? Promise.reject(new Error("spawn ps ENOENT")) : { code: 1, stdout: "", stderr: "" });
   assert.deepEqual([...(await goneIdentities(gone, { exec: blind }))], []);
   const failing = async () => ({ code: 2, stdout: "", stderr: "ps: bad" });
   assert.deepEqual([...(await goneIdentities(gone, { exec: failing }))], []);
