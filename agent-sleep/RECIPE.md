@@ -64,10 +64,13 @@ its own.
   - **Which spaces.** A space belongs to the workspace its first pane with a
     folder is in (else the folder it was made in), as projects-sidebar
     decides. A space with no terminal pane, like Inicio, belongs to none.
-  - **It asks first** when a Claude it would stop is working, or may have text
-    you haven't sent. A dialog in the middle of the window, titled with the
-    workspace, says "<N> agents are working or may have unsent text. Sleep
-    anyway?" ("1 agent is" for one), with Cancel and Sleep. It opens whether
+  - **It asks first** when any agent it would stop is working (or blocked),
+    whatever the agent: a Claude, Codex, or any other that reports its
+    status to Herdr. It asks too when a Claude may have text you haven't
+    sent. An agent it leaves alone (see below) doesn't count. A dialog in
+    the middle of the window, titled with the workspace, says "<N> agents
+    are working or may have unsent text. Sleep anyway?" ("1 agent is" for
+    one), with Cancel and Sleep. It opens whether
     the popup is open or not. Nothing changes until you answer, and Cancel
     changes nothing; so does closing it any other way (Esc, a click beside it),
     as in Orca. Asking again while it is open replaces it with the new

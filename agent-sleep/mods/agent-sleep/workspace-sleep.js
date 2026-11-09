@@ -142,18 +142,26 @@ export function kindOf(t, { record, claude = false } = {}) {
 
 // ── D5: work in flight ──────────────────────────────────────────────────────
 
-// One Claude that would be stopped, before anything changes:
-//   "working"  Core says working or blocked
-//   "clear"    its prompt line is empty
-//   "probe"    one line of text on a hidden terminal: agent-sleep's probe
-//              (D5 there) tells a draft from a suggestion
-//   "text"     anything else: text where the person can see it (plain text
-//              can't tell a draft from a suggestion, and the probe never
-//              types there), a multi-line draft, a dialog, a screen it can't read
+// One terminal this sleep would stop (kindOf: `kind` "claude", the default,
+// or "program"), before anything changes:
+//   "working"  Core says its agent is working or blocked, whatever the agent:
+//              a Claude, or any other that reports a status (OSC 7501: Codex,
+//              pi, …), which the stop interrupts and then hangs up on (D2 b;
+//              workspace-sleep step 4's F2)
+//   "clear"    a Claude's prompt line is empty; another program's status says
+//              nothing is in flight (idle, done, or none: its prompt line
+//              isn't read, only a Claude's can be)
+//   "probe"    a Claude's one line of text on a hidden terminal: agent-sleep's
+//              probe (D5 there) tells a draft from a suggestion
+//   "text"     anything else a Claude shows: text where the person can see it
+//              (plain text can't tell a draft from a suggestion, and the probe
+//              never types there), a multi-line draft, a dialog, a screen it
+//              can't read
 // The coordinator counts working, text, and a probe that didn't say
 // "suggestion"; any count asks first.
-export function flightOf({ status, prompt, visible }) {
+export function flightOf({ kind = "claude", status, prompt, visible }) {
   if (status === "working" || status === "blocked") return "working";
+  if (kind !== "claude") return "clear";
   if (!isObject(prompt) || prompt.program !== "claude") return "text";
   if (prompt.state === "empty") return "clear";
   if (prompt.state === "text" && visible !== true) return "probe";

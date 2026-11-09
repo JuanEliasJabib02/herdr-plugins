@@ -90,6 +90,13 @@ test("D5: in flight when Core says working or blocked, or its prompt line may ho
   assert.equal(flightOf({ status: "idle", prompt: { program: "shell", state: "bare" }, visible: false }), "text", "fail closed");
 });
 
+test("D5 (step 4's F2): another agent the sleep would stop is in flight when Core says working or blocked, whatever the agent; its prompt line isn't read", () => {
+  for (const status of ["working", "blocked"]) assert.equal(flightOf({ kind: "program", status }), "working", status);
+  for (const status of ["idle", "done", null, undefined]) assert.equal(flightOf({ kind: "program", status }), "clear", String(status));
+  assert.equal(flightOf({ kind: "claude", status: "idle", prompt: { program: "claude", state: "text" }, visible: false }), "probe", "a Claude keeps its rules");
+  assert.equal(flightOf({ status: "idle", prompt: { program: "shell", state: "bare" }, visible: false }), "text", "a Claude's rules by default");
+});
+
 test("D11 step 3: an empty line exits; text gets one ctrl+c, then must be empty, or a hidden suggestion", () => {
   const line = (state) => ({ program: "claude", state });
   assert.equal(CLEAR_KEY, "ctrl+c");
@@ -591,6 +598,67 @@ test("In flight: working, text where you can see it, a hidden draft; not a hidde
   await step(co, w);
   assert.equal(co.question.count, 3, "t1, t3 and t4");
   assert.deepEqual(w.keys.map((k) => `${k.address} ${k.key}`), ["t3 x", "t3 backspace", "t5 x", "t5 backspace"]);
+});
+
+// Another agent (OSC 7501: Codex, pi, the tester's `app=fake`) in front of its
+// zsh root: a program as addProgram makes one, whose Core status names its app.
+function addAgent(w, address, { pid, fgPid, app, state, name = app }) {
+  addProgram(w, address, { pid, fgPid, name });
+  w.core[address].status = { app, state };
+}
+
+test("In flight (step 4's F2): a working agent that isn't Claude asks first too; Cancel leaves it running, and Sleep stops it as before", async () => {
+  const { w, co } = await ready((w) => {
+    addShell(w, "t1", { pid: 100 });
+    addAgent(w, "t3", { pid: 103, fgPid: 303, app: "fake", state: "working" });
+    w.onKill = (args, w) => {
+      if (args.at(-1) === "-303") w.core.t3 = shellOf(w.core.t3);
+    };
+  });
+  const nothing = () => {
+    assert.equal(Object.hasOwn(w.files, WORKSPACES), false);
+    assert.deepEqual(w.runs, []);
+    assert.deepEqual(touched(w), { keys: [], sends: [], interrupts: [], kills: [] });
+  };
+  co.command(SLEEP_WORKSPACE);
+  await step(co, w);
+  assert.deepEqual(co.view().question, { id: co.question?.id, label: "app", count: 1 }, "the fake agent is working");
+  nothing();
+  await answer(co, w, false);
+  await steps(co, w, 3);
+  nothing();
+  co.command(SLEEP_WORKSPACE);
+  await step(co, w);
+  await answer(co, w, true);
+  showSpace(w, "inicio");
+  await steps(co, w, 8);
+  assert.deepEqual(w.interrupts.map((i) => i.address), ["t3"], "what Sleep does is unchanged: the interrupt");
+  assert.deepEqual(w.kills, [["-HUP", "--", "-303"]], "then the hang-up, still in front past the grace");
+  assert.equal(entries(w)["/code/app"].state, "asleep");
+});
+
+test("In flight (step 4's F2): N counts each agent the sleep would stop that Core says is working or blocked, Claude or not; not an idle or done one, a program with no status, or an agent it leaves alone", async () => {
+  const layout = [
+    { id: "sa", tabs: { a1: [["pa1", "t1", "/code/app"]], a2: [["pa3", "t3", "/code/app"], ["pa5", "t5", "/code/app"]] } },
+    { id: "sa2", tabs: { a3: [["pa4", "t4", "/code/app"], ["pa6", "t6", "/code/app"], ["pa7", "t7", "/code/app"]], a4: [["pa8", "t8", "/code/app"], ["pa10", "t10", "/code/app"]] } },
+    { id: "inicio", folder: HOME, tabs: { i1: [["pi1", null, null]] } },
+  ];
+  const { w, co } = await ready((w) => {
+    w.core.t1.status = WORKING; // a Claude, as before
+    addAgent(w, "t3", { pid: 103, fgPid: 303, app: "codex", state: "working" });
+    addAgent(w, "t5", { pid: 105, fgPid: 305, app: "pi", state: "blocked" });
+    addAgent(w, "t4", { pid: 104, fgPid: 304, app: "codex", state: "idle" });
+    addAgent(w, "t6", { pid: 106, fgPid: 306, app: "fake", state: "done" });
+    addProgram(w, "t7", { pid: 107, fgPid: 307 }); // `sleep 300`: no status
+    addAgent(w, "t8", { pid: 108, fgPid: 308, app: "codex", state: "working" });
+    w.core.t8.argv = ["/usr/local/bin/codex"]; // its own program: root-not-shell, never stopped
+    addAgent(w, "t10", { pid: 110, fgPid: 310, app: "codex", state: "working" });
+    w.core.t10.parent = "t1"; // a sub-agent: never stopped
+  }, { layout });
+  co.command(SLEEP_WORKSPACE);
+  await step(co, w);
+  assert.equal(co.question?.count, 3, "t1, t3 and t5");
+  assert.deepEqual(touched(w), { keys: [], sends: [], interrupts: [], kills: [] });
 });
 
 // ── Order (D10) ──

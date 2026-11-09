@@ -622,7 +622,7 @@ const REG2 = {
 function world({ spaces: sp, panes: ps, shown = "b" } = {}) {
   const w = {
     shared: { "projects.v1": REG2, "projects.cache.v1": CACHE, "projects.inicio.v1": { space: "ini" } },
-    runs: [], toasts: [], overlays: [], picks: [], listens: 0, waiting: [], queued: [],
+    runs: [], toasts: [], overlays: [], picks: [], listens: 0, waiting: [], queued: [], timers: [],
   };
   const all = sp ?? ordered(["a", "b", "ini", "c"], shown);
   const panesNow = ps ?? [term("a-t1", "/code/a"), term("b-t1", WT), view("ini-m"), term("c-t1", "/code/c")];
@@ -676,14 +676,25 @@ const settle = async () => {
 };
 
 // A copy of the mod as Herdr starts one: props() set, then init with a cx
-// whose tasks run and whose timers never fire.
+// whose tasks run and whose timers fire only when a test says (fire).
 async function copyOf(w, view) {
   w.props = view ? { view } : null;
-  const cx = { spawn: (fn) => fn(cx)?.catch?.(() => {}), timer: { every() {} }, sleep: () => Promise.resolve(), notify() {} };
+  const cx = {
+    spawn: (fn) => fn(cx)?.catch?.(() => {}),
+    timer: { every: (_ms, fn) => w.timers.push(() => fn(cx)) },
+    sleep: () => Promise.resolve(),
+    notify() {},
+  };
   const c = new Projects();
   c.init(null, cx);
   await settle();
   return c;
+}
+
+// Every timer of the copies started in `w` fires once.
+async function fire(w) {
+  for (const f of w.timers) f();
+  await settle();
 }
 
 // A key command, as Herdr delivers one: to a copy waiting on nextCommand().
@@ -715,6 +726,22 @@ test("the keeper listens without a window too: commands come only from one, and 
   await copyOf(w, "keeper");
   assert.equal(w.listens, 1);
   assert.deepEqual(w.runs, [], "inert: no look, no move, no making");
+});
+
+test("a keeper started before its window (a cold start) looks once one is there, with no reload; while there is none it makes, moves and selects nothing (step 4's F1)", async () => {
+  // b shown, Inicio last: its place is right after b, index 3.
+  const w = world({ spaces: ordered(["a", "b", "c", "ini"], "b") });
+  w.window = null;
+  const c = await copyOf(w, "keeper");
+  assert.equal(w.timers.length, 1, "its look's timer started anyway");
+  assert.equal(w.listens, 1, "and its listener");
+  await fire(w);
+  c.render({ spawn: (fn) => fn({ sleep: () => Promise.resolve() }) });
+  await fire(w);
+  assert.deepEqual(w.runs, [], "no window: no look, no move, no making");
+  w.window = { active: true, platform: "macos" };
+  await fire(w);
+  assert.deepEqual(w.runs, [["space.move", { id: "ini", index: 3 }]], "the window is there: Inicio goes right after b");
 });
 
 test("every existing projects.* command runs from the keeper copy, the tree copy's state reached through the store", async (t) => {

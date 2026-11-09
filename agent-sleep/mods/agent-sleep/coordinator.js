@@ -1121,17 +1121,25 @@ export class Coordinator {
     return out;
   }
 
-  // D5: how many of the Claudes this sleep would stop are working or may have
-  // unsent text (flightOf). Only one that can come back counts: one the gate
-  // refuses keeps running anyway. A hidden line of text gets agent-sleep's
-  // probe, which never types where the person can see it.
+  // D5: how many of the agents this sleep would stop are working, or, for a
+  // Claude, may have unsent text (flightOf). Any other agent Core says is
+  // working or blocked counts, whatever it is (step 4's F2): the stop
+  // interrupts it and then hangs up (D2 b). Of the Claudes, only one that can
+  // come back counts: one the gate refuses keeps running anyway. A hidden
+  // line of text gets agent-sleep's probe, which never types where the person
+  // can see it. What the sleep leaves alone (kindOf's UNTOUCHED) never counts.
   async inFlight(addresses) {
     let count = 0;
     for (const t of await this.freshTerminals(addresses)) {
-      if (kindOf(t, { record: own(this.records, t.address), claude: isClaudeCodeTerminal(t) }) !== "claude") continue;
+      const kind = kindOf(t, { record: own(this.records, t.address), claude: isClaudeCodeTerminal(t) });
+      if (kind === "program") {
+        if (flightOf({ kind, status: statusWord(t.status) }) === "working") count += 1;
+        continue;
+      }
+      if (kind !== "claude") continue;
       if (!(await this.gateClaude(t)).ok) continue;
       const screen = await this.read(t.address);
-      const flight = flightOf({ status: statusWord(t.status), prompt: readPrompt(screen, t.foreground.name), visible: this.isVisible(t.address) });
+      const flight = flightOf({ kind, status: statusWord(t.status), prompt: readPrompt(screen, t.foreground.name), visible: this.isVisible(t.address) });
       if (flight === "clear") continue;
       if (flight === "probe" && (await this.probe(t.address, screen)) === "suggestion") continue;
       count += 1;

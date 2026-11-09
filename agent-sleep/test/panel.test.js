@@ -505,8 +505,12 @@ test("the popup's text area gives way, its buttons never: flex_1 + min_h(0) + ov
   assert.match(panel, /\.tooltip\(view\.debug\)/, "the headline's tooltip is the debug line");
 });
 
-test("herdr-app check has no window: that copy draws and starts nothing", () => {
-  assert.match(src("main.js"), /if \(!appWindow\(\)\) return;\s*startLoop\(/);
+test("herdr-app check has no window: that copy's pulses do nothing; each pulse looks, so a copy started before its window works once one is there (workspace-sleep step 4's F1)", () => {
+  const main = src("main.js");
+  assert.match(main, /startLoop\(pr, cx\.timer, \(cx\) => \{\s*(\/\/[^\n]*\s*)*if \(!appWindow\(\)\) return;\s*cx\.spawn\(/, "the window is looked for on each pulse");
+  assert.doesNotMatch(main, /if \(!appWindow\(\)\) return;\s*startLoop\(/, "never once at init, before the loop starts");
+  const init = main.slice(main.indexOf("class Moon {"), main.indexOf("  // \"agent-sleep.<name>\""));
+  assert.match(init, /\}\);\s*this\.listen\(cx\);\s*\}\s*$/, "the listener starts with the loop, window or not");
 });
 
 test("the panel command opens the popup from main.js; every other name goes to the table", () => {

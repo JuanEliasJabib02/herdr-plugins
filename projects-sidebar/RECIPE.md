@@ -311,8 +311,9 @@ across repos.
     2 s passed). When the space order changes under the keeper more than 3
     times in 10 s (two screens share the order, not the selection), Inicio
     stays put for 60 s and the keeper logs it once. Nothing is made while
-    this computer's spaces load, and without a window (`herdr-app check`)
-    the keeper does nothing.
+    this computer's spaces load, and while there is no window (`herdr-app
+    check`, or a start before the window is up) the keeper does nothing; it
+    starts on its own once the window is there.
 - **Space keys skip Inicio.** In this layout `cmd-alt-]` and `cmd-alt-[`
   (`projects.space-next`, `projects.space-prev`) and `ctrl-1`…`ctrl-9`
   (`projects.space-1`…`projects.space-9`) do what Herdr's `space.next`,

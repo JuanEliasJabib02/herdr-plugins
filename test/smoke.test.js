@@ -288,8 +288,11 @@ test("Inicio and the keeper are views of the mod; check-views can draw each (wor
   const keeper = src("keeper.js");
   assert.match(keeper, /export default class Keeper/);
   const init = keeper.slice(keeper.indexOf("  init("), keeper.indexOf("\n  }\n", keeper.indexOf("  init(")));
-  assert.match(init, /if \(!this\.live\) return;/, "inert without a window: herdr-app check never makes a space");
-  assert.match(init, /this\.live = Boolean\(window\(\)\)/);
+  assert.doesNotMatch(init, /window\(\)|return;/, "the window isn't read once at init: a copy started before it would never look (workspace-sleep step 4's F1)");
+  assert.match(init, /cx\.timer\.every\(TICK,/, "its look's timer starts, window or not");
+  const wake = keeper.slice(keeper.indexOf("  wake(cx) {"), keeper.indexOf("\n  }\n", keeper.indexOf("  wake(cx) {")));
+  assert.match(wake, /if \(!window\(\)\) \{\s*this\.last = null;\s*return;\s*\}/, "each look is inert without a window: herdr-app check never makes a space");
+  assert.ok(wake.indexOf("if (!window())") < wake.indexOf("cx.spawn("), "before anything is spawned");
   const render = keeper.slice(keeper.indexOf("  render("));
   assert.doesNotMatch(render, /\brun\(|setShared\(|store\.save/, "never writes from render()");
   assert.match(keeper, /cx\.spawn\(async \(cx\) =>/, "it acts from a spawned task");

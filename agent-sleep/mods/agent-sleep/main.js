@@ -88,10 +88,14 @@ class Moon {
     this.confirm = null; // { question, overlay }: the confirm it has open (workspace-sleep D5)
     if (!isLoopCopy(pr, DEFAULT_VIEW)) return;
     this.co = new Coordinator(herdrDeps());
-    // herdr-app check has no window and really runs what it is handed: that
-    // copy only draws, and writes nothing to the home it checks in.
-    if (!appWindow()) return;
+    // The loop and the listener start whether or not there is a window now:
+    // after a cold start the status row's copies can start before it, and a
+    // copy that looked once, here, never ran (workspace-sleep step 4's F1).
     startLoop(pr, cx.timer, (cx) => {
+      // Each pulse looks instead. herdr-app check has no window and really
+      // runs what it is handed: that copy only draws, and its pulses read
+      // nothing and write nothing to the home it checks in.
+      if (!appWindow()) return;
       cx.spawn(async (cx) => {
         // Also while its place isn't known: the first frame has no window size,
         // and nothing else may redraw this copy before a `panel` key.
@@ -103,6 +107,10 @@ class Moon {
   }
 
   // "agent-sleep.<name>" in keys.json, or `herdr-app do agent-sleep.<name>`.
+  // Listening from the start, window or not, a command is taken when it is
+  // sent, never left queued for a later copy to run against whatever is
+  // shown then (F1). A command only sets what the next pulse does, and a
+  // pulse does nothing without a window.
   listen(cx) {
     cx.spawn(async (cx) => {
       for (;;) {

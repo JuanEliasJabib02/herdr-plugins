@@ -10,8 +10,10 @@
 // Inicio when the shown space is put away (a workspace sleep) or vanishes.
 // The rules are inicio-model.js's; this file wires herdr in. It acts only
 // from spawned tasks, never from render() (store.js "Never write from
-// render()"), and without a window it is inert, so `herdr-app check` never
-// makes a space.
+// render()"), and while there is no window it is inert, so `herdr-app check`
+// never makes a space. The window is looked for at each look, not once at
+// init: after a cold start this copy can start before the window, and one
+// that looked only then never looked again (workspace-sleep step 4's F1).
 //
 // It is also the mod's only listener (D7, T8): a key command reaches one
 // shown copy only, the first one started (T0b item 2), and this one starts
@@ -54,8 +56,6 @@ export const commands = Object.fromEntries(SPACE_COMMANDS.map((name) => [name, (
 
 export default class Keeper {
   init(_props, cx) {
-    this.live = Boolean(window());
-    if (!this.live) return;
     this.last = null; // the last look (inicio-model.js look), null before the first
     this.guard = newGuard();
     this.busy = false;
@@ -64,9 +64,16 @@ export default class Keeper {
     this.wake(cx);
   }
 
-  // One look at a time: one asked for while another runs is that one.
+  // One look at a time: one asked for while another runs is that one. None
+  // while there is no window (herdr-app check, a cold start before the
+  // window is up): nothing made, moved or selected, and the first look once
+  // one is there is a first look, as after a reload (D7).
   wake(cx) {
     if (this.busy) return;
+    if (!window()) {
+      this.last = null;
+      return;
+    }
     this.busy = true;
     cx.spawn(async (cx) => {
       try {
@@ -158,7 +165,7 @@ export default class Keeper {
 
   // Drawn again whenever spaces() changes: a look right away, from a task.
   render(cx) {
-    if (this.live) this.wake(cx);
+    this.wake(cx);
     return div().size_full();
   }
 }
