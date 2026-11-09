@@ -44,17 +44,29 @@
 //              taskBatch?: { <groupId>/<KEY>: { op, since, pid } } (D31: a
 //                          whole-task toggle running; setTaskBatch,
 //                          clearTaskBatch; absent when none runs) },
-//     notes: [≤ 200 { at, repo, text, toast, action?, level?, button? }],
+//     notes: [≤ 200 { at, repo, text, toast, action?, level?, button?, title?, body?, timeout? }],
 //                  level (D35): notify's level, info|success|warning|error;
 //                  an error toasts for 60 s (board-model.js takeToasts).
 //                  button: the server popup's button the toast's click
 //                  leads to ("Forzar sync"), named in its body, never in
-//                  `text` (the log `spotlight logs` prints)
-//     variants: { <lane>/<taskKey>::<root>: <variant> },   ≤ 500, oldest dropped first
-//     envs?: { <groupId>/<KEY> | ws:<path>: local|dev|prod } }
+//                  `text` (the log `spotlight logs` prints).
+//                  title, body, timeout (D41): the toast's own, Orca's
+//                  words; without them it reads "Spotlight" over `text`, as
+//                  before. An empty body is a title-only toast. `text`
+//                  stays the log's line (which workspace lit what)
+//     variants: { task:<KEY>::<root>: <variant> },   ≤ 500, oldest dropped first
+//                  D46: the task in any space (server-plan.js variantKey);
+//                  `<lane>/<KEY>::<root>` entries written before it are
+//                  still read, until the task's next pick in that repo
+//                  replaces them (cli-work.mjs rememberTaskVariant)
+//     envs?: { task:<KEY> | ws:<path>: local|dev|prod } }
 //                  D32: every env pick, surviving the turn-off; ≤ 500, the
 //                  oldest dropped first (rememberEnv); absent until the first
-//                  pick, so a state from before it reads and writes as it was
+//                  pick, so a state from before it reads and writes as it was.
+//                  D46: a task's key is the same in every space;
+//                  `<groupId>/<KEY>` entries written before it, and a
+//                  record's envKey in that form, are still read (task-env.js
+//                  storedEnv), until the task's next pick replaces them
 // A task is keyed `<lane>/<taskKey>` in the queue and lighting (D12).
 // Reading is tolerant: a file that isn't JSON or isn't v1 reads as the empty
 // state and is copied to state.json.corrupt-<ms> before the first write over
@@ -181,19 +193,25 @@ export function parseState(text) {
 export const serializeState = (state) => `${JSON.stringify(state, null, 2)}\n`;
 
 // Appends a note (D18: progress and errors the footer turns into toasts),
-// keeping the newest NOTES_MAX. `level` and `button` (D35) are kept only
-// when given, so a note without them reads as before. Mutates and returns
-// `state`.
-export function addNote(state, { repo = null, text, toast = false, action, level, button } = {}, at = Date.now()) {
+// keeping the newest NOTES_MAX. `level` and `button` (D35), and the toast's
+// `title`, `body` and `timeout` (D41: a non-empty title, any string as the
+// body, the empty one too, a positive duration in ms) are kept only when
+// given as one, so a note without them reads as before. Mutates and
+// returns `state`.
+export function addNote(state, { repo = null, text, toast = false, action, level, button, title, body, timeout } = {}, at = Date.now()) {
   state.notes.push({
     at, repo, text, toast: Boolean(toast), ...(action ? { action } : {}), ...(level ? { level } : {}), ...(button ? { button } : {}),
+    ...(typeof title === "string" && title !== "" ? { title } : {}),
+    ...(typeof body === "string" ? { body } : {}),
+    ...(Number.isFinite(timeout) && timeout > 0 ? { timeout } : {}),
   });
   if (state.notes.length > NOTES_MAX) state.notes.splice(0, state.notes.length - NOTES_MAX);
   return state;
 }
 
-// The key of a task's remembered variant in one repo (T5a):
-// `<lane>/<taskKey>::<root>`, the root normalized.
+// The key of a task's remembered variant in one repo as T5a wrote it,
+// `<lane>/<taskKey>::<root>`, the root normalized; still read (D46), never
+// written: the CLI keys by server-plan.js variantKey, task:<KEY>::<root>.
 export const variantKey = (lane, taskKey, root) => `${lane}/${taskKey}::${normRoot(root)}`;
 
 // Remembers a variant under `key` as the newest entry (an existing key moves
@@ -207,7 +225,7 @@ export function rememberVariant(state, key, variant) {
   return state;
 }
 
-// Stores an env pick (D32) under `key` (`<groupId>/<KEY>` or ws:<path>,
+// Stores an env pick (D32) under `key` (task:<KEY> or ws:<path>, D46,
 // task-env.js) as the newest entry, Local included: an existing key moves
 // to the end, and the oldest past ENVS_MAX are dropped. Mutates and returns
 // `state`.

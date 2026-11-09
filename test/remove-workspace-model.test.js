@@ -2,7 +2,11 @@
 // (on a fresh list: changes, submodules by git's own refusal test, the lock,
 // the branch), removeWorkspace's order (check again → close the spaces →
 // remove → the branch → the fresh list), and spacesToClose. T14a: removeTask
-// (D36's Run), a task's workspaces one at a time. The git cases run against a
+// (D36's Run), a task's workspaces one at a time. T41: other plugins' remove
+// hooks (Spotlight's D43): parseRemoveHooks, hookArgv, runHooks, the hooks
+// before a delete closes the spaces (a workspace, each target of a task) and
+// before a project leaves the list (removeProjectWith), and the wiring
+// node --test can't run, asserted on the source. The git cases run against a
 // real git in throwaway repos; outcomes come from git's state, never from its
 // words, so one case runs under LANG=es_ES.UTF-8 too.
 import { test, after } from "node:test";
@@ -13,7 +17,9 @@ import { tmpdir } from "node:os";
 import { join, basename } from "node:path";
 import {
   GIT, lockOf, removalCheck, removeWorkspace, removeTask, spacesToClose,
+  HOOK_TIMEOUT, parseRemoveHooks, hookArgv, runHooks, removeProjectWith,
 } from "../projects-sidebar/mods/projects/remove-workspace-model.js";
+import { REMOVE_HOOK_KEYS } from "../projects-sidebar/mods/projects/config.js";
 
 // ── Real git (throwaway repos, no global config or hooks) ──────────────────
 
@@ -648,6 +654,290 @@ test("14e. an each that throws or rejects, or a closeSpaces that throws, never r
   assert.ok(existsSync(lone));
 });
 
+// ── 15. Other plugins' remove hooks (Spotlight's D43) ──────────────────────
+
+// Spotlight's program as it publishes it: an absolute path.
+const SPOT = "/opt/herdr/spotlight/bin/spotlight";
+const EMPTY = { workspace: [], project: [] };
+
+// A hook runner shaped like M/git.js's (exec's: resolves { code, stdout,
+// stderr }, rejects when the program can't start or at its timeout). Each
+// call writes "start <argv>" to `calls` when it starts and "done <argv>"
+// when it settles, `ms` later. By program name: "fails" exits 1, "rejects"
+// rejects as exec does past its timeout, "throws" throws before it starts.
+function hookRunner(calls, ms = 10) {
+  return (argv) => {
+    const line = argv.join(" ");
+    calls.push(`start ${line}`);
+    if (argv[0] === "throws") throw new Error("can't start");
+    return new Promise((resolve, reject) => setTimeout(() => {
+      calls.push(`done ${line}`);
+      if (argv[0] === "rejects") reject(new Error("timed out after 120000 ms"));
+      else resolve({ code: argv[0] === "fails" ? 1 : 0, stdout: "", stderr: argv[0] === "fails" ? "boom" : "" });
+    }, ms));
+  };
+}
+
+test("15a. parseRemoveHooks keeps valid workspace and project argv, drops a bad one alone, ignores unknown fields", () => {
+  assert.deepEqual(REMOVE_HOOK_KEYS, ["removeHooks.spotlight"]);
+  assert.ok(Object.isFrozen(REMOVE_HOOK_KEYS));
+  const ws = [SPOT, "teardown", "--workspace", "{path}"];
+  const pj = [SPOT, "teardown", "--repo", "{path}"];
+  assert.deepEqual(parseRemoveHooks([{ workspace: ws, project: pj }]), { workspace: [ws], project: [pj] });
+  assert.deepEqual(parseRemoveHooks([{ workspace: ["spotlight", "{path}"] }]), { workspace: [["spotlight", "{path}"]], project: [] }, "a bare program, looked up on PATH");
+
+  // A bad argv goes alone (badges-model.js actionOf's exec rules): the other one stays.
+  const bad = [
+    ["a relative program", ["bin/spotlight", "{path}"]],
+    ["a ./ program", ["./spotlight", "{path}"]],
+    ["an empty program", ["", "{path}"]],
+    ["no program", []],
+    ["a string", "spotlight teardown {path}"],
+    ["a non-string argument", [SPOT, 42]],
+    ["a NUL", [SPOT, "a\0b"]],
+    ["more than 20 strings", [SPOT, ...Array(20).fill("x")]],
+    ["an argument over 500 chars", [SPOT, "x".repeat(501)]],
+    ["an action object", { exec: ws }],
+    ["null", null],
+  ];
+  for (const [how, argv] of bad) {
+    assert.deepEqual(parseRemoveHooks([{ workspace: argv, project: pj }]), { workspace: [], project: [pj] }, how);
+    assert.deepEqual(parseRemoveHooks([{ workspace: ws, project: argv }]), { workspace: [ws], project: [] }, how);
+  }
+  assert.deepEqual(parseRemoveHooks([{ project: pj }]), { workspace: [], project: [pj] }, "only one published");
+
+  // Unknown fields are ignored, the known ones kept.
+  assert.deepEqual(parseRemoveHooks([{ workspace: ws, project: pj, group: ws, timeout: 5, v: 2 }]), { workspace: [ws], project: [pj] });
+
+  // A value that isn't an object is no hooks; so is no list of values.
+  for (const v of [null, undefined, "x", 1, true, [ws]]) assert.deepEqual(parseRemoveHooks([v]), EMPTY, String(v));
+  for (const v of [null, undefined, "x", {}]) assert.deepEqual(parseRemoveHooks(v), EMPTY, String(v));
+
+  // In the keys' order, each plugin's after the one before.
+  const other = ["other", "{path}"];
+  assert.deepEqual(parseRemoveHooks([{ workspace: ws }, null, { workspace: other, project: other }]), { workspace: [ws, other], project: [other] });
+
+  // A copy: a later change to the published value isn't read.
+  const live = [SPOT, "teardown", "{path}"];
+  const parsed = parseRemoveHooks([{ workspace: live }]);
+  live.push("--force");
+  assert.deepEqual(parsed.workspace, [[SPOT, "teardown", "{path}"]]);
+});
+
+test("15b. hookArgv: {path} replaces a whole argument, never a substring, never the program", () => {
+  const p = "/w/app/feat";
+  assert.deepEqual(hookArgv([SPOT, "teardown", "--workspace", "{path}"], p), [SPOT, "teardown", "--workspace", p]);
+  assert.deepEqual(hookArgv([SPOT, "{path}", "--also", "{path}"], p), [SPOT, p, "--also", p], "every whole argument");
+  const near = [SPOT, "--at={path}", "{path}/x", "{PATH}", " {path}", "{path} ", "{ path }"];
+  assert.deepEqual(hookArgv(near, p), near, "never a substring");
+  assert.deepEqual(hookArgv(["{path}", "x"], p), ["{path}", "x"], "the program is never the path");
+  assert.deepEqual(hookArgv([SPOT, "{path}"], "/w/a b/it's"), [SPOT, "/w/a b/it's"], "the path is one argument, as it is");
+  const argv = [SPOT, "{path}"];
+  hookArgv(argv, p);
+  assert.deepEqual(argv, [SPOT, "{path}"], "the hook itself stays");
+});
+
+test("15c. runHooks runs each hook with the path, one after another, each awaited; a failure, a rejection or a throw never stops the next, and it never rejects", async () => {
+  const calls = [];
+  const p = "/w/app/feat";
+  await runHooks([["fails", "{path}"], ["rejects", "{path}"], ["throws", "{path}"], [SPOT, "teardown", "{path}"]], p, hookRunner(calls));
+  assert.deepEqual(calls, [
+    `start fails ${p}`, `done fails ${p}`,
+    `start rejects ${p}`, `done rejects ${p}`,
+    `start throws ${p}`,
+    `start ${SPOT} teardown ${p}`, `done ${SPOT} teardown ${p}`,
+  ]);
+  for (const none of [[], null, undefined, "x"]) {
+    const c = [];
+    await runHooks(none, p, hookRunner(c));
+    assert.deepEqual(c, [], String(none));
+  }
+  const c = [];
+  await runHooks([null, "x", [SPOT, "{path}"]], p, hookRunner(c));
+  assert.deepEqual(c.filter((l) => l.startsWith("start ")), [`start ${SPOT} ${p}`], "an entry that isn't a list is skipped");
+  await runHooks([[SPOT, "{path}"]], p, null); // no runner: nothing runs, no rejection
+});
+
+test("15d. removeWorkspace runs every workspace hook with the path, one after another, awaited, after the check and before the spaces close", async () => {
+  const repo = makeRepo("hooks-order");
+  const wt = addWorktree(repo, "hooked");
+  const check = await removalCheck({ project: repo, path: wt }, { git: realGit, exists });
+  const { calls, io } = recording();
+  const hooks = [[SPOT, "teardown", "--workspace", "{path}"], ["other", "{path}"]];
+  const r = await removeWorkspace({ project: repo, path: `${wt}/`, seen: check }, { ...io, beforeRemove: (dir) => runHooks(hooks, dir, hookRunner(calls, 30)) });
+  assert.equal(r.status, "removed");
+  assert.equal(r.branch, "deleted");
+  assert.ok(!existsSync(wt));
+  const at = (c) => calls.indexOf(c);
+  const [s1, d1, s2, d2] = [`start ${SPOT} teardown --workspace ${wt}`, `done ${SPOT} teardown --workspace ${wt}`, `start other ${wt}`, `done other ${wt}`];
+  assert.ok([s1, d1, s2, d2].every((c) => at(c) >= 0), `each hook got the path, normalized: ${calls.join(" | ")}`);
+  assert.ok(at(GIT.status.join(" ")) < at(s1), "after the check");
+  assert.ok(at(s1) < at(d1) && at(d1) < at(s2) && at(s2) < at(d2), "one after another, each awaited");
+  assert.ok(at(d2) < at("closeSpaces"), "the spaces close once every hook is done");
+  assert.ok(at("closeSpaces") < calls.findIndex((c) => c.startsWith("worktree remove")));
+});
+
+test("15e. a failing, slow (exec rejects past its 120 s) or throwing hook, or a beforeRemove that throws, never stops the delete", async () => {
+  const repo = makeRepo("hooks-fail");
+  const wt = addWorktree(repo, "failing-hooks");
+  const check = await removalCheck({ project: repo, path: wt }, { git: realGit, exists });
+  const hooks = [["fails", "{path}"], ["rejects", "{path}"], ["throws", "{path}"], ["after", "{path}"]];
+  const { calls, io } = recording();
+  const r = await removeWorkspace({ project: repo, path: wt, seen: check }, { ...io, beforeRemove: (dir) => runHooks(hooks, dir, hookRunner(calls)) });
+  assert.equal(r.status, "removed");
+  assert.deepEqual(calls.filter((c) => c.startsWith("start ")), hooks.map(([program]) => `start ${program} ${wt}`), "every hook ran");
+  assert.ok(calls.indexOf(`done after ${wt}`) < calls.indexOf("closeSpaces"));
+  assert.ok(!existsSync(wt));
+
+  // A beforeRemove that throws or rejects (a broken binding): the delete goes on.
+  const broken = [
+    ["throw", () => {
+      throw new Error("binding gone");
+    }],
+    ["reject", async () => {
+      throw new Error("binding gone");
+    }],
+  ];
+  for (const [how, beforeRemove] of broken) {
+    const w = addWorktree(repo, `broken-${how}`);
+    const seen = await removalCheck({ project: repo, path: w }, { git: realGit, exists });
+    const rec = recording();
+    const out = await removeWorkspace({ project: repo, path: w, seen }, { ...rec.io, beforeRemove });
+    assert.equal(out.status, "removed", how);
+    assert.equal(ran(rec.calls, "closeSpaces").length, 1, how);
+    assert.ok(!existsSync(w), how);
+  }
+});
+
+test("15f. no hooks → today's order: the same calls as without beforeRemove, and nothing else runs", async () => {
+  const repo = makeRepo("hooks-none");
+  const [a, b] = ["plain", "nohooks"].map((n) => addWorktree(repo, n));
+  const [checkA, checkB] = await Promise.all([a, b].map((path) => removalCheck({ project: repo, path }, { git: realGit, exists })));
+  const today = recording();
+  assert.equal((await removeWorkspace({ project: repo, path: a, seen: checkA }, today.io)).status, "removed");
+  const runs = [];
+  const none = recording();
+  const r = await removeWorkspace({ project: repo, path: b, seen: checkB }, { ...none.io, beforeRemove: (dir) => runHooks(parseRemoveHooks([]).workspace, dir, hookRunner(runs)) });
+  assert.equal(r.status, "removed");
+  assert.deepEqual(runs, [], "no hook ran");
+  const shape = (calls, path, branch) => calls.map((c) => c.replaceAll(path, "<wt>").replaceAll(branch, "<b>"));
+  assert.deepEqual(shape(none.calls, b, "nohooks"), shape(today.calls, a, "plain"));
+});
+
+test("15g. a delete the check stops runs no hook: the main checkout (refused), a change it didn't see (changed)", async () => {
+  const repo = makeRepo("hooks-stopped");
+  const wt = addWorktree(repo, "changed-later");
+  const seen = await removalCheck({ project: repo, path: wt }, { git: realGit, exists });
+  writeFileSync(join(wt, "new.txt"), "x\n");
+  for (const [path, status, check] of [[repo, "refused", await removalCheck({ project: repo, path: repo }, { git: realGit, exists })], [wt, "changed", seen]]) {
+    const runs = [];
+    const { calls, io } = recording();
+    const r = await removeWorkspace({ project: repo, path, seen: check }, { ...io, beforeRemove: (dir) => runHooks([[SPOT, "{path}"]], dir, hookRunner(runs)) });
+    assert.equal(r.status, status, path);
+    assert.deepEqual(runs, [], `${status}: no hook ran`);
+    assert.deepEqual(ran(calls, "closeSpaces"), [], path);
+  }
+  assert.ok(existsSync(wt));
+});
+
+test("15h. a task delete runs the workspace hooks for each target, before that target's spaces close; a skipped target runs none", async () => {
+  const repo = makeRepo("task-hooks");
+  const [one, two, three] = ["one", "two", "three"].map((n) => addWorktree(repo, `hooks-${n}`));
+  const targets = await checkedTargets([[repo, one], [repo, two], [repo, three]]);
+  let asked = 0;
+  const { calls, io } = recording(realGit, async () => {}, {
+    alive: async () => {
+      asked += 1;
+      if (asked === 2) throw new Error("reloaded");
+    },
+  });
+  const hooks = [[SPOT, "teardown", "--workspace", "{path}"]];
+  const rs = await removeTask({ targets }, { ...io, beforeRemove: (dir) => runHooks(hooks, dir, hookRunner(calls)) });
+  assert.deepEqual(rs.map((r) => r.status), ["removed", "removed", "skipped"]);
+  const hook = (p) => `start ${SPOT} teardown --workspace ${p}`;
+  assert.deepEqual(calls.filter((c) => c.startsWith("start ") || isHook(c)), [hook(one), "closeSpaces", "each 0", "alive", hook(two), "closeSpaces", "each 1", "alive"]);
+  assert.ok(!existsSync(one) && !existsSync(two) && existsSync(three));
+});
+
+test("15i. removeProjectWith runs the project hooks with its path, one after another, then removes it; a failing hook still removes it", async () => {
+  const calls = [];
+  const hooks = [[SPOT, "teardown", "--repo", "{path}"], ["other", "{path}"]];
+  await removeProjectWith({ project: "/code/app/" }, {
+    beforeRemove: (p) => runHooks(hooks, p, hookRunner(calls)),
+    remove: (p) => calls.push(`remove ${p}`),
+  });
+  assert.deepEqual(calls, [
+    `start ${SPOT} teardown --repo /code/app`, `done ${SPOT} teardown --repo /code/app`,
+    "start other /code/app", "done other /code/app",
+    "remove /code/app",
+  ]);
+
+  const failing = [];
+  await removeProjectWith({ project: "/code/app" }, {
+    beforeRemove: (p) => runHooks([["fails", "{path}"], ["rejects", "{path}"], ["throws", "{path}"]], p, hookRunner(failing)),
+    remove: (p) => failing.push(`remove ${p}`),
+  });
+  assert.deepEqual(failing.filter((c) => c.startsWith("start ")).length, 3);
+  assert.equal(failing.at(-1), "remove /code/app", "removed after the failing hooks");
+
+  // A beforeRemove that throws or rejects, or none: removed all the same.
+  const odd = [
+    () => {
+      throw new Error("binding gone");
+    },
+    async () => {
+      throw new Error("binding gone");
+    },
+    undefined,
+  ];
+  for (const beforeRemove of odd) {
+    const removed = [];
+    await removeProjectWith({ project: "/code/app" }, { beforeRemove, remove: (p) => removed.push(p) });
+    assert.deepEqual(removed, ["/code/app"], String(beforeRemove));
+  }
+
+  // remove is awaited.
+  const order = [];
+  await removeProjectWith({ project: "/code/app" }, {
+    remove: async () => {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      order.push("removed");
+    },
+  });
+  order.push("resolved");
+  assert.deepEqual(order, ["removed", "resolved"]);
+});
+
+test("15j. the wiring node --test can't run: git.js passes beforeRemove to removeWith and removeTaskWith and runs a hook with exec in the home folder for 120 s; the dialogs pass the workspace hooks; project-menu.js runs removeProjectWith in a task no view owns", () => {
+  const src = (f) => readFileSync(new URL(`../projects-sidebar/mods/projects/${f}`, import.meta.url), "utf8");
+  assert.equal(HOOK_TIMEOUT, 120_000);
+
+  const git = src("git.js");
+  assert.match(git, /^import \{ exec, home \} from "herdr";$/m);
+  assert.match(git, /exec\(argv\[0\], argv\.slice\(1\), \{ cwd: home\(\), timeout: HOOK_TIMEOUT \}\)/, "exec, argv only, cwd home, 120 s");
+  assert.match(git, /export const runRemoveHooks = \(hooks, path\) => runHooks\(hooks, path, runHook\);/);
+  assert.match(git, /export const removeWorkspace = \(\{ project, path, seen \}, \{ closeSpaces, hooks \}\) =>\s+removeWith\(\{ project, path, seen \}, \{ git, exists: pathExists, closeSpaces, beforeRemove: \(dir\) => runRemoveHooks\(hooks, dir\) \}\);/);
+  assert.match(git, /export const removeTask = \(\{ targets \}, \{ closeSpaces, each, alive, hooks \}\) =>\s+removeTaskWith\(\{ targets \}, \{ git, exists: pathExists, closeSpaces, each, alive, beforeRemove: \(dir\) => runRemoveHooks\(hooks, dir\) \}\);/);
+
+  assert.match(src("store.js"), /^export const removeHooks = \(\) => parseRemoveHooks\(REMOVE_HOOK_KEYS\.map\(\(k\) => shared\(k\)\)\);$/m);
+  assert.match(src("delete-workspace.js"), /removeWorkspace\(\{ project, path, seen \}, \{ closeSpaces: \(\) => closeSpaces\(path, bg\), hooks \}\)/);
+  assert.match(src("delete-workspace.js"), /const hooks = store\.removeHooks\(\)\.workspace;/);
+  assert.match(src("delete-task.js"), /removeTask\(\{ targets \}, \{\n\s+hooks,\n\s+closeSpaces: /);
+  assert.match(src("delete-task.js"), /const hooks = store\.removeHooks\(\)\.workspace;/);
+
+  const menu = src("project-menu.js");
+  const spawn = /cx\.spawn\(async \(\) => \{([\s\S]*?)\n\s+\}, \{ owner: null \}\);/.exec(menu);
+  assert.ok(spawn, "a task no view owns");
+  assert.match(spawn[1], /await removeProjectWith\(\{ project: path \}, \{/, "removeProjectWith runs inside it");
+  assert.match(spawn[1], /beforeRemove: \(p\) => runRemoveHooks\(hooks, p\)/);
+  assert.match(spawn[1], /store\.updateRegistry\(\(r\) => removeProject\(r, p\)\);/, "the registry write is removeProjectWith's remove");
+  assert.match(spawn[1], /store\.saveCache\(withoutProject\(store\.cache\(\), p\)\);/);
+  assert.equal(menu.match(/store\.updateRegistry\(\(r\) => removeProject\(/g)?.length, 1, "nowhere else");
+  assert.match(menu, /const hooks = store\.removeHooks\(\)\.project;/);
+  assert.match(menu, /\.on_click\(\(_e, cx\) => this\.choose\(it, cx\)\)/, "a click passes its cx");
+  assert.match(menu, /this\.choose\(list\[this\.at\], cx\)/, "so does Enter");
+});
+
 // ── The git it runs, and what other files import ───────────────────────────
 
 test("GIT: status counts untracked files and submodules; remove forces at most once; the branch goes with -d, never -D", () => {
@@ -666,5 +956,5 @@ test("pins: git.js binds removalCheck, removeWorkspace and removeTask, and keeps
     assert.match(git, new RegExp(`export (async function|const|function) ${name}\\b`), `git.js exports ${name}`);
   }
   assert.match(git, /from "\.\/remove-workspace-model\.js"/);
-  assert.match(git, /\{ git, exists: pathExists, closeSpaces, each, alive \}/, "removeTask runs with the real git; callers pass only closeSpaces, each and alive");
+  assert.match(git, /\{ git, exists: pathExists, closeSpaces, each, alive, beforeRemove: /, "removeTask runs with the real git; callers pass only closeSpaces, each, alive and the hooks");
 });

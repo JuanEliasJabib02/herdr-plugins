@@ -12,58 +12,79 @@
 //            "spotlight.<…>" }, spin?: true (its icon spins, D29),
 //            reveal?: "hover" | "grow" (shown on its row's hover; "grow"
 //            also opens its width), pill?: true (an outlined pill), dot?:
-//            "on" | "off" (a server dot), hover?: <tone> (its hover's tone) }
-//   (D39, projects-sidebar's T30) at most 4 per plugin on a row; a value
-//   with no rows is null (the key cleared); written only when it changes
-//   (setShared re-renders every mod).
+//            "on" | "off" (a server dot), hover?: <tone> (its hover's tone),
+//            bar?: <tone> (the row's left bar), line?: 2 (under the row's
+//            label), disabled?: true (half opacity, inert, no action),
+//            look?: "secondary" | "outline" (beside pill: true, Orca's
+//            Badge variants, the text in its own case) }
+//   (D39, D42, projects-sidebar's T30 and T33) at most 4 per plugin on a
+//   row, line-2 badges included; a value with no rows is null (the key
+//   cleared); written only when it changes (setShared re-renders every
+//   mod).
 //
-// Orca's sidebar (WorktreeCardSpotlightControls, D39), words in the tooltip
-// (S11, S12), in this order on a row:
-//   1. flashlight  on a workspace of an enabled repo. The holder's: working
+// Orca's cards (WorktreeCardSpotlightControls, D39, D42), words in the
+// tooltip (S11, S12), in this order on a row:
+//   1. variant     on the holder's row of a repo with variants (badges.js
+//                  detects them, `variants`; else the record's candidates
+//                  while it asks, or the variant its server ran), whatever
+//                  the server does: Orca's SpotlightVariantTag, a dim pill
+//                  with no icon, the variant uppercased and cut to 6 ("DO"),
+//                  "?" with none picked (or while it asks for one). A click
+//                  opens the server popup and its chips.
+//   2. flashlight  on a workspace of an enabled repo. The holder's: working
 //                  (amber, Orca's; Herdr's accent is blue in its default
 //                  theme), always shown, with the server dot (Orca's
 //                  SpotlightServerDot): "on" while a process runs in the
 //                  Spotlight terminal (starting or listening), "off" when
 //                  it doesn't, none with no server or its terminal gone.
-//                  Any other workspace's: dim, shown on its row's hover
-//                  (`reveal: "hover"`). Blocked (red) on an error. A click
-//                  toggles that workspace (`spotlight toggle --workspace
-//                  <path>`). While a light, a turn-off, a Forzar sync or a
-//                  restart works on the repo (its record's `busy`, D33),
-//                  the holder's flashlight (its dot kept) and the target
-//                  workspace's is the ring instead: spinning,
-//                  "Sincronizando…", no action, always shown.
-//   2. server      on the holder's row while Spotlight is on: ":3000" /
-//                  ":3000+1" listening, "…" starting, red when stopped or
-//                  gone, with the error as its tooltip when a busy port or a
-//                  death at start is why (D24, D25). A listening server that
-//                  runs a variant shows it instead, Orca's variant tag: a
-//                  dim pill with no icon, uppercased and cut to 6 ("DO"),
-//                  the port in its tooltip ("DO en :3000 · …", D36). A click
-//                  opens the server popup: the command
-//                  `spotlight.server.<id>` reaches the footer copy's
-//                  nextCommand() as "server.<id>" (probed, RECIPE.md), and
-//                  `servers[id]` names the workspace.
-//   3. queue       with the queue on, on the rows of a task that asked for a
-//                  turn: flask testing, clock + "#N" in line, pause paused.
+//                  Its tooltip is Orca's: "Spotlight encendido: …",
+//                  "Sincronizado hace 2 min." from the `now` given (Orca's
+//                  formatTimeAgo), then the server's state. Blocked (red)
+//                  on a root error (a sync's, not a server's: Orca's sync
+//                  error), "La sincronización de Spotlight está fallando:
+//                  …". Any other workspace's: dim, shown on its row's hover
+//                  (`reveal: "hover"`), Orca's idle or takeover sentence. A
+//                  click toggles that workspace (`spotlight toggle
+//                  --workspace <path>`). While a light, a turn-off, a
+//                  Forzar sync or a restart works on the repo (its record's
+//                  `busy`, D33), the holder's flashlight (its dot kept) and
+//                  the target workspace's is the ring instead: spinning,
+//                  "Sincronizando…" (the holder's followed by the server's
+//                  state, as Orca's), no action, always shown.
+//   3. line 2      on the holder's row, under its label (Orca's details
+//                  row): the root's ports, Orca's label ":3000" / ":3000
+//                  +1", dim text, while the server listens on a port; a
+//                  down server with an error instead (D24, D25: a busy
+//                  port, a death at start, a failed start; Herdr's extra)
+//                  as red text, "puerto ocupado", "server caído", "no
+//                  arrancó", the message in its tooltip. A click opens the
+//                  server popup: the command `spotlight.server.<id>`
+//                  reaches the footer copy's nextCommand() as "server.<id>"
+//                  (probed, RECIPE.md), and `servers[id]` names the
+//                  workspace. No server badge (D42).
+//   4. queue       with the queue on, on the rows of a task that asked for a
+//                  turn: flask testing, clock + "#N" in line, pause paused
+//                  (Herdr's extra on the rows).
 //
-// The root's row while Spotlight is on there (Orca's SpotlightPrimaryBadge):
+// The root's row while Spotlight is on there (Orca's SpotlightPrimaryBadge
+// and its amber root bar):
 //   1. chip        a working pill, the flashlight and "Spotlight", the server
-//                  dot after its text; a click shows the server's
-//                  "Spotlight" tab (`spotlight peek --repo <root>`, the
-//                  popup's Ver server), busy or not. Its tooltip names the
-//                  holder and the server's state. Busy, its icon is the ring.
-//                  A root error (not a server one) turns it blocked, with
-//                  the error as its tooltip and the turn-off as its click,
-//                  as the root's flashlight had.
-//   2. port        ":3000" / ":3000+1", a dim text badge, opening the server
-//                  popup, only while the server listens on a port.
+//                  dot after its text, carrying the row's amber bar (`bar:
+//                  "working"`); a click shows the server's "Spotlight" tab
+//                  (`spotlight peek --repo <root>`, the popup's Ver
+//                  server), busy or not, whatever the record's error: never
+//                  red, a root error shows on the holder's flashlight (D42,
+//                  Orca's). Its tooltip names the holder and the server's
+//                  state. Busy, its icon is the ring.
+//   2. port        on line 2: ":3000" / ":3000 +1", a dim text badge,
+//                  opening the server popup, only while the server listens
+//                  on a port.
 //   3. logs        the log, dim, on the row's hover, no click; its tooltip
 //                  says how agents read it (`spotlight logs --repo <name>`).
 //                  The root terminal's own queue badge takes its place.
 //   4. X           dim, amber on hover, on the row's hover: turns Spotlight
 //                  off and restores the root (`toggle --workspace <root>`).
-//                  None while busy.
+//                  Busy, Orca's disabled X: `disabled`, with no action.
 // A root with an error and no holder (a refused fresh light) keeps the red
 // flashlight, which opens the popup (Proyectar igual).
 //
@@ -75,11 +96,16 @@
 //                  dim otherwise; the repos skipped (Spotlight off there)
 //                  named in its tooltip. Always shown. A click runs
 //                  `spotlight toggle --task <KEY> --group <id>`. While that
-//                  batch runs (queue.taskBatch) or a member's repo is busy,
-//                  the ring, with no action. None when no repo with
+//                  batch runs (queue.taskBatch) or a member's repo is busy
+//                  for one of the task's workspaces (the mark's target; not
+//                  another task's work on a shared repo), the ring, with no
+//                  action. None when no repo with
 //                  Spotlight on has a workspace of the task.
-//   2. queue       the task's queue badge, the one its rows show, so a
-//                  folded lane still says it (Orca's TaskTestTurnBadge).
+//   2. queue       the task's place in the queue, so a folded lane still
+//                  says it, as Orca's TaskTestTurnBadge (D42): a text pill
+//                  with no tooltip and no click, "Probando" filled
+//                  (`look: "secondary"`), "En cola #<n>" and "Pausado"
+//                  outlined (`look: "outline"`).
 //   3. env         the env of the task's servers (D32, D39, Orca's
 //                  TaskSpotlightEnvPill): a dim text badge, the env's name
 //                  and "▾" ("Local ▾"), "Mixto ▾" when the held repos run
@@ -93,21 +119,22 @@
 
 import { normRoot, repoSettings, ENVS } from "./settings.js";
 import { taskOf, taskLit } from "./task.js";
-import { portLabel, pickPort, portUrl } from "./ports.js";
+import { pickPort, portUrl } from "./ports.js";
 import { positionOf } from "./queue.js";
 import { MOD } from "./board-model.js";
-import { serverDown, isServerError } from "./server-errors.js";
+import { serverDown, isServerError, PORT_BUSY, SERVER_EXITED, SERVER_START_FAILED } from "./server-errors.js";
 import { oneLine } from "./text.js";
-import { ENV_LABELS, recordEnv, storedEnv } from "./task-env.js";
+import { ENV_LABELS, recordEnv, storedEnv, taskEnvKey } from "./task-env.js";
 import { formatVariant, isSafeVariant } from "./server-plan.js";
 
 export const iconPath = (name) => `mods/${MOD}/icons/${name}.svg`;
 
 const TEXT_MAX = 16;
-// D36: the variant on the holder's server badge, in code points, "…" included.
+// D36: the variant on the holder's tag, in code points, "…" included.
 const VARIANT_MAX = 6;
 const TOOLTIP_MAX = 200;
-// D39: the lit root row's chip, port, logs and X (projects-sidebar's cap).
+// D39, D42: the lit root row's chip, port, logs and X (projects-sidebar's
+// cap per plugin), line-2 badges included.
 const PER_ROW = 4;
 
 const isObject = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
@@ -232,10 +259,12 @@ export function parseCache(value) {
 
 // ── The badges ─────────────────────────────────────────────────────────────
 
-// "22:58:04" in local time.
-function clock(ms) {
-  const d = new Date(ms);
-  return [d.getHours(), d.getMinutes(), d.getSeconds()].map((n) => String(n).padStart(2, "0")).join(":");
+// Orca's formatTimeAgo (D42), in Spanish: "recién" under a minute (or for a
+// time ahead of `now`), "hace <n> min" under an hour, else "hace <n> h".
+function timeAgo(then, now) {
+  const minutes = Math.floor((now - then) / 60_000);
+  if (minutes < 1) return "recién";
+  return minutes < 60 ? `hace ${minutes} min` : `hace ${Math.floor(minutes / 60)} h`;
 }
 
 const ERROR_TEXT = {
@@ -257,38 +286,63 @@ export async function attempt(check, fallback) {
 
 export const errorText = (error) => ERROR_TEXT[error?.code] ?? `Spotlight: ${oneLine(error?.message ?? error?.code ?? "error")}`;
 
+// A text as a sentence: a final period when it ends in none, so the next
+// sentence of a tooltip reads after it.
+const sentence = (s) => (/[.!?…]$/.test(s) ? s : `${s}.`);
+
 // One badge as the contract spells it: an icon (none on a text badge), a
-// text cut to TEXT_MAX, and D39's fields only when set.
-function badge({ icon, text, tone, tooltip, action, spin, reveal, pill, dot, hover }) {
+// text cut to TEXT_MAX, a tooltip when there is one (a lane's queue pill has
+// none, D42), and D39's and D42's fields only when set. A disabled badge is
+// published with no action (D42: an older reader draws it inert too).
+function badge({ icon, text, tone, tooltip, action, spin, reveal, pill, dot, hover, bar, line, disabled, look }) {
   const b = {};
   if (icon) b.icon = iconPath(icon);
   if (text) b.text = cut(oneLine(text), TEXT_MAX);
   b.tone = tone;
-  b.tooltip = cut(oneLine(tooltip), TOOLTIP_MAX);
-  if (action) b.action = action;
+  const tip = cut(oneLine(tooltip), TOOLTIP_MAX);
+  if (tip) b.tooltip = tip;
+  if (action && !disabled) b.action = action;
   if (spin) b.spin = true;
   if (reveal) b.reveal = reveal;
   if (pill) b.pill = true;
   if (dot) b.dot = dot;
   if (hover) b.hover = hover;
+  if (bar) b.bar = bar;
+  if (line === 2) b.line = 2;
+  if (disabled) b.disabled = true;
+  if (look) b.look = look;
   return b;
 }
 
-const toggle = (bin, workspace) => ({ exec: [bin, "toggle", "--workspace", workspace] });
+// D41: a click's toggle carries --note: a refusal the CLI answers at once is
+// a Spotlight error toast and exit 0, so projects-sidebar's exec-failure
+// toast doesn't say it a second time.
+const toggle = (bin, workspace) => ({ exec: [bin, "toggle", "--workspace", workspace, "--note"] });
 const popup = (workspace) => ({ command: `${MOD}.server.${serverIdOf(workspace)}` });
 // D38's "Ver server": the root's "Spotlight" tab, as the popup's button.
 const peek = (bin, root) => ({ exec: [bin, "peek", "--repo", root] });
 
 // D33: a busy repo's flashlight. No action: the work holds the repo's lock,
 // and a click would only queue behind it. `dot`: the holder's keeps its
-// server dot (D39, Orca's held button while syncing).
-const ring = (dot) => badge({ icon: "spinner", tone: "working", tooltip: "Sincronizando…", spin: true, dot });
+// server dot (D39, Orca's held button while syncing); `server`: the holder's
+// says the server's state after "Sincronizando…", as Orca's (D42).
+const ring = (dot, server) => badge({ icon: "spinner", tone: "working", tooltip: server ? `Sincronizando… ${server}` : "Sincronizando…", spin: true, dot });
 
 // A record's busy mark, or null.
 const busyOf = (record) => (isObject(record?.busy) ? record.busy : null);
 
 // The record's port numbers, the integers only.
 const portsOf = (record) => (Array.isArray(record.ports) ? record.ports.filter(Number.isInteger) : []);
+
+// Orca's port label (formatSpotlightPortLabel, D42): ":3000", or ":3000 +1"
+// for several, the configured port first when it listens, else the lowest;
+// null when none listens.
+function portText(record, configured) {
+  const ports = [...new Set(portsOf(record))];
+  const picked = pickPort(ports, configured);
+  if (picked === null) return null;
+  return ports.length > 1 ? `:${picked} +${ports.length - 1}` : `:${picked}`;
+}
 
 // The server's dot (D39, Orca's SpotlightServerDot, spotlight-server-status.ts):
 // "on" while a process runs in the Spotlight terminal (starting or
@@ -303,73 +357,102 @@ function serverDot(record) {
   return record.serverCommand || record.serverTerminal ? "off" : null;
 }
 
-// 1. The flashlight of a lit repo's holder row, with the server dot. Its
-// tooltip is Orca's (WorktreeCardSpotlightControls: activeHere, lastSynced,
-// then the server's state), the sync as a clock: badges aren't redrawn each
-// second for a "hace 2 min".
-function holderFlashlight(record, at, bin, configured) {
+// The record's root error (a sync's, a light's, Orca's: not a server one),
+// or null. Orca's sync error, on the holder's flashlight (D42).
+const rootErrorOf = (record) => (record.lastError && !isServerError(record.lastError) ? record.lastError : null);
+
+// ── The holder's row (D42, Orca's WorktreeCardSpotlightControls) ──────────
+
+// The repo's variants (D36, D42): what badges.js detected for the root, else
+// the record's candidates while it asks for one; the safe ones only.
+function variantsOf(record, detected) {
+  const asking = record.serverState === "needs-variant" && Array.isArray(record.variantCandidates) ? record.variantCandidates : [];
+  const list = Array.isArray(detected) && detected.length > 0 ? detected : asking;
+  return list.filter(isSafeVariant);
+}
+
+// The variant the holder's server runs (the popup's selected chip), or null
+// when none is picked or a new one is asked for.
+const holderVariant = (record) => (record.serverState !== "needs-variant" && isSafeVariant(record.serverVariant) ? record.serverVariant : null);
+
+// 1. Orca's variant tag, on a repo with variants (or whose server ran one):
+// a dim pill, the variant uppercased and cut, "?" with none; its click opens
+// the server popup's chips. null on a repo with none.
+function variantTag(record, at, detected) {
+  const variant = holderVariant(record);
+  if (variantsOf(record, detected).length === 0 && !isSafeVariant(record.serverVariant)) return null;
+  if (!variant) {
+    return badge({ text: "?", tone: "dim", pill: true, tooltip: "Todavía no elegiste variante de Spotlight. Clic para elegir una.", action: popup(at) });
+  }
+  const shown = formatVariant(variant);
+  return badge({ text: cut(shown, VARIANT_MAX), tone: "dim", pill: true, tooltip: `Variante de Spotlight: ${shown}. Clic para cambiarla.`, action: popup(at) });
+}
+
+// 2. The flashlight of a lit repo's holder row, with the server dot. Its
+// tooltip is Orca's: activeHere, lastSynced ("hace 2 min" from `now`; none
+// without a sync or a clock), then the server's state; on a root error,
+// red, Orca's sync error, then the server's state. A click turns it off.
+function holderFlashlight(record, at, { bin, configured, now }) {
   const dot = serverDot(record);
-  if (record.lastError) return badge({ icon: "flashlight", tone: "blocked", tooltip: errorText(record.lastError), action: toggle(bin, at), dot });
-  const synced = Number.isFinite(record.lastSyncAt) ? ` Sincronizado a las ${clock(record.lastSyncAt)}.` : "";
-  const tooltip = `Spotlight encendido: este workspace se refleja en el root del proyecto. Clic para apagarlo.${synced} ${serverStateText(record, configured)}`;
+  const server = serverStateText(record, configured, holderVariant(record));
+  const error = rootErrorOf(record);
+  if (error) {
+    const said = sentence(ERROR_TEXT[error.code] ?? oneLine(error.message ?? error.code ?? "error"));
+    return badge({ icon: "flashlight", tone: "blocked", tooltip: `La sincronización de Spotlight está fallando: ${said} ${server}`, action: toggle(bin, at), dot });
+  }
+  const synced = Number.isFinite(record.lastSyncAt) && Number.isFinite(now) ? ` Sincronizado ${timeAgo(record.lastSyncAt, now)}.` : "";
+  const tooltip = `Spotlight encendido: este workspace se refleja en el root del proyecto. Clic para apagarlo.${synced} ${server}`;
   return badge({ icon: "flashlight", tone: "working", tooltip, action: toggle(bin, at), dot });
 }
 
 // A listening server's tooltip: what runs ("local · pnpm dev") and its URLs,
-// the picked port's first; `lead` before them (the holder's variant).
-function listeningTooltip(record, configured, lead = null) {
+// the picked port's first.
+function listeningTooltip(record, configured) {
   const ports = portsOf(record);
   const picked = pickPort(ports, configured);
   const urls = [picked, ...ports.filter((p) => p !== picked)].filter((p) => p != null).map(portUrl);
   const what = [record.serverEnv, record.serverCommand].filter(Boolean).join(" · ");
-  return [lead, what, urls.join(" ")].filter(Boolean).join(" · ");
+  return [what, urls.join(" ")].filter(Boolean).join(" · ");
 }
 
-// 2. The server badge of a lit repo's holder row. A server that didn't come
-// up (a busy port refused its start, D24, or it died starting, D25:
-// server-errors.js serverDown) says why. A listening server's variant takes
-// the port's place, as Orca's variant tag (D36, D39): a dim pill, no icon.
-function serverBadge(record, at, configured) {
-  const what = [record.serverEnv, record.serverCommand].filter(Boolean).join(" · ");
-  const action = popup(at);
+// A down server's words on the holder's line 2 (Herdr's extra states, D24,
+// D25), by its error.
+const DOWN_TEXT = { [PORT_BUSY]: "puerto ocupado", [SERVER_EXITED]: "server caído", [SERVER_START_FAILED]: "no arrancó" };
+
+// 3. The holder's line 2 (Orca's details row): a server that didn't come up
+// and isn't up now (serverDown: the error on top is a server one) as red
+// text with its message; else the root's ports, Orca's label, while it
+// listens; else null. A click opens the server popup.
+function holderLine2(record, at, configured) {
   if (serverDown(record)) {
-    return badge({ icon: "server", tone: "blocked", tooltip: record.lastError.message || errorText(record.lastError), action });
+    const { code, message } = record.lastError;
+    return badge({ text: DOWN_TEXT[code], tone: "blocked", line: 2, tooltip: message || errorText(record.lastError), action: popup(at) });
   }
-  switch (record.serverState) {
-    case "listening": {
-      const port = portLabel(portsOf(record), configured);
-      if (isSafeVariant(record.serverVariant)) {
-        const variant = formatVariant(record.serverVariant);
-        const tooltip = listeningTooltip(record, configured, port ? `${variant} en ${port}` : variant);
-        return badge({ text: cut(variant, VARIANT_MAX), tone: "dim", pill: true, tooltip, action });
-      }
-      return badge({ icon: "server", text: port || undefined, tone: "done", tooltip: listeningTooltip(record, configured), action });
-    }
-    case "starting":
-      return badge({ icon: "server", text: "…", tone: "working", tooltip: ["Arrancando", what].filter(Boolean).join(" · "), action });
-    case "needs-variant":
-      // Orca's SpotlightVariantTag with no variant yet: a muted outlined "?".
-      return badge({ text: "?", tone: "dim", pill: true, tooltip: "Aún no hay variante de Spotlight. Clic para elegir una.", action });
-    case "gone":
-      return badge({ icon: "server", tone: "blocked", tooltip: "Server cerrado · clic para reiniciarlo", action });
-    default:
-      if (!record.serverCommand && !record.serverTerminal) {
-        return badge({ icon: "server", tone: "dim", tooltip: "Sin server · clic para elegir uno", action });
-      }
-      return badge({ icon: "server", tone: "blocked", tooltip: ["Server parado", what].filter(Boolean).join(" · "), action });
-  }
+  return portLine2(record, at, configured);
 }
 
-// ── The root's row while lit (D39, Orca's SpotlightPrimaryBadge) ───────────
+// The port on line 2, a dim text badge (Orca's port label), opening the
+// server popup; null unless the server listens on a port. The holder's and
+// the root's (D42).
+function portLine2(record, at, configured) {
+  if (record.serverState !== "listening") return null;
+  const port = portText(record, configured);
+  return port ? badge({ text: port, tone: "dim", line: 2, tooltip: listeningTooltip(record, configured), action: popup(at) }) : null;
+}
 
-// The server's state in the chip's tooltip, Orca's sentences in Spanish
-// ("Server running on port 3000."), with Herdr's states: a server that
-// didn't come up says why.
-function serverStateText(record, configured) {
+// ── The root's row while lit (D39, D42, Orca's SpotlightPrimaryBadge) ──────
+
+// The server's state in a tooltip, Orca's sentences in Spanish ("Server
+// running on port 3000."), with Herdr's states: a server that didn't come
+// up says why. `variant` (the holder's, Orca's spotlightServerVariantLabel):
+// "Server corriendo: DO en :3000.", "Server detenido (DO).".
+function serverStateText(record, configured, variant = null) {
   if (serverDown(record)) return record.lastError.message || errorText(record.lastError);
+  const shown = variant ? formatVariant(variant) : null;
   switch (record.serverState) {
     case "listening": {
       const picked = pickPort(portsOf(record), configured);
+      if (shown) return picked === null ? `Server corriendo: ${shown}.` : `Server corriendo: ${shown} en :${picked}.`;
       return picked === null ? "Server corriendo." : `Server corriendo en el puerto ${picked}.`;
     }
     case "starting":
@@ -379,33 +462,22 @@ function serverStateText(record, configured) {
     case "gone":
       return "Server cerrado.";
     default:
-      return record.serverCommand || record.serverTerminal ? "Server detenido." : "Sin server.";
+      if (!record.serverCommand && !record.serverTerminal) return "Sin server.";
+      return shown ? `Server detenido (${shown}).` : "Server detenido.";
   }
 }
 
 // 1. The SPOTLIGHT chip: a working pill, the flashlight, "Spotlight" (drawn
-// uppercase) and the server dot. Its click shows the server's tab, busy or
-// not; busy, its icon is the ring. A root error (a server error is the
-// holder's server badge's) turns it blocked, its tooltip the error and its
-// click the turn-off, as the root's flashlight was; busy, the click stays
-// the tab's, as a turn-off would only queue behind the work.
+// uppercase) and the server dot, carrying the row's amber bar (Orca's root
+// bar). Its click shows the server's tab, busy or not, whatever the error:
+// never red (D42, Orca's), a root error is the holder flashlight's. Busy,
+// its icon is the ring.
 function rootChip(record, root, { bin, configured, busy }) {
-  const error = record.lastError && !isServerError(record.lastError) ? record.lastError : null;
-  const tooltip = error
-    ? errorText(error)
-    : `El root del proyecto refleja "${baseName(record.holder)}". Clic para abrir la terminal del server. ${serverStateText(record, configured)}`;
   return badge({
-    icon: busy ? "spinner" : "flashlight", spin: busy, text: "Spotlight", tone: error ? "blocked" : "working", pill: true,
-    dot: serverDot(record), tooltip, action: error && !busy ? toggle(bin, root) : peek(bin, root),
+    icon: busy ? "spinner" : "flashlight", spin: busy, text: "Spotlight", tone: "working", pill: true, bar: "working",
+    dot: serverDot(record), action: peek(bin, root),
+    tooltip: `El root del proyecto refleja "${baseName(record.holder)}". Clic para abrir la terminal del server. ${serverStateText(record, configured)}`,
   });
-}
-
-// 2. The port, a dim text badge (Orca's port label), opening the server
-// popup; null unless the server listens on a port.
-function rootPort(record, root, configured) {
-  if (record.serverState !== "listening") return null;
-  const port = portLabel(portsOf(record), configured);
-  return port ? badge({ text: port, tone: "dim", tooltip: listeningTooltip(record, configured), action: popup(root) }) : null;
 }
 
 // 3. The logs icon, on the row's hover, with no click: Orca's sentence, with
@@ -419,8 +491,10 @@ function rootLogs(record, name) {
 }
 
 // 4. The X, on the row's hover, dim and amber on hover: the root's turn-off.
-const rootOff = (bin, root) => badge({
-  icon: "x", tone: "dim", hover: "working", reveal: "hover", tooltip: "Apagar Spotlight y restaurar el root del proyecto", action: toggle(bin, root),
+// Busy, Orca's disabled X: `disabled`, with no action (D42).
+const rootOff = (bin, root, busy) => badge({
+  icon: "x", tone: "dim", hover: "working", reveal: "hover", tooltip: "Apagar Spotlight y restaurar el root del proyecto",
+  action: toggle(bin, root), disabled: busy,
 });
 
 const PAUSED = { limit: "Pausado · sin límite", signin: "Pausado · inicia sesión" };
@@ -434,8 +508,10 @@ function waitReason(blockers) {
   return b.holding ? "repo ocupado" : "otro va antes";
 }
 
-// 3. One queue badge per task that asked: testing wins over waiting, which
-// wins over paused. → Map(taskKey → { badge, rows }).
+// 4. One queue badge per task that asked: testing wins over waiting, which
+// wins over paused. → Map(taskKey → { badge, pill, rows }): `badge` the
+// rows' icon (Herdr's extra), `pill` the lane header's, Orca's
+// TaskTestTurnBadge (D42): its words in a text pill, no tooltip, no click.
 function queueBadges(state, qctx) {
   const tasks = new Map();
   for (const r of state.queue.requests) {
@@ -451,8 +527,12 @@ function queueBadges(state, qctx) {
   const out = new Map();
   for (const [key, t] of tasks) {
     let b;
+    let pill;
     if (t.requests.some((r) => r.state === "holding")) {
       b = badge({ icon: "flask", tone: "working", tooltip: "Probando" });
+      // dim, as every pill with a `look` (projects-sidebar RECIPE): a reader
+      // that doesn't know `look` draws a dim chip, never an amber one.
+      pill = badge({ text: "Probando", tone: "dim", pill: true, look: "secondary" });
     } else {
       const places = t.requests
         .filter((r) => r.state !== "paused")
@@ -463,13 +543,15 @@ function queueBadges(state, qctx) {
         const n = places[0].position;
         const why = waitReason(places[0].blockers);
         b = badge({ icon: "clock", text: `#${n}`, tone: "dim", tooltip: `En cola #${n}${why ? ` · ${why}` : ""}` });
+        pill = badge({ text: `En cola #${n}`, tone: "dim", pill: true, look: "outline" });
       } else {
         const paused = t.requests.find((r) => r.state === "paused");
         if (!paused) continue;
         b = badge({ icon: "pause", tone: "blocked", tooltip: PAUSED[paused.pauseReason] ?? "Pausado · error" });
+        pill = badge({ text: "Pausado", tone: "dim", pill: true, look: "outline" });
       }
     }
-    out.set(key, { badge: b, rows: [...t.rows] });
+    out.set(key, { badge: b, pill, rows: [...t.rows] });
   }
   return out;
 }
@@ -509,13 +591,22 @@ function taskLanes({ projects, cache, enabled, taskGroups }) {
 const LANE_OFF = "Spotlight de esta tarea: proyecta sus workspaces en el root de cada proyecto.";
 const LANE_ON = "Spotlight prendido para esta tarea. Clic para apagarlo en todos los proyectos.";
 
+// A member's repo busy for one of this task's own workspaces (the mark's
+// target, D33). Another task's work on a shared repo isn't this task's:
+// Orca's TaskSpotlightButton spins only for its own task.
+const busyForTask = (member, repos) => {
+  const target = busyOf(repos[member.root])?.workspace;
+  return isAbsolute(target) && member.workspaces.some((w) => normRoot(w) === normRoot(target));
+};
+
 // 1. A task lane's flashlight, or null when no member can hold it. The ring
 // while its batch runs (queue.taskBatch[<groupId>/<KEY>]) or a member's repo
-// is busy (D33): no action, the work holds the repos' locks.
+// is busy for one of the task's workspaces (D33): no action, the work holds
+// the repos' locks.
 function laneFlashlight({ group, key, members, skipped }, { state, bin }) {
   if (members.length === 0) return null;
   const repos = state?.repos ?? {};
-  if (isObject(state?.queue?.taskBatch?.[`${group}/${key}`]) || members.some((m) => busyOf(repos[m.root]))) return ring();
+  if (isObject(state?.queue?.taskBatch?.[`${group}/${key}`]) || members.some((m) => busyForTask(m, repos))) return ring();
   const lit = taskLit(members, repos);
   const off = skipped.length > 0 ? ` Saltado, Spotlight apagado en: ${skipped.join(", ")}` : "";
   return badge({
@@ -525,8 +616,10 @@ function laneFlashlight({ group, key, members, skipped }, { state, bin }) {
 }
 
 // The env of a task's servers (D32), what its pill says and its popup
-// checks. `group`, `key`: the lane (its env key `<group>/<key>`); `members`:
-// taskLanes'; `state`, `settings`: board-model.js's. The basis is the
+// checks. `key`: the lane's task, whose env key is task:<key> in every
+// space (D46: a pick stored from any space's lane, before D46 its
+// `<groupId>/<KEY>` too, is this one's, so the lane's `group` isn't read);
+// `members`: taskLanes'; `state`, `settings`: board-model.js's. The basis is the
 // members held by a workspace of the task, each with the env its server
 // runs for it (task-env.js recordEnv: what is stored for its record's key,
 // else its settings env; a record lit before T22, its envOverride); with
@@ -535,10 +628,10 @@ function laneFlashlight({ group, key, members, skipped }, { state, bin }) {
 // for the task, else the basis' env when it agrees, else null (Mixto);
 // shown as Orca shows its pill, while a member holds or the stored env
 // isn't Local.
-export function laneEnv({ group, key, members, state, settings }) {
+export function laneEnv({ key, members, state, settings }) {
   const repos = isObject(state?.repos) ? state.repos : {};
   const list = Array.isArray(members) ? members : [];
-  const stored = storedEnv(state?.envs, `${group}/${key}`);
+  const stored = storedEnv(state?.envs, taskEnvKey(key));
   const held = list.filter((m) => taskLit([m], repos));
   const basis = (held.length > 0 ? held : list).map((m) => {
     const fallback = repoSettings(settings, m.root).env;
@@ -590,6 +683,12 @@ function lanePill({ group, key, members }, { state, settings }) {
 //   bin       board-model.js cliPathOf(appHome())
 //   taskGroups  taskModeGroups(shared("projects.v1")): the groups whose
 //             task lanes get badges (D29); none by default
+//   now       the clock (ms) the holder's "Sincronizado hace <n> min" is
+//             told from (D42, badges.js's Date.now()); not a number: no
+//             sync sentence
+//   variants  { [root]: [variant] }: each lit root's dev:<v> apps (D42,
+//             badges.js's detectServerScripts), for the holder's tag; none
+//             by default
 // → { value: { [path | laneKey]: [badge] } | null, servers: { [id]: { workspace, root } },
 //     lanes: { [id]: { group, task, members: [{ root, name, workspaces }] } } }
 // `servers` names every workspace Spotlight knows (lit rows, the enabled
@@ -597,8 +696,8 @@ function lanePill({ group, key, members }, { state, settings }) {
 // `spotlight.server.<id>` (cli-work.mjs errorNote) resolves too. `lanes`
 // names every task lane with a flashlight (and so an env pill), for the env
 // popup's `spotlight.env.<id>` (laneEnvIdOf).
-export function buildBadges({ state, settings, projects = [], cache = {}, enabled = {}, bin, taskGroups = [] }) {
-  const rows = new Map(); // path → [badge, …] in D17's order
+export function buildBadges({ state, settings, projects = [], cache = {}, enabled = {}, bin, taskGroups = [], now = null, variants = {} }) {
+  const rows = new Map(); // path → [badge, …] in D42's order
   const add = (at, b) => {
     const list = rows.get(at) ?? [];
     list.push(b);
@@ -620,17 +719,25 @@ export function buildBadges({ state, settings, projects = [], cache = {}, enable
       const holder = normRoot(record.holder);
       lit.set(root, holder);
       const configured = repoSettings(settings, root).port;
-      add(holder, busy ? ring(serverDot(record)) : holderFlashlight(record, holder, bin, configured));
-      add(holder, serverBadge(record, holder, configured));
+      // The holder's row, Orca's order: the variant tag, the flashlight (the
+      // ring while busy), then line 2 (before the queue badges, so the cap
+      // keeps it).
+      const tag = variantTag(record, holder, isObject(variants) ? variants[root] : null);
+      if (tag) add(holder, tag);
+      const server = serverStateText(record, configured, holderVariant(record));
+      add(holder, busy ? ring(serverDot(record), server) : holderFlashlight(record, holder, { bin, configured, now }));
+      const under = holderLine2(record, holder, configured);
+      if (under) add(holder, under);
       know(holder, root);
-      // The root's row, Orca's order: chip, port, logs, X (none while busy).
+      // The root's row, Orca's order: chip (its bar), port (line 2), logs, X
+      // (disabled while busy).
       add(root, rootChip(record, root, { bin, configured, busy: Boolean(busy) }));
-      const port = rootPort(record, root, configured);
+      const port = portLine2(record, root, configured);
       if (port) add(root, port);
       const logs = rootLogs(record, names.get(root) || baseName(root));
       add(root, logs);
       logsOn.set(root, logs);
-      if (!busy) add(root, rootOff(bin, root));
+      add(root, rootOff(bin, root, Boolean(busy)));
       know(root, root);
     } else if (record.lastError) {
       // A refused fresh activation leaves an error and no holder: the root's
@@ -653,7 +760,10 @@ export function buildBadges({ state, settings, projects = [], cache = {}, enable
       know(c.path, root);
       if (enabled[root] !== true || c.main || c.path === lit.get(root) || spun.has(c.path)) continue;
       const holder = lit.get(root);
-      const tooltip = holder ? `Spotlight · proyectar aquí (ahora ${baseName(holder)})` : "Spotlight · encender aquí";
+      // D42: Orca's takeover and idle sentences.
+      const tooltip = holder
+        ? `Quitarle el Spotlight a "${baseName(holder)}": el root del proyecto reflejará este workspace.`
+        : "Spotlight en este workspace: refleja sus cambios en el root del proyecto para probar.";
       // D39: shown on the row's hover, as Orca's idle flashlight.
       add(c.path, badge({ icon: "flashlight", tone: "dim", tooltip, action: toggle(bin, c.path), reveal: "hover" }));
     }
@@ -688,11 +798,11 @@ export function buildBadges({ state, settings, projects = [], cache = {}, enable
   const lanes = {};
   for (const lane of taskLanes({ projects, cache, enabled, taskGroups: Array.isArray(taskGroups) ? taskGroups : [] })) {
     const at = `${lane.group}/task:${lane.key}`;
-    // Orca's order (TaskSectionHeader): the flashlight, the queue badge, the env pill.
+    // Orca's order (TaskSectionHeader): the flashlight, the queue pill (D42), the env pill.
     const light = laneFlashlight(lane, { state, bin });
     if (light) add(at, light);
     const asked = queued.get(`${lane.group}/${lane.key}`);
-    if (asked) add(at, asked.badge);
+    if (asked) add(at, asked.pill);
     if (light) {
       lanes[laneEnvIdOf(lane.group, lane.key)] = { group: lane.group, task: lane.key, members: lane.members };
       add(at, lanePill(lane, { state, settings }));

@@ -336,3 +336,135 @@ test("a turn-off that fails in one repo still turns off the other: 'Spotlight of
   assert.equal(state.repos[back.root], undefined);
   assert.equal(toasts().at(-1), "Spotlight off en 1 de 2 proyectos");
 });
+
+// ── D41: toasts as Orca's ───────────────────────────────────────────────────
+
+const ROOT_DIVERGED_ES = "El root del proyecto tiene cambios hechos fuera del workspace de Spotlight. Haz commit o descártalos ahí primero.";
+// A note's toast fields, as the footer reads them.
+const toastFields = (n) => ({ level: n.level, title: n.title, body: n.body, ...(n.timeout ? { timeout: n.timeout } : {}) });
+
+test("D41: a single light toasts success with Orca's title and, with no server command, 'Los logs del server quedan para los agentes en <log>'; its text names repo and holder as before; a light inside a batch writes none, and the batch's summary is Orca's: 'Spotlight on para AX-50' / 'Spotlight off para AX-50'", async () => {
+  const front = makeRepo("front", ["AX-50"]);
+  const back = makeRepo("back", ["AX-50"]);
+  const { cx } = makeCx({ shared: sharedOf([{ id: "g1", repos: [front, back] }]) });
+  seedLogs(front.root, back.root);
+  await lightDirect(cx, front.root, front.ws["AX-50"]);
+  const lit = state.notes.filter((n) => n.toast);
+  assert.equal(lit.length, 1, JSON.stringify(state.notes));
+  assert.equal(lit[0].text, "Spotlight on · front ← ax-50 · sin server");
+  assert.deepEqual(toastFields(lit[0]), {
+    level: "success",
+    title: "Spotlight on — el root del proyecto ahora refleja este workspace",
+    body: `Los logs del server quedan para los agentes en ${join(base, "front.log")}`,
+  });
+
+  // The batch: front is lit by the task already, back gets lit quietly.
+  state.notes = [];
+  const on = await toggleTask(cx, { group: "g1", task: "AX-50" });
+  assert.equal(on.summary, "Spotlight on · AX-50");
+  assert.deepEqual(state.notes.filter((n) => n.toast).map((n) => ({ text: n.text, ...toastFields(n) })), [
+    { text: "Spotlight on · AX-50", level: "success", title: "Spotlight on para AX-50", body: "" },
+  ]);
+  state.notes = [];
+  const off = await toggleTask(cx, { group: "g1", task: "AX-50" });
+  assert.equal(off.summary, "Spotlight off · AX-50");
+  assert.deepEqual(state.notes.filter((n) => n.toast).map((n) => ({ text: n.text, ...toastFields(n) })), [
+    { text: "Spotlight off · AX-50", level: "success", title: "Spotlight off para AX-50", body: "" },
+  ]);
+});
+
+test("D41: a batch some of whose members fail: a warning 'Spotlight on en 1 de 2 proyectos' / 'Spotlight off en 1 de 2 proyectos'; each failure toasts its own error with Orca's title for a light or a turn-off and Orca's description", async () => {
+  const front = makeRepo("front", ["AX-50"]);
+  const back = makeRepo("back", ["AX-50"]);
+  const shared = sharedOf([{ id: "g1", repos: [back, front] }]);
+  seedLogs(front.root, back.root);
+  run(back.root, "checkout", "-q", "--detach");
+  const { cx } = makeCx({ shared });
+  await toggleTask(cx, { group: "g1", task: "AX-50" });
+  const [failed, summary] = state.notes.filter((n) => n.toast);
+  assert.equal(failed.title, "No se pudo prender Spotlight en back", JSON.stringify(state.notes));
+  assert.equal(failed.level, "error");
+  // not-on-primary-branch has no description of Orca's: its own message.
+  assert.equal(failed.body, state.repos[back.root].lastError.message);
+  assert.deepEqual({ text: summary.text, ...toastFields(summary) }, {
+    text: "Spotlight on en 1 de 2 proyectos", level: "warning", title: "Spotlight on en 1 de 2 proyectos", body: "",
+  });
+
+  // back can be lit now; then front's root diverges and its turn-off refuses.
+  run(back.root, "checkout", "-q", "main");
+  await toggleTask(cx, { group: "g1", task: "AX-50" });
+  write(front.root, "README.md", "edited in the root\n");
+  state.notes = [];
+  const r = await toggleTask(cx, { group: "g1", task: "AX-50" });
+  assert.equal(r.summary, "Spotlight off en 1 de 2 proyectos", JSON.stringify(r));
+  const [refused, offSummary] = state.notes.filter((n) => n.toast);
+  assert.deepEqual(toastFields(refused), { level: "error", title: "No se pudo apagar Spotlight en front", body: ROOT_DIVERGED_ES });
+  assert.equal(refused.button, "Apagar igual");
+  assert.equal(refused.text, `front: ${state.repos[front.root].lastError.message}`, "the log's line stays the error's");
+  assert.deepEqual({ text: offSummary.text, ...toastFields(offSummary) }, {
+    text: "Spotlight off en 1 de 2 proyectos", level: "warning", title: "Spotlight off en 1 de 2 proyectos", body: "",
+  });
+});
+
+test("D41: a turn-off that goes through toasts success 'Spotlight off — root del proyecto restaurado'; one that leaves the root detached writes one warning alone (60 s, Orca's words: the branch in another workspace, or gone), quiet or not", async () => {
+  const { deactivateRepo } = await import("../mods/spotlight/cli-work.mjs");
+  const app = makeRepo("app", ["AX-1"]);
+  const { cx } = makeCx({ shared: sharedOf([{ id: "g1", repos: [app] }]) });
+  seedLogs(app.root);
+  await lightDirect(cx, app.root, app.ws["AX-1"]);
+  state.notes = [];
+  assert.equal((await deactivateRepo(cx, app.root)).ok, true);
+  assert.deepEqual(state.notes.filter((n) => n.toast).map((n) => ({ text: n.text, ...toastFields(n) })), [
+    { text: "Spotlight off — root restaurado", level: "success", title: "Spotlight off — root del proyecto restaurado", body: "" },
+  ]);
+
+  // Its branch checked out in another worktree while the root was lit.
+  seedLogs(app.root);
+  await lightDirect(cx, app.root, app.ws["AX-1"]);
+  run(app.root, "worktree", "add", "-q", join(base, "elsewhere"), "main");
+  state.notes = [];
+  const inUse = await deactivateRepo(cx, app.root);
+  assert.equal(inUse.ok, true);
+  const detached = {
+    level: "warning", title: "Spotlight off — el root del proyecto quedó detached", timeout: 60_000,
+  };
+  assert.deepEqual(state.notes.filter((n) => n.toast).map(toastFields), [{
+    ...detached,
+    body: "Su rama \"main\" está abierta en otro workspace, así que el root no pudo volver a ella. Libera esa rama (o cambia el root a cualquier rama) para volver a engancharlo.",
+  }]);
+  assert.match(state.notes.at(-1).text, /^app: The root is back on its original commit but left detached/, "the log's line as before");
+
+  // Its branch gone, in a quiet turn-off (a batch's): the warning still shows.
+  run(app.root, "worktree", "remove", "--force", join(base, "elsewhere"));
+  run(app.root, "checkout", "-q", "main");
+  seedLogs(app.root);
+  await lightDirect(cx, app.root, app.ws["AX-1"]);
+  run(app.root, "update-ref", "-d", "refs/heads/main");
+  state.notes = [];
+  assert.equal((await deactivateRepo(cx, app.root, { quiet: true })).ok, true);
+  assert.deepEqual(state.notes.filter((n) => n.toast).map(toastFields), [{
+    ...detached, body: "La rama original del root ya no existe, así que quedó detached en su commit original.",
+  }]);
+});
+
+test("D41: a refused sync toasts 'Falló el sync de Spotlight' with Orca's description and Forzar sync; a forced re-sync that goes through, success 'Spotlight re-sincronizado — el root refleja el workspace otra vez'", async () => {
+  const { syncRepo } = await import("../mods/spotlight/cli-work.mjs");
+  const app = makeRepo("app", ["AX-1"]);
+  const { cx } = makeCx({ shared: sharedOf([{ id: "g1", repos: [app] }]) });
+  seedLogs(app.root);
+  await lightDirect(cx, app.root, app.ws["AX-1"]);
+  // A commit made in the root: its HEAD moved off the snapshot.
+  run(app.root, "commit", "-q", "--allow-empty", "-m", "made in the root");
+  state.notes = [];
+  assert.equal((await syncRepo(cx, app.root)).ok, false);
+  const [refused] = state.notes.filter((n) => n.toast);
+  assert.deepEqual(toastFields(refused), { level: "error", title: "Falló el sync de Spotlight", body: ROOT_DIVERGED_ES });
+  assert.equal(refused.button, "Forzar sync");
+
+  state.notes = [];
+  assert.equal((await syncRepo(cx, app.root, { force: true })).ok, true);
+  assert.deepEqual(state.notes.filter((n) => n.toast).map((n) => ({ text: n.text, ...toastFields(n) })), [{
+    text: "Spotlight re-sincronizado: el root refleja el workspace otra vez.",
+    level: "success", title: "Spotlight re-sincronizado — el root refleja el workspace otra vez", body: "",
+  }]);
+});

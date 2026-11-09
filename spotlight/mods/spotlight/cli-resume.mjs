@@ -46,6 +46,9 @@ const CLASSIFY_HC_RETRY_MS = 500;
 // `resume`'s immediate refusals, each with its own text (resume.js).
 const IMMEDIATE = new Set([2, 3, 5, 7, 8, 64]);
 const PERSON_KINDS = new Set(["permission", "question"]);
+// The auto-resume toast's title (D41): the test queue's name, as its popup
+// (board-model.js WORDS.title).
+const RESUME_TITLE = "Cola de pruebas";
 
 const find = (s, terminal) => s.queue.requests.find((r) => r.terminal === terminal) ?? null;
 const qctxOf = (cx, now) => ({ now, ...cx.settings.queue });
@@ -103,7 +106,9 @@ function resumeRequest(s, cur, fields, qctx, now, { autoAccount = null } = {}) {
   Object.assign(cur, fields);
   if (autoAccount) {
     const repo = cur.members?.[0]?.root ?? cur.root ?? null;
-    addNote(s, { repo, text: `Reanudado con ${autoAccount}: ${labelOf(s.queue.requests, cur.taskKey)}`, toast: true }, now);
+    // Herdr's own toast (D41): its words under a title, the test queue's
+    // own name (the "Cola de pruebas" popup): a resume is the queue's.
+    addNote(s, { repo, text: `Reanudado con ${autoAccount}: ${labelOf(s.queue.requests, cur.taskKey)}`, toast: true, title: RESUME_TITLE }, now);
   }
   if (cur.state !== "paused") return [];
   const o = request(s.queue, { ...cur }, qctx);

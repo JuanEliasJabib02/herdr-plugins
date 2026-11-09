@@ -28,7 +28,7 @@ import { acquire, unlock, LockError } from "../mods/spotlight/locks.js";
 import {
   rescuedNotes, describeServer, recordServers, waitForTurnServers, ensureServer, portBusyError, errorNote,
 } from "../mods/spotlight/cli-work.mjs";
-import { readSettings } from "../mods/spotlight/board-model.js";
+import { readSettings, takeToasts, toastMark } from "../mods/spotlight/board-model.js";
 import { nodeIo } from "../mods/spotlight/server-plan.js";
 import { appendLogHeader } from "../mods/spotlight/server-log.js";
 
@@ -101,6 +101,24 @@ function words(line) {
   if (cur !== null) list.push(cur);
   return list;
 }
+// D40: a typed \`[cd '<dir>' && ]spotlight-serve '<line>'\`: the folder it
+// moves to (null: none) and the line; null for any other text.
+function serveOf(text) {
+  const m = /^(?:cd ('(?:[^']|'\\\\'')*') && )?spotlight-serve ('(?:[^']|'\\\\'')*')$/.exec(text);
+  return m ? { cd: m[1] ? words(m[1])[0] : null, command: words(m[2])[0] } : null;
+}
+// What \`spotlight logs --path\` prints in a root: its record's log in
+// state.json, else server-log.js's logPathFor under this world's HOME.
+function logPathFor(root) {
+  const p = String(root).replace(/\\/+$/, "") || "/";
+  try {
+    const kept = JSON.parse(fs.readFileSync(process.env.HERDR_APP_HOME + "/spotlight/state.json", "utf8")).repos?.[p]?.logPath;
+    if (kept) return kept;
+  } catch {}
+  const base = require("path").basename(p).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 22).replace(/-+$/, "") || "repo";
+  const hash = require("crypto").createHash("sha1").update(p).digest("hex").slice(0, 6);
+  return require("path").join(process.env.HOME, ".local", "state", "herdr-spotlight", "logs", base + "-" + hash + ".log");
+}
 lock();
 try {
   const s = load();
@@ -141,8 +159,13 @@ try {
       if (t.state !== "live") { out(11, undefined, { kind: "finished", message: "finished" }); break; }
       const text = rest[1];
       s.sent.push({ terminal: t.address, text });
-      if (text.startsWith("script ")) {
-        const argv = words(text);
+      // D40: \`[cd '<dir>' && ]spotlight-serve '<line>'\` leads the terminal
+      // with what the helper execs: script writing the repo's log (what
+      // \`spotlight logs --path\` prints there: the CLI's logPathFor).
+      const served = serveOf(text);
+      if (served) {
+        if (served.cd) t.cwd = served.cd;
+        const argv = ["script", "-F", "-q", "-a", logPathFor(t.cwd), "/bin/zsh", "-c", served.command];
         t.foreground = { pid: s.nextPid++, name: "script", argv, cwd: t.cwd };
         try { fs.appendFileSync(argv[4], "fake server: " + argv[7] + "\\r\\n"); } catch {}
         if (s.listen[t.cwd]) t.serverPorts = s.listen[t.cwd];
@@ -587,7 +610,7 @@ test("a server that never opens a port exits 0 at the deadline: 'starting (port 
   assert.match(r.stdout, /^Not every server is listening yet\. Read its log, or run `spotlight on` again to keep waiting\.$/m);
   assert.ok(r.ms >= 3000, `returned before the deadline (${r.ms} ms)`);
   const sent = w.hc().sent.map((x) => x.text);
-  assert.ok(sent.some((x) => x.startsWith("script -F -q -a ") && x.endsWith("/bin/zsh -c 'npm run dev --'")), sent.join("\n"));
+  assert.ok(sent.some((x) => /(^| && )spotlight-serve 'npm run dev --'$/.test(x)), sent.join("\n"));
 });
 
 test("an edit in the holder with auto-sync off: the next `on` leaves the root with the edit", async () => {
@@ -710,6 +733,9 @@ test("toggle off with a file made by hand in the root where the original commit 
   const note = w.state().notes.find((n) => n.toast && /page\.txt/.test(n.text));
   assert.ok(note, JSON.stringify(w.state().notes));
   assert.match(note.text, /^app: page\.txt quedó como cambio sin commit \(tu versión\)\. Copia en refs\/herdr-spotlight\/rescued\/\S+\.$/);
+  // D41: Herdr's own toast keeps its words under a title naming the repo.
+  assert.equal(note.title, "Spotlight · app");
+  assert.equal(note.body, note.text.slice("app: ".length));
 });
 
 test("rescuedNotes: the line for files not written back points at `git show <ref>:<archivo>`, never at a checkout that would overwrite what came back", () => {
@@ -856,14 +882,14 @@ test("a sync that changes pnpm-lock.yaml restarts the server with the install ch
   await w.until((s) => s.queue.lighting[`direct/${shop.root}`]?.phase === "done", { what: "lit" });
   const first = w.hc().sent.map((x) => x.text);
   assert.equal(first.length, 1, first.join("\n"));
-  assert.match(first[0], /\/bin\/zsh -c 'pnpm dev'$/);
+  assert.match(first[0], /spotlight-serve 'pnpm dev'$/);
 
   write(ws, "pnpm-lock.yaml", "lockfileVersion: '9.0'\npackages: {}\n");
   const r = await w.cli(["sync", "--repo", shop.root]);
   assert.equal(r.code, 0, r.stderr + r.stdout);
   const hc = w.hc();
   assert.ok(hc.calls.some((c) => c[0] === "interrupt"), "the running server was interrupted");
-  assert.match(hc.sent.at(-1).text, /\/bin\/zsh -c 'pnpm install --frozen-lockfile && pnpm dev'$/);
+  assert.match(hc.sent.at(-1).text, /spotlight-serve 'pnpm install --frozen-lockfile && pnpm dev'$/);
   assert.deepEqual(w.state().repos[shop.root].pendingInstalls, []);
 
   const server = w.serverTerminal(shop.root);
@@ -1340,7 +1366,7 @@ test("J-002: the settings' env is the default and a change restarts the server o
   const ws = app.ws["AX-16"];
   const t = w.agent(ws);
   const typed = () => w.hc().sent.map((x) => x.text);
-  const runs = (env) => new RegExp(`/bin/zsh -c 'npm run ${env} --'$`);
+  const runs = (env) => new RegExp(`spotlight-serve 'npm run ${env} --'$`);
   const record = () => w.state().repos[app.root];
 
   assert.equal((await w.cli(["on"], { terminal: t, cwd: ws })).code, 0);
@@ -1363,8 +1389,8 @@ test("J-002: the settings' env is the default and a change restarts the server o
   // The popup picks Dev: stored for the task (D32), over the settings' Prod.
   const pick = await w.cli(["env", "--workspace", ws, "--env", "dev"]);
   assert.equal(pick.code, 0, pick.stderr + pick.stdout);
-  assert.equal(w.state().envs["g1/AX-16"], "dev");
-  assert.equal(record().envKey, "g1/AX-16");
+  assert.equal(w.state().envs["task:AX-16"], "dev");
+  assert.equal(record().envKey, "task:AX-16");
   assert.equal(record().serverEnv, "dev");
   assert.match(typed().at(-1), runs("dev"));
   const sent = typed().length;
@@ -1377,14 +1403,14 @@ test("J-002: the settings' env is the default and a change restarts the server o
   // D32: the pick survives the turn-off: the next lighting runs it, not the settings' env.
   assert.equal((await w.cli(["toggle", "--workspace", ws])).code, 0);
   await w.until((s) => !s.repos[app.root], { what: "turned off" });
-  assert.equal(w.state().envs["g1/AX-16"], "dev");
+  assert.equal(w.state().envs["task:AX-16"], "dev");
   const offAt = typed().length;
   const back = await w.cli(["on"], { terminal: t, cwd: ws });
   assert.equal(back.code, 0, back.stderr + back.stdout);
   assert.ok(typed().length > offAt, "the light started the server again");
   assert.match(typed().at(-1), runs("dev"));
   assert.equal(record().serverEnv, "dev");
-  assert.equal(record().envKey, "g1/AX-16");
+  assert.equal(record().envKey, "task:AX-16");
 });
 
 test("J-008: a foreign process in the server terminal leaves the recorded env alone: nothing ran in the new one", async () => {
@@ -1406,7 +1432,7 @@ test("J-008: a foreign process in the server terminal leaves the recorded env al
   const sent = w.hc().sent.length;
   await w.cli(["env", "--workspace", ws, "--env", "dev"]);
   assert.equal(w.hc().sent.length, sent, "nothing typed over the foreign process");
-  assert.equal(w.state().envs["g1/AX-17"], "dev");
+  assert.equal(w.state().envs["task:AX-17"], "dev");
   assert.equal(record().serverEnv, "local", "serverEnv says what ran");
 });
 
@@ -1709,7 +1735,7 @@ const alive = (pid) => {
     return false;
   }
 };
-const scriptLines = (w) => w.hc().sent.filter((x) => x.text.startsWith("script "));
+const scriptLines = (w) => w.hc().sent.filter((x) => /(^| && )spotlight-serve '/.test(x.text));
 const serverNoteAction = (workspace) => ({ name: `spotlight.server.${sha1(workspace).slice(0, 12)}` });
 
 test("a listener outside the server terminal's tree on the expected port: port-busy with pid, command and cwd, no line typed, a toast that opens the popup; nothing is killed without --free-port", async () => {
@@ -2045,8 +2071,10 @@ test("a turn-off whose server lives through SIGKILL is an error that names it, n
   assert.doesNotMatch(off.stdout, /root restored/);
   const notes = w.state().notes.filter((n) => n.repo === app.root);
   assert.ok(notes.some((n) => n.toast && n.text === `app: ${message}`), JSON.stringify(notes));
-  // D35: an error toast, 60 s.
+  // D35: an error toast, 60 s; D41: a turn-off's title, its message the body.
   assert.equal(notes.find((n) => n.text === `app: ${message}`).level, "error");
+  assert.equal(notes.find((n) => n.text === `app: ${message}`).title, "No se pudo apagar Spotlight en app");
+  assert.equal(notes.find((n) => n.text === `app: ${message}`).body, message);
   assert.ok(!notes.some((n) => n.text === "Spotlight off — root restaurado"), JSON.stringify(notes));
   assert.deepEqual(w.hc().kills, [{ pid: stuck, signal: "SIGTERM" }, { pid: stuck, signal: "SIGKILL" }]);
   assert.match(readFileSync(logPath, "utf8"), /server NOT stopped/);
@@ -2460,9 +2488,9 @@ test("D31: `toggle --task AX-70 --group g1` hands the batch to a detached copy: 
 // ── T22 (D32): the env per task, through the CLI ───────────────────────────
 
 const ENV_PKG = { scripts: { local: "vite", dev: "vite --mode dev", prod: "vite --mode prod" } };
-const runsEnv = (env) => new RegExp(`/bin/zsh -c 'npm run ${env} --'$`);
+const runsEnv = (env) => new RegExp(`spotlight-serve 'npm run ${env} --'$`);
 
-test("D32: `env --task AX-50 --group g1 --env dev` stores envs[\"g1/AX-50\"] and restarts only the lit repos AX-50 holds whose command changes; detached it stores, answers at once and restarts after", async () => {
+test("D32: `env --task AX-50 --group g1 --env dev` stores envs[\"task:AX-50\"] (D46) and restarts only the lit repos AX-50 holds whose command changes; detached it stores, answers at once and restarts after", async () => {
   const w = makeWorld();
   const front = makeRepo(w, "front", { pkg: ENV_PKG, tasks: ["AX-50"] });
   // No Dev command: its server is left running.
@@ -2479,18 +2507,18 @@ test("D32: `env --task AX-50 --group g1 --env dev` stores envs[\"g1/AX-50\"] and
   const typedIn = (r) => w.hc().sent.filter((x) => x.terminal === w.serverTerminal(r.root).address).map((x) => x.text);
   const counts = () => [front, api, web, admin].map((r) => typedIn(r).length);
   assert.deepEqual(counts(), [1, 1, 1, 1]);
-  assert.deepEqual([front, api, web, admin].map((r) => w.state().repos[r.root].envKey), ["g1/AX-50", "g1/AX-50", "g1/AX-50", "g1/AX-51"]);
+  assert.deepEqual([front, api, web, admin].map((r) => w.state().repos[r.root].envKey), ["task:AX-50", "task:AX-50", "task:AX-50", "task:AX-51"]);
 
   const r = await w.cli(["env", "--task", "AX-50", "--group", "g1", "--env", "dev", "--inline"]);
   assert.equal(r.code, 0, r.stderr + r.stdout);
   assert.match(r.stdout, /^front: env dev; the server restarted: npm run dev --$/m);
   const s = w.state();
-  assert.deepEqual(s.envs, { "g1/AX-50": "dev" });
+  assert.deepEqual(s.envs, { "task:AX-50": "dev" });
   // front restarted into Dev; api and web typed nothing; admin is AX-51's.
   assert.deepEqual(counts(), [2, 1, 1, 1]);
   assert.match(typedIn(front).at(-1), runsEnv("dev"));
   assert.deepEqual([front, api, web, admin].map((x) => s.repos[x.root].serverEnv), ["dev", "local", "dev", "local"]);
-  assert.equal(s.repos[admin.root].envKey, "g1/AX-51");
+  assert.equal(s.repos[admin.root].envKey, "task:AX-51");
   // Nothing left for the reap to restart.
   assert.equal((await w.cli(["reap"])).code, 0);
   await sleep(1500);
@@ -2500,7 +2528,7 @@ test("D32: `env --task AX-50 --group g1 --env dev` stores envs[\"g1/AX-50\"] and
   const d = await w.cli(["env", "--task", "ax_50", "--group", "g1", "--env", "local"]);
   assert.equal(d.code, 0, d.stderr + d.stdout);
   assert.match(d.stdout, /AX-50/);
-  assert.equal(w.state().envs["g1/AX-50"], "local");
+  assert.equal(w.state().envs["task:AX-50"], "local");
   await w.until((x) => x.repos[front.root]?.serverEnv === "local" && x.repos[web.root]?.serverEnv === "local" && !x.repos[front.root].busy, {
     what: "AX-50's servers back in Local",
   });
@@ -2520,7 +2548,7 @@ test("D32: `env --task AX-50 --group g1 --env dev` stores envs[\"g1/AX-50\"] and
     const u = await w.cli(args);
     assert.equal(u.code, 2, `${args.join(" ")}: ${u.stderr}${u.stdout}`);
   }
-  assert.deepEqual(w.state().envs, { "g1/AX-50": "local" });
+  assert.deepEqual(w.state().envs, { "task:AX-50": "local" });
 });
 
 test("D32: repo settings env Dev, then Local picked on the pill: Local is stored and runs; the pick survives a turn-off and the next light starts with it", async () => {
@@ -2533,11 +2561,11 @@ test("D32: repo settings env Dev, then Local picked on the pill: Local is stored
   const typed = () => w.hc().sent.map((x) => x.text);
   assert.equal((await w.cli(["toggle", "--workspace", ws, "--inline"])).code, 0);
   assert.match(typed().at(-1), runsEnv("dev"));
-  assert.equal(w.state().repos[app.root].envKey, "g1/AX-60");
+  assert.equal(w.state().repos[app.root].envKey, "task:AX-60");
 
   const pick = await w.cli(["env", "--task", "AX-60", "--group", "g1", "--env", "local"]);
   assert.equal(pick.code, 0, pick.stderr + pick.stdout);
-  assert.equal(w.state().envs["g1/AX-60"], "local", "Local is stored too");
+  assert.equal(w.state().envs["task:AX-60"], "local", "Local is stored too");
   await w.until((s) => s.repos[app.root]?.serverEnv === "local" && !s.repos[app.root].busy, { what: "the server in Local" });
   assert.match(typed().at(-1), runsEnv("local"));
 
@@ -2545,7 +2573,7 @@ test("D32: repo settings env Dev, then Local picked on the pill: Local is stored
   const off = await w.cli(["toggle", "--workspace", ws, "--inline"]);
   assert.equal(off.code, 0, off.stderr + off.stdout);
   assert.equal(w.state().repos[app.root], undefined);
-  assert.deepEqual(w.state().envs, { "g1/AX-60": "local" });
+  assert.deepEqual(w.state().envs, { "task:AX-60": "local" });
   const n = typed().length;
   assert.equal((await w.cli(["toggle", "--workspace", ws, "--inline"])).code, 0);
   assert.equal(typed().length, n + 1);
@@ -2570,7 +2598,7 @@ test("D32: `env --workspace` writes its workspace's key: a task workspace's is t
   assert.equal((await w.cli(["toggle", "--workspace", ws80, "--inline"])).code, 0);
   const pick = await w.cli(["env", "--workspace", ws80, "--env", "prod"]);
   assert.equal(pick.code, 0, pick.stderr + pick.stdout);
-  assert.deepEqual(w.state().envs, { "g1/AX-80": "prod" });
+  assert.deepEqual(w.state().envs, { "task:AX-80": "prod" });
   assert.match(typed().at(-1), runsEnv("prod"));
 
   // AX-81 doesn't hold the root: its pick is stored, nothing restarts.
@@ -2578,12 +2606,12 @@ test("D32: `env --workspace` writes its workspace's key: a task workspace's is t
   const stored = await w.cli(["env", "--workspace", ws81, "--env", "dev"]);
   assert.equal(stored.code, 0, stored.stderr + stored.stdout);
   assert.match(stored.stdout, /^app: env dev saved\.$/m);
-  assert.equal(w.state().envs["g1/AX-81"], "dev");
+  assert.equal(w.state().envs["task:AX-81"], "dev");
   assert.equal(typed().length, n);
-  assert.deepEqual({ envKey: record().envKey, serverEnv: record().serverEnv }, { envKey: "g1/AX-80", serverEnv: "prod" });
+  assert.deepEqual({ envKey: record().envKey, serverEnv: record().serverEnv }, { envKey: "task:AX-80", serverEnv: "prod" });
   // Its light runs it.
   assert.equal((await w.cli(["toggle", "--workspace", ws81, "--inline"])).code, 0);
-  assert.equal(record().envKey, "g1/AX-81");
+  assert.equal(record().envKey, "task:AX-81");
   assert.match(typed().at(-1), runsEnv("dev"));
 
   // Task-less workspaces are keyed by their path.
@@ -2596,7 +2624,7 @@ test("D32: `env --workspace` writes its workspace's key: a task workspace's is t
   assert.equal((await w.cli(["toggle", "--workspace", bareB, "--inline"])).code, 0);
   assert.equal(record().envKey, `ws:${bareB}`);
   assert.match(typed().at(-1), runsEnv("local"), "bareB doesn't inherit bareA's pick");
-  assert.deepEqual(Object.keys(w.state().envs).sort(), ["g1/AX-80", "g1/AX-81", `ws:${bareA}`].sort());
+  assert.deepEqual(Object.keys(w.state().envs).sort(), ["task:AX-80", "task:AX-81", `ws:${bareA}`].sort());
 });
 
 test("D32: a record lit before T22 (envOverride, no envKey) keeps its env and restarts nothing; picked through `env --task` it gets envKey, restarts once, and the next reap leaves it alone", async () => {
@@ -2629,7 +2657,7 @@ test("D32: a record lit before T22 (envOverride, no envKey) keeps its env and re
   const pick = await w.cli(["env", "--task", "AX-90", "--group", "g1", "--env", "dev", "--inline"]);
   assert.equal(pick.code, 0, pick.stderr + pick.stdout);
   const rec = w.state().repos[app.root];
-  assert.equal(rec.envKey, "g1/AX-90");
+  assert.equal(rec.envKey, "task:AX-90");
   assert.equal("envOverride" in rec, false);
   assert.equal(typed().length, n + 1);
   assert.match(typed().at(-1), runsEnv("dev"));
@@ -2637,6 +2665,75 @@ test("D32: a record lit before T22 (envOverride, no envKey) keeps its env and re
   await sleep(1500);
   assert.equal(typed().length, n + 1, "the next reap leaves it alone");
   assert.equal(w.state().repos[app.root].serverEnv, "dev");
+});
+
+// ── T39 (D46): the env and the variant of a task across spaces ────────────
+// As Orca (spotlight-env-key.ts, "no space limit"): a task's env is keyed
+// task:<KEY> in every space, and a pick restarts every lit repo whose holder
+// has that key, in any space. Queue, lighting, taskBatch and lane badge keys
+// stay per space (D12).
+
+test("D46: the same task key in two spaces shares one env: `env --task` picked in one restarts the lit repos of both; the queue and lighting keys stay per space", async () => {
+  const w = makeWorld();
+  const front = makeRepo(w, "front", { pkg: ENV_PKG, tasks: ["AX-50"] });
+  const back = makeRepo(w, "back", { pkg: ENV_PKG, tasks: ["AX-50"] });
+  w.register([{ id: "g1", repos: [front] }, { id: "g2", repos: [back] }]);
+  w.listen(front.root, [3000]);
+  w.listen(back.root, [3001]);
+  const t = w.agent(front.ws["AX-50"]);
+  const on = await w.cli(["on"], { terminal: t, cwd: front.ws["AX-50"] });
+  assert.equal(on.code, 0, on.stderr + on.stdout);
+  const lit = await w.cli(["toggle", "--task", "AX-50", "--group", "g2", "--inline"]);
+  assert.equal(lit.code, 0, lit.stderr + lit.stdout);
+  let s = w.state();
+  assert.deepEqual([front, back].map((r) => s.repos[r.root].envKey), ["task:AX-50", "task:AX-50"]);
+  assert.deepEqual([front, back].map((r) => s.repos[r.root].serverEnv), ["local", "local"]);
+  // D12: the queue and the lighting keep the lane's key.
+  assert.equal(requestOf(s, t).taskKey, "g1/AX-50");
+  assert.ok("g1/AX-50" in s.queue.lighting, JSON.stringify(Object.keys(s.queue.lighting)));
+
+  const pick = await w.cli(["env", "--task", "AX-50", "--group", "g2", "--env", "dev", "--inline"]);
+  assert.equal(pick.code, 0, pick.stderr + pick.stdout);
+  assert.match(pick.stdout, /^front: env dev; the server restarted: npm run dev --$/m);
+  assert.match(pick.stdout, /^back: env dev; the server restarted: npm run dev --$/m);
+  s = w.state();
+  assert.deepEqual(s.envs, { "task:AX-50": "dev" });
+  assert.deepEqual([front, back].map((r) => s.repos[r.root].serverEnv), ["dev", "dev"]);
+  const typedIn = (r) => w.hc().sent.filter((x) => x.terminal === w.serverTerminal(r.root).address).map((x) => x.text);
+  assert.match(typedIn(front).at(-1), runsEnv("dev"));
+  assert.match(typedIn(back).at(-1), runsEnv("dev"));
+  assert.equal(requestOf(s, t).taskKey, "g1/AX-50", "the queue's key unchanged");
+});
+
+test("D46: an old <groupId>/<KEY> entry of any space is still read, the later position winning over task:<KEY>; the next pick writes task:<KEY>, drops the old ones and rewrites a lit record's old envKey", async () => {
+  const w = makeWorld();
+  const app = makeRepo(w, "app", { pkg: ENV_PKG, tasks: ["AX-50"] });
+  w.register([{ id: "g1", repos: [app] }]);
+  w.listen(app.root, [3000]);
+  const ws = app.ws["AX-50"];
+  const typed = () => w.hc().sent.map((x) => x.text);
+  assert.equal((await w.cli(["toggle", "--workspace", ws, "--inline"])).code, 0);
+  assert.equal(w.state().repos[app.root].serverEnv, "local");
+
+  // As a version before D46 left it: the record keyed by its lane, picks
+  // keyed by space, one in another space after this task's own.
+  const before = w.state();
+  before.repos[app.root].envKey = "g1/AX-50";
+  before.envs = { "g1/AX-50": "prod", "task:AX-50": "local", "zz/AX-50": "dev", "zz/AX-51": "prod", [`ws:${join(w.dir, "ws", "app", "AX-50")}`]: "prod" };
+  w.writeState(before);
+  // The reap finds the env in force (the latest: zz's Dev) isn't what runs.
+  assert.equal((await w.cli(["reap"])).code, 0);
+  const moved = await w.until((x) => (x.repos[app.root]?.serverEnv !== "local" && !x.repos[app.root].busy ? x : null), { what: "the reap's restart" });
+  assert.equal(moved.repos[app.root].serverEnv, "dev");
+  assert.match(typed().at(-1), runsEnv("dev"));
+
+  const pick = await w.cli(["env", "--task", "AX-50", "--group", "g1", "--env", "prod", "--inline"]);
+  assert.equal(pick.code, 0, pick.stderr + pick.stdout);
+  const s = w.state();
+  assert.deepEqual(s.envs, { "zz/AX-51": "prod", [`ws:${join(w.dir, "ws", "app", "AX-50")}`]: "prod", "task:AX-50": "prod" });
+  assert.equal(s.repos[app.root].envKey, "task:AX-50");
+  assert.equal(s.repos[app.root].serverEnv, "prod");
+  assert.match(typed().at(-1), runsEnv("prod"));
 });
 
 // ── D35: error toasts that name their popup button; D36: the variant ──────
@@ -2689,6 +2786,82 @@ test("D35: errorNote: every error note is level error; one whose click opens the
     assert.equal(note.level, "error", what);
     assert.equal(note.action, undefined, what);
     assert.equal(note.button, undefined, what);
+  }
+});
+
+test("D41: errorNote's title says what was refused (a light, a sync, a turn-off) and its body is Orca's description of the code, else its message; a server error is Herdr's own: 'Spotlight · <repo>' over its words; `text` stays the log's line", () => {
+  const ROOT = "/Users/u/code/app";
+  const WS = "/Users/u/ws/app/ax-1";
+  const noteOf = (args, record = {}) => {
+    const s = { version: 1, repos: { [ROOT]: { serverState: "stopped", lastError: null, ...record } }, queue: { requests: [], lighting: {} }, notes: [], variants: {} };
+    errorNote(s, { root: ROOT, name: "app", workspace: WS, now: 5, ...args });
+    return s.notes[0];
+  };
+  const TITLES = { light: "No se pudo prender Spotlight en app", sync: "Falló el sync de Spotlight", off: "No se pudo apagar Spotlight en app" };
+  const DESCRIPTIONS = {
+    "operation-in-progress": "Termina o aborta primero el merge/rebase en curso.",
+    "root-diverged": "El root del proyecto tiene cambios hechos fuera del workspace de Spotlight. Haz commit o descártalos ahí primero.",
+    "restore-conflict": "Restaurar los cambios originales del root dio conflicto. Resuélvelo en el root del proyecto y vuelve a intentar.",
+    "untracked-collision": "Archivos sin seguimiento en el root se sobrescribirían. Muévelos o bórralos, o fuerza el sync.",
+    "not-enabled": "Spotlight no está activado para este proyecto.",
+  };
+  for (const [op, title] of Object.entries(TITLES)) {
+    for (const [code, body] of Object.entries(DESCRIPTIONS)) {
+      const error = { code, message: `the ${code} message` };
+      const note = noteOf({ error, op });
+      assert.deepEqual({ title: note.title, body: note.body, level: note.level }, { title, body, level: "error" }, `${op} ${code}`);
+      assert.equal(note.text, `app: the ${code} message`, `${op} ${code}: the log's line`);
+    }
+    // Any other code: its own message.
+    const other = noteOf({ error: { code: "not-on-primary-branch", message: "Check out a branch in the root." }, op });
+    assert.deepEqual([other.title, other.body], [title, "Check out a branch in the root."], op);
+  }
+  // A refused turn-off whose server didn't stop either (G4): Orca's description, then that.
+  const both = noteOf({ error: { code: "root-diverged", message: "diverged. Además, el server no paró: hc no pudo leer su terminal." }, op: "off", also: "hc no pudo leer su terminal" });
+  assert.equal(both.body, `${DESCRIPTIONS["root-diverged"]} Además, el server no paró: hc no pudo leer su terminal.`);
+  // A refused turn-off that saved untracked files (sync.js deactivate's
+  // message names the rescued ref): Orca's description, then that sentence,
+  // so the toast's body still names the ref; with a server that didn't stop
+  // either, that last.
+  const SAVED = "Tus archivos sin seguimiento que estorbaban están a salvo en refs/herdr-spotlight/rescued/2026-11-09T10-00-00-000Z-abc1234.";
+  const rescued = noteOf({ error: { code: "restore-conflict", message: `Restoring the root's original uncommitted changes conflicted: CONFLICT (content).\nerror: could not apply. ${SAVED}` }, op: "off" });
+  assert.equal(rescued.body, `${DESCRIPTIONS["restore-conflict"]} ${SAVED}`);
+  assert.equal(rescued.text, `app: Restoring the root's original uncommitted changes conflicted: CONFLICT (content).\nerror: could not apply. ${SAVED}`);
+  const rescuedBoth = noteOf({ error: { code: "restore-conflict", message: `conflicted. ${SAVED} Además, el server no paró: hc no pudo leer su terminal.` }, op: "off", also: "hc no pudo leer su terminal" });
+  assert.equal(rescuedBoth.body, `${DESCRIPTIONS["restore-conflict"]} ${SAVED} Además, el server no paró: hc no pudo leer su terminal.`);
+  // Server errors (a busy port, a dead or failed start): Herdr's own words under "Spotlight · app".
+  const BUSY = portBusyError({ port: 3000, pid: 900, command: "node", cwd: "/x" });
+  const busy = noteOf({ error: BUSY, top: BUSY }, { lastError: BUSY });
+  assert.deepEqual([busy.title, busy.body, busy.text], ["Spotlight · app", BUSY.message, `app: ${BUSY.message}`]);
+  const DIVERGED = { code: "root-diverged", message: "El root se movió del snapshot de Spotlight." };
+  const under = noteOf({ error: BUSY, top: { ...DIVERGED, serverError: BUSY } }, { lastError: { ...DIVERGED, serverError: BUSY } });
+  assert.equal(under.title, "Spotlight · app");
+  assert.equal(under.body, `${BUSY.message} Antes resuelve el root: ${DIVERGED.message}`);
+  // The hint goes after the body in the toast (board-model.js), never in `text`.
+  const [toast] = takeToasts([noteOf({ error: DIVERGED, op: "off" })], toastMark(0)).toasts;
+  assert.deepEqual(toast, {
+    title: TITLES.off, body: `${DESCRIPTIONS["root-diverged"]} Clic: Apagar igual en el popup`, level: "error", timeout: 60_000, action: serverNoteAction(WS),
+  });
+});
+
+test("D41: a single light's note: success, Orca's title, the body by what its server did (Arrancando, Reiniciando con only for a server it replaced, else where the logs stay); its text names repo and holder as before", async () => {
+  const { lightNote } = await import("../mods/spotlight/cli-work.mjs");
+  const LOG ="/Users/u/.local/state/herdr-spotlight/logs/app-abc123.log";
+  const base = { root: "/code/app", name: "app", workspace: "/ws/app/ax-1", logPath: LOG };
+  const plan = { command: "npm run dev --" };
+  const fresh = lightNote({ ...base, server: { state: "started", plan, result: { ok: true, started: true } } });
+  assert.deepEqual(fresh, {
+    repo: "/code/app", text: "Spotlight on · app ← ax-1 · server arrancando", toast: true, level: "success",
+    title: "Spotlight on — el root del proyecto ahora refleja este workspace", body: `Arrancando npm run dev -- — logs en ${LOG}`,
+  });
+  const restarted = lightNote({ ...base, server: { state: "started", plan, result: { ok: true, started: true, restarted: true } } });
+  assert.equal(restarted.body, `Reiniciando con npm run dev -- — logs en ${LOG}`);
+  assert.equal(restarted.text, "Spotlight on · app ← ax-1 · server arrancando");
+  for (const state of ["running", "none", "needs-variant", "pending", "failed", "still-running", "port-busy", "terminal-busy"]) {
+    const note = lightNote({ ...base, server: { state, plan, result: { ok: true, started: false } } });
+    assert.equal(note.body, `Los logs del server quedan para los agentes en ${LOG}`, state);
+    assert.equal(note.title, "Spotlight on — el root del proyecto ahora refleja este workspace", state);
+    assert.match(note.text, /^Spotlight on · app ← ax-1 · /, state);
   }
 });
 
@@ -2797,7 +2970,7 @@ test("D36: each light that needs a variant asks for it; `env --variant` picked f
   assert.equal(rec.serverCommand, null);
   assert.equal(rec.serverVariant, null);
   assert.equal(w.hc().sent.length, sent, "nothing typed");
-  assert.equal(w.state().variants[`g1/AX-1::${app.root}`], "co");
+  assert.equal(w.state().variants[`task:AX-1::${app.root}`], "co");
 
   const mine = await w.cli(["env", "--workspace", ws2, "--variant", "mx"]);
   assert.equal(mine.code, 0, mine.stdout + mine.stderr);
@@ -2805,4 +2978,524 @@ test("D36: each light that needs a variant asks for it; `env --variant` picked f
   assert.equal(lit.serverVariant, "mx");
   assert.match(lit.serverCommand, /dev:mx/);
   assert.equal(lit.serverState, "starting");
+});
+
+test("D46: the variant follows the task across spaces for the same repo: one remembered before D46 under another space is read by an `env --task` pick and by a light; a pick rewrites it as task:<KEY>::<root>", async () => {
+  const w = makeWorld();
+  const app = makeRepo(w, "multi", { pkg: VARIANT_PKG, files: VARIANT_APPS, tasks: ["AX-1"] });
+  // The repo is in g2 now; AX-1's variant was remembered while it was in g1.
+  w.register([{ id: "g2", repos: [app] }]);
+  const ws = app.ws["AX-1"];
+  const asks = () => w.state().notes.filter((n) => n.toast && n.text === ASK("multi"));
+  assert.equal((await w.cli(["toggle", "--workspace", ws, "--inline"])).code, 0);
+  assert.equal(w.state().repos[app.root].serverState, "needs-variant");
+  assert.equal(asks().length, 1);
+  const s = w.state();
+  s.variants = { [`g1/AX-1::${app.root}`]: "mx", [`g1/AX-2::${app.root}`]: "co" };
+  w.writeState(s);
+
+  // The lane's env pill (task:AX-1) reads it: Dev starts with mx.
+  const pick = await w.cli(["env", "--task", "AX-1", "--group", "g2", "--env", "dev", "--inline"]);
+  assert.equal(pick.code, 0, pick.stderr + pick.stdout);
+  let rec = w.state().repos[app.root];
+  assert.equal(rec.serverVariant, "mx");
+  assert.match(rec.serverCommand, /dev:mx/);
+
+  // Off and on again: the light (the marker's g2/AX-1) reads it too, and asks nothing.
+  assert.equal((await w.cli(["toggle", "--workspace", ws, "--inline"])).code, 0);
+  assert.equal(w.state().repos[app.root], undefined);
+  assert.equal((await w.cli(["toggle", "--workspace", ws, "--inline"])).code, 0);
+  rec = w.state().repos[app.root];
+  assert.equal(rec.serverVariant, "mx");
+  assert.match(rec.serverCommand, /dev:mx/);
+  assert.equal(asks().length, 1, "nothing asked");
+
+  // A pick: stored under the task alone, its old entry gone, another task's kept.
+  const chip = await w.cli(["env", "--workspace", ws, "--variant", "co"]);
+  assert.equal(chip.code, 0, chip.stdout + chip.stderr);
+  assert.deepEqual(w.state().variants, { [`g1/AX-2::${app.root}`]: "co", [`task:AX-1::${app.root}`]: "co" });
+  assert.equal(w.state().repos[app.root].serverVariant, "co");
+});
+
+// ── D41: toasts as Orca's ──────────────────────────────────────────────────
+
+test("D41: the variant prompt is Orca's: an info titled 'Elige una variante para <project>', its body, 60 s, opening the popup's chips; its text as before", async () => {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), "sl-vp-")));
+  worlds.push({ dir });
+  const root = join(dir, "multi");
+  for (const [rel, text] of Object.entries({ "package.json": JSON.stringify(VARIANT_PKG), ...VARIANT_APPS })) write(root, rel, text);
+  const ws = "/Users/u/ws/multi/ax-1";
+  const state = {
+    version: 1,
+    repos: {
+      [root]: {
+        holder: ws, lastSnapshotSha: "a".repeat(40), lastSyncAt: 1, lastError: null, serverTerminal: null, serverPid: null, serverStartedAt: null,
+        serverCommand: null, serverEnv: null, serverVariant: null, serverState: "stopped", pendingInstalls: [], ports: [], logPath: join(dir, "multi.log"),
+      },
+    },
+    queue: { requests: [], lighting: {} },
+    notes: [],
+    variants: {},
+  };
+  const cx = memoryCx({ state, exec: shellExec().exec });
+  assert.equal((await ensureServer(cx, root, { workspace: ws })).state, "needs-variant");
+  const [ask] = state.notes;
+  assert.deepEqual(ask, {
+    at: ask.at, repo: root, text: ASK("multi"), toast: true, level: "info", action: serverNoteAction(ws),
+    title: "Elige una variante para multi", body: "Su server arranca con la que elijas, y esta tarea la recuerda.", timeout: 60_000,
+  });
+  assert.deepEqual(takeToasts(state.notes, toastMark(0)).toasts, [{
+    title: "Elige una variante para multi", body: "Su server arranca con la que elijas, y esta tarea la recuerda.", level: "info", timeout: 60_000,
+    action: serverNoteAction(ws),
+  }]);
+});
+
+test("D41: a click (`toggle --note`) refused: a turn-off on a diverged root and a light where Spotlight is off each write an error note with Orca's title and exit 0; the popup's Apagar and a bare call keep exit 1 and 2 with stderr", async () => {
+  const w = makeWorld();
+  const app = makeRepo(w, "app", { pkg: DEV, tasks: ["AX-7"] });
+  const docs = makeRepo(w, "docs", { tasks: ["AX-8"] });
+  w.register([{ id: "g1", repos: [app, docs] }]);
+  const ws = app.ws["AX-7"];
+  assert.equal((await w.cli(["toggle", "--workspace", ws])).code, 0);
+  await w.until((s) => s.queue.lighting[`direct/${app.root}`]?.phase === "done", { what: "lit" });
+  git(app.root, "commit", "-q", "--allow-empty", "-m", "made in the root");
+  const errors = () => w.state().notes.filter((n) => n.toast && n.level === "error");
+
+  const click = await w.cli(["toggle", "--workspace", ws, "--note"]);
+  assert.equal(click.code, 0, click.stderr + click.stdout);
+  assert.equal(errors().length, 1, JSON.stringify(w.state().notes));
+  const [refused] = errors();
+  assert.equal(refused.repo, app.root);
+  assert.equal(refused.title, "No se pudo apagar Spotlight en app");
+  assert.equal(refused.body, "El root del proyecto tiene cambios hechos fuera del workspace de Spotlight. Haz commit o descártalos ahí primero.");
+  assert.equal(refused.button, "Apagar igual");
+  assert.deepEqual(refused.action, serverNoteAction(ws));
+  assert.match(refused.text, /^app: /);
+  // The popup still offers Apagar igual from the record's error.
+  assert.equal(w.state().repos[app.root].lastError.code, "root-diverged");
+  assert.ok(refsOf(app.root).includes("refs/herdr-spotlight/snapshot"), "nothing turned off");
+  // The popup's Apagar (no --note): exit 1 and stderr, as before.
+  const popup = await w.cli(["toggle", "--workspace", ws]);
+  assert.equal(popup.code, 1, popup.stderr + popup.stdout);
+  assert.match(popup.stderr, /^root-diverged: /);
+
+  const off = await w.cli(["toggle", "--workspace", docs.ws["AX-8"], "--note"]);
+  assert.equal(off.code, 0, off.stderr + off.stdout);
+  const enabled = errors().find((n) => n.repo === docs.root);
+  assert.ok(enabled, JSON.stringify(w.state().notes));
+  assert.equal(enabled.title, "No se pudo prender Spotlight en docs");
+  assert.equal(enabled.body, "Spotlight no está activado para este proyecto.");
+  assert.equal(enabled.action, undefined, "no popup can turn it on");
+  assert.deepEqual(refsOf(docs.root), []);
+  // A bare call (agents): exit 2 and stderr, as before.
+  const bare = await w.cli(["toggle", "--workspace", docs.ws["AX-8"]]);
+  assert.equal(bare.code, 2, bare.stderr + bare.stdout);
+  assert.match(bare.stderr, /^not-enabled: /);
+  assert.equal(errors().filter((n) => n.repo === docs.root).length, 1, "a bare call writes no note");
+});
+
+test("D41: a fresh light toasts 'Arrancando <command> — logs en <log>'; a takeover that replaced the running server, 'Reiniciando con <command> — …'; `spotlight logs` still prints which workspace lit what", async () => {
+  const w = makeWorld();
+  const app = makeRepo(w, "app", { pkg: ENV_PKG, tasks: ["AX-1", "AX-2"] });
+  w.register([{ id: "g1", repos: [app] }]);
+  w.listen(app.root, [3000]);
+  const [ws1, ws2] = [app.ws["AX-1"], app.ws["AX-2"]];
+  const lights = () => w.state().notes.filter((n) => n.toast && n.level === "success" && /^Spotlight on · /.test(n.text));
+  const TITLE = "Spotlight on — el root del proyecto ahora refleja este workspace";
+
+  assert.equal((await w.cli(["toggle", "--workspace", ws1, "--inline"])).code, 0);
+  const logPath = w.state().repos[app.root].logPath;
+  assert.equal(lights().length, 1, JSON.stringify(w.state().notes));
+  assert.deepEqual([lights()[0].title, lights()[0].body, lights()[0].text], [
+    TITLE, `Arrancando npm run local -- — logs en ${logPath}`, "Spotlight on · app ← ax-1 · server arrancando",
+  ]);
+
+  // AX-2's own env, picked before it holds: its takeover replaces the server running Local.
+  assert.equal((await w.cli(["env", "--task", "AX-2", "--group", "g1", "--env", "dev", "--inline"])).code, 0);
+  const take = await w.cli(["toggle", "--workspace", ws2, "--inline"]);
+  assert.equal(take.code, 0, take.stderr + take.stdout);
+  assert.equal(w.state().repos[app.root].serverCommand, "npm run dev --");
+  assert.equal(lights().length, 2, JSON.stringify(w.state().notes));
+  assert.deepEqual([lights()[1].title, lights()[1].body, lights()[1].text], [
+    TITLE, `Reiniciando con npm run dev -- — logs en ${logPath}`, "Spotlight on · app ← ax-2 · server arrancando",
+  ]);
+
+  const logs = await w.cli(["logs", "--repo", app.root]);
+  assert.equal(logs.code, 0, logs.stderr);
+  assert.match(logs.stdout, /^ {2}\d\d:\d\d:\d\d {2}Spotlight on · app ← ax-1 · server arrancando$/m);
+  assert.match(logs.stdout, /^ {2}\d\d:\d\d:\d\d {2}Spotlight on · app ← ax-2 · server arrancando$/m);
+});
+
+// ── T36 (D43): `spotlight teardown`, projects-sidebar's remove hooks ───────
+
+test("D43: `teardown --workspace` on a non-holder does nothing and never lights; on the holder it turns the root off without force: refused, exit 0 and no note; through, the server stopped, no success note, a rescued file's note kept; a light whose process is gone isn't waited on", async () => {
+  const w = makeWorld();
+  const app = makeRepo(w, "app", { pkg: DEV, tasks: ["AX-80", "AX-81"], files: { "page.txt": "v1\n" } });
+  w.register([{ id: "g1", repos: [app] }]);
+  const [ws1, ws2] = [app.ws["AX-80"], app.ws["AX-81"]];
+  git(ws1, "rm", "-q", "page.txt");
+  git(ws1, "commit", "-q", "-m", "drop page");
+  assert.equal((await w.cli(["toggle", "--workspace", ws1])).code, 0);
+  await w.until((s) => s.queue.lighting[`direct/${app.root}`]?.phase === "done", { what: "lit" });
+  const refs = refsOf(app.root);
+  const lighting = Object.keys(w.state().queue.lighting);
+  const notes = w.state().notes.length;
+  // A light that wrongly waited would sit here for a minute.
+  const env = { extraEnv: { SPOTLIGHT_TEARDOWN_MS: "60000" } };
+
+  // ws2 holds nothing: nothing turned off, nothing lit, no note.
+  const other = await w.cli(["teardown", "--workspace", ws2], env);
+  assert.equal(other.code, 0, other.stderr + other.stdout);
+  assert.match(other.stdout, /^Nothing to turn off: ax-81 holds no Spotlight root\.$/m);
+  assert.equal(w.state().repos[app.root].holder, ws1);
+  assert.equal("busy" in w.state().repos[app.root], false);
+  assert.deepEqual(refsOf(app.root), refs);
+  assert.deepEqual(Object.keys(w.state().queue.lighting), lighting, "never lights");
+  assert.equal(w.state().notes.length, notes);
+
+  // The holder on a diverged root: refused without force, exit 0, no note.
+  git(app.root, "commit", "-q", "--allow-empty", "-m", "made in the root");
+  const refused = await w.cli(["teardown", "--workspace", ws1], env);
+  assert.equal(refused.code, 0, refused.stderr + refused.stdout);
+  assert.match(refused.stdout, /^app: root-diverged: /m);
+  assert.deepEqual(refsOf(app.root), refs, "never forced");
+  assert.equal(w.state().repos[app.root].lastError.code, "root-diverged");
+  assert.equal(w.state().notes.length, notes, "no refusal note");
+
+  // The click's marker, its light killed mid-way (its pid gone): not waited on.
+  const dead = spawnProc("true", []);
+  await dead.exited;
+  const s = w.state();
+  Object.assign(s.queue.lighting[`direct/${app.root}`], { phase: "running", pid: dead.pid });
+  w.writeState(s);
+
+  git(app.root, "reset", "-q", "--hard", "HEAD~1");
+  write(app.root, "page.txt", "mine\n");
+  const off = await w.cli(["teardown", "--workspace", ws1], env);
+  assert.equal(off.code, 0, off.stderr + off.stdout);
+  assert.ok(off.ms < 20_000, `took ${off.ms} ms: it waited on a light that wasn't running`);
+  assert.match(off.stdout, /^Spotlight off in app: root restored\.$/m);
+  assert.match(off.stdout, /^app: page\.txt quedó como cambio sin commit \(tu versión\)\. Copia en refs\/herdr-spotlight\/rescued\/\S+\.$/m);
+  assert.equal(w.state().repos[app.root], undefined);
+  assert.equal(git(app.root, "symbolic-ref", "--short", "HEAD"), "main");
+  assert.equal(readFileSync(join(app.root, "page.txt"), "utf8"), "mine\n");
+  assert.equal(w.serverTerminal(app.root).foreground.name, "zsh", "the server was stopped");
+  const added = w.state().notes.slice(notes);
+  assert.equal(added.length, 1, JSON.stringify(added));
+  assert.match(added[0].text, /^app: page\.txt quedó como cambio sin commit/);
+  assert.equal(added[0].title, "Spotlight · app");
+});
+
+test("D43: `teardown --workspace` while a light for W holds the repo lock waits it out, then turns the root off; a repo lock someone else holds is waited on too", async () => {
+  const w = makeWorld();
+  const app = makeRepo(w, "app", { pkg: DEV, tasks: ["AX-82"] });
+  w.register([{ id: "g1", repos: [app] }]);
+  const ws = app.ws["AX-82"];
+  w.slowGit("reset", 1.5);
+  assert.equal((await w.cli(["toggle", "--workspace", ws])).code, 0);
+  await w.until((s) => (s.repos[app.root]?.busy?.op === "light" ? s : null), { what: "the light holding the lock" });
+  const pending = w.cli(["teardown", "--workspace", ws]);
+  await sleep(200);
+  w.slowGit(null);
+  const off = await pending;
+  assert.equal(off.code, 0, off.stderr + off.stdout);
+  assert.match(off.stdout, /^Spotlight off in app: root restored\.$/m);
+  assert.deepEqual(refsOf(app.root), []);
+  assert.equal(w.state().repos[app.root], undefined);
+  assert.equal(w.state().queue.lighting[`direct/${app.root}`], undefined);
+  assert.equal(git(app.root, "symbolic-ref", "--short", "HEAD"), "main");
+  assert.ok(!w.state().notes.some((n) => /root restaurado/.test(n.text)), "no success note");
+
+  // Lit again, its repo lock taken by someone else for a while: waited on.
+  assert.equal((await w.cli(["toggle", "--workspace", ws])).code, 0);
+  await w.until((s) => s.queue.lighting[`direct/${app.root}`]?.phase === "done" && s.repos[app.root]?.holder === ws, { what: "lit again" });
+  const lock = lockDirOf(w, app.root);
+  const owner = await acquire(lock);
+  const waiting = w.cli(["teardown", "--workspace", ws]);
+  await sleep(1000);
+  assert.ok(refsOf(app.root).length > 0, "still lit while the lock is held");
+  unlock(lock, owner);
+  const r = await waiting;
+  assert.equal(r.code, 0, r.stderr + r.stdout);
+  assert.ok(r.ms >= 900, `returned after ${r.ms} ms, before the lock was let go`);
+  assert.match(r.stdout, /^Spotlight off in app: root restored\.$/m);
+  assert.deepEqual(refsOf(app.root), []);
+});
+
+test("D43: past the deadline (SPOTLIGHT_TEARDOWN_MS) a held repo lock or a light still running gives up: it says so and exits 0 before it, nothing turned off", async () => {
+  const w = makeWorld();
+  const app = makeRepo(w, "app", { pkg: DEV, tasks: ["AX-83"] });
+  w.register([{ id: "g1", repos: [app] }]);
+  const ws = app.ws["AX-83"];
+  assert.equal((await w.cli(["toggle", "--workspace", ws])).code, 0);
+  await w.until((s) => s.queue.lighting[`direct/${app.root}`]?.phase === "done", { what: "lit" });
+  const refs = refsOf(app.root);
+  const short = { extraEnv: { SPOTLIGHT_TEARDOWN_MS: "800" } };
+  const stillLit = (what) => {
+    assert.deepEqual(refsOf(app.root), refs, what);
+    assert.equal(w.state().repos[app.root].holder, ws, what);
+  };
+
+  const lock = lockDirOf(w, app.root);
+  const owner = await acquire(lock);
+  try {
+    for (const args of [["--workspace", ws], ["--repo", app.root]]) {
+      const r = await w.cli(["teardown", ...args], short);
+      assert.equal(r.code, 0, r.stderr + r.stdout);
+      assert.match(r.stdout, /^Gave up waiting for app's lock after 0\.8 s: nothing turned off there\.$/m, args.join(" "));
+      assert.ok(r.ms < 5000, `${args.join(" ")} took ${r.ms} ms`);
+      stillLit(args.join(" "));
+    }
+  } finally {
+    unlock(lock, owner);
+  }
+
+  // AX-83's light still running (its process alive): waited on, then given up.
+  const light = spawnProc("sleep", ["60"]);
+  const s = w.state();
+  s.queue.lighting["g1/AX-83"] = {
+    grantId: 1, phase: "running", pid: light.pid, startedAt: Date.now(), error: null, errors: {},
+    members: [{ root: app.root, name: "app", workspace: ws, workspaces: [ws] }], taskKey: "g1/AX-83", force: false,
+  };
+  w.writeState(s);
+  for (const [args, who] of [[["--workspace", ws], "ax-83"], [["--repo", app.root], "app"]]) {
+    const r = await w.cli(["teardown", ...args], short);
+    assert.equal(r.code, 0, r.stderr + r.stdout);
+    assert.match(r.stdout, new RegExp(`^Gave up waiting after 0\\.8 s for a Spotlight light of ${who} still running: nothing turned off\\.$`, "m"));
+    assert.ok(r.ms >= 700 && r.ms < 5000, `${args.join(" ")} took ${r.ms} ms`);
+    stillLit(args.join(" "));
+  }
+  process.kill(light.pid, "SIGKILL");
+});
+
+test("D43: `teardown --repo` turns a lit root off with no note; refused, it stops the server and purges: the record, snapshot, original-head and original-branch go, backup, rescued/* and rescued-pending stay; one warning note and the output name the original branch and commit and the backup, the apply line only when the root had uncommitted changes", async () => {
+  const w = makeWorld();
+  const clean = makeRepo(w, "clean", { pkg: DEV, tasks: ["AX-84"] });
+  const dirty = makeRepo(w, "dirty", { pkg: DEV, tasks: ["AX-85"] });
+  const plain = makeRepo(w, "plain", { pkg: DEV, tasks: ["AX-86"] });
+  const idle = makeRepo(w, "idle", { pkg: DEV });
+  w.register([{ id: "g1", repos: [clean, dirty, plain, idle] }]);
+  write(dirty.root, "README.md", "edited in the root\n");
+  for (const repo of [clean, dirty, plain]) {
+    const lit = await w.cli(["toggle", "--workspace", Object.values(repo.ws)[0], "--inline"]);
+    assert.equal(lit.code, 0, lit.stderr + lit.stdout);
+  }
+  const notes = w.state().notes.length;
+
+  // Not lit: nothing to do.
+  const none = await w.cli(["teardown", "--repo", idle.root]);
+  assert.equal(none.code, 0, none.stderr + none.stdout);
+  assert.match(none.stdout, /^Spotlight is not on in idle: nothing to turn off\.$/m);
+
+  // Lit and clean: an ordinary turn-off, silent.
+  const off = await w.cli(["teardown", "--repo", plain.root]);
+  assert.equal(off.code, 0, off.stderr + off.stdout);
+  assert.match(off.stdout, /^Spotlight off in plain: root restored\.$/m);
+  assert.equal(w.state().repos[plain.root], undefined);
+  assert.deepEqual(refsOf(plain.root), []);
+  assert.equal(w.state().notes.length, notes, "no success note");
+
+  const RESCUED = "refs/herdr-spotlight/rescued/2026-11-09T00-00-00-000Z-abc1234";
+  const APPLY = "git stash apply --index refs/herdr-spotlight/backup";
+  for (const [repo, applies] of [[clean, false], [dirty, true]]) {
+    const { root, name } = repo;
+    const originalHead = git(root, "rev-parse", "refs/herdr-spotlight/original-head");
+    const backup = git(root, "rev-parse", "refs/herdr-spotlight/backup");
+    assert.equal(backup !== originalHead, applies, name);
+    // A rescue an earlier turn-off left, and a commit made in the root: refused.
+    git(root, "update-ref", RESCUED, originalHead);
+    git(root, "update-ref", "refs/herdr-spotlight/rescued-pending", originalHead);
+    git(root, "commit", "-q", "--allow-empty", "-m", "made in the root");
+    const before = w.state().notes.length;
+
+    const r = await w.cli(["teardown", "--repo", root]);
+    assert.equal(r.code, 0, r.stderr + r.stdout);
+    assert.equal(w.state().repos[root], undefined, `${name}: the record is gone`);
+    assert.equal(w.state().queue.lighting[`direct/${root}`], undefined, name);
+    assert.deepEqual(refsOf(root).sort(), [
+      "refs/herdr-spotlight/backup", "refs/herdr-spotlight/rescued-pending", RESCUED,
+    ].sort(), name);
+    assert.equal(git(root, "rev-parse", "refs/herdr-spotlight/backup"), backup, name);
+    assert.equal(w.serverTerminal(root).foreground.name, "zsh", `${name}: the server was stopped`);
+
+    const added = w.state().notes.slice(before);
+    assert.equal(added.length, 1, `${name}: ${JSON.stringify(added)}`);
+    const [note] = added;
+    assert.equal(note.toast, true);
+    assert.equal(note.level, "warning");
+    assert.equal(note.title, `Spotlight · ${name}`);
+    assert.equal(note.text, `${name}: ${note.body}`);
+    assert.match(note.body, /root-diverged/, name);
+    assert.ok(note.body.includes(`rama main, commit ${originalHead.slice(0, 7)}`), `${name}: ${note.body}`);
+    assert.ok(note.body.includes("refs/herdr-spotlight/backup"), name);
+    assert.ok(note.body.includes(RESCUED), name);
+    assert.equal(note.body.includes(APPLY), applies, `${name}: ${note.body}`);
+    // The output says the same, a line each.
+    assert.match(r.stdout, new RegExp(`^${name}: El root estaba en la rama main, commit ${originalHead.slice(0, 7)}\\.$`, "m"));
+    assert.ok(r.stdout.includes("refs/herdr-spotlight/backup"), name);
+    assert.ok(r.stdout.includes(RESCUED), name);
+    assert.equal(r.stdout.split("\n").includes(`${name}: Para traerlos: ${APPLY}`), applies, `${name}: ${r.stdout}`);
+  }
+});
+
+test("D43: usage: one of --workspace or --repo (exit 2); USAGE lists teardown", async () => {
+  const w = makeWorld();
+  for (const args of [["teardown"], ["teardown", "--workspace", "/a", "--repo", "/b"]]) {
+    const r = await w.cli(args);
+    assert.equal(r.code, 2, `${args.join(" ")}: ${r.stderr}${r.stdout}`);
+    assert.match(r.stderr, /^spotlight teardown: --workspace <path> or --repo <path>/);
+  }
+  const help = await w.cli(["--help"]);
+  assert.match(help.stdout, /^ {2}spotlight teardown --workspace p \| --repo r {2,}/m);
+});
+
+// cli-work.mjs's deactivateRepo over a real store (its real locks: taking
+// the repo lock twice in one flow throws lock-reentry) and real git, with a
+// stub stopServer and a git that fails where a test says. Every git call and
+// stop records whether the repo lock was held then.
+const TEST_GIT_VARS = { GIT_CONFIG_GLOBAL: GIT_ENV.GIT_CONFIG_GLOBAL, GIT_CONFIG_NOSYSTEM: "1" };
+
+async function teardownFixture() {
+  const { createStore, emptyRepo } = await import("../mods/spotlight/store.js");
+  const { gitContext, runGit, activate } = await import("../mods/spotlight/sync.js");
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), "sl-teardown-")));
+  worlds.push({ dir });
+  const root = join(dir, "repos", "app");
+  const ws = join(dir, "ws", "app", "ax-90");
+  mkdirSync(root, { recursive: true });
+  git(root, "init", "-q", "-b", "main");
+  write(root, "a.txt", "a\n");
+  write(root, "to-delete.txt", "original\n");
+  git(root, "add", "-A");
+  git(root, "commit", "-q", "-m", "init");
+  git(root, "worktree", "add", "-q", "-b", "AX-90", ws);
+  git(ws, "rm", "-q", "to-delete.txt");
+  git(ws, "commit", "-q", "-m", "drop to-delete");
+  // Staged in the root before Spotlight: its backup is a stash commit.
+  write(root, "new.txt", "staged in root\n");
+  git(root, "add", "new.txt");
+  const appHome = join(dir, "app");
+  const lockDir = join(appHome, "spotlight", "locks", `repo-${sha1(root)}`);
+  const seen = { git: [], locks: [], stops: [], writes: 0, failOn: () => false };
+  const gitCtx = gitContext({
+    git: async (args, cwd, opts) => {
+      seen.git.push({ args, locked: existsSync(lockDir) });
+      if (seen.failOn(args)) throw Object.assign(new Error("simulated failure"), { stderr: "simulated failure" });
+      return runGit(args, cwd, { ...opts, env: { ...TEST_GIT_VARS, ...(opts?.env ?? {}) } });
+    },
+  });
+  await activate(gitCtx, root, ws);
+  const real = createStore({ appHome, hasServerCommand: () => false });
+  await real.updateState((s) => {
+    s.repos[root] = { ...emptyRepo(), holder: ws, serverTerminal: "t1", serverState: "listening" };
+  });
+  seen.git.length = 0;
+  const store = {
+    ...real,
+    withRepoLock: (r, fn, opts) => {
+      seen.locks.push({ root: r, timeoutMs: opts?.timeoutMs });
+      return real.withRepoLock(r, fn, opts);
+    },
+    updateState: (fn) => {
+      seen.writes += 1;
+      return real.updateState(fn);
+    },
+  };
+  const cx = {
+    store, gitCtx, nameOf: (r) => basename(r), now: Date.now, sleep, pollMs: 20, teardownMs: 5_000,
+    server: {
+      stopServer: async (a) => {
+        seen.stops.push({ terminal: a.terminal, locked: existsSync(lockDir) });
+        return { ok: true, stopped: true, terminal: a.terminal, forced: 0 };
+      },
+    },
+    serverDeps: {},
+  };
+  return { root, ws, cx, seen, state: () => real.readState() };
+}
+
+test("D43: deactivateRepo reads onlyIf under its own repo lock, before any busy mark; `silent` drops a refusal's note unless its error names a rescued ref", async () => {
+  const { deactivateRepo } = await import("../mods/spotlight/cli-work.mjs");
+  const f = await teardownFixture();
+  const holds = (r) => r?.holder === f.ws;
+
+  // Not the holder: skipped under the lock, with no write at all, so no busy mark.
+  const skipped = await deactivateRepo(f.cx, f.root, { silent: true, onlyIf: (r) => r?.holder === "/somewhere/else", lockTimeoutMs: 1000 });
+  assert.deepEqual(skipped, { ok: true, skipped: true });
+  assert.equal(f.seen.writes, 0, "nothing written");
+  assert.deepEqual(f.seen.locks, [{ root: f.root, timeoutMs: 1000 }]);
+  assert.deepEqual(f.seen.stops, []);
+  assert.equal(f.state().repos[f.root].holder, f.ws);
+
+  // The holder, refused (a commit made in the root): silent writes the record's error, no note.
+  git(f.root, "commit", "-q", "--allow-empty", "-m", "made in the root");
+  const refused = await deactivateRepo(f.cx, f.root, { silent: true, onlyIf: holds });
+  assert.equal(refused.code, "root-diverged");
+  assert.deepEqual(f.state().notes, []);
+  assert.equal(f.state().repos[f.root].lastError.code, "root-diverged");
+  // Not silent, the same refusal toasts as it always did.
+  await deactivateRepo(f.cx, f.root, {});
+  assert.deepEqual(f.state().notes.map((n) => [n.level, n.title]), [["error", "No se pudo apagar Spotlight en app"]]);
+
+  // Back on the snapshot, an untracked file in the way, a restore that
+  // conflicts: its error names the rescued ref, so silent keeps its note.
+  git(f.root, "reset", "-q", "--hard", "HEAD~1");
+  write(f.root, "to-delete.txt", "mine\n");
+  f.seen.failOn = (args) => args.includes("stash") && args.includes("apply");
+  const conflict = await deactivateRepo(f.cx, f.root, { silent: true, onlyIf: holds });
+  assert.equal(conflict.code, "restore-conflict");
+  assert.match(conflict.message, /a salvo en refs\/herdr-spotlight\/rescued\/\S+\.$/);
+  const added = f.state().notes.slice(1);
+  assert.equal(added.length, 1, JSON.stringify(added));
+  assert.equal(added[0].level, "error");
+  assert.match(added[0].text, /^app: .*a salvo en refs\/herdr-spotlight\/rescued\/\S+\.$/s);
+  // The toast's body names the ref too: Orca's description, then where the files went.
+  const ref = /(refs\/herdr-spotlight\/rescued\/\S+)\.$/.exec(conflict.message)[1];
+  assert.equal(
+    added[0].body,
+    `Restaurar los cambios originales del root dio conflicto. Resuélvelo en el root del proyecto y vuelve a intentar. Tus archivos sin seguimiento que estorbaban están a salvo en ${ref}.`,
+  );
+});
+
+test("D43: deactivateRepo's purge runs inside its own repo lock: one lock, the stop once (by the purge when the refusal came first), every git step under it; one warning note names the recovery refs", async () => {
+  const { deactivateRepo } = await import("../mods/spotlight/cli-work.mjs");
+  const APPLY = "git stash apply --index refs/herdr-spotlight/backup";
+
+  // Refused before the stop (a diverged root): the purge stops the server itself.
+  const a = await teardownFixture();
+  git(a.root, "commit", "-q", "--allow-empty", "-m", "made in the root");
+  const head = git(a.root, "rev-parse", "refs/herdr-spotlight/original-head");
+  const r = await deactivateRepo(a.cx, a.root, { silent: true, purge: true, lockTimeoutMs: 2000 });
+  assert.equal(r.ok, false);
+  assert.equal(r.code, "root-diverged");
+  assert.equal(r.purged?.originalHeadSha, head);
+  assert.deepEqual(a.seen.locks, [{ root: a.root, timeoutMs: 2000 }], "one repo lock");
+  assert.deepEqual(a.seen.stops, [{ terminal: "t1", locked: true }]);
+  assert.ok(a.seen.git.length > 0 && a.seen.git.every((c) => c.locked), "every git step under the lock");
+  assert.equal(a.state().repos[a.root], undefined);
+  assert.deepEqual(refsOf(a.root), ["refs/herdr-spotlight/backup"]);
+  const [note] = a.state().notes;
+  assert.equal(a.state().notes.length, 1);
+  assert.deepEqual([note.level, note.title, note.toast], ["warning", "Spotlight · app", true]);
+  assert.ok(note.body.includes(APPLY), note.body);
+
+  // Refused after the stop (a restore that conflicts once its files were rescued): no second stop.
+  const b = await teardownFixture();
+  write(b.root, "to-delete.txt", "mine\n");
+  b.seen.failOn = (args) => args.includes("stash") && args.includes("apply");
+  const r2 = await deactivateRepo(b.cx, b.root, { silent: true, purge: true });
+  assert.equal(r2.code, "restore-conflict");
+  assert.equal(b.seen.locks.length, 1);
+  assert.deepEqual(b.seen.stops, [{ terminal: "t1", locked: true }]);
+  assert.ok(b.seen.git.every((c) => c.locked));
+  const left = refsOf(b.root);
+  assert.ok(left.includes("refs/herdr-spotlight/backup") && left.includes("refs/herdr-spotlight/rescued-pending"), left.join(" "));
+  const rescued = left.filter((ref) => ref.startsWith("refs/herdr-spotlight/rescued/"));
+  assert.equal(rescued.length, 1, left.join(" "));
+  assert.equal(left.length, 3, left.join(" "));
+  // One note, the purge's: it names the rescued ref; the refusal's own isn't written beside it.
+  assert.equal(b.state().notes.length, 1, JSON.stringify(b.state().notes));
+  assert.equal(b.state().notes[0].level, "warning");
+  assert.ok(b.state().notes[0].body.includes(rescued[0]), b.state().notes[0].body);
+  assert.ok(b.state().notes[0].body.includes(APPLY));
 });

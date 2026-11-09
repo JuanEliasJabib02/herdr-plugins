@@ -6,7 +6,8 @@
 // a key `<groupId>/task:<KEY>` holds that group's task lane badges, drawn on
 // the lane's header, and `spin: true` turns a badge's icon. Spotlight T30
 // (its D39): badges drawn as Orca's buttons, and `reveal`, `pill`, `dot` and
-// `hover`.
+// `hover`. Spotlight T33 (its D42): Orca's cards, with `bar`, `line: 2`,
+// `disabled` and the pill's `look`.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -15,8 +16,9 @@ import {
   parseBadges, badgeTooltip, badgeMaxWidth, badgeRun, laneBadgeKey, execFailure, startFailure, BADGE_ROOM, BADGE_GAP,
   iconOf, textOf, actionOf as validAction, publisherOf,
   tint, chipColor, pillStyle, badgeHover, revealStyle, dotStyle, badgeWidths, badgeGaps, badgeLayout, badgeClickable, hasReveal,
-  BADGE_MOTION, BADGE_BOX,
+  BADGE_MOTION, BADGE_BOX, BADGE_TONES,
 } from "../projects-sidebar/mods/projects/badges-model.js";
+import * as badgesModel from "../projects-sidebar/mods/projects/badges-model.js";
 
 const src = (f) => readFileSync(new URL(`../projects-sidebar/mods/projects/${f}`, import.meta.url), "utf8");
 
@@ -271,7 +273,7 @@ test("tree.js draws a row's badges after its label and runs their actions (D38)"
   const label = row.indexOf(".child(w.label)");
   const drawn = row.indexOf("badgeStrip(");
   assert.ok(label >= 0 && drawn > label, "the badges come after the label");
-  assert.match(row, /badgeLayout\(badges, /, "they share the row's badge room (badgeLayout, D39)");
+  assert.match(row, /lineLayout\(lines\.line1, /, "they share the line's badge room (badgeLayout through lineLayout, D39, D42)");
 
   const badge = body("badge");
   assert.match(badge, /badgeButton\(/, "drawn as a button (D39)");
@@ -446,7 +448,7 @@ test("tree.js draws the active group's lane badges on a lane's header, and spins
   const drawn = header.indexOf("badgeStrip(");
   const count = header.indexOf("String(l.count)");
   assert.ok(label >= 0 && drawn > label && count > drawn, "label, badges, count");
-  assert.match(header, /badgeLayout\(badges, /);
+  assert.match(header, /lineLayout\(lines\.line1, /);
 
   // A lane badge: its hover; a click never folds the lane (stopped whether
   // or not it has an action) and runs the action with the lane as target,
@@ -741,7 +743,7 @@ test("tree.js applies D39's look: the button, the reveal, the grow clip, the hov
   // rows and lane headers; none on project or agent rows.
   for (const name of ["workspaceRow", "taskRow"]) {
     assert.match(body(name), /\.when\(hasReveal\(badges\), \(el\) => el\.on_hover\(\(on, cx\) => hoverRow\(/, `${name} tracks its hover only with a reveal badge`);
-    assert.match(body(name), /badgeLayout\(badges, \{ hovered: hovered === /, `${name} lays its badges out with its hover`);
+    assert.match(body(name), /lineLayout\(lines\.line1, id, /, `${name} lays its badges out with its hover (lineLayout, D42)`);
   }
   for (const name of ["projectRow", "agentRow", "railRow"]) assert.doesNotMatch(body(name), /on_hover\(/, `${name} has no on_hover`);
   // Redrawn on enter and leave, only when it changes.
@@ -768,4 +770,232 @@ test("tree.js applies D39's look: the button, the reveal, the grow clip, the hov
   assert.match(row, /div\(\)\.flex_shrink\(1\)\.min_w\(0\)\.max_w\(110\)\.truncate\(\)[^\n]*w\.projectName/);
   assert.doesNotMatch(row, /flex_none\(\)\.max_w\(110\)/);
   assert.match(strip, /h_flex\(\)\.flex_none\(\)/);
+});
+
+// ── Orca's cards: bar, line 2, disabled and the pill's look (Spotlight T33, its D42) ──
+
+// The new pieces, read off the module so each test below fails on its own
+// while they are missing.
+const { badgeLines, rowBar, ROW_H, ROW_H2, DISABLED_OPACITY } = badgesModel;
+
+test("parse (D42): bar, line, disabled and look are kept when valid and dropped alone; the badge always stays", () => {
+  const plain = { key: "badges.spotlight", index: 0, icon: ICON, tone: "dim" };
+  const pill = { key: "badges.spotlight", index: 0, text: "Probando", tone: "dim", pill: true };
+  // bar: one of the five tones.
+  for (const bar of BADGE_TONES) assert.deepEqual(one({ icon: ICON, bar }), { ...plain, bar }, bar);
+  // line: 2 only (line 1 is the default).
+  assert.deepEqual(one({ icon: ICON, line: 2 }), { ...plain, line: 2 });
+  // disabled: true only. A disabled badge has no action: one published with
+  // an action loses it, so it draws inert, as an older reader draws it.
+  assert.deepEqual(one({ icon: ICON, disabled: true }), { ...plain, disabled: true });
+  assert.deepEqual(one({ icon: ICON, tooltip: "t", disabled: true, action: TOGGLE }), { ...plain, tooltip: "t", disabled: true });
+  // look: "secondary" or "outline", beside pill: true.
+  for (const look of ["secondary", "outline"]) assert.deepEqual(one({ text: "Probando", pill: true, look }), { ...pill, look }, look);
+
+  // Anything else drops that field, never the badge.
+  const bad = [undefined, null, 1, 0, true, "", "Working", "amber", "hover", {}, ["working"]];
+  for (const bar of bad) assert.deepEqual(one({ icon: ICON, bar }), plain, `bar ${JSON.stringify(bar)}`);
+  for (const line of [undefined, null, 0, 1, 3, 2.5, "2", true, [2], {}]) assert.deepEqual(one({ icon: ICON, line }), plain, `line ${JSON.stringify(line)}`);
+  for (const disabled of [false, "true", 1, null, {}, [true]]) {
+    assert.deepEqual(one({ icon: ICON, disabled, action: TOGGLE }), { ...plain, action: TOGGLE }, `disabled ${JSON.stringify(disabled)} keeps the action`);
+  }
+  for (const look of [undefined, null, "", "Secondary", "OUTLINE", "default", "ghost", 1, true, {}, ["outline"]]) {
+    assert.deepEqual(one({ text: "Probando", pill: true, look }), pill, `look ${JSON.stringify(look)}`);
+  }
+  // A look without pill: true says nothing: dropped.
+  assert.deepEqual(one({ text: "Probando", look: "outline" }), { key: "badges.spotlight", index: 0, text: "Probando", tone: "dim" });
+  assert.deepEqual(one({ text: "Probando", pill: 1, look: "secondary" }), { key: "badges.spotlight", index: 0, text: "Probando", tone: "dim" });
+  // All four bad at once, with text and an action: only they go.
+  assert.deepEqual(
+    one({ text: "x", tone: "working", action: TOGGLE, bar: "amber", line: 3, disabled: "yes", look: "ghost" }),
+    { key: "badges.spotlight", index: 0, text: "x", tone: "working", action: TOGGLE },
+  );
+  // All four valid together, beside D39's, on a lane key too.
+  const all = { text: "En cola #2", tone: "dim", pill: true, look: "outline", bar: "working", line: 2, disabled: true, reveal: "hover" };
+  assert.deepEqual(parseBadges([{ [AX]: [all] }])[AX][0], { key: "badges.spotlight", index: 0, ...all });
+});
+
+test("rowBar (D42): the first badge carrying a bar gives the row Orca's 3 px bar in its tone, inset 4 px; an unknown tone, none", () => {
+  const bar = (color) => ({ color, width: 3, inset: 4 });
+  assert.deepEqual(rowBar([{ icon: ICON }, { text: "x", bar: "working" }], THEME), bar(THEME.working), "the working tone (Orca's amber)");
+  // With two, the first wins.
+  assert.deepEqual(rowBar([{ icon: ICON, bar: "blocked" }, { icon: ICON, bar: "working" }], THEME), bar(THEME.blocked));
+  // Through the parse, as tree.js reads it.
+  assert.deepEqual(rowBar(parseBadges([{ "/w": [{ icon: ICON, bar: "done" }] }])["/w"], THEME), bar(THEME.done));
+  // An unknown tone: none, raw or parsed.
+  assert.equal(rowBar([{ icon: ICON, bar: "amber" }], THEME), null);
+  assert.equal(rowBar(parseBadges([{ "/w": [{ icon: ICON, bar: "amber" }] }])["/w"], THEME), null);
+  // No bar, no badges, or a theme without that color: none.
+  assert.equal(rowBar([{ icon: ICON, tone: "working" }], THEME), null);
+  assert.equal(rowBar([], THEME), null);
+  assert.equal(rowBar(undefined, THEME), null);
+  assert.equal(rowBar([{ icon: ICON, bar: "working" }], { ...THEME, working: undefined }), null);
+});
+
+test("badgeLines (D42): a line-2 badge goes under the label and the row is 42 px; none, 28 px; on a lane header it joins line 1 and the header stays 28 px", () => {
+  assert.equal(ROW_H, 28);
+  assert.equal(ROW_H2, 42);
+  const chip = { icon: ICON, text: "Spotlight", tone: "working", pill: true, bar: "working" };
+  const port = { text: ":3000", tone: "dim", line: 2 };
+  const logs = { icon: ICON, reveal: "hover" };
+  const x = { icon: ICON, reveal: "hover", hover: "working" };
+  // Spotlight's lit root as D42 publishes it.
+  assert.deepEqual(badgeLines([chip, port, logs, x]), { line1: [chip, logs, x], line2: [port], height: 42 });
+  // Only line-2 badges: line 1 keeps the label alone, still two lines.
+  assert.deepEqual(badgeLines([port]), { line1: [], line2: [port], height: 42 });
+  // None on line 2: one line, 28 px.
+  assert.deepEqual(badgeLines([chip, logs]), { line1: [chip, logs], line2: [], height: 28 });
+  assert.deepEqual(badgeLines([]), { line1: [], line2: [], height: 28 });
+  assert.deepEqual(badgeLines(undefined), { line1: [], line2: [], height: 28 });
+  // A lane header has one line: line-2 badges join line 1 at its end.
+  assert.deepEqual(badgeLines([port, chip, logs], { lane: true }), { line1: [chip, logs, port], line2: [], height: 28 });
+  assert.deepEqual(badgeLines([chip], { lane: true }), { line1: [chip], line2: [], height: 28 });
+
+  // Each line is laid out with its own room: two texts on line 1 share it by
+  // two, the one on line 2 has it alone; in one line they would share by three.
+  const texts = [{ text: "a" }, { text: "b" }, { text: "c", line: 2 }];
+  const { line1, line2 } = badgeLines(texts);
+  assert.deepEqual(badgeLayout(line1).map((s) => s.maxW), [badgeMaxWidth(2), badgeMaxWidth(2)]);
+  assert.deepEqual(badgeLayout(line2).map((s) => [s.maxW, s.ml]), [[badgeMaxWidth(1), 0]], "line 2's first badge has no gap before it");
+  assert.deepEqual(badgeLayout(texts).map((s) => s.maxW), Array(3).fill(badgeMaxWidth(3)));
+
+  // The row's caps still hold, line-2 badges counted: 4 per plugin, 5 per row.
+  const five = ["a", "b", "c", "d", "e"].map((text, i) => (i % 2 ? { text, line: 2 } : { text }));
+  const mine = parseBadges([{ "/w": five }])["/w"];
+  assert.deepEqual(brief(mine), ["spotlight:a:0", "spotlight:b:1", "spotlight:c:2", "spotlight:d:3"]);
+  assert.deepEqual([brief(badgeLines(mine).line1), brief(badgeLines(mine).line2)], [["spotlight:a:0", "spotlight:c:2"], ["spotlight:b:1", "spotlight:d:3"]]);
+  const lineTwo = ["1", "2", "3", "4"].map((n) => ({ text: `s${n}`, line: 2 }));
+  const both = parseBadges([{ "/w": lineTwo }, { "/w": [{ text: "p1" }, { text: "p2" }] }])["/w"];
+  assert.deepEqual(brief(both), ["spotlight:s1:0", "spotlight:s2:1", "spotlight:s3:2", "spotlight:s4:3", "pr:p1:0"]);
+  assert.deepEqual(badgeLines(both).height, 42);
+});
+
+test("disabled (D42): not clickable, no hover chip, half opacity, its tooltip without what a click runs", () => {
+  assert.equal(DISABLED_OPACITY, 0.5);
+  // As published (no action), and as an older publisher might send it.
+  const raw = { icon: ICON, tone: "dim", hover: "working", reveal: "hover", tooltip: "Apagando Spotlight…", disabled: true, action: TOGGLE };
+  const parsed = one(raw);
+  assert.equal(Object.hasOwn(parsed, "action"), false, "the parse drops its action");
+  for (const b of [raw, parsed, { icon: ICON, disabled: true }]) {
+    for (const hovered of [false, true]) assert.equal(badgeClickable(b, hovered), false, `${JSON.stringify(b)} hovered ${hovered}`);
+    assert.equal(badgeHover(b, THEME), null, "no hover chip, its hover tone or not");
+  }
+  assert.equal(badgeHover({ text: "Spotlight", tone: "working", pill: true, disabled: true, action: TOGGLE }, THEME), null, "a pill neither");
+  // Half opacity: always shown at 0.5; a reveal one at 0 until its row is
+  // hovered, then 0.5. Never clickable in a layout either.
+  assert.deepEqual(badgeLayout([{ icon: ICON, disabled: true }], { hovered: false }).map((s) => [s.opacity, s.clickable]), [[0.5, false]]);
+  assert.deepEqual(badgeLayout([parsed], { hovered: false }).map((s) => [s.opacity, s.clickable]), [[0, false]]);
+  assert.deepEqual(badgeLayout([parsed], { hovered: true }).map((s) => [s.opacity, s.clickable]), [[0.5, false]]);
+  // Its tooltip is kept, without the "runs" tail: a click runs nothing.
+  assert.equal(badgeTooltip(raw), "Apagando Spotlight…");
+  assert.equal(badgeTooltip(parsed), "Apagando Spotlight…");
+  assert.equal(badgeTooltip({ disabled: true, action: TOGGLE }), null);
+  assert.equal(badgeTooltip({ disabled: true, tooltip: "t", action: { command: "spotlight.x" } }), "t");
+});
+
+test("look (D42): secondary is Orca's filled neutral badge, outline its outlined dim one, both keeping the text's case; a pill without look stays uppercase", () => {
+  // Secondary: a neutral fill (the foreground at 10 %, drawn over the row as
+  // Orca's secondary over its sidebar), its border the fill (Orca's
+  // transparent border), the foreground text; Orca's px-1.5, medium, 10 px,
+  // rounded-full.
+  assert.deepEqual(
+    pillStyle({ text: "Probando", tone: "dim", pill: true, look: "secondary" }, THEME),
+    { border: "#abb2bf1a", bg: "#abb2bf1a", color: THEME.foreground, px: 6, weight: "medium", size: 10, radius: 8, keepCase: true },
+  );
+  // Outline: the theme's border, no fill, the dim text (Orca's muted).
+  assert.deepEqual(
+    pillStyle({ text: "En cola #2", tone: "dim", pill: true, look: "outline" }, THEME),
+    { border: THEME.border, bg: null, color: THEME.dim, px: 6, weight: "medium", size: 10, radius: 8, keepCase: true },
+  );
+  // The look decides the colors, whatever the tone.
+  for (const look of ["secondary", "outline"]) {
+    assert.deepEqual(pillStyle({ tone: "working", pill: true, look }, THEME), pillStyle({ tone: "dim", pill: true, look }, THEME), look);
+  }
+  // A foreground the theme doesn't spell as #hex: the hover color fills it.
+  const odd = pillStyle({ tone: "dim", pill: true, look: "secondary" }, { ...THEME, foreground: "white" });
+  assert.deepEqual([odd.bg, odd.border], [THEME.hover, THEME.hover]);
+  // pill: true without look: today's uppercase chip, unchanged (no keepCase).
+  assert.deepEqual(pillStyle({ tone: "dim", pill: true }, THEME), { border: THEME.border, bg: null, color: THEME.dim, px: 4, weight: "semibold", size: 10 });
+  // An unknown look is dropped at the parse: today's pill.
+  assert.deepEqual(pillStyle(one({ text: "x", pill: true, look: "ghost" }), THEME), pillStyle({ tone: "dim", pill: true }, THEME));
+  // A look with no pill: no pill.
+  assert.equal(pillStyle({ tone: "dim", look: "outline" }, THEME), null);
+  // On hover, with an action: a neutral chip (the foreground at 15 %), the
+  // text lifting to the foreground; a `hover` tone takes over as on any pill.
+  for (const look of ["secondary", "outline"]) {
+    assert.deepEqual(badgeHover({ tone: "dim", pill: true, look, action: TOGGLE }, THEME), { bg: "#abb2bf26", color: THEME.foreground }, look);
+  }
+  assert.deepEqual(badgeHover({ tone: "dim", pill: true, look: "outline", hover: "working", action: TOGGLE }, THEME), { bg: "#e5c07b26", color: THEME.working });
+  assert.equal(badgeHover({ tone: "dim", pill: true, look: "outline" }, THEME), null, "no action, no hover look");
+});
+
+test("D42: badges with none of the new fields draw as before", () => {
+  const b = one({ icon: ICON, text: "on", tone: "working", tooltip: "t", action: TOGGLE });
+  const pill = one({ icon: ICON, text: "Spotlight", tone: "working", pill: true, dot: "on", action: TOGGLE });
+  assert.deepEqual(badgeLines([b, pill]), { line1: [b, pill], line2: [], height: 28 }, "one line, 28 px");
+  assert.equal(rowBar([b, pill], THEME), null, "no bar");
+  assert.equal(badgeClickable(b, false), true);
+  assert.equal(badgeTooltip(b), "t · runs spotlight");
+  assert.deepEqual(badgeLayout([b, pill]).map((s) => [s.opacity, s.clickable]), [[1, true], [1, true]]);
+  assert.deepEqual(pillStyle(pill, THEME), { border: "#e5c07b4d", bg: "#e5c07b0d", color: THEME.working, px: 6, weight: "medium", size: 10 });
+  assert.deepEqual(badgeHover(pill, THEME), { bg: "#e5c07b26", color: THEME.working });
+});
+
+test("tree.js applies D42's look: the bar, the second line, the lane's one line, disabled and the pill's case", () => {
+  const tree = src("tree.js");
+  const body = (name) => {
+    const start = tree.indexOf(`function ${name}(`);
+    assert.ok(start >= 0, `tree.js has ${name}`);
+    return tree.slice(start, tree.indexOf("\n}\n", start));
+  };
+  for (const name of ["badgeLines", "rowBar"]) {
+    assert.match(tree, new RegExp(`import \\{[^}]*\\b${name}\\b[^}]*\\} from "\\./badges-model\\.js"`), `tree.js imports ${name}`);
+  }
+
+  // Each line laid out on its own (its own room), with the row's hover.
+  assert.match(body("lineLayout"), /badgeLayout\(list, \{ hovered: hovered === rowId, measured: list\.map\(\(b\) => grown\.get\(idOf\(b\)\) \?\? null\) \}\)/);
+
+  // A workspace row: its lines and height from badgeLines, the bar from
+  // rowBar, line 1 as before, line 2 under it at its right.
+  const row = body("workspaceRow");
+  assert.match(row, /const lines = badgeLines\(badges\);/);
+  assert.match(row, /const bar = rowBar\(badges, t\);/);
+  assert.match(row, /\.h\(lines\.height\)/);
+  assert.doesNotMatch(row, /\.h\(28\)/, "the row's height is badgeLines'");
+  assert.match(row, /\.relative\(\)/, "the bar is placed in the row");
+  assert.match(row, /\.when\(Boolean\(bar\), \(el\) => el\.child\(barMark\(bar\)\)\)/);
+  assert.match(row, /lineLayout\(lines\.line1, id, /);
+  assert.match(row, /lineLayout\(lines\.line2, id, /);
+  assert.match(row, /\.when\(lines\.line2\.length > 0, \(el\) => el\.child\(h_flex\(\)\.h\(BADGE_BOX\)\.flex_none\(\)\.justify_end\(\)/, "line 2 at the row's right");
+  const [first, second] = [row.indexOf("badgeStrip(lines.line1, "), row.indexOf("badgeStrip(lines.line2, ")];
+  assert.ok(first >= 0 && second > first, "line 1, then line 2");
+  // The hover is the whole row's: both lines' reveal badges.
+  assert.match(row, /\.when\(hasReveal\(badges\), /);
+
+  // A lane header: one line, 28 px, and the bar too.
+  const header = body("taskRow");
+  assert.match(header, /const lines = badgeLines\(badges, \{ lane: true \}\);/);
+  assert.match(header, /const bar = rowBar\(badges, t\);/);
+  assert.match(header, /\.h\(lines\.height\)/);
+  assert.match(header, /\.relative\(\)/);
+  assert.match(header, /\.when\(Boolean\(bar\), \(el\) => el\.child\(barMark\(bar\)\)\)/);
+  assert.match(header, /lineLayout\(lines\.line1, id, /);
+
+  // The bar: 3 px at the row's left edge, inset top and bottom, rounded; it
+  // takes no clicks (no id, no handler).
+  const mark = body("barMark");
+  assert.match(mark, /div\(\)\.absolute\(\)\.left\(0\)\.top\(bar\.inset\)\.bottom\(bar\.inset\)\.w\(bar\.width\)\.rounded\(bar\.width \/ 2\)\.bg\(bar\.color\)/);
+  assert.doesNotMatch(mark, /\.id\(|on_click|on_mouse/);
+
+  // The button: a disabled badge has the default cursor and its half
+  // opacity (a grow one's comes through its clip); a look pill keeps its
+  // text's case and Orca's round ends.
+  const button = body("badgeButton");
+  assert.match(button, /\.when\(Boolean\(b\.disabled\), \(el\) => el\.cursor_default\(\)\)/);
+  assert.match(button, /\.when\(b\.reveal === "hover" \|\| \(Boolean\(b\.disabled\) && b\.reveal !== "grow"\), \(el\) => el\.opacity\(slot\.opacity\)\.transition\("opacity", BADGE_MOTION\)\)/);
+  assert.match(button, /pill && !pill\.keepCase \? b\.text\.toUpperCase\(\) : b\.text/);
+  assert.match(button, /\.when\(Boolean\(pill\.radius\), \(e\) => e\.rounded\(pill\.radius\)\)/);
+  // On a workspace row a disabled badge swallows its click: inert, as
+  // Orca's disabled button (the row doesn't open either).
+  assert.match(body("badge"), /\.when\(Boolean\(b\.disabled\), \(el\) => el\.on_click\(\(_e, cx\) => cx\.stop_propagation\(\)\)\)/);
 });

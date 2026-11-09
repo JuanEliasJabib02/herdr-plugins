@@ -26,3 +26,13 @@ export const BADGE_KEYS = Object.freeze(["badges.spotlight", "badges.pr", "badge
 // menus-model.js parseMenus; the format is RECIPE.md "Menu items from other
 // plugins".
 export const MENU_KEYS = Object.freeze(["menus.spotlight"]);
+
+// Other plugins' remove hooks (Spotlight's D43): programs this mod runs
+// before a workspace is deleted and before a project leaves the list, so a
+// plugin can let go of it first (Spotlight turns its root off). The shared()
+// keys this mod reads, never writes, in the order their hooks run. Same
+// rules as MENU_KEYS: a fixed list, one line per plugin. Each key is
+// { workspace?: argv, project?: argv }, read by remove-workspace-model.js
+// parseRemoveHooks; the format is RECIPE.md "Remove hooks from other
+// plugins".
+export const REMOVE_HOOK_KEYS = Object.freeze(["removeHooks.spotlight"]);

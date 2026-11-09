@@ -1,7 +1,8 @@
 // Spotlight's items in projects-sidebar's workspace menu (D30, S21; Orca's
 // WorktreeSpotlightMenuItems.tsx and WorktreeSpotlightEnvSubMenu.tsx): what
 // badges.js publishes under the shared key `menus.spotlight`, beside the
-// badges. Pure: it imports only the plugin's other pure modules, so
+// badges; and its remove hooks (D43, removeHooksOf at the end), under
+// `removeHooks.spotlight`. Pure: it imports only the plugin's other pure modules, so
 // `node --test` loads it. The contract it codes against is projects-sidebar's
 // RECIPE.md "Menu items from other plugins":
 //   value  { [workspace path, as `git worktree list` prints it]: [item] }
@@ -64,9 +65,11 @@ function item({ id, text, icon, danger, busy, tooltip, checked, action, items })
   return it;
 }
 
+// D41: --note, as the badges' toggle: a refusal is a Spotlight error toast
+// and exit 0, never projects-sidebar's exec-failure toast as well.
 const toggleItem = (bin, at, off, busy) => item({
   id: "toggle", text: off ? "Apagar Spotlight" : "Proyectar este workspace", icon: "flashlight", busy,
-  action: { exec: [bin, "toggle", "--workspace", at] },
+  action: { exec: [bin, "toggle", "--workspace", at, "--note"] },
 });
 
 const forceItem = (bin, root, busy) => item({
@@ -98,8 +101,9 @@ const envMenu = (bin, workspace, env) => item({
 //   cache     badges-model.js parseCache(shared("projects.cache.v1"))
 //   enabled   { [root]: boolean }: whether Spotlight is on for each
 //             registered repo (D7, badges.js enabledRoots)
-//   registry  shared("projects.v1") as Herdr returns it: a workspace's task
-//             lane, for its env key (task-env.js checkoutEnvKey)
+//   registry  shared("projects.v1") as Herdr returns it; no longer read:
+//             a workspace's env key is its task's in any space (D46,
+//             task-env.js checkoutEnvKey)
 //   bin       board-model.js cliPathOf(appHome())
 // → { [path]: [item] } with its paths sorted, or null when no row has any.
 export function buildMenus({ state, settings, projects = [], cache = {}, enabled = {}, registry = null, bin }) {
@@ -126,4 +130,19 @@ export function buildMenus({ state, settings, projects = [], cache = {}, enabled
   const value = {};
   for (const at of [...rows.keys()].sort()) value[at] = rows.get(at);
   return value;
+}
+
+// Spotlight's remove hooks (D43, Orca turning Spotlight off before it
+// removes a worktree or a repo), published by badges.js under the shared key
+// `removeHooks.spotlight` from the same refresh as `menus.spotlight`. The
+// contract is projects-sidebar's RECIPE.md "Remove hooks from other
+// plugins": before a workspace is deleted it runs `spotlight teardown
+// --workspace <path>`, before a project leaves the list `spotlight teardown
+// --repo <path>`, each argument "{path}" replaced by the path as a whole
+// argument. `bin`: board-model.js cliPathOf(appHome()).
+export function removeHooksOf(bin) {
+  return {
+    workspace: [bin, "teardown", "--workspace", "{path}"],
+    project: [bin, "teardown", "--repo", "{path}"],
+  };
 }

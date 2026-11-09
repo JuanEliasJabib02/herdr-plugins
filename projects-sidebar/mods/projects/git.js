@@ -5,10 +5,12 @@
 // remove-workspace-model.js and rename-workspace-model.js, which tests run
 // against a real git (and fakes of gh and ssh).
 
-import { exec } from "herdr";
+import { exec, home } from "herdr";
 import { resolveProject, listCheckouts } from "./lib.js";
 import { fetchOrigin, defaultBaseOf, recentBasesOf, baseExistsIn, branchExistsIn, addWorktreeIn } from "./new-workspace-model.js";
-import { removalCheck as checkRemoval, removeWorkspace as removeWith, removeTask as removeTaskWith } from "./remove-workspace-model.js";
+import {
+  removalCheck as checkRemoval, removeWorkspace as removeWith, removeTask as removeTaskWith, runHooks, HOOK_TIMEOUT,
+} from "./remove-workspace-model.js";
 import { renameCheck as checkRename, renameWorkspace as renameWith, sshHostnameOf } from "./rename-workspace-model.js";
 import { projectPrs, accountsOf } from "./pr-model.js";
 import { readCard, mergePr, readCreateFacts, createPr } from "./pr-card-model.js";
@@ -67,23 +69,37 @@ export const addWorktree = (repo, { name, path, base }) => addWorktreeIn(repo, {
 // mainBranch, list }. Never rejects.
 export const removalCheck = ({ project, path }) => checkRemoval({ project, path }, { git, exists: pathExists });
 
-// Deletes a workspace in D23's order: check again, closeSpaces() (awaited;
-// it closes the workspace's spaces and waits until they are gone), git
-// worktree remove, git branch -d. `seen`: the removalCheck the person
-// confirmed. Resolves { status, err, branch, branchErr, list, check }; never
+// One of other plugins' remove hooks (Spotlight's D43): its argv through
+// exec, never a shell, in the home folder (the workspace's folder is about
+// to go), for at most HOOK_TIMEOUT (120 s), past which exec rejects. What it
+// answers is ignored.
+const runHook = (argv) => exec(argv[0], argv.slice(1), { cwd: home(), timeout: HOOK_TIMEOUT });
+
+// Runs other plugins' remove hooks for `path`: `hooks`, a list of
+// store.removeHooks() (`workspace` or `project`), one after another, each
+// awaited, every failure ignored (remove-workspace-model.js runHooks). Never
 // rejects.
-export const removeWorkspace = ({ project, path, seen }, { closeSpaces }) =>
-  removeWith({ project, path, seen }, { git, exists: pathExists, closeSpaces });
+export const runRemoveHooks = (hooks, path) => runHooks(hooks, path, runHook);
+
+// Deletes a workspace in D23's order: check again, other plugins' workspace
+// hooks (`hooks`: store.removeHooks().workspace, run with the workspace's
+// path, each awaited), closeSpaces() (awaited; it closes the workspace's
+// spaces and waits until they are gone), git worktree remove, git branch -d.
+// `seen`: the removalCheck the person confirmed. Resolves { status, err,
+// branch, branchErr, list, check }; never rejects.
+export const removeWorkspace = ({ project, path, seen }, { closeSpaces, hooks }) =>
+  removeWith({ project, path, seen }, { git, exists: pathExists, closeSpaces, beforeRemove: (dir) => runRemoveHooks(hooks, dir) });
 
 // Deletes a task's workspaces (D36's Run): targets = [{ project, path, seen
 // }], one at a time, each through removeWorkspace with closeSpaces(target)
-// (required: without it nothing is removed). each(result, i): after every
-// target that ran (a throw is ignored). alive(): asked before every target
-// after the first; false or a throw skips the rest ("Stopped: the plugin was
-// reloaded."). Resolves [{ project, path, status, err, branch, branchErr,
-// list, check }] in the targets' order; never rejects.
-export const removeTask = ({ targets }, { closeSpaces, each, alive }) =>
-  removeTaskWith({ targets }, { git, exists: pathExists, closeSpaces, each, alive });
+// (required: without it nothing is removed) and the workspace `hooks` run
+// with that target's path. each(result, i): after every target that ran (a
+// throw is ignored). alive(): asked before every target after the first;
+// false or a throw skips the rest ("Stopped: the plugin was reloaded.").
+// Resolves [{ project, path, status, err, branch, branchErr, list, check }]
+// in the targets' order; never rejects.
+export const removeTask = ({ targets }, { closeSpaces, each, alive, hooks }) =>
+  removeTaskWith({ targets }, { git, exists: pathExists, closeSpaces, each, alive, beforeRemove: (dir) => runRemoveHooks(hooks, dir) });
 
 // ── Rename (D25–D26, D28) ──────────────────────────────────────────────────
 

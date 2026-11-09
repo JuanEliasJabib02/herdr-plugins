@@ -177,7 +177,7 @@ test("listening → gone: one 'Cerraste la terminal del server de <repo>…' toa
   assert.equal(rec.holder, wt, "Spotlight stays on");
   assert.deepEqual(rec.serverProcs, [P3000], "the turn-off still kills what escaped (F1)");
   assert.deepEqual(state.notes, [
-    { at: state.notes[0].at, repo: root, text: GONE_TEXT, toast: true, action: { name: `spotlight.server.${serverId(wt)}` } },
+    { at: state.notes[0].at, repo: root, text: GONE_TEXT, toast: true, action: { name: `spotlight.server.${serverId(wt)}` }, title: "Spotlight · landing" },
   ]);
   // Decided under the repo lock, with a give-up: never waiting on a restart.
   const settle = lockCalls.filter((c) => c.store === "cli");
@@ -322,4 +322,96 @@ test("a server that keeps listening toasts nothing, by the reap or by `on` (thei
   assert.deepEqual(texts(), []);
   assert.equal(state.repos[root].serverState, "listening");
   assert.deepEqual(state.repos[root].ports, [3000]);
+});
+
+// ── T37 (D44): the watcher reaps on the tick that sees it ──────────────────
+
+// `spotlight watch` (watch.mjs runWatcher) over this file's fake cx: its
+// reap is the real one, its looks at t1 what `hc get` prints, its time fake.
+// It reaps at start, then on the first 3 s tick whose look at the server
+// terminal changed, so the toast comes within one tick, in any layout,
+// instead of at the next 30 s reap. `tick()` lets one sleep go.
+async function watcherOver(firstLook) {
+  const { runWatcher } = await import("../mods/spotlight/watch.mjs");
+  const w = { look: firstLook, now: 0, reapsAt: [], mine: true };
+  let parked = null;
+  let onPark = null;
+  const parkedOrDone = () => Promise.race([new Promise((r) => (parked ? r() : (onPark = r))), w.done]);
+  const deps = {
+    readState: () => structuredClone(state),
+    look: async (t) => (t === "t1" ? structuredClone(w.look) : { missing: true }),
+    reap: async () => {
+      w.reapsAt.push(w.now);
+      await reap(cx);
+    },
+    sync: () => {
+      throw new Error("no file changes here");
+    },
+    watchFolder: () => ({ close() {} }),
+    isDirectory: () => false,
+    after: () => ({ cancel() {} }),
+    sleep: (ms) =>
+      new Promise((resume) => {
+        parked = { ms, resume };
+        const p = onPark;
+        onPark = null;
+        p?.();
+      }),
+    now: () => w.now,
+    pidAlive: () => true,
+    stillMine: () => w.mine,
+    release: async () => "idle",
+    stopped: () => false,
+    log: () => {},
+  };
+  w.done = runWatcher(deps);
+  await parkedOrDone();
+  w.tick = async () => {
+    const p = parked;
+    parked = null;
+    w.now += p.ms;
+    p.resume();
+    await parkedOrDone();
+  };
+  w.end = async () => {
+    w.mine = false;
+    await w.tick();
+    return w.done;
+  };
+  return w;
+}
+
+// hc get for t1: the Spotlight tab's shell (pid 50001) with Spotlight's `script` in front.
+const T1_SERVING = { terminal: { address: "t1", state: "live", status: null, turn: 0, foreground: { pid: 50010, name: "script" } } };
+const T1_PROMPT = { terminal: { address: "t1", state: "live", status: null, turn: 0, foreground: { pid: 50001, name: "zsh" } } };
+
+test("T37: the watcher sees the server's tab closed on its next 3 s tick and reaps at once: one toast, no wait for the 30 s reap", async () => {
+  const w = await watcherOver(T1_SERVING);
+  assert.deepEqual(w.reapsAt, [0], "the start's reap");
+  assert.deepEqual(texts(), []);
+  // The tab is closed between two ticks.
+  w.look = { missing: true };
+  live = GONE;
+  await w.tick();
+  assert.deepEqual(w.reapsAt, [0, 3000]);
+  assert.deepEqual(texts(), [GONE_TEXT]);
+  assert.equal(state.repos[root].serverState, "gone");
+  await w.tick();
+  await w.tick();
+  assert.deepEqual(w.reapsAt, [0, 3000], "nothing changed since");
+  assert.deepEqual(texts(), [GONE_TEXT]);
+  assert.equal((await w.end()).reason, "replaced");
+});
+
+test("T37: a Ctrl-C in the Spotlight tab (the shell leads again) is reaped on the tick that sees it: one 'se detuvo' toast", async () => {
+  const w = await watcherOver(T1_SERVING);
+  await w.tick();
+  assert.deepEqual(w.reapsAt, [0]);
+  w.look = T1_PROMPT;
+  live = STOPPED;
+  await w.tick();
+  assert.deepEqual(w.reapsAt, [0, 6000]);
+  assert.deepEqual(texts(), [STOPPED_TEXT]);
+  assert.equal(state.repos[root].serverState, "stopped");
+  assert.equal((await w.end()).reason, "replaced");
 });

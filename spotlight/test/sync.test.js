@@ -367,6 +367,45 @@ describe("sync engine (D8)", () => {
     assert.equal(run(root, "show", `${afterPurge.backupSha}:a.txt`), "a-dirty-in-root");
   });
 
+  test("D43: purgeRefs reads the refs before it drops them and returns what the teardown note names; rescued/* and rescued-pending stay; `applies` only when the backup differs from the original head", async () => {
+    // A clean root: its backup is the original commit itself, nothing to apply.
+    await activate(ctx, root, wt);
+    const clean = await inspectRefs(ctx, root);
+    assert.equal(clean.backupSha, clean.originalHeadSha);
+    const rescued = "refs/herdr-spotlight/rescued/2026-11-09T00-00-00-000Z-abc1234";
+    run(root, "update-ref", rescued, clean.originalHeadSha);
+    run(root, "update-ref", RESCUED_PENDING, clean.originalHeadSha);
+
+    const first = await purgeRefs(ctx, root);
+    assert.deepEqual(first, {
+      originalBranch: "main", originalHeadSha: clean.originalHeadSha, backupSha: clean.backupSha, applies: false, rescued: [rescued],
+    });
+    const gone = await inspectRefs(ctx, root);
+    assert.equal(gone.snapshotSha, null);
+    assert.equal(gone.originalHeadSha, null);
+    assert.equal(gone.originalBranch, null);
+    assert.equal(gone.backupSha, clean.backupSha, "the backup stays");
+    assert.equal(run(root, "rev-parse", rescued), clean.originalHeadSha, "rescued/* stays");
+    assert.equal(run(root, "rev-parse", RESCUED_PENDING), clean.originalHeadSha, "rescued-pending stays");
+
+    // A root with uncommitted changes: the backup is a stash commit to apply.
+    run(root, "checkout", "-q", "-f", "main");
+    write(root, "a.txt", "a-dirty-in-root\n");
+    await activate(ctx, root, wt);
+    const dirty = await inspectRefs(ctx, root);
+    assert.notEqual(dirty.backupSha, dirty.originalHeadSha);
+    const second = await purgeRefs(ctx, root);
+    assert.equal(second.applies, true);
+    assert.equal(second.backupSha, dirty.backupSha);
+    assert.equal(second.originalHeadSha, dirty.originalHeadSha);
+    assert.deepEqual(second.rescued, [rescued]);
+
+    // Nothing of ours left: nulls, nothing to apply, nothing rescued but what stays.
+    run(root, "update-ref", "-d", REFS.backup);
+    const none = await purgeRefs(ctx, root);
+    assert.deepEqual(none, { originalBranch: null, originalHeadSha: null, backupSha: null, applies: false, rescued: [rescued] });
+  });
+
   test("generated files (next-env.d.ts) never count as divergence nor as a collision", async () => {
     assert.ok(GENERATED_FILE_NAMES.has("next-env.d.ts"));
     assert.equal(isGeneratedFile("next-env.d.ts"), true);

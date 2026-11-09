@@ -419,7 +419,10 @@ test("spotlight puts its CLI on PATH as ~/.local/bin/spotlight: it runs through 
   const r = run(INSTALL, home, "spotlight");
   assert.equal(r.status, 0, r.stderr);
   assert.equal(readlinkSync(link), join(home, "mods/spotlight/bin/spotlight"));
-  assert.deepEqual(manifest(home, "spotlight"), [link, "mods/spotlight"]);
+  // D40: the server helper Spotlight types into the root's terminal, beside it.
+  const serve = join(binDir(home), "spotlight-serve");
+  assert.equal(readlinkSync(serve), join(home, "mods/spotlight/bin/spotlight-serve"));
+  assert.deepEqual(manifest(home, "spotlight"), [link, serve, "mods/spotlight"]);
 
   const help = spawnSync(link, ["--help"], { encoding: "utf8" });
   assert.equal(help.status, 0, help.stderr);
@@ -445,6 +448,7 @@ test("spotlight puts its CLI on PATH as ~/.local/bin/spotlight: it runs through 
   const gone = run(INSTALL, home, "--uninstall", "spotlight");
   assert.equal(gone.status, 0, gone.stderr);
   assert.equal(present(link), false);
+  assert.equal(present(serve), false);
   assert.equal(existsSync(join(home, "mods/spotlight")), false);
 });
 
@@ -456,7 +460,7 @@ test("projects-sidebar requires spotlight: it lands first, with its command, and
   assert.ok(spot !== -1, r.stdout);
   assert.ok(spot < r.stdout.indexOf(`installed ${home}/mods/projects\n`), "spotlight lands before projects-sidebar");
   assert.equal(readlinkSync(join(binDir(home), "spotlight")), join(home, "mods/spotlight/bin/spotlight"));
-  assert.deepEqual(manifest(home, "spotlight"), [join(binDir(home), "spotlight"), "mods/spotlight"]);
+  assert.deepEqual(manifest(home, "spotlight"), [join(binDir(home), "spotlight"), join(binDir(home), "spotlight-serve"), "mods/spotlight"]);
 
   const status = find(JSON.parse(readFileSync(join(home, "layouts/projects.json"), "utf8")), "status");
   assert.deepEqual(

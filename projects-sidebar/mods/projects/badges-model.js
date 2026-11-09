@@ -12,7 +12,7 @@
 //              group, `task:<KEY>` exactly as task-model.js builds it
 //              (Spotlight's D29)
 //   a badge:   { icon?, text?, tone?, tooltip?, action?, spin?, reveal?,
-//                pill?, dot?, hover? }
+//                pill?, dot?, hover?, bar?, line?, disabled?, look? }
 //   action:    { command: "<mod>.<command>" } | { exec: [program, ...args] }
 //              (<mod> is the key's first name after `badges.`: its own commands)
 //   spin:      true turns the badge's icon (a busy mark)
@@ -21,6 +21,13 @@
 //   pill:      true draws it as an outlined pill with uppercase text
 //   dot:       "on" | "off", a server dot: filled, or a hollow ring
 //   hover:     a tone the badge's chip and color take on hover
+//   bar:       a tone: its row draws Orca's 3 px bar at its left edge
+//              (Spotlight's D42; the row's first badge carrying one wins)
+//   line:      2 puts it on a second line under the row's label, at its
+//              right; that row grows to 42 px (a lane header keeps one line)
+//   disabled:  true draws it at half opacity, inert: its action is dropped
+//   look:      "secondary" | "outline" beside pill: true, Orca's filled
+//              neutral badge or its outlined one, the text in its own case
 //
 // Anything else is dropped field by field: a bad icon or action goes and the
 // badge stays; a badge left with neither icon nor text goes; a value that
@@ -30,18 +37,20 @@
 // menus-model.js checks plugins' workspace menu items (`menus.*`, Spotlight's
 // D30) with them, so an item's action follows a badge's rules.
 //
-// The look (Spotlight's D39, Orca's sidebar buttons) is pure functions too,
-// below the parse: the chip, the pill, the reveal, the dot and the widths.
-// tree.js only applies them.
+// The look (Spotlight's D39, Orca's sidebar buttons; its D42, Orca's cards)
+// is pure functions too, below the parse: the chip, the pill, the reveal,
+// the dot, the widths, the lines and the bar. tree.js only applies them.
 
 import { BADGE_KEYS } from "./config.js";
 import { normPath, isAbsolute, noteKeyOf } from "./lib.js";
 
 export const BADGE_TONES = ["accent", "dim", "working", "blocked", "done"];
 const DEFAULT_TONE = "dim";
-// The values `reveal` and `dot` take (Spotlight's D39).
+// The values `reveal` and `dot` take (Spotlight's D39), and a pill's `look`
+// (its D42: Orca's Badge variants).
 const REVEALS = ["hover", "grow"];
 const DOTS = ["on", "off"];
+const LOOKS = ["secondary", "outline"];
 
 // Caps, in code points for the strings. Four per plugin so Spotlight's lit
 // root row (its pill, port, logs and X) leaves another plugin a place
@@ -122,16 +131,21 @@ export function actionOf(action, publisher) {
 
 // One badge, or null when it has neither icon nor text. `key` and `index`
 // (its place among that plugin's badges on the row) say which badge a click
-// is on. `spin` and `pill` are kept only as `true`: false is the default,
-// anything else is dropped alone; so are a `reveal` or `dot` that isn't one
-// of theirs and a `hover` that isn't a tone.
+// is on. `spin`, `pill` and `disabled` are kept only as `true` and `line`
+// only as 2: the other value is the default, anything else is dropped alone;
+// so are a `reveal` or `dot` that isn't one of theirs, a `hover` or `bar`
+// that isn't a tone, and a `look` that isn't one of LOOKS or comes without
+// `pill: true`. A disabled badge loses its action (Spotlight's D42: it is
+// published with none, so an older reader draws it inert too).
 function badgeOf(raw, key, index) {
   if (!isObject(raw)) return null;
   const icon = iconOf(raw.icon);
   const text = textOf(raw.text);
   if (!icon && !text) return null;
   const tooltip = tooltipOf(raw.tooltip);
-  const action = actionOf(raw.action, publisherOf(key));
+  const disabled = raw.disabled === true;
+  const action = disabled ? null : actionOf(raw.action, publisherOf(key));
+  const pill = raw.pill === true;
   return {
     key,
     index,
@@ -142,9 +156,13 @@ function badgeOf(raw, key, index) {
     ...(action ? { action } : {}),
     ...(raw.spin === true ? { spin: true } : {}),
     ...(REVEALS.includes(raw.reveal) ? { reveal: raw.reveal } : {}),
-    ...(raw.pill === true ? { pill: true } : {}),
+    ...(pill ? { pill: true } : {}),
     ...(DOTS.includes(raw.dot) ? { dot: raw.dot } : {}),
     ...(BADGE_TONES.includes(raw.hover) ? { hover: raw.hover } : {}),
+    ...(BADGE_TONES.includes(raw.bar) ? { bar: raw.bar } : {}),
+    ...(raw.line === 2 ? { line: 2 } : {}),
+    ...(disabled ? { disabled: true } : {}),
+    ...(pill && LOOKS.includes(raw.look) ? { look: raw.look } : {}),
   };
 }
 
@@ -211,9 +229,10 @@ export function parseBadges(values, keys = BADGE_KEYS) {
 }
 
 // What a badge's hover says: its tooltip, then what a click runs, so a
-// click never runs something unnamed. null when there is nothing to say.
+// click never runs something unnamed. A disabled badge runs nothing
+// (Spotlight's D42): its tooltip alone. null when there is nothing to say.
 export function badgeTooltip(badge) {
-  const a = badge?.action;
+  const a = badge?.disabled ? null : badge?.action;
   const runs = a?.exec ? `runs ${a.exec[0]}` : a?.command ?? null;
   return [badge?.tooltip, runs].filter(Boolean).join(" · ") || null;
 }
@@ -241,6 +260,23 @@ const TAG_PX = 4;
 const CHIP_PX = 6;
 // The server dot (Orca's `size-1.5`).
 const DOT = 6;
+// A look pill (Spotlight's D42, Orca's Badge): `px-1.5`, `rounded-full` on
+// its 16 px, the secondary's neutral fill (the foreground at 10 %, drawn
+// over the row as Orca's secondary over its sidebar, so it still shows on a
+// hovered row) and the chip a look pill shows on hover.
+const LOOK_PX = 6;
+const LOOK_RADIUS = BADGE_BOX / 2;
+const LOOK_FILL = 0.1;
+const LOOK_HOVER = 0.15;
+// A disabled badge's opacity (Orca's `disabled:opacity-50`).
+export const DISABLED_OPACITY = 0.5;
+// A row's height: one line (Orca's `h-7`), or two when a badge asks for
+// line 2 (Orca's card with its details row).
+export const ROW_H = 28;
+export const ROW_H2 = 42;
+// Orca's root bar: `w-[3px]`, `inset-y-1`.
+const BAR_W = 3;
+const BAR_INSET = 4;
 
 const HEX = /^#([0-9a-f]{3}|[0-9a-f]{6}|[0-9a-f]{8})$/i;
 
@@ -269,10 +305,21 @@ export function chipColor(tone, t) {
 
 // A pill's look (`pill: true`), 16 px tall with uppercase 10 px text. Dim:
 // Orca's variant tag, the theme's border and no fill. Any other tone: its
-// SPOTLIGHT chip, the tone's border at 30 % and a 5 % fill. null when the
-// badge isn't a pill.
+// SPOTLIGHT chip, the tone's border at 30 % and a 5 % fill. With a `look`
+// (Spotlight's D42, Orca's Badge, its test-turn badge), whatever the tone:
+// "secondary", a neutral fill with the foreground text, its border the fill
+// (Orca's transparent border); "outline", the theme's border, no fill, the
+// dim text (Orca's muted). Both medium, round-ended (`radius`) and keeping
+// the text's case (`keepCase`). null when the badge isn't a pill.
 export function pillStyle(b, t) {
   if (!b?.pill) return null;
+  if (b.look === "secondary") {
+    const fill = tint(t?.foreground, LOOK_FILL) ?? t?.hover ?? null;
+    return { border: fill, bg: fill, color: t?.foreground ?? null, px: LOOK_PX, weight: "medium", size: PILL_TEXT, radius: LOOK_RADIUS, keepCase: true };
+  }
+  if (b.look === "outline") {
+    return { border: t?.border ?? null, bg: null, color: t?.dim ?? null, px: LOOK_PX, weight: "medium", size: PILL_TEXT, radius: LOOK_RADIUS, keepCase: true };
+  }
   const color = t?.[b.tone] ?? t?.dim ?? null;
   if (b.tone === "dim") return { border: t?.border ?? null, bg: null, color, px: TAG_PX, weight: "semibold", size: PILL_TEXT };
   return { border: tint(color, 0.3) ?? color, bg: tint(color, 0.05), color, px: CHIP_PX, weight: "medium", size: PILL_TEXT };
@@ -282,12 +329,15 @@ export function pillStyle(b, t) {
 // it and the color its icon and text take. Its `hover` tone if it names one,
 // else its own: a dim badge lifts to the foreground, any other keeps its
 // color. A pill's chip is its own: the dim tag takes the hover color, a tone
-// chip its tone at 15 %. null without an action: a badge with nothing to
-// click has no hover look (Orca's logs icon).
+// chip its tone at 15 %; a look pill (Spotlight's D42) a neutral chip, the
+// foreground at 15 %, its text lifting to the foreground, unless `hover`
+// names a tone. null without an action, or disabled: a badge with nothing
+// to click has no hover look (Orca's logs icon, its disabled X).
 export function badgeHover(b, t) {
-  if (!b?.action) return null;
+  if (!b?.action || b.disabled) return null;
   const tone = b.hover ?? b.tone;
   const color = tone === "dim" && !b.hover ? t?.foreground ?? null : t?.[tone] ?? null;
+  if (b.pill && b.look && !b.hover) return { bg: tint(t?.foreground, LOOK_HOVER) ?? t?.hover ?? null, color: t?.foreground ?? null };
   if (!b.pill) return { bg: chipColor(tone, t), color };
   if (tone === "dim") return { bg: t?.hover ?? null, color };
   return { bg: tint(t?.[tone], 0.15) ?? t?.hover ?? null, color };
@@ -306,9 +356,10 @@ export function revealStyle(b, { hovered = false, measured = null } = {}) {
   return { opacity, width: Number.isFinite(measured) ? measured : null };
 }
 
-// Whether a badge's click runs: a reveal badge only while its row is
-// hovered, since at opacity 0 it doesn't show; any other always.
-export const badgeClickable = (b, hovered) => !b?.reveal || hovered === true;
+// Whether a badge's click runs: never a disabled one (Spotlight's D42); a
+// reveal badge only while its row is hovered, since at opacity 0 it doesn't
+// show; any other always.
+export const badgeClickable = (b, hovered) => !b?.disabled && (!b?.reveal || hovered === true);
 
 // Whether a row has a badge that waits for its hover: only such a row tracks
 // its hover (tree.js on_hover).
@@ -360,11 +411,13 @@ export function badgeGaps(badges) {
   return gaps;
 }
 
-// A row's badges laid out, one { maxW, ml, pl, pr, opacity, width,
+// A line of a row's badges laid out (badgeLines' line 1 or line 2, each
+// with its own BADGE_ROOM), one { maxW, ml, pl, pr, opacity, width,
 // clickable } per badge: badgeWidths' cap, badgeGaps' gap, revealStyle's
-// opacity and width (for a grow badge, the width of its clip, the gap it
-// carries included), and badgeClickable. `hovered`: whether the row is;
-// `measured`: each badge's own width as last drawn, or null.
+// opacity, halved when disabled (Spotlight's D42), and width (for a grow
+// badge, the width of its clip, the gap it carries included), and
+// badgeClickable. `hovered`: whether the row is; `measured`: each badge's
+// own width as last drawn, or null.
 export function badgeLayout(badges, { hovered = false, measured = [] } = {}) {
   const list = Array.isArray(badges) ? badges : [];
   const widths = badgeWidths(list);
@@ -373,8 +426,33 @@ export function badgeLayout(badges, { hovered = false, measured = [] } = {}) {
     const { opacity, width } = revealStyle(b, { hovered, measured: measured?.[i] ?? null });
     const g = gaps[i];
     const clip = b?.reveal === "grow" && width !== null && width > 0 ? width + g.pl + g.pr : width;
-    return { maxW: widths[i], ...g, opacity, width: clip, clickable: badgeClickable(b, hovered) };
+    const shown = b?.disabled ? opacity * DISABLED_OPACITY : opacity;
+    return { maxW: widths[i], ...g, opacity: shown, width: clip, clickable: badgeClickable(b, hovered) };
   });
+}
+
+// A row's badges by line (Spotlight's D42, Orca's card): { line1, line2,
+// height }. A `line: 2` badge goes under the label (Orca's details row), the
+// rest stay after it, each in its order; a row with any on line 2 is ROW_H2
+// tall, else ROW_H. A lane header (`lane: true`) has one line: its line-2
+// badges join line 1 at its end, and it stays ROW_H. The row's caps were
+// already counted over both lines (parseBadges).
+export function badgeLines(badges, { lane = false } = {}) {
+  const list = Array.isArray(badges) ? badges : [];
+  const line1 = list.filter((b) => b?.line !== 2);
+  const line2 = list.filter((b) => b?.line === 2);
+  if (lane) return { line1: [...line1, ...line2], line2: [], height: ROW_H };
+  return { line1, line2, height: line2.length ? ROW_H2 : ROW_H };
+}
+
+// The bar a row draws at its left edge (Spotlight's D42, Orca's amber root
+// bar): { color, width, inset } in px, from the first of its badges whose
+// `bar` is a tone; null with none, or when the theme lacks that color.
+export function rowBar(badges, t) {
+  const list = Array.isArray(badges) ? badges : [];
+  const tone = list.find((b) => BADGE_TONES.includes(b?.bar))?.bar;
+  const color = tone ? t?.[tone] ?? null : null;
+  return color ? { color, width: BAR_W, inset: BAR_INSET } : null;
 }
 
 const firstLine = (s) => String(s ?? "").split("\n").map((l) => l.trim()).find(Boolean) ?? "";

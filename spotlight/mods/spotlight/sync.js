@@ -1054,12 +1054,30 @@ async function writeBack(ctx, rootPath, refs, rescue, original) {
   return { ref: rescue.ref, restored, kept };
 }
 
-/** Teardown when a normal turn-off can't finish (the repo is going away):
- *  best-effort deletion of the anchor refs. Keeps the backup ref: the root's
+/** Teardown when a normal turn-off can't finish (the repo is going away,
+ *  D43, Orca's purgeForTeardown): reads the refs first, then deletes the
+ *  anchor refs (the snapshot, original-head and original-branch, as a
+ *  turn-off's last step does), best effort. Keeps the backup ref: the root's
  *  uncommitted state is reachable only through it (its first parent is the
- *  original HEAD). */
+ *  original HEAD). Keeps every rescued/* ref and rescued-pending too (L11):
+ *  the untracked root files a turn-off saved are only there. Returns what it
+ *  read, for the note that names the recovery handles: {originalBranch,
+ *  originalHeadSha, backupSha, applies, rescued}. `applies` when the backup
+ *  holds uncommitted changes, which `git stash apply --index` brings back:
+ *  it differs from the original head (the check deactivate makes; with a
+ *  clean root the backup is the original commit itself). `rescued`: the
+ *  rescued/* refs, sorted. Nulls and [] for what isn't there. */
 export async function purgeRefs(ctx, rootPath) {
+  const refs = await inspectRefs(ctx, rootPath);
+  const listed = await gitTry(ctx, rootPath, ["for-each-ref", "--format=%(refname)", RESCUED_PREFIX]);
   await gitTry(ctx, rootPath, ["update-ref", "-d", REFS.snapshot]);
   await gitTry(ctx, rootPath, ["update-ref", "-d", REFS.originalHead]);
   await gitTry(ctx, rootPath, ["symbolic-ref", "--delete", REFS.originalBranch]);
+  return {
+    originalBranch: refs.originalBranch,
+    originalHeadSha: refs.originalHeadSha,
+    backupSha: refs.backupSha,
+    applies: Boolean(refs.backupSha && refs.originalHeadSha && refs.backupSha !== refs.originalHeadSha),
+    rescued: (listed ?? "").split("\n").filter(Boolean).sort(),
+  };
 }

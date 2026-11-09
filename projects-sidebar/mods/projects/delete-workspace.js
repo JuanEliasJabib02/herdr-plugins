@@ -3,10 +3,11 @@
 // would take (removalCheck, D24): Delete stays off until git answers, a
 // locked worktree has no Delete, and changes or submodules turn it into
 // "Delete anyway". Delete runs removeWorkspace in D23's order (check again,
-// close the spaces, git worktree remove, git branch -d) in a task no view
-// owns: Herdr's Esc may close even a modal dialog, and a closed dialog's own
-// tasks are cancelled after 250 ms, which would cut the sequence between
-// closing the spaces and removing the folder. Its outcome goes to the dialog
+// other plugins' remove hooks, close the spaces, git worktree remove, git
+// branch -d) in a task no view owns: Herdr's Esc may close even a modal
+// dialog, and a closed dialog's own tasks are cancelled after 250 ms, which
+// would cut the sequence between closing the spaces and removing the folder
+// (or between a hook and the rest). Its outcome goes to the dialog
 // while it is open, else to a toast. What it says and what an outcome does
 // live in tree-model.js (deletePrompt, deleteOutcome).
 
@@ -110,6 +111,9 @@ export default class DeleteWorkspace {
     if (this.busy || !shown.ready) return;
     const { project, path } = this;
     const seen = this.check; // what the person confirmed: "Delete anyway" forces once
+    // Other plugins' workspace hooks (Spotlight's D43), run after the check
+    // and before the spaces close.
+    const hooks = store.removeHooks().workspace;
     this.busy = true;
     this.error = "";
     cx.notify();
@@ -118,7 +122,7 @@ export default class DeleteWorkspace {
     cx.spawn(async (bg) => {
       let r;
       try {
-        r = await removeWorkspace({ project, path, seen }, { closeSpaces: () => closeSpaces(path, bg) });
+        r = await removeWorkspace({ project, path, seen }, { closeSpaces: () => closeSpaces(path, bg), hooks });
       } catch (e) {
         r = { status: "failed", err: String(e?.message ?? e), branch: null, branchErr: null, list: null, check: null };
       }

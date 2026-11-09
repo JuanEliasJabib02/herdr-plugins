@@ -4,7 +4,12 @@
 // a port outside 1..65535 refused, unknown keys kept, and whether a `queue.*`
 // value changed, so the dialog execs `spotlight reap` (Orca's capChanged
 // regrant). T26 (D37): each command field's "▾" suggestions and placeholder,
-// and a save that turns a lit repo off before it stores `enabled: false`.
+// and turning a lit repo off before `enabled: false` is stored. T40 (D47,
+// Orca's RepositorySpotlightSection / RepositorySpotlightServerFields): no
+// Guardar; each control saves on its own (saveChange) through settings.json's
+// compare-and-swap (casWrite): the "Usar Spotlight" switch on change (a lit
+// repo turned off first, Apagar igual when refused), the fields on blur or
+// Enter, and Orca's help texts in Spanish.
 // Pure, no Herdr import, so node tests it.
 
 import {
@@ -16,10 +21,11 @@ import {
   clampInt,
   parseCommand,
   defaultEnabled,
+  parseSettings,
   repoSettings,
   perSpaceLimit,
 } from "./settings.js";
-import { commandTemplate } from "./server-plan.js";
+import { commandTemplate, formatVariant, VARIANT_PLACEHOLDER } from "./server-plan.js";
 
 const isObject = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
 const folderName = (root) => root.split("/").filter(Boolean).pop() ?? root;
@@ -215,7 +221,146 @@ export function commandPlaceholder(stored, detection, env) {
   return commandTemplate({ settings: { envs }, detected: detection?.detected ?? {}, env }) ?? NO_START;
 }
 
-// ── Apagado on a lit repo (D37, Orca's RepositorySpotlightSection) ─────────
+// ── Orca's help texts, in Spanish (D47) ────────────────────────────────────
+
+// RepositorySpotlightSection's (the section, the logs, the switch) and
+// RepositorySpotlightServerFields' (Server, Puerto).
+export const HELP = {
+  section: "Prueba los cambios de un workspace en el root del proyecto sin duplicar dependencias instaladas ni builds.",
+  logs: "Con Spotlight encendido, la salida de la terminal del server queda en un log que los agentes de cualquier workspace leen con `spotlight logs`.",
+  switchLabel: "Usar Spotlight",
+  switch: "Muestra un botón de Spotlight en los workspaces de este proyecto que refleja sus cambios en el root del proyecto.",
+  serverTitle: "Server",
+  server: "Spotlight corre este comando en la terminal de Spotlight al prenderse y le agrega --port N. Un campo vacío usa el script detectado en package.json. Local usa Dev si no tiene.",
+  portLabel: "Puerto",
+  port: "Se agrega al comando como --port N. Vacío deja el puerto del comando.",
+  portPlaceholder: "Por defecto del comando",
+  // Orca's toast action on a refused turn-off: the forced one.
+  forceOff: "Apagar igual",
+};
+
+// Orca's variant help, only for a repo with variants (detectServerScripts'
+// `variants`); null otherwise. `detection`: its answer, or null.
+export function variantHelp(detection) {
+  const variants = Array.isArray(detection?.variants) ? detection.variants.filter((v) => typeof v === "string" && v) : [];
+  if (variants.length === 0) return null;
+  return `Este proyecto corre uno de ${variants.map(formatVariant).join(", ")} a la vez. Escribe ${VARIANT_PLACEHOLDER} en un comando para correr el de cada tarea: Spotlight lo elige por las apps que cambió la rama de la tarea, o pregunta.`;
+}
+
+// ── One control, one save (D47) ────────────────────────────────────────────
+
+// A change is one control's new value:
+//   { queue: "enabled" | "autoResume", value: boolean }   the queue's switches
+//   { queue: "cap", value: text }                          Máximo en total
+//   { queue: "perSpace", lane, value: text }               a space's limit
+//   { root, field: "enabled", value: boolean }             Usar Spotlight
+//   { root, field: "env", value: "local" | "dev" | "prod" } the env chip
+//   { root, field: "envs.<env>", value: text }             a command field
+//   { root, field: "port", value: text }                   Puerto
+
+const envOf = (field) => (typeof field === "string" && field.startsWith("envs.") ? field.slice(5) : null);
+
+// The stored value a change is about, as parsed settings hold it (a repo
+// with no record reads as the defaults).
+function storedValue(settings, change) {
+  if (change.root !== undefined) {
+    const r = repoSettings(settings, change.root);
+    const env = envOf(change.field);
+    if (env) return r.envs?.[env] ?? null;
+    if (change.field === "enabled") return typeof r.enabled === "boolean" ? r.enabled : null;
+    if (change.field === "env") return ENVS.includes(r.env) ? r.env : ENVS[0];
+    if (change.field === "port") return r.port ?? null;
+    return undefined;
+  }
+  if (change.queue === "perSpace") return perSpaceLimit(settings, change.lane);
+  return settings.queue?.[change.queue];
+}
+
+// What one change saves: applyForm's answer for a form that is the stored
+// settings with that one control changed, so a save checks, trims and clamps
+// exactly as before, and keeps every other value and unknown key.
+// `settings` is null when nothing is written: the value is refused (errors:
+// [{ field, message }]) or what is stored already (an unchanged value, Enter
+// then blur). needsReap: a queue value changed (the dialog runs the reap).
+export function saveChange(settings, change) {
+  const nothing = { settings: null, errors: [], needsReap: false };
+  const root = change?.root !== undefined ? normRoot(change.root) : null;
+  const lanes = change?.queue === "perSpace" && change.lane ? [{ id: change.lane }] : [];
+  const form = toForm(settings, { lanes, repos: root ? [{ root }] : [] });
+  if (root) {
+    const f = form.repos[root];
+    const env = envOf(change.field);
+    if (env && ENVS.includes(env)) f.envs[env] = change.value;
+    else if (change.field === "enabled" || change.field === "env" || change.field === "port") f[change.field] = change.value;
+    else return nothing;
+  } else if (change?.queue === "perSpace" && change.lane) form.queue.perSpace[change.lane] = change.value;
+  else if (["enabled", "autoResume", "cap"].includes(change?.queue)) form.queue[change.queue] = change.value;
+  else return nothing;
+  const out = applyForm(settings, form);
+  if (!out.settings) return { settings: null, errors: out.errors, needsReap: false };
+  const key = root ? { ...change, root } : change;
+  if (sameJson(storedValue(out.settings, key), storedValue(settings, key))) return nothing;
+  return out;
+}
+
+// The text a typed field shows for the stored value: the trimmed command,
+// the clamped number, or the stored one again for text that wasn't a number.
+export function fieldText(settings, change) {
+  const value = storedValue(settings, change?.root !== undefined ? { ...change, root: normRoot(change.root) } : change);
+  return value == null ? "" : String(value);
+}
+
+// One change written through settings.json's compare-and-swap (D7: only the
+// mod writes it, against the text it read). `io`: { read() → text | null,
+// write(text, expected) }, which rejects on a stale snapshot (expected null
+// creates the file). `snapshot`: { text, settings } as last read or written.
+// `apply(settings)`: saveChange's answer for those settings. A stale snapshot
+// reads the file again and applies the change to what it holds now (another
+// writer's values kept), up to `tries` times. Answers { ok, wrote, text,
+// settings } (the snapshot to keep), { ok: false, wrote: false, errors } for
+// a refused value, or { ok: false, wrote: false } when every try was stale.
+export async function casWrite(io, snapshot, apply, tries = 3) {
+  let text = snapshot.text;
+  let settings = snapshot.settings;
+  for (let attempt = 0; attempt < tries; attempt++) {
+    if (attempt > 0) {
+      try {
+        text = await io.read();
+      } catch {
+        continue;
+      }
+      settings = parseSettings(text).settings;
+    }
+    const out = apply(settings);
+    if (out.errors?.length > 0) return { ok: false, wrote: false, errors: out.errors };
+    if (!out.settings) return { ok: true, wrote: false, text, settings, needsReap: false };
+    const next = serializeSettings(out.settings);
+    try {
+      await io.write(next, text);
+    } catch {
+      continue; // Stale: read it again.
+    }
+    return { ok: true, wrote: true, text: next, settings: parseSettings(next).settings, needsReap: out.needsReap };
+  }
+  return { ok: false, wrote: false };
+}
+
+// ── Usar Spotlight (D47) and turning a lit repo off first (D37) ────────────
+
+// The switch of one repo: `on` what it shows (the stored value, or the
+// registration default for an unset repo), `disabled` when it can't be
+// flipped (~/.claude, always off; or the default still being looked up), and
+// `note` the dim line beside it: the default and why, or the harness. `repo`:
+// its repoSettings record; `facts`: as enabledChoice takes them.
+export function spotlightSwitch(repo, facts) {
+  const choice = enabledChoice(repo, facts);
+  const harness = Boolean(facts?.harness);
+  return {
+    on: choice.effective === true,
+    disabled: harness || choice.effective === null,
+    note: harness || choice.value === null ? choice.label : "",
+  };
+}
 
 // The turn-off waits this long: a turn-off stops the server (up to 8 s for
 // the prompt, 3 s more to kill) and restores the root (git work).
@@ -235,46 +380,30 @@ export function isLit(state, root) {
 // turns off (never lights), whoever holds it now.
 export const turnOffArgv = (root) => ["toggle", "--workspace", normRoot(root), "--inline"];
 
-// The save in two steps when a lit repo is switched to Apagado: applyForm's
-// answer, plus `turnOff` [{ root, argv }], the repos switched to Apagado
-// (stored value not already false) that `state` (state.json) has lit. Their
-// `enabled` keeps its stored value in `settings`, the first write; the dialog
-// turns each off, then writes `enabled: false` (withEnabledOff) for the ones
-// that went off. Nothing to turn off when a field is refused.
-export function planSave(settings, form, state) {
-  const out = applyForm(settings, form);
-  if (!out.settings) return { ...out, turnOff: [] };
-  const turnOff = [];
-  const repos = { ...out.settings.repos };
-  for (const [root, f] of Object.entries(form.repos ?? {})) {
-    const before = settings.repos[root];
-    if (f.enabled !== false || before?.enabled === false || !isLit(state, root)) continue;
-    turnOff.push({ root, argv: turnOffArgv(root) });
-    if (before) repos[root] = { ...repos[root], enabled: before.enabled ?? null };
-    else if (repos[root] && repoIsDefault({ ...repos[root], enabled: null })) delete repos[root];
-    else if (repos[root]) repos[root] = { ...repos[root], enabled: null };
-  }
-  return { ...out, settings: { ...out.settings, repos }, turnOff };
-}
+// Apagar igual: the same turn-off, forced (the root's own changes or the
+// untracked files in the way are dropped, as the server popup's).
+export const forceTurnOffArgv = (root) => [...turnOffArgv(root), "--force"];
 
-// Settings with `enabled: false` for `roots` (the repos whose turn-off went
-// through); every other value kept. A new object: `settings` is left alone.
-export function withEnabledOff(settings, roots) {
-  const repos = { ...settings.repos };
-  for (const raw of roots) {
-    const root = normRoot(raw);
-    repos[root] = { ...(repos[root] ?? {}), enabled: false };
-  }
-  return { ...settings, repos };
+// What flipping a repo's switch does: `shown` is what it shows (spotlightSwitch's
+// `on`), the flip saves the opposite. Off on a repo `state` (state.json) has
+// lit turns it off first: `turnOff` { root, argv }, and `change` is written
+// only once it went off (afterTurnOff's writeOff); otherwise `change` is
+// written at once. null when what it shows isn't known.
+export function flipSpotlight(root, shown, state) {
+  if (typeof shown !== "boolean") return null;
+  const key = normRoot(root);
+  const change = { root: key, field: "enabled", value: !shown };
+  const turnOff = shown && isLit(state, key) ? { root: key, argv: turnOffArgv(key) } : null;
+  return { change, turnOff };
 }
 
 const firstLine = (s) => String(s ?? "").split("\n").map((l) => l.trim()).find(Boolean) ?? "";
 
 // The turn-off's exec answer ({ code, stdout, stderr }, or { error } when the
 // exec threw) as { ok, message }. Exit 0 went off; `root-is-holder` means
-// nothing is lit any more (the record went since the re-read), so the switch
-// can be written too. Otherwise the switch stays on and `message` is stderr's
-// first line (else stdout's, else the exit code).
+// nothing is lit any more (the record went since state.json was read), so
+// the switch can be written too. Otherwise the switch stays on and `message`
+// is stderr's first line (else stdout's, else the exit code).
 export function turnOffOutcome(result) {
   if (result?.error !== undefined) {
     return { ok: false, message: firstLine(result.error?.message ?? result.error) || "no se pudo apagar" };
@@ -283,4 +412,20 @@ export function turnOffOutcome(result) {
   const line = firstLine(result?.stderr);
   if (line.startsWith("root-is-holder")) return { ok: true, message: "" };
   return { ok: false, message: line || firstLine(result?.stdout) || `salió con código ${result?.code}` };
+}
+
+// The refusals Apagar igual forces, the CLI's own (its hint and the server
+// popup's): the root changed outside the workspace, or untracked files in the
+// way. A message is `<code>: …` (the CLI's stderr).
+const FORCEABLE = ["root-diverged", "untracked-collision"];
+export const offersForce = (message) => FORCEABLE.some((code) => String(message ?? "").startsWith(`${code}:`));
+
+// What the dialog does once a turn-off answered: { ok, message, writeOff,
+// offerForce }. A turn-off of the switch that went off writes `enabled:
+// false`; a refused one leaves the switch on and offers Apagar igual when
+// forcing fixes the refusal. Apagar igual (`forced`) never writes the switch:
+// it stays on whatever the answer, as after Orca's toast action.
+export function afterTurnOff(result, { forced = false } = {}) {
+  const { ok, message } = turnOffOutcome(result);
+  return { ok, message, writeOff: ok && !forced, offerForce: !ok && !forced && offersForce(message) };
 }

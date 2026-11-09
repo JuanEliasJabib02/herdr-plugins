@@ -203,6 +203,25 @@ test("D35: addNote keeps a note's level and the popup button its toast names; a 
   assert.ok(!("level" in notes[2]) && !("button" in notes[2]));
 });
 
+test("D41: addNote keeps a note's title, body (an empty one too: a title-only toast) and timeout; a note without them, or with values that aren't one, has none, as before", async () => {
+  const dir = tmp();
+  const store = createStore({ stateDir: dir, hasServerCommand: noServer, now: () => 42 });
+  await store.updateState((s) => {
+    addNote(s, { repo: "/code/app", text: "Spotlight on · app ← ax-1 · server arrancando", toast: true, level: "success", title: "Spotlight on — x", body: "Arrancando vite — logs en /l" }, 43);
+    addNote(s, { repo: "/code/app", text: "Spotlight off — root restaurado", toast: true, level: "success", title: "Spotlight off — y", body: "" }, 44);
+    addNote(s, { repo: "/code/app", text: "ask", toast: true, level: "info", title: "Elige", body: "b", timeout: 60_000 }, 45);
+    addNote(s, { repo: "/code/app", text: "plain", toast: true }, 46);
+    addNote(s, { repo: "/code/app", text: "odd", toast: true, title: "", body: 7, timeout: 0 }, 47);
+  });
+  assert.deepEqual(store.readState().notes, [
+    { at: 43, repo: "/code/app", text: "Spotlight on · app ← ax-1 · server arrancando", toast: true, level: "success", title: "Spotlight on — x", body: "Arrancando vite — logs en /l" },
+    { at: 44, repo: "/code/app", text: "Spotlight off — root restaurado", toast: true, level: "success", title: "Spotlight off — y", body: "" },
+    { at: 45, repo: "/code/app", text: "ask", toast: true, level: "info", title: "Elige", body: "b", timeout: 60_000 },
+    { at: 46, repo: "/code/app", text: "plain", toast: true },
+    { at: 47, repo: "/code/app", text: "odd", toast: true },
+  ]);
+});
+
 test("variants: the per-task remembered variant, keyed <lane>/<taskKey>::<root>, at most 500, oldest dropped first", async () => {
   assert.equal(VARIANTS_MAX, 500);
   assert.equal(variantKey("g1", "AX-3447", "/code/landing/"), "g1/AX-3447::/code/landing");
@@ -474,6 +493,31 @@ test("D32: envs keeps at most ENVS_MAX picks: a pick again is the newest, and th
   });
   assert.equal(Object.keys(store.readState().envs).length, ENVS_MAX);
   assert.equal(Object.keys(store.readState().envs)[0], "g1/T-5");
+});
+
+test("D46: a task named 2024 (fix/2024's) is stored as task:2024 and keeps its place in the order and the cap through a write", async () => {
+  const { envKeyOf } = await import(new URL("../mods/spotlight/task-env.js", import.meta.url).href);
+  const key = envKeyOf("g1/2024", "/code/app-wt");
+  assert.equal(key, "task:2024");
+  const dir = tmp();
+  const store = createStore({ stateDir: dir, hasServerCommand: noServer });
+  await store.updateState((s) => {
+    rememberEnv(s, "task:AX-1", "dev");
+    rememberEnv(s, key, "prod");
+    rememberEnv(s, "ws:/code/app-wt2", "local");
+  });
+  assert.deepEqual(Object.keys(store.readState().envs), ["task:AX-1", "task:2024", "ws:/code/app-wt2"], "insertion order, read back");
+  // Picked again it is the newest; the cap drops the oldest, never it.
+  await store.updateState((s) => {
+    rememberEnv(s, key, "dev");
+    for (let i = 0; i < ENVS_MAX - 1; i++) rememberEnv(s, `task:T-${i}`, "local");
+  });
+  const keys = Object.keys(store.readState().envs);
+  assert.equal(keys.length, ENVS_MAX);
+  assert.equal(keys[0], "task:2024", "the oldest left, in its place");
+  assert.equal(store.readState().envs[key], "dev");
+  await store.updateState((s) => rememberEnv(s, "task:T-new", "local"));
+  assert.equal(key in store.readState().envs, false, "the oldest goes first");
 });
 
 // ── D33: the busy mark; D31: the task batch marker ─────────────────────────
