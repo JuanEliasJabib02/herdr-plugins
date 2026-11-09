@@ -2,19 +2,25 @@
 // what other plugins publish under the fixed keys in config.js BADGE_KEYS:
 // each key is { [workspacePath]: [badge] }, read through store.js, drawn
 // after a workspace row's label by tree.js. The contract other plugins
-// consume is RECIPE.md "Badges from other plugins".
+// consume is RECIPE.md "Badges from other plugins". Spotlight T18 (its D29):
+// a key `<groupId>/task:<KEY>` holds that group's task lane badges, drawn on
+// the lane's header, and `spin: true` turns a badge's icon.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { BADGE_KEYS } from "../projects-sidebar/mods/projects/config.js";
 import {
-  parseBadges, badgeTooltip, badgeMaxWidth, execFailure, startFailure, BADGE_ROOM, BADGE_GAP,
+  parseBadges, badgeTooltip, badgeMaxWidth, badgeRun, laneBadgeKey, execFailure, startFailure, BADGE_ROOM, BADGE_GAP,
 } from "../projects-sidebar/mods/projects/badges-model.js";
 
 const src = (f) => readFileSync(new URL(`../projects-sidebar/mods/projects/${f}`, import.meta.url), "utf8");
 
+const HOME = "/Users/demo";
 const LOGIN = "/Users/demo/orca/workspaces/app/login";
 const APP = "/code/app";
+// A ticket lane of group g1, as the tree keys it (task-model.js laneKey).
+const AX = "g1/task:AX-3653";
+const ICON = "mods/spotlight/icons/flashlight.svg";
 
 // The one badge a lone spotlight value draws on "/w", or null when dropped.
 const one = (badge) => parseBadges([{ "/w": [badge] }])["/w"]?.[0] ?? null;
@@ -268,8 +274,182 @@ test("tree.js draws a row's badges after its label and runs their actions (D38)"
   const runner = body("runBadge");
   assert.match(runner, /if \(running\.has\(id\)\) return;\s*running\.add\(id\);/);
   assert.match(runner, /finally \{\s*running\.delete\(id\);/);
-  assert.match(runner, /exec\(argv\[0\], argv\.slice\(1\), \{ cwd: path \}\)/);
+  // Where it runs and its guard's id come from badgeRun (tested above): a
+  // workspace row's badge runs in that workspace's folder, as before.
+  assert.match(runner, /const \{ id, cwd \} = badgeRun\(\{ target, badge: b, home: home\(\) \}\);/);
+  assert.match(runner, /exec\(argv\[0\], argv\.slice\(1\), \{ cwd \}\)/);
+  assert.match(badge, /runBadge\(\{ path: w\.path \}, b, cx\)/);
   assert.match(runner, /run\(command\)/);
   assert.match(runner, /level: "warning"/);
   assert.doesNotMatch(runner, /"sh"|"-c"/, "never a shell");
+});
+
+// ── Lane badges and spin (Spotlight T18, its D29) ─────────────────────────
+
+// A row's badges as "<plugin>:<text>:<index>".
+const brief = (row) => (row ?? []).map((b) => `${b.key.slice(7)}:${b.text}:${b.index}`);
+
+test("lane keys (D29): `<groupId>/task:<KEY>` holds that group's lane badges, beside path keys, with the same field rules and caps", () => {
+  const flashlight = {
+    icon: ICON,
+    tone: "working",
+    tooltip: "Spotlight prendido para esta tarea.",
+    action: { exec: ["spotlight", "toggle", "--task", "AX-3653", "--group", "g1"] },
+  };
+  const got = parseBadges([{
+    [LOGIN]: [{ text: "on", tone: "working" }],
+    [AX]: [flashlight, { text: "Dev" }],
+    "g1/task:login": [{ text: "#2", tone: "accent" }],
+    "g2/task:AX-3653": [{ text: "Prod" }],
+  }]);
+  assert.deepEqual(got, {
+    [LOGIN]: [{ key: "badges.spotlight", index: 0, text: "on", tone: "working" }],
+    [AX]: [
+      { key: "badges.spotlight", index: 0, ...flashlight },
+      { key: "badges.spotlight", index: 1, text: "Dev", tone: "dim" },
+    ],
+    "g1/task:login": [{ key: "badges.spotlight", index: 0, text: "#2", tone: "accent" }],
+    // Every group's lanes are read; the tree draws only the active group's.
+    "g2/task:AX-3653": [{ key: "badges.spotlight", index: 0, text: "Prod", tone: "dim" }],
+  });
+
+  // Each field follows a path badge's rule: a lane key parses a badge
+  // exactly as a path key does.
+  const onLane = (raw, key = "badges.spotlight") => parseBadges([{ [AX]: [raw] }], [key])[AX]?.[0] ?? null;
+  const onPath = (raw, key = "badges.spotlight") => parseBadges([{ [LOGIN]: [raw] }], [key])[LOGIN]?.[0] ?? null;
+  for (const raw of [
+    { icon: "mods/s/../x.svg", text: "t" },
+    { icon: "mods/s/../x.svg" },
+    { text: "abcdefghijklmnopqrstuvwxyz", tone: "red" },
+    { text: "  3\n  tests ", tooltip: "  a\n\n b ", color: "#f00" },
+    { text: "x", action: { command: "spotlight.toggle" } },
+    { text: "x", action: { command: "pr.open" } },
+    { text: "x", action: { command: "app.quit" } },
+    { text: "x", action: { exec: ["./spotlight"] } },
+    { text: "x", action: { exec: ["/usr/bin/true", "--task", "AX-3653"] } },
+    { text: "x", action: { command: "spotlight.toggle", exec: ["/usr/bin/true"] } },
+    { tooltip: "neither icon nor text" },
+  ]) {
+    assert.deepEqual(onLane(raw), onPath(raw), JSON.stringify(raw));
+  }
+  assert.deepEqual(onLane({ text: "#1", action: { command: "pr.open" } }, "badges.pr").action, { command: "pr.open" }, "the publisher rule holds on a lane");
+
+  // Caps: 3 per plugin and 4 per lane, in key order.
+  const five = ["a", "b", "c", "d", "e"].map((text) => ({ text }));
+  assert.deepEqual(brief(parseBadges([{ [AX]: five }])[AX]), ["spotlight:a:0", "spotlight:b:1", "spotlight:c:2"]);
+  const three = (p) => ({ [AX]: ["1", "2", "3"].map((n) => ({ text: `${p}${n}` })) });
+  assert.deepEqual(brief(parseBadges([three("s"), three("p"), three("h")])[AX]), ["spotlight:s1:0", "spotlight:s2:1", "spotlight:s3:2", "pr:p1:0"]);
+  // A lane and a workspace row each have their own caps.
+  const both = parseBadges([{ [AX]: five, [LOGIN]: five }]);
+  assert.equal(both[AX].length, 3);
+  assert.equal(both[LOGIN].length, 3);
+
+  // The key the tree looks a lane up by: its group's id, "/", its lane.
+  assert.equal(laneBadgeKey("g1", "task:AX-3653"), AX);
+  assert.equal(laneBadgeKey("g2", "task:login"), "g2/task:login");
+});
+
+test("lane keys (D29): no group, no task, No task's lane or a name noteKeyOf refuses is dropped; an absolute key is still a path", () => {
+  const raw = (key) => ({ [key]: [{ text: "x" }] });
+  for (const key of [
+    "g1/task:", "g1/task:none", "g1/task:NONE", "task:AX-3653", "AX-3653", "servers", "g1/servers", "g1/AX-3653",
+    "g1/task:__proto__", "g1/task:constructor", "g1/task:Prototype", `g1/task:${"x".repeat(201)}`,
+    "g1:task:AX-3653", "g1/Task:AX-3653", "g1task:AX-3653", "",
+  ]) {
+    assert.deepEqual(parseBadges([raw(key)]), {}, JSON.stringify(key.slice(0, 24)));
+  }
+  // noteKeyOf's limit: a 200-char name is still a lane.
+  const long = `g1/task:${"x".repeat(200)}`;
+  assert.deepEqual(Object.keys(parseBadges([raw(long)])), [long]);
+
+  // A parsed `__proto__`, alone or as a lane name, stays out of the result
+  // and its prototype.
+  const kept = parseBadges([JSON.parse('{"__proto__": [{"text": "p"}], "g1/task:__proto__": [{"text": "q"}], "g1/task:AX-1": [{"text": "k"}]}')]);
+  assert.deepEqual(Object.keys(kept), ["g1/task:AX-1"]);
+  assert.equal(Object.getPrototypeOf(kept), Object.prototype);
+
+  // A key is read as it is written: no case or slash is fixed, so a lane
+  // published in another form than the tree's is kept but drawn nowhere
+  // (tree-model.test.js).
+  assert.deepEqual(Object.keys(parseBadges([raw("g1/task:ax-3653")])), ["g1/task:ax-3653"]);
+  // An absolute key is a path, as before, whatever it spells.
+  assert.deepEqual(Object.keys(parseBadges([raw("/g1/task:AX-3653/")])), ["/g1/task:AX-3653"]);
+});
+
+test("spin (D29): `spin: true` is kept on path and lane badges; any other value drops alone; a badge without it parses as before", () => {
+  const plain = { key: "badges.spotlight", index: 0, icon: ICON, tone: "dim" };
+  assert.deepEqual(one({ icon: ICON, spin: true }), { ...plain, spin: true });
+  assert.deepEqual(parseBadges([{ [AX]: [{ icon: ICON, spin: true }] }])[AX][0], { ...plain, spin: true });
+  assert.deepEqual(one({ text: "x", spin: true }).spin, true, "kept with text alone; only an icon turns");
+  // false is the default: no field, as a badge that never had one.
+  assert.deepEqual(one({ icon: ICON, spin: false }), plain);
+  for (const spin of ["true", 1, 0, null, {}, [true]]) {
+    assert.deepEqual(one({ icon: ICON, spin }), plain, `${JSON.stringify(spin)}: dropped alone, the badge stays`);
+    assert.deepEqual(one({ icon: ICON, text: "t", tone: "working", spin }), { ...plain, text: "t", tone: "working" }, JSON.stringify(spin));
+  }
+  // A badge with no icon or text still goes, spin or not.
+  assert.equal(one({ spin: true }), null);
+});
+
+test("badgeRun (D29): a path badge's exec runs in its workspace, keyed as before; a lane badge's in the home folder, keyed by group and lane", () => {
+  const b = { key: "badges.spotlight", index: 1, text: "x", tone: "dim", action: { exec: ["spotlight"] } };
+  // A workspace row's: the id runBadge built before T18, and its folder.
+  assert.deepEqual(badgeRun({ target: { path: LOGIN }, badge: b, home: HOME }), { id: `${LOGIN}\nbadges.spotlight\n1`, cwd: LOGIN });
+
+  const lane = badgeRun({ target: { group: "g1", lane: "task:AX-3653" }, badge: b, home: HOME });
+  assert.equal(lane.cwd, HOME, "a lane has no folder: the home one");
+  assert.equal(lane.id, `${AX}\nbadges.spotlight\n1`, "the id holds the group and the lane");
+
+  // Another group's lane of the same name, another plugin's badge or
+  // another place in the row is another guard.
+  const ids = [
+    lane.id,
+    badgeRun({ target: { group: "g2", lane: "task:AX-3653" }, badge: b, home: HOME }).id,
+    badgeRun({ target: { group: "g1", lane: "task:AX-3653" }, badge: { ...b, key: "badges.pr" }, home: HOME }).id,
+    badgeRun({ target: { group: "g1", lane: "task:AX-3653" }, badge: { ...b, index: 0 }, home: HOME }).id,
+    badgeRun({ target: { group: "g1", lane: "task:login" }, badge: b, home: HOME }).id,
+    badgeRun({ target: { path: LOGIN }, badge: b, home: HOME }).id,
+  ];
+  assert.equal(new Set(ids).size, ids.length);
+});
+
+test("tree.js draws the active group's lane badges on a lane's header, and spins a badge's icon (D29)", () => {
+  const tree = src("tree.js");
+  const body = (name) => {
+    const start = tree.indexOf(`function ${name}(`);
+    assert.ok(start >= 0, `tree.js has ${name}`);
+    return tree.slice(start, tree.indexOf("\n}\n", start));
+  };
+
+  // render hands the rows the active group's id; a lane header gets the
+  // badges published under that group and its lane.
+  assert.match(tree, /model\.rows\.map\(\(r\) => row\(r, t, notes, badges, prs, model\.group\.id\)\)/);
+  assert.match(body("row"), /taskRow\(r, t, notes, group, badges\[laneBadgeKey\(group, r\.lane\)\] \?\? \[\]\)/);
+
+  // After the label, before the count, sharing the row's badge room.
+  const header = body("taskRow");
+  const label = header.indexOf(".child(l.label)");
+  const drawn = header.indexOf(".children(badges.map(");
+  const count = header.indexOf("String(l.count)");
+  assert.ok(label >= 0 && drawn > label && count > drawn, "label, badges, count");
+  assert.match(header, /badgeMaxWidth\(badges\.length\)/);
+
+  // A lane badge: its hover; a click never folds the lane (stopped whether
+  // or not it has an action) and runs the action with the lane as target;
+  // a right-click opens the task menu, never the action.
+  const lane = body("laneBadge");
+  assert.match(lane, /\.flex_none\(\)[\s\S]*?\.max_w\(width\)/);
+  assert.match(lane, /\.truncate\(\)/);
+  assert.match(lane, /badgeTooltip\(b\)/);
+  assert.match(lane, /on_mouse_down\("right", \(_e, cx\) => \{\s*cx\.stop_propagation\(\);[^}]*openTaskMenu\(l\.lane, l\.label\)/);
+  assert.match(lane, /\.on_click\(\(_e, cx\) => \{\s*cx\.stop_propagation\(\);[^}]*if \(b\.action\) runBadge\(\{ group, lane: l\.lane \}, b, cx\);/);
+  assert.doesNotMatch(lane, /\.when\(Boolean\(b\.action\), \(el\) => el\.cursor_pointer\(\)\.on_click/, "the click is caught with or without an action");
+
+  // Both badge kinds draw their icon through badgeIcon, which turns it when
+  // the badge asks.
+  assert.match(lane, /badgeIcon\(b, color\)/);
+  assert.match(body("badge"), /badgeIcon\(b, color\)/);
+  assert.match(body("badgeIcon"), /b\.spin \? pic\.spin\(BADGE_SPIN\) : pic/);
+  // gpui-kit's spin() takes at least 100 ms a turn.
+  assert.ok(Number(/^const BADGE_SPIN = (\d+);/m.exec(tree)?.[1]) >= 100);
 });

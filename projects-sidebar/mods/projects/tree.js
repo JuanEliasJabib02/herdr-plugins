@@ -7,8 +7,8 @@
 // instead of projects, each row naming its project, and the header gets a
 // New workspace "+"; a lane shows its task's note on hover and has a
 // right-click menu (D34, D35). A workspace row also shows what other
-// plugins publish for it ("badges", D38). Below 160 px of sidebar it is a
-// rail of initials.
+// plugins publish for it ("badges", D38), and so does a task lane's header
+// (Spotlight's D29). Below 160 px of sidebar it is a rail of initials.
 //
 // This copy is also the worktree engine (D6): it lists every group's
 // projects into projects.cache.v1 at start, re-lists one when its
@@ -29,7 +29,9 @@ import {
   buildTree, openAction, railAction, isNarrow, projectPaths, pruneCache, watchDirs, eachLimit, liveFolder, addProjectAt, reorderProject,
 } from "./tree-model.js";
 import { buildTaskTree } from "./task-model.js";
-import { badgeTooltip, badgeMaxWidth, execFailure, startFailure, BADGE_GAP } from "./badges-model.js";
+import {
+  badgeTooltip, badgeMaxWidth, badgeRun, laneBadgeKey, execFailure, startFailure, BADGE_GAP,
+} from "./badges-model.js";
 import { openNewWorkspace } from "./new-workspace.js";
 import { openProjectMenu } from "./project-menu.js";
 import { openWorkspaceMenu } from "./workspace-menu.js";
@@ -73,9 +75,14 @@ let drag = null;
 let dragged = false;
 const DRAG_START = 4;
 
-// D38: the badges whose exec is still running, `${path}\n${key}\n${index}`:
-// a click on one of them is ignored until its program ends.
+// D38: the badges whose exec is still running, badgeRun's id (the row, the
+// badge's key and index): a click on one of them is ignored until its
+// program ends.
 const running = new Set();
+
+// A badge's icon that asks to turn (`spin`, Spotlight's D29) makes a turn
+// every this many ms, as Herdr's own spinners.
+const BADGE_SPIN = 900;
 
 export default class Tree {
   init(_props, cx) {
@@ -304,13 +311,14 @@ export default class Tree {
     };
     const model = byTask ? buildTaskTree({ ...args, tasks: ui.tasks ?? [] }) : buildTree(args);
     const notes = byTask ? store.notes() : {};
-    // Other plugins' badges (D38), read once; the rail draws none.
+    // Other plugins' badges (D38), workspace rows' and task lanes', read
+    // once; the rail draws none.
     const badges = narrow ? {} : store.badges();
     // The PR of each workspace's branch, read once; the rail shows none.
     const prs = narrow ? {} : store.prs();
     const body = model.empty
       ? narrow ? [] : [emptyState(t)]
-      : narrow ? model.projects.map((p) => railRow(p, t)) : model.rows.map((r) => row(r, t, notes, badges, prs));
+      : narrow ? model.projects.map((p) => railRow(p, t)) : model.rows.map((r) => row(r, t, notes, badges, prs, model.group.id));
     return v_flex().size_full().min_h(0).bg(t.chrome).text_size(13)
       .child(header(model.group, narrow, byTask, t))
       .child(v_flex().id("projects-list").flex_1().min_h(0).px(narrow ? 0 : 8).pb(14).overflow_y_scrollbar().mode("always")
@@ -364,10 +372,12 @@ function focusedProject() {
 }
 
 // `notes`: projects.notes.v1, read once per render (Task mode only).
-// `badges`: other plugins' badges by workspace path (store.js badges).
-// `prs`: the PR of each workspace's branch by path (store.js prs).
-function row(r, t, notes, badges, prs) {
-  if (r.kind === "task") return taskRow(r, t, notes);
+// `badges`: other plugins' badges by workspace path and by lane key
+// (store.js badges). `prs`: the PR of each workspace's branch by path
+// (store.js prs). `group`: the active group's id: a lane header draws only
+// the badges published for this group's lane (Spotlight's D29).
+function row(r, t, notes, badges, prs, group) {
+  if (r.kind === "task") return taskRow(r, t, notes, group, badges[laneBadgeKey(group, r.lane)] ?? []);
   if (r.kind === "project") return projectRow(r, t);
   if (r.kind === "workspace") return workspaceRow(r, t, badges[r.path] ?? [], prs[r.path] ?? null);
   if (r.kind === "agent") return agentRow(r, t);
@@ -379,10 +389,17 @@ function row(r, t, notes, badges, prs) {
 // A task lane (Task mode): fold on click; its count and, folded, its most
 // urgent status. Its task's note, if any, on hover: the note only, no icon
 // (Orca). A ticket or name lane opens the task menu on right-click; No task
-// and Servers have no note key, so neither (D34, D35).
-function taskRow(l, t, notes) {
+// and Servers have no note key, so neither (D34, D35). Other plugins'
+// badges for this group's lane (Spotlight's D29: Orca's task header
+// buttons, which come after its status) sit before the count, sharing the
+// row's badge room like a workspace row's; No task and Servers never have
+// any (badges-model.js takes no lane key for them).
+// `group`: the active group's id; `badges`: the ones published for
+// `<group>/<lane>`.
+function taskRow(l, t, notes, group, badges) {
   const key = noteKeyOf(l.lane);
   const note = noteOf(notes, key);
+  const width = badgeMaxWidth(badges.length);
   return h_flex().id(`t:${l.lane}`).h(28).flex_none().px(8).gap(7).items_center().rounded(8)
     .cursor_pointer()
     .hover((s) => s.bg(t.hover))
@@ -395,7 +412,32 @@ function taskRow(l, t, notes) {
     .child(svg(chrome(l.collapsed ? "chevron-right" : "chevron-down")).size(11).flex_none().text_color(t.dim))
     .child(div().flex_1().min_w(0).truncate().font_semibold().text_color(t.foreground).child(l.label))
     .when(l.collapsed && Boolean(l.status) && l.status !== "idle", (el) => el.child(statusMark(l.status, t)))
+    .when(badges.length > 0, (el) => el.child(h_flex().flex_none().gap(BADGE_GAP).items_center()
+      .children(badges.map((b) => laneBadge(group, l, b, width, t)))))
     .when(l.count > 0, (el) => el.child(div().flex_none().text_size(11.5).text_color(t.dim).child(String(l.count))));
+}
+
+// Another plugin's badge on a task lane's header (Spotlight's D29), drawn
+// like a workspace row's (badge below). A click never folds the lane: with
+// an action it runs it, with the home folder as its cwd; without one it
+// does nothing. A right-click opens the task menu, as on the header, and
+// never runs the action.
+function laneBadge(group, l, b, width, t) {
+  const color = t[b.tone] ?? t.dim;
+  const tip = badgeTooltip(b);
+  return h_flex().id(`lb:${b.key}:${b.index}:${l.lane}`).flex_none().max_w(width).gap(3).items_center().text_size(11.5).text_color(color)
+    .when(Boolean(tip), (el) => el.tooltip(tip))
+    .on_mouse_down("right", (_e, cx) => {
+      cx.stop_propagation(); // or on_click runs the action (ClickEvent carries no button)
+      openTaskMenu(l.lane, l.label);
+    })
+    .on_click((_e, cx) => {
+      cx.stop_propagation(); // the header's click would fold the lane
+      if (b.action) runBadge({ group, lane: l.lane }, b, cx);
+    })
+    .when(Boolean(b.action), (el) => el.cursor_pointer())
+    .when(Boolean(b.icon), (el) => el.child(badgeIcon(b, color)))
+    .when(Boolean(b.text), (el) => el.child(div().min_w(0).truncate().child(b.text)));
 }
 
 // A project: collapse on click, its menu on right-click, "+" for a new workspace.
@@ -520,18 +562,27 @@ function badge(w, b, width, t) {
     })
     .when(Boolean(b.action), (el) => el.cursor_pointer().on_click((_e, cx) => {
       cx.stop_propagation(); // like the project's "+": the row doesn't open the workspace too
-      runBadge(w.path, b, cx);
+      runBadge({ path: w.path }, b, cx);
     }))
-    .when(Boolean(b.icon), (el) => el.child(svg(b.icon).size(12).flex_none().text_color(color)))
+    .when(Boolean(b.icon), (el) => el.child(badgeIcon(b, color)))
     .when(Boolean(b.text), (el) => el.child(div().min_w(0).truncate().child(b.text)));
 }
 
+// A badge's icon, 12 px in its tone's color; turning when the badge asks
+// (`spin: true`, Spotlight's D29: a busy mark).
+function badgeIcon(b, color) {
+  const pic = svg(b.icon).size(12).flex_none().text_color(color);
+  return b.spin ? pic.spin(BADGE_SPIN) : pic;
+}
+
 // A badge's action (D38): a mod command (no args, no answer: run returns
-// null), or a program run as argv, never through a shell, in the
-// workspace's folder with Herdr's environment (the login shell's PATH, a
-// 30 s limit). A non-zero exit or a program that can't start is a warning
-// toast. While its program runs, more clicks on that badge are ignored.
-function runBadge(path, b, cx) {
+// null), or a program run as argv, never through a shell, with Herdr's
+// environment (the login shell's PATH, a 30 s limit), in the workspace's
+// folder, or the home folder for a lane's badge (badgeRun). A non-zero exit
+// or a program that can't start is a warning toast. While its program
+// runs, more clicks on that badge are ignored.
+// `target`: { path } for a workspace row, { group, lane } for a lane header.
+function runBadge(target, b, cx) {
   const { command } = b.action;
   if (command) {
     try {
@@ -542,13 +593,13 @@ function runBadge(path, b, cx) {
     return;
   }
   const argv = b.action.exec;
-  const id = `${path}\n${b.key}\n${b.index}`;
+  const { id, cwd } = badgeRun({ target, badge: b, home: home() });
   if (running.has(id)) return;
   running.add(id);
   cx.spawn(async () => {
     let failure;
     try {
-      failure = execFailure(await exec(argv[0], argv.slice(1), { cwd: path }));
+      failure = execFailure(await exec(argv[0], argv.slice(1), { cwd }));
     } catch (e) {
       failure = startFailure(e);
     } finally {

@@ -67,6 +67,9 @@ across repos.
     "Servers". Servers holds each project's main checkout, or "<name> ·
     Loading…" while a project is still listed.
   - Click a lane header to fold it; folds survive a reload.
+  - A ticket or name lane's header shows other plugins' badges for that
+    task, if any, before its count (see Badges from other plugins), folded
+    or not.
   - Right-click a ticket or name lane for its menu: "Add note…" ("Edit
     note…" once it has one), a separator, then "Delete task…" in the
     blocked color, dimmed with "No workspaces" when the lane has none in
@@ -598,10 +601,10 @@ across repos.
 
 **Badges from other plugins**
 
-Other plugins can put small indicators ("badges") on workspace rows, the
-Spotlight plugin first. This plugin knows none of them: it reads, draws and
-runs what they publish. This section is the contract a publisher codes
-against.
+Other plugins can put small indicators ("badges") on workspace rows and on
+Task-mode lane headers, the Spotlight plugin first. This plugin knows none
+of them: it reads, draws and runs what they publish. This section is the
+contract a publisher codes against.
 
 - **Keys:** `badges.spotlight`, `badges.pr` and `badges.hibernate`, read in
   that order (`config.js` `BADGE_KEYS`). A plugin writes only its own key,
@@ -609,12 +612,34 @@ against.
   path at once. Adding a plugin is one line in that list.
   There is no index key listing the plugins: shared state keeps the last
   write, so two plugins adding themselves to one list at start would race.
-- **Value:** `{ [workspacePath]: [badge] }`.
+- **Value:** `{ [workspacePath | laneKey]: [badge] }`.
   - A path is the workspace's folder, absolute, spelled as `git worktree
-    list` prints it (a trailing slash is ignored). Any other key is ignored.
+    list` prints it (a trailing slash is ignored). An absolute key is
+    always a path.
+  - A lane key, `<groupId>/task:<KEY>`, puts its badges on that group's
+    task lane header:
+    - `<groupId>` is the group's `id` in `projects.v1` (`g1`, `g2`…).
+    - `task:<KEY>` is exactly the lane this plugin builds (`task-model.js`
+      `laneKey`): a ticket, found in the branch or else the folder name, as
+      its prefix uppercased, a dash and its digits (`feat/ax_3356-fix` →
+      `task:AX-3356`); without one, the branch's last segment (or the
+      folder name) lowercased (`feat/Login` → `task:login`).
+    - The key is read as written, never respelled: `g1/task:ax-3356` is
+      kept but matches no lane, so nothing draws.
+    - Dropped: a key with no group (`task:AX-3356`), a lane with no name
+      (`g1/task:`), No task's (`g1/task:none`, any case), Servers
+      (`g1/servers`), and a name a task note couldn't have (`__proto__`,
+      `constructor` or `prototype` in any case, over 200 chars; `lib.js`
+      `noteKeyOf`).
+    - Lane headers exist only in a group organized by Task, as Orca's task
+      header exists only under "Group by → Task": a group in Project mode
+      draws none of its lane keys. Only the active group's are drawn, so
+      publish the lanes of every Task-mode group that has the task, each
+      under its own id; the same name in two groups never shares badges.
+  - Any other key is ignored.
   - A value that isn't an object (`null`, a string, a list) is no badges.
-  - A path whose value isn't a list draws nothing there.
-- **A badge:** `{ icon?, text?, tone?, tooltip?, action? }`.
+  - A path or lane whose value isn't a list draws nothing there.
+- **A badge:** `{ icon?, text?, tone?, tooltip?, action?, spin? }`.
   - `icon`: an SVG under Herdr's home (`~/.config/herdr-app`),
     `mods/<mod>/…/<name>.svg` at any depth, with no `..`, empty segment or
     backslash. Drawn 12 px, tinted. Build it from your mod's folder name:
@@ -626,6 +651,10 @@ against.
   - `tooltip`: at most 200 code points (a longer one is cut), on one line
     like `text`: runs of whitespace (newlines too) become one space, so
     what a click runs, shown after it, stays in view.
+  - `spin`: `true` turns the badge's icon, one turn every 900 ms (a busy
+    mark, e.g. a ring icon while your plugin works). `false` or absent:
+    still. Any other value is dropped alone. A badge with only text
+    doesn't turn.
   - A badge needs an icon or a text; one with neither is dropped.
   - A field that breaks a rule is dropped alone: a bad icon or action goes
     and the rest of the badge stays. Unknown fields are ignored.
@@ -648,7 +677,9 @@ against.
     (`./x`, `bin/x`) drops the action: it would run a file from whatever
     branch the workspace has checked out. Prefer an absolute path.
   - An `exec` click runs `exec(argv[0], argv.slice(1), { cwd: <the
-    workspace's folder> })`: argv only, never a shell. It gets Herdr's
+    workspace's folder> })`, or, on a lane header (which has no folder),
+    with `cwd` your home folder: argv only, never a shell. Put what the
+    program needs to know (the task, the group) in its args. It gets Herdr's
     environment, whose PATH is `~/.local/bin` and then the login shell's
     (`$SHELL -l`, which reads `/etc/paths` and `.zprofile` but not
     `.zshrc`). So a bare name finds `/usr/local/bin`, but not a folder only
@@ -657,20 +688,29 @@ against.
     titled with the program's name: stderr's first line, else "exited with
     code N". While a badge's program runs, more clicks on it are ignored.
 - **Limits:** at most 3 badges per plugin on a row, and 4 per row in all,
-  in key order; the rest aren't drawn.
+  in key order; the rest aren't drawn. A lane header is a row of its own,
+  with the same limits.
 - **Drawing:** after the workspace row's label, in Project and Task modes,
-  main checkouts included, never on the narrow rail. The icon, then the
+  main checkouts included, never on the narrow rail. On a lane header:
+  after its label and, folded, its status mark (Orca's order: status, then
+  the task's buttons), before its count, folded or not. The icon, then the
   text (11.5 px), in the tone's color. The row's badges share 128 px (one
   badge up to 72 px, four up to 29 px each, 4 px apart), and a long text
   ends in "…", so the label keeps its room. The hover shows the tooltip,
   then what a click runs: "· runs <argv[0]>" or "· <command>".
-- **Clicks:** a click runs the action and doesn't open the workspace. A
-  right-click opens the workspace menu, as on the row, and never runs the
-  action. A badge without an action clicks like its row.
+- **Clicks:** on a workspace row, a click runs the action and doesn't open
+  the workspace; a right-click opens the workspace menu, as on the row, and
+  never runs the action; a badge without an action clicks like its row. On
+  a lane header, a click runs the action and never folds the lane, and a
+  badge without an action swallows the click (it doesn't fold the lane
+  either); a right-click opens the task menu, as on the header, and never
+  runs the action.
 - **Lifetime:** the format only grows; a breaking change gets a new key
-  (e.g. `badges.spotlight.v2`). A publisher clears its own paths, and its
-  key (`setShared(key, null)`), when they no longer apply: a stale badge
-  stays until it does.
+  (e.g. `badges.spotlight.v2`). Lane keys and `spin` were added this way:
+  an older projects-sidebar drops a lane key (it isn't absolute) and
+  ignores `spin`, and draws the rest. A publisher clears its own paths and
+  lanes, and its key (`setShared(key, null)`), when they no longer apply: a
+  stale badge stays until it does.
 - **Example:** this `badges.spotlight` value draws a "live" badge in the
   `working` color on one workspace. Its hover reads "Spotlight is on · runs
   /usr/local/bin/spotlight", and a click runs that program with the three
@@ -685,6 +725,31 @@ against.
         "tone": "working",
         "tooltip": "Spotlight is on",
         "action": { "exec": ["/usr/local/bin/spotlight", "toggle", "--workspace", "/Users/you/orca/workspaces/app/login"] }
+      }
+    ]
+  }
+  ```
+
+- **Example, a lane:** in group `g1`, organized by Task and active, this
+  value draws a turning ring on the AX-3653 lane's header (every
+  workspace whose branch or folder has `ax-3653`, `AX_3653`…), then a
+  "Dev" badge. A click on the ring folds nothing and runs nothing (it has
+  no action); a click on "Dev" runs the program in your home folder. In
+  any other group, or with `g1` in Project mode, neither shows:
+
+  ```json
+  {
+    "g1/task:AX-3653": [
+      {
+        "icon": "mods/spotlight/icons/spinner.svg",
+        "tone": "working",
+        "tooltip": "Sincronizando…",
+        "spin": true
+      },
+      {
+        "text": "Dev",
+        "tooltip": "Spotlight env of this task",
+        "action": { "exec": ["/usr/local/bin/spotlight", "env", "--task", "AX-3653", "--group", "g1", "--env", "dev"] }
       }
     ]
   }

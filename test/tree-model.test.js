@@ -13,6 +13,8 @@ import {
   watchDirs, eachLimit, liveFolder, addProjectAt, deletePrompt, deleteOutcome, terminalsStaying,
   renamePrompt, renameOutcome, reorderProject, spaceRenames,
 } from "../projects-sidebar/mods/projects/tree-model.js";
+import { buildTaskTree } from "../projects-sidebar/mods/projects/task-model.js";
+import { parseBadges, laneBadgeKey } from "../projects-sidebar/mods/projects/badges-model.js";
 
 const HOME = "/Users/demo";
 const NOW = 1_800_000_000_000;
@@ -696,6 +698,48 @@ test("reorder: other groups, the mode, a project's saved base and the stored val
   const stored = JSON.parse(JSON.stringify(next));
   assert.deepEqual(parseRegistry(stored), next);
   assert.equal(needsBackup(stored, parseRegistry(stored)), false, "a reordered registry reads back as itself");
+});
+
+// Spotlight T18 (its D29): other plugins' badges on a Task-mode lane header.
+test("lane badges (D29): a lane finds what was published under its group and its lane exactly as the tree builds it; other groups' and other spellings draw nowhere", () => {
+  const W = "/Users/demo/orca/workspaces";
+  let r = emptyRegistry();
+  r = addProject(r, { path: "/code/app" });
+  r = addProject(r, { path: "/code/api" });
+  r = setOrganize(r, "g1", "task");
+  r = addGroup(r, "Clients");
+  r = addProject(r, { path: "/code/client" }, "g2");
+  r = setOrganize(r, "g2", "task");
+  const cache = {
+    "/code/app": [
+      { path: "/code/app", branch: "main", main: true },
+      { path: `${W}/app/ax-3653-fix`, branch: "juan/ax-3653-fix", main: false },
+      { path: `${W}/app/login`, branch: "feat/Login", main: false },
+    ],
+    "/code/api": [{ path: "/code/api", branch: "develop", main: true }, { path: `${W}/api/ax-3653`, branch: "AX_3653", main: false }],
+    "/code/client": [{ path: "/code/client", branch: "main", main: true }, { path: `${W}/client/ax-3653`, branch: "ax-3653", main: false }],
+  };
+  const published = parseBadges([{
+    "g1/task:AX-3653": [{ text: "on" }],
+    "g1/task:login": [{ text: "Dev" }],
+    "g2/task:AX-3653": [{ text: "client" }],
+    // Not the tree's form of these lanes (P's ticket is uppercased with a
+    // dash; a name lane is lowercased): kept by the parse, drawn nowhere.
+    "g1/task:ax-3653": [{ text: "lower" }],
+    "g1/task:AX_3653": [{ text: "underscore" }],
+    "g1/task:Login": [{ text: "cased" }],
+  }]);
+  // What render hands each lane header (tree.js row): its texts by lane.
+  const drawn = (registry) => {
+    const t = buildTaskTree({ registry, cache, spaces: [], panes: [], agents: [], collapsed: [], home: HOME, now: NOW, tasks: [] });
+    const lanes = t.rows.filter((x) => x.kind === "task");
+    return Object.fromEntries(lanes.map((l) => [l.lane, (published[laneBadgeKey(t.group.id, l.lane)] ?? []).map((b) => b.text)]));
+  };
+  // Both checkouts of AX-3653 (two spellings in their branches) are one
+  // lane, and it finds g1's badges; Servers finds none.
+  assert.deepEqual(drawn(r), { "task:AX-3653": ["on"], "task:login": ["Dev"], servers: [] });
+  // Another group active: its own lane of the same name, never g1's.
+  assert.deepEqual(drawn(selectGroup(r, "g2")), { "task:AX-3653": ["client"], servers: [] });
 });
 
 test("reorder: the drag is wired into the tree (D33)", async () => {

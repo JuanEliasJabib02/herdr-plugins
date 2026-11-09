@@ -1,22 +1,27 @@
 // Indicators from other plugins ("badges", D38), with no herdr or gpui-kit
 // imports so `node --test` can load it. This plugin knows no plugin: it
 // reads what they publish under config.js BADGE_KEYS, draws it after a
-// workspace row's label (tree.js) and runs its action on a click. The
-// contract other plugins consume is RECIPE.md "Badges from other plugins";
-// it only grows (a breaking change gets a new key, e.g. badges.spotlight.v2).
+// workspace row's label, or a task lane header's (tree.js), and runs its
+// action on a click. The contract other plugins consume is RECIPE.md
+// "Badges from other plugins"; it only grows (a breaking change gets a new
+// key, e.g. badges.spotlight.v2).
 //
-//   each key:  { [workspacePath]: [badge] }   absolute paths, as `git
-//              worktree list` prints them
-//   a badge:   { icon?, text?, tone?, tooltip?, action? }
+//   each key:  { [workspacePath | laneKey]: [badge] }
+//              workspacePath: absolute, as `git worktree list` prints it
+//              laneKey: `<groupId>/task:<KEY>`, a Task-mode lane of that
+//              group, `task:<KEY>` exactly as task-model.js builds it
+//              (Spotlight's D29)
+//   a badge:   { icon?, text?, tone?, tooltip?, action?, spin? }
 //   action:    { command: "<mod>.<command>" } | { exec: [program, ...args] }
 //              (<mod> is the key's first name after `badges.`: its own commands)
+//   spin:      true turns the badge's icon (a busy mark)
 //
 // Anything else is dropped field by field: a bad icon or action goes and the
 // badge stays; a badge left with neither icon nor text goes; a value that
 // isn't an object is no badges at all. Never throws.
 
 import { BADGE_KEYS } from "./config.js";
-import { normPath, isAbsolute } from "./lib.js";
+import { normPath, isAbsolute, noteKeyOf } from "./lib.js";
 
 export const BADGE_TONES = ["accent", "dim", "working", "blocked", "done"];
 const DEFAULT_TONE = "dim";
@@ -91,7 +96,8 @@ function actionOf(action, publisher) {
 
 // One badge, or null when it has neither icon nor text. `key` and `index`
 // (its place among that plugin's badges on the row) say which badge a click
-// is on.
+// is on. `spin` is kept only as `true`: false is the default, anything else
+// is dropped alone.
 function badgeOf(raw, key, index) {
   if (!isObject(raw)) return null;
   const icon = iconOf(raw.icon);
@@ -107,35 +113,67 @@ function badgeOf(raw, key, index) {
     tone: BADGE_TONES.includes(raw.tone) ? raw.tone : DEFAULT_TONE,
     ...(tooltip ? { tooltip } : {}),
     ...(action ? { action } : {}),
+    ...(raw.spin === true ? { spin: true } : {}),
   };
 }
 
-// Every row's badges: { [workspacePath]: [badge] }, each row's in key order
-// (BADGE_KEYS'), at most 3 per plugin and 4 in all. `values`: the keys'
-// shared() values, in that order (store.js badges()).
+// ── Lane keys (Spotlight's D29) ─────────────────────────────────────────────
+
+const LANE = "/task:";
+
+// The key a task lane's badges are published and looked up under: its
+// group's id, then the lane as task-model.js builds it ("task:AX-3356", a
+// ticket prefix uppercased with a dash; "task:login", a name lowercased).
+// tree.js draws the active group's lanes only, so another group's lane of
+// the same name never shows them.
+export const laneBadgeKey = (groupId, lane) => `${groupId}/${lane}`;
+
+// Whether `at` is a lane key: not absolute (that is a path), a group id
+// before its first "/task:", and after it a lane that can name a task
+// (lib.js noteKeyOf: not "task:" alone, nor No task's "task:none", nor a
+// name over 200 chars or special on a plain object). Read as written, never
+// respelled: a key in another form than the tree's is kept and matches no
+// lane.
+function isLaneKey(at) {
+  if (typeof at !== "string" || isAbsolute(at)) return false;
+  const cut = at.indexOf(LANE);
+  return cut > 0 && noteKeyOf(at.slice(cut + 1)) !== null;
+}
+
+// The row a value's key puts its badges on: a path, normalized; a lane key
+// as it is; or null for any other key.
+function rowOf(at) {
+  if (isAbsolute(at)) return normPath(at);
+  return isLaneKey(at) ? at : null;
+}
+
+// Every row's badges: { [workspacePath | laneKey]: [badge] }, each row's in
+// key order (BADGE_KEYS'), at most 3 per plugin and 4 in all; a lane header
+// is a row with its own caps. `values`: the keys' shared() values, in that
+// order (store.js badges()).
 export function parseBadges(values, keys = BADGE_KEYS) {
   const rows = {};
   if (!Array.isArray(values)) return rows;
   values.forEach((value, i) => {
     if (!isObject(value)) return;
     const key = keys[i] ?? String(i);
-    const mine = new Map(); // path -> this plugin's badges on it
+    const mine = new Map(); // row -> this plugin's badges on it
     for (const [at, list] of Object.entries(value)) {
-      if (!isAbsolute(at) || !Array.isArray(list)) continue;
-      const path = normPath(at);
-      const kept = mine.get(path) ?? [];
+      const target = rowOf(at);
+      if (target === null || !Array.isArray(list)) continue;
+      const kept = mine.get(target) ?? [];
       for (const raw of list) {
         if (kept.length >= PER_PLUGIN) break;
         const b = badgeOf(raw, key, kept.length);
         if (b) kept.push(b);
       }
-      mine.set(path, kept);
+      mine.set(target, kept);
     }
-    for (const [path, kept] of mine) {
-      const row = rows[path] ?? [];
+    for (const [target, kept] of mine) {
+      const row = rows[target] ?? [];
       const room = PER_ROW - row.length;
       if (room <= 0 || !kept.length) continue;
-      rows[path] = [...row, ...kept.slice(0, room)];
+      rows[target] = [...row, ...kept.slice(0, room)];
     }
   });
   return rows;
@@ -157,6 +195,19 @@ const BADGE_W = 72;
 export const badgeMaxWidth = (count) => Math.min(BADGE_W, Math.floor((BADGE_ROOM - BADGE_GAP * (Math.max(count, 1) - 1)) / Math.max(count, 1)));
 
 const firstLine = (s) => String(s ?? "").split("\n").map((l) => l.trim()).find(Boolean) ?? "";
+
+// Where a click's exec runs, and the id its in-flight guard keeps (tree.js
+// runBadge): `target` is the row the badge is on, { path } for a workspace
+// row, { group, lane } for a task lane header. A workspace's runs in its
+// folder, keyed by its path, the badge's key and index (as before lanes); a
+// lane has no folder, so its runs in the home folder (`home`), keyed by its
+// lane key (group and lane), so the same lane name in two groups is two
+// guards.
+export function badgeRun({ target, badge, home } = {}) {
+  const lane = typeof target?.lane === "string";
+  const row = lane ? laneBadgeKey(target.group, target.lane) : target?.path;
+  return { id: `${row}\n${badge?.key}\n${badge?.index}`, cwd: lane ? home : target?.path };
+}
 
 // A click's exec came back: null on exit code 0, else what the warning
 // toast says.
