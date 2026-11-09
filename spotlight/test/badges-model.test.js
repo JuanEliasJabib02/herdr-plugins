@@ -661,14 +661,33 @@ test("D31: no eligible member, no flashlight: a task only in repos whose Spotlig
   assert.deepEqual(icons(buildLanes(s, { laneCache }).value[laneKey("AX-9")]), ["flask"]);
 });
 
-test("D31, D33: a member's repo busy, or the task's batch marker set: the lane's flashlight is the ring, spinning, with no action", () => {
+test("D31, D33: a member's repo busy for one of the task's own workspaces, or the task's batch marker set: the lane's flashlight is the ring, spinning, with no action; another task's work on a shared repo spins nothing here", () => {
   const busy = baseState();
   busy.repos[FRONT] = repo({ busy: { op: "light", since: 5, pid: 4242, workspace: F1 } });
   const out = buildLanes(busy).value;
   assert.deepEqual(out[laneKey("AX-3447")][0], RING);
   assert.equal(out[laneKey("AX-3447")][0].action, undefined);
   assert.equal(out[laneKey("AX-3500")][0].icon, "mods/spotlight/icons/flashlight.svg", "back isn't busy: AX-3500 keeps its flashlight");
-  assert.deepEqual(out[laneKey("login")][0], RING, "front is login's member too");
+  // Juan's report (2026-11-09): lighting one task's workspace spun every
+  // lane with a workspace in that repo. Front is login's member too, but
+  // the work is for AX-3447's F1: login keeps its flashlight, as Orca's
+  // TaskSpotlightButton spins only for its own task.
+  assert.equal(out[laneKey("login")][0].icon, "mods/spotlight/icons/flashlight.svg", "front busy for AX-3447's F1 doesn't spin login");
+  assert.ok(out[laneKey("login")][0].action, "login's flashlight keeps its click");
+
+  // A mark with no workspace (a restart) spins no lane.
+  const restart = baseState();
+  restart.repos[FRONT] = repo({ busy: { op: "restart", since: 5, pid: 4242, workspace: null } });
+  const quiet = buildLanes(restart).value;
+  assert.equal(quiet[laneKey("AX-3447")][0].icon, "mods/spotlight/icons/flashlight.svg");
+  assert.equal(quiet[laneKey("login")][0].icon, "mods/spotlight/icons/flashlight.svg");
+
+  // Work for login's F2 spins login only.
+  const other = baseState();
+  other.repos[FRONT] = repo({ busy: { op: "light", since: 5, pid: 4242, workspace: F2 } });
+  const mine = buildLanes(other).value;
+  assert.deepEqual(mine[laneKey("login")][0], RING);
+  assert.equal(mine[laneKey("AX-3447")][0].icon, "mods/spotlight/icons/flashlight.svg", "front busy for login's F2 doesn't spin AX-3447");
 
   const batch = baseState();
   batch.queue.taskBatch = { "ax/AX-3500": { op: "on", since: 5, pid: 4242 } };

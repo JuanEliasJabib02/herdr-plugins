@@ -75,8 +75,10 @@
 //                  dim otherwise; the repos skipped (Spotlight off there)
 //                  named in its tooltip. Always shown. A click runs
 //                  `spotlight toggle --task <KEY> --group <id>`. While that
-//                  batch runs (queue.taskBatch) or a member's repo is busy,
-//                  the ring, with no action. None when no repo with
+//                  batch runs (queue.taskBatch) or a member's repo is busy
+//                  for one of the task's workspaces (the mark's target; not
+//                  another task's work on a shared repo), the ring, with no
+//                  action. None when no repo with
 //                  Spotlight on has a workspace of the task.
 //   2. queue       the task's queue badge, the one its rows show, so a
 //                  folded lane still says it (Orca's TaskTestTurnBadge).
@@ -509,13 +511,22 @@ function taskLanes({ projects, cache, enabled, taskGroups }) {
 const LANE_OFF = "Spotlight de esta tarea: proyecta sus workspaces en el root de cada proyecto.";
 const LANE_ON = "Spotlight prendido para esta tarea. Clic para apagarlo en todos los proyectos.";
 
+// A member's repo busy for one of this task's own workspaces (the mark's
+// target, D33). Another task's work on a shared repo isn't this task's:
+// Orca's TaskSpotlightButton spins only for its own task.
+const busyForTask = (member, repos) => {
+  const target = busyOf(repos[member.root])?.workspace;
+  return isAbsolute(target) && member.workspaces.some((w) => normRoot(w) === normRoot(target));
+};
+
 // 1. A task lane's flashlight, or null when no member can hold it. The ring
 // while its batch runs (queue.taskBatch[<groupId>/<KEY>]) or a member's repo
-// is busy (D33): no action, the work holds the repos' locks.
+// is busy for one of the task's workspaces (D33): no action, the work holds
+// the repos' locks.
 function laneFlashlight({ group, key, members, skipped }, { state, bin }) {
   if (members.length === 0) return null;
   const repos = state?.repos ?? {};
-  if (isObject(state?.queue?.taskBatch?.[`${group}/${key}`]) || members.some((m) => busyOf(repos[m.root]))) return ring();
+  if (isObject(state?.queue?.taskBatch?.[`${group}/${key}`]) || members.some((m) => busyForTask(m, repos))) return ring();
   const lit = taskLit(members, repos);
   const off = skipped.length > 0 ? ` Saltado, Spotlight apagado en: ${skipped.join(", ")}` : "";
   return badge({
