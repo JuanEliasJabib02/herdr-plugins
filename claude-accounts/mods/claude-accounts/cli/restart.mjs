@@ -88,8 +88,11 @@
 //      still differs from the item's `to`. Right before acting it re-reads
 //      the terminal (D7): a switch item already on its target is dropped
 //      (Orca's consumePendingPaneAccountRestart); a resume job already on it
-//      only sends its message. A switch item whose terminal closed, or whose
-//      Claude quit, is dropped too; a resume job in that case fails. A
+//      only sends its message. A switch item whose Claude quit on its own
+//      (a /exit by hand), leaving the shell in the foreground, goes straight
+//      to step 4, as Orca's pending restart fires once Claude is gone; with
+//      nothing to resume, or with its terminal closed or another program in
+//      front, it's dropped. A resume job in those cases fails. A
 //      session with no transcript (a `/clear` nobody has written to yet)
 //      fails, and Claude is never stopped.
 //   2. stopping: SIGTERM to the foreground pid (probe b4). From here on the
@@ -790,6 +793,9 @@ const blockedBy = (doc, item, t) => {
   );
 };
 
+// The terminal's own shell is the foreground: nothing else runs in it.
+const atShell = (found) => Number.isInteger(found.foregroundPid) && found.foregroundPid === found.pid;
+
 async function runItem(home, id, t) {
   // 1. Wait for idle, with no cap.
   let known;
@@ -812,6 +818,23 @@ async function runItem(home, id, t) {
     found = await inspectTerminal(item.terminal, known);
     if (found.kind === "missing" || found.kind === "notClaude") {
       if (item.kind === "switch") {
+        // Orca's pending restart: Claude quit on its own (a /exit by hand)
+        // and the shell is back, so the line goes in now, with no stop.
+        if (found.kind === "notClaude" && atShell(found) && item.sessionId && (await hasTranscript(configDirOf(known, item.to), item.sessionId))) {
+          line = resumeLine(targetDir(known, item.to), item.args ?? [], item.sessionId);
+          const seen = item;
+          const stopping = await mutate(home, id, (current) => {
+            if (!sameTarget(current, seen)) return "skip";
+            current.state = "stopping";
+            return null;
+          });
+          if (stopping === null) return;
+          if (stopping !== "skip") {
+            item = stopping;
+            break;
+          }
+          continue;
+        }
         if ((await drop(home, id, item)) === "skip") continue;
       } else {
         const why = found.kind === "missing" ? `terminal ${item.terminal} is gone` : `Claude is no longer running in ${item.terminal}`;

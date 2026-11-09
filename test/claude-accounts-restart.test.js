@@ -1116,6 +1116,31 @@ test("a busy terminal is waited on with no cap, and restart --cancel <t> cancels
   assert.deepEqual(s.json(["restart", "--cancel", "t1"]), { cancelled: [] }, "nothing left to cancel");
 });
 
+test("a waiting restart still fires when Claude quits on its own (a /exit by hand): the resume line goes in on the new account, as in Orca", async () => {
+  const s = sandbox({ active: A, switchMode: "restart" });
+  const t1 = s.term("t1", { on: A, status: "busy", state: "working", argv: ["/Users/tester/.local/bin/claude", "--model", "opus"] });
+  s.json(["use", B]);
+  const item = await until(() => s.item((i) => i.state === "waitingIdle" && i.claimedBy), WAIT, "waitingIdle");
+  // The person types /exit while the restart waits: Claude quits, the shell is back.
+  process.kill(t1.pid, "SIGKILL");
+  const done = await until(() => s.item((i) => i.id === item.id && i.state === "done"), WAIT, "the restart", s.queue);
+  assert.equal(done.code, 0);
+  assert.deepEqual(s.typed("t1").map((x) => [x.dir, x.args]), [[s.dirs[B], ["--model", "opus", "--resume", t1.sessionId]]]);
+  assert.equal(accountNow(s, "t1"), B);
+});
+
+test("a Claude that quits on its own with nothing to resume (no transcript) drops its waiting restart: nothing is typed", async () => {
+  const s = sandbox({ active: A, switchMode: "restart" });
+  const t1 = s.term("t1", { on: A, status: "busy", state: "working" });
+  s.json(["use", B]);
+  const item = await until(() => s.item((i) => i.state === "waitingIdle" && i.claimedBy), WAIT, "waitingIdle");
+  rmSync(t1.transcriptFile);
+  process.kill(t1.pid, "SIGKILL");
+  await until(() => !s.item((i) => i.id === item.id), WAIT, "the item dropped", s.queue);
+  assert.deepEqual(s.typed("t1"), []);
+  assert.deepEqual(s.sends(), []);
+});
+
 test("timeouts: a shell that doesn't come back, and a new Claude that never reports idle, end as timeout (4) with the line to run by hand", async () => {
   const s = sandbox({ timing: SHORT_CAPS });
   const t1 = s.term("t1", { on: A, ignoreTerm: true });
