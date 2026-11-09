@@ -2372,3 +2372,38 @@ test("D33: a light, a human's toggle or an agent's turn, marks its repo busy wit
 });
 
 // ── T21 (D31): the whole-task toggle, through the CLI ──────────────────────
+
+test("D31: `toggle --task AX-70 --group g1` hands the batch to a detached copy: every member lit, one summary note; `--inline` again turns them all off; usage errors exit 2, no member exits 1", async () => {
+  const w = makeWorld();
+  const front = makeRepo(w, "front", { pkg: DEV, tasks: ["AX-70"] });
+  const back = makeRepo(w, "back", { pkg: DEV, tasks: ["AX-70"] });
+  const docs = makeRepo(w, "docs", { tasks: ["AX-71"] });
+  w.register([{ id: "g1", repos: [front, back, docs] }]);
+  w.listen(front.root, [3000]);
+  w.listen(back.root, [3001]);
+
+  const on = await w.cli(["toggle", "--task", "AX-70", "--group", "g1"]);
+  assert.equal(on.code, 0, on.stderr + on.stdout);
+  assert.match(on.stdout, /^Toggling Spotlight for AX-70 in g1\./m);
+  const lit = await w.until((s) => (s.notes.some((n) => n.text === "Spotlight on · AX-70") && !s.queue.taskBatch ? s : null), { what: "the batch's summary" });
+  assert.equal(lit.repos[front.root].holder, front.ws["AX-70"]);
+  assert.equal(lit.repos[back.root].holder, back.ws["AX-70"]);
+  assert.deepEqual(lit.notes.filter((n) => n.toast).map((n) => n.text), ["Spotlight on · AX-70"]);
+  assert.ok(refsOf(front.root).length > 0 && refsOf(back.root).length > 0);
+
+  const off = await w.cli(["toggle", "--task", "AX-70", "--group", "g1", "--inline"]);
+  assert.equal(off.code, 0, off.stderr + off.stdout);
+  assert.match(off.stdout, /^Spotlight off · AX-70$/m);
+  assert.deepEqual(Object.keys(w.state().repos), []);
+  assert.deepEqual(refsOf(front.root), []);
+  assert.deepEqual(refsOf(back.root), []);
+
+  for (const args of [["toggle", "--task", "AX-70"], ["toggle", "--group", "g1"], ["toggle", "--task", "AX-70", "--group", "nope"], ["toggle", "--task", "none", "--group", "g1"]]) {
+    const r = await w.cli(args);
+    assert.equal(r.code, 2, `${args.join(" ")}: ${r.stderr}${r.stdout}`);
+  }
+  // docs has no server command and no `enabled`: Spotlight is off there, so AX-71 has no member.
+  const none = await w.cli(["toggle", "--task", "AX-71", "--group", "g1", "--inline"]);
+  assert.equal(none.code, 1, none.stderr + none.stdout);
+  assert.match(none.stderr, /^no-members: .*docs/m);
+});

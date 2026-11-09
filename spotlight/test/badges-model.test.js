@@ -13,7 +13,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   sha1Hex, serverIdOf, parseProjects, parseCache, buildBadges, nextPublish, canonicalJson,
-  attempt,
+  attempt, taskModeGroups,
 } from "../mods/spotlight/badges-model.js";
 import { cliPathOf, readState, readSettings } from "../mods/spotlight/board-model.js";
 import { serverId } from "../mods/spotlight/cli-work.mjs";
@@ -108,10 +108,12 @@ const icons = (list) => (list ?? []).map((b) => path.basename(b.icon, ".svg"));
 
 // projects-sidebar's checks, as its badges-model.js applies them.
 const COMMAND = /^[a-z0-9][a-z0-9-]*\.[a-z0-9][a-z0-9._-]*$/;
+// D29: a task lane's key, `<groupId>/task:<KEY>`.
+const LANE_KEY = /^[^/]+\/task:[^/].*$/;
 const codePoints = (s) => [...s].length;
 function assertContract(value) {
   for (const [at, list] of Object.entries(value)) {
-    assert.ok(at.startsWith("/") && !at.endsWith("/"), `absolute path without trailing slash: ${at}`);
+    assert.ok((at.startsWith("/") && !at.endsWith("/")) || LANE_KEY.test(at), `absolute path without trailing slash, or a lane key: ${at}`);
     assert.ok(Array.isArray(list) && list.length >= 1 && list.length <= 3, `1..3 badges on ${at}`);
     for (const b of list) {
       assert.match(b.icon, /^mods\/spotlight\/icons\/[a-z-]+\.svg$/);
@@ -497,4 +499,129 @@ test("parsing is tolerant: a bad registry or cache reads as empty", () => {
   ]);
   assert.deepEqual(parseCache({ [BACK]: [{ path: B1, branch: 3, main: false }], [FRONT]: "x", rel: [] }), {});
   assert.deepEqual(parseCache(undefined), {});
+});
+
+// ── T21 (D31, D29): the task lane's flashlight and queue badge ─────────────
+// The fixture's group "ax" in Task mode: lanes AX-3447 (back B1, the holder;
+// front F1; other O1, whose Spotlight is off), AX-3500 (back B2) and login
+// (front F2).
+
+const laneKey = (key) => `ax/task:${key}`;
+const NOT_LIT = "Spotlight de esta tarea: proyecta sus workspaces en el root de cada proyecto.";
+const LIT = "Spotlight prendido para esta tarea. Clic para apagarlo en todos los proyectos.";
+const laneToggle = (key) => ({ exec: [BIN, "toggle", "--task", key, "--group", "ax"] });
+
+function buildLanes(state = baseState(), { settings = settingsOf(), taskGroups = ["ax"], laneCache = cache } = {}) {
+  return buildBadges({ state, settings, projects, cache: laneCache, enabled, bin: BIN, taskGroups });
+}
+
+test("taskModeGroups: the ids of projects.v1's groups organized by Task; anything else is none", () => {
+  const registry = {
+    version: 1,
+    groups: [
+      { id: "ax", name: "AX", projects: [], organize: "task" },
+      { id: "ag", name: "AG", projects: [] },
+      { id: "", name: "x", projects: [], organize: "task" },
+      { id: "ar", name: "Arrecife", projects: [], organize: "project" },
+      { id: "ax", name: "again", projects: [], organize: "task" },
+    ],
+  };
+  assert.deepEqual(taskModeGroups(registry), ["ax"]);
+  assert.deepEqual(taskModeGroups({ version: 2, groups: registry.groups }), []);
+  assert.deepEqual(taskModeGroups(null), []);
+});
+
+test("D31: a Task-mode group's lanes get the task's flashlight, keyed and acting with the group; dim until every member is held, then working; skipped repos named", () => {
+  const { value } = buildLanes();
+  // AX-3447: back held by B1, front not lit, other skipped (Spotlight off).
+  const [light, flask] = value[laneKey("AX-3447")];
+  assert.deepEqual(light, {
+    icon: "mods/spotlight/icons/flashlight.svg", tone: "dim", tooltip: `${NOT_LIT} Saltado, Spotlight apagado en: other`, action: laneToggle("AX-3447"),
+  });
+  assert.deepEqual(icons([flask]), ["flask"]);
+  // AX-3500: its only member (back) is held by AX-3447's workspace.
+  assert.equal(value[laneKey("AX-3500")][0].tone, "dim");
+  assert.equal(value[laneKey("AX-3500")][0].tooltip, NOT_LIT);
+  // A name lane: the lowercased name, as projects-sidebar keys it.
+  assert.deepEqual(value[laneKey("login")], [{ icon: "mods/spotlight/icons/flashlight.svg", tone: "dim", tooltip: NOT_LIT, action: laneToggle("login") }]);
+  assertContract(value);
+
+  // Every member held by one of the task's workspaces: working, the lit tooltip.
+  const both = baseState();
+  both.repos[FRONT] = repo({ holder: F1, serverState: "listening", ports: [5173] });
+  const lit = buildLanes(both).value[laneKey("AX-3447")][0];
+  assert.equal(lit.tone, "working");
+  assert.equal(lit.tooltip, `${LIT} Saltado, Spotlight apagado en: other`);
+  assert.deepEqual(lit.action, laneToggle("AX-3447"));
+  // front held by a workspace of another task: not lit.
+  both.repos[FRONT].holder = F2;
+  assert.equal(buildLanes(both).value[laneKey("AX-3447")][0].tone, "dim");
+  assertContract(buildLanes(both).value);
+
+  // The workspace rows keep their own badges, as before.
+  assert.deepEqual(value[B1], build().value[B1]);
+});
+
+test("D31: no eligible member, no flashlight: a task only in repos whose Spotlight is off, the Servers lane and the No task lane publish none", () => {
+  const laneCache = {
+    ...cache,
+    [OTHER]: [...cache[OTHER], { path: `${WS}/other/ax-9`, branch: "juan/AX-9", main: false }, { path: `${WS}/other/none`, branch: null, main: false }],
+  };
+  const { value } = buildLanes(baseState(), { laneCache });
+  assert.equal(value[laneKey("AX-9")], undefined);
+  assert.deepEqual(Object.keys(value).filter((k) => !k.startsWith("/")).sort(), [laneKey("AX-3447"), laneKey("AX-3500"), laneKey("login")]);
+  // A task with no eligible member still shows its queue badge.
+  const s = baseState();
+  s.queue.requests.push({
+    terminal: "t9", taskKey: "ax/AX-9", label: "AX-9", lane: "ax", state: "holding", requestedAt: 5, grantedAt: 6, members: [], workspace: `${WS}/other/ax-9`, root: OTHER, slotOnly: true,
+  });
+  assert.deepEqual(icons(buildLanes(s, { laneCache }).value[laneKey("AX-9")]), ["flask"]);
+});
+
+test("D31, D33: a member's repo busy, or the task's batch marker set: the lane's flashlight is the ring, spinning, with no action", () => {
+  const busy = baseState();
+  busy.repos[FRONT] = repo({ busy: { op: "light", since: 5, pid: 4242, workspace: F1 } });
+  const out = buildLanes(busy).value;
+  assert.deepEqual(out[laneKey("AX-3447")][0], RING);
+  assert.equal(out[laneKey("AX-3447")][0].action, undefined);
+  assert.equal(out[laneKey("AX-3500")][0].icon, "mods/spotlight/icons/flashlight.svg", "back isn't busy: AX-3500 keeps its flashlight");
+  assert.deepEqual(out[laneKey("login")][0], RING, "front is login's member too");
+
+  const batch = baseState();
+  batch.queue.taskBatch = { "ax/AX-3500": { op: "on", since: 5, pid: 4242 } };
+  const running = buildLanes(batch).value;
+  assert.deepEqual(running[laneKey("AX-3500")][0], RING);
+  assert.equal(running[laneKey("AX-3447")][0].icon, "mods/spotlight/icons/flashlight.svg", "another task's batch doesn't spin this lane");
+  assertContract(running);
+});
+
+test("D31: the task's queue badge on its lane, as on its rows: testing, queued #2, paused; none with the queue off", () => {
+  const s = baseState();
+  s.queue.requests.push({
+    terminal: "t3", taskKey: "ax/login", label: "login", lane: "ax", state: "waiting", requestedAt: 4, members: [member(FRONT, "front", F2)], workspace: F2, root: FRONT,
+  });
+  const { value } = buildLanes(s);
+  assert.deepEqual(icons(value[laneKey("AX-3447")]), ["flashlight", "flask"]);
+  assert.deepEqual(icons(value[laneKey("AX-3500")]), ["flashlight", "clock"]);
+  const second = value[laneKey("login")][1];
+  assert.deepEqual(icons([second]), ["clock"]);
+  assert.equal(second.text, "#2");
+  // Behind AX-3500, and AX-3447 holds front.
+  assert.equal(second.tooltip, "En cola #2 · repo ocupado");
+  assert.deepEqual(second, value[F2][1], "the lane's badge is the row's");
+
+  Object.assign(s.queue.requests[1], { state: "paused", pauseReason: "limit", pausedAt: 9 });
+  assert.equal(buildLanes(s).value[laneKey("AX-3500")][1].tooltip, "Pausado · sin límite");
+  const off = buildLanes(s, { settings: settingsOf({ version: 1, queue: { enabled: false } }) }).value;
+  assert.deepEqual(icons(off[laneKey("AX-3447")]), ["flashlight"]);
+});
+
+test("D29: a group not in Task mode gets no lane keys", () => {
+  // buildBadges with no taskGroups at all (build()), or with groups that aren't the fixture's.
+  for (const taskGroups of [[], ["ag"], "ax"]) {
+    const { value } = buildLanes(baseState(), { taskGroups });
+    assert.deepEqual(Object.keys(value).filter((k) => !k.startsWith("/")), [], JSON.stringify(taskGroups));
+    assert.deepEqual(value, build().value);
+  }
+  assert.deepEqual(Object.keys(build().value).filter((k) => !k.startsWith("/")), []);
 });

@@ -1,5 +1,6 @@
 // badges.spotlight (D2, D17): Spotlight's icons on projects-sidebar's
-// workspace rows, and the badge commands they hand out. Only the footer copy
+// workspace rows and Task-mode lane headers (D29, D31), and the badge
+// commands they hand out. Only the footer copy
 // runs it (main.js): startBadges keeps the value in step with state.json
 // (board.js watchState, whose readings also feed auto-sync's holders),
 // settings.json and projects-sidebar's lists, and writes it only when it
@@ -18,7 +19,7 @@ import { repoSettings, repoEnabledFrom, normRoot } from "./settings.js";
 import { hasServerCommand } from "./server-plan.js";
 import { cliPathOf } from "./board-model.js";
 import { readFiles, watchState, openServer } from "./board.js";
-import { buildBadges, nextPublish, parseProjects, parseCache, attempt } from "./badges-model.js";
+import { buildBadges, nextPublish, parseProjects, parseCache, attempt, taskModeGroups } from "./badges-model.js";
 import { modIo } from "./server-view-model.js";
 import { followHolders } from "./autosync.js";
 
@@ -81,13 +82,16 @@ async function enabledRoots(projects, settings) {
 }
 
 // Builds the badges from the last readings and publishes them if they changed.
+// The task lanes of every group organized by Task get theirs too (D29, D31),
+// whichever group projects-sidebar shows: a lane name can repeat across groups.
 async function refresh() {
   if (!files) return;
   const { state, settings } = files;
-  const projects = parseProjects(shared("projects.v1"));
+  const registry = shared("projects.v1");
+  const projects = parseProjects(registry);
   const cache = parseCache(shared("projects.cache.v1"));
   const enabled = await enabledRoots(projects, settings);
-  const built = buildBadges({ state, settings, projects, cache, enabled, bin: cliPathOf(appHome()) });
+  const built = buildBadges({ state, settings, projects, cache, enabled, bin: cliPathOf(appHome()), taskGroups: taskModeGroups(registry) });
   servers = built.servers;
   const out = nextPublish(shared(KEY), built.value);
   if (out.write) setShared(KEY, out.value);

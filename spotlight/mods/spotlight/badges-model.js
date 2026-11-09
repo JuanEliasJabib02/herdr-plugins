@@ -33,8 +33,22 @@
 //                  and `servers[id]` names the workspace.
 //   3. queue       with the queue on, on the rows of a task that asked for a
 //                  turn: flask testing, clock + "#N" in line, pause paused.
+//
+// On a task lane's header, in every group organized by Task (D29, D31;
+// projects-sidebar draws the active group's only):
+//   1. flashlight  the whole task's: working when every member's root is
+//                  held by one of the task's workspaces (task.js taskLit),
+//                  dim otherwise; the repos skipped (Spotlight off there)
+//                  named in its tooltip. A click runs `spotlight toggle
+//                  --task <KEY> --group <id>`. While that batch runs
+//                  (queue.taskBatch) or a member's repo is busy, the ring,
+//                  with no action. None when no repo with Spotlight on has
+//                  a workspace of the task.
+//   2. queue       the task's queue badge, the one its rows show, so a
+//                  folded lane still says it (Orca's TaskTestTurnBadge).
 
 import { normRoot, repoSettings } from "./settings.js";
+import { taskOf, taskLit } from "./task.js";
 import { portLabel, pickPort, portUrl } from "./ports.js";
 import { positionOf } from "./queue.js";
 import { MOD } from "./board-model.js";
@@ -136,6 +150,21 @@ export function parseProjects(registry) {
     }
   }
   return out;
+}
+
+// The ids of projects.v1's groups organized by Task (`organize: "task"`,
+// projects-sidebar's D29), in order: the ones whose task lanes get badges.
+// A group id listed twice counts the first time, as projects-sidebar reads it.
+export function taskModeGroups(registry) {
+  if (!isObject(registry) || registry.version !== 1 || !Array.isArray(registry.groups)) return [];
+  const seen = new Set();
+  const ids = [];
+  for (const g of registry.groups) {
+    if (!isObject(g) || typeof g.id !== "string" || !g.id || !Array.isArray(g.projects) || seen.has(g.id)) continue;
+    seen.add(g.id);
+    if (g.organize === "task") ids.push(g.id);
+  }
+  return ids;
 }
 
 const isCheckout = (c) => isObject(c) && isAbsolute(c.path) && (c.branch === null || typeof c.branch === "string") && typeof c.main === "boolean";
@@ -288,6 +317,56 @@ function queueBadges(state, qctx) {
   return out;
 }
 
+// ── Task lanes (D29, D31) ──────────────────────────────────────────────────
+
+// The task lanes of each Task-mode group, from projects.cache.v1 as
+// projects-sidebar builds them (task.js taskOf: a ticket, or a name
+// lowercased; main checkouts and No task have none): [{ group, key,
+// members: [{ root, workspaces }], skipped: [name] }], members the repos with
+// a worktree of the task and Spotlight on (`enabled`), skipped the others,
+// both in the group's order. The CLI's `toggle --task` resolves the same
+// members (task.js resolveGroupTask).
+function taskLanes({ projects, cache, enabled, taskGroups }) {
+  const lanes = [];
+  for (const group of taskGroups) {
+    const byKey = new Map();
+    for (const { root, name, group: of } of projects) {
+      if (of !== group) continue;
+      const mine = new Map(); // task key → this repo's worktrees of it
+      for (const c of cache[root] ?? []) {
+        const key = taskOf(c)?.key;
+        if (key) mine.set(key, [...(mine.get(key) ?? []), c.path]);
+      }
+      for (const [key, workspaces] of mine) {
+        const lane = byKey.get(key) ?? { group, key, members: [], skipped: [] };
+        if (enabled[root] === true) lane.members.push({ root, workspaces });
+        else lane.skipped.push(name);
+        byKey.set(key, lane);
+      }
+    }
+    lanes.push(...byKey.values());
+  }
+  return lanes;
+}
+
+const LANE_OFF = "Spotlight de esta tarea: proyecta sus workspaces en el root de cada proyecto.";
+const LANE_ON = "Spotlight prendido para esta tarea. Clic para apagarlo en todos los proyectos.";
+
+// 1. A task lane's flashlight, or null when no member can hold it. The ring
+// while its batch runs (queue.taskBatch[<groupId>/<KEY>]) or a member's repo
+// is busy (D33): no action, the work holds the repos' locks.
+function laneFlashlight({ group, key, members, skipped }, { state, bin }) {
+  if (members.length === 0) return null;
+  const repos = state?.repos ?? {};
+  if (isObject(state?.queue?.taskBatch?.[`${group}/${key}`]) || members.some((m) => busyOf(repos[m.root]))) return ring();
+  const lit = taskLit(members, repos);
+  const off = skipped.length > 0 ? ` Saltado, Spotlight apagado en: ${skipped.join(", ")}` : "";
+  return badge({
+    icon: "flashlight", tone: lit ? "working" : "dim", tooltip: `${lit ? LANE_ON : LANE_OFF}${off}`,
+    action: { exec: [bin, "toggle", "--task", key, "--group", group] },
+  });
+}
+
 // Every badge of the moment, and the server popup's id map:
 //   state     board-model.js readState(state.json's text)
 //   settings  board-model.js readSettings(settings.json's text)
@@ -296,11 +375,13 @@ function queueBadges(state, qctx) {
 //   enabled   { [root]: boolean }: whether Spotlight is on for each
 //             registered repo (D7, settings.js repoEnabledFrom)
 //   bin       board-model.js cliPathOf(appHome())
-// → { value: { [path]: [badge] } | null, servers: { [id]: { workspace, root } } }
+//   taskGroups  taskModeGroups(shared("projects.v1")): the groups whose
+//             task lanes get badges (D29); none by default
+// → { value: { [path | laneKey]: [badge] } | null, servers: { [id]: { workspace, root } } }
 // `servers` names every workspace Spotlight knows (lit rows, the enabled
 // repos' worktrees, the queue's members, the lightings'), so a toast's
 // `spotlight.server.<id>` (cli-work.mjs errorNote) resolves too.
-export function buildBadges({ state, settings, projects = [], cache = {}, enabled = {}, bin }) {
+export function buildBadges({ state, settings, projects = [], cache = {}, enabled = {}, bin, taskGroups = [] }) {
   const rows = new Map(); // path → [badge, …] in D17's order
   const add = (at, b) => {
     const list = rows.get(at) ?? [];
@@ -360,10 +441,19 @@ export function buildBadges({ state, settings, projects = [], cache = {}, enable
   }
 
   const queue = settings?.queue ?? {};
-  if (queue.enabled !== false) {
-    for (const { badge: b, rows: at } of queueBadges(state, { ...queue }).values()) {
-      for (const p of at) add(p, b);
-    }
+  const queued = queue.enabled !== false ? queueBadges(state, { ...queue }) : new Map();
+  for (const { badge: b, rows: at } of queued.values()) {
+    for (const p of at) add(p, b);
+  }
+
+  // The task lanes: `<groupId>/task:<KEY>`, as projects-sidebar keys them
+  // (D29); a lane's queue key is `<groupId>/<KEY>` (D12).
+  for (const lane of taskLanes({ projects, cache, enabled, taskGroups: Array.isArray(taskGroups) ? taskGroups : [] })) {
+    const at = `${lane.group}/task:${lane.key}`;
+    const light = laneFlashlight(lane, { state, bin });
+    if (light) add(at, light);
+    const asked = queued.get(`${lane.group}/${lane.key}`);
+    if (asked) add(at, asked.badge);
   }
 
   const value = {};

@@ -201,3 +201,20 @@ While Spotlight works on a repo, its flashlight is a spinning ring, as Orca's "s
   - `lightTask(cx, key, { quiet: true })` and `deactivateRepo(cx, root, { quiet: true })` leave out the per-repo "Spotlight on · …" and "Spotlight off — root restaurado" notes. Errors, warnings and rescued files still toast.
   - `quiet` is a call option, never stored on the lighting marker, so a later Proyectar igual of that marker toasts as usual.
 - The pieces are `store.js` (`markBusy`, `clearBusy`, `setTaskBatch`, `clearTaskBatch`; a malformed mark or batch is dropped on read), `cli-work.mjs` (`withBusy`, `withTaskBatch`, `staleMarks`) and `badges-model.js` (the ring).
+
+## The task button
+
+In a group organized by Task, each task lane's header carries Spotlight's flashlight, Orca's "Spotlight this task" (D31, D29): one click lights the whole task, or turns it off, in every project of the group.
+
+- Who takes part: each project of the group with a workspace of the task (a main checkout never is one) whose Spotlight is on (its setting, else the default: a repo with a server command). With several workspaces there, the one holding the root, else the one whose agent changed status last, else the newest commit, as `spotlight on` picks. Projects with Spotlight off are skipped and named in the tooltip ("Saltado, Spotlight apagado en: admin-action"). Orca spans every worktree; here only the group's projects count (D12). With nobody left, the lane has no flashlight.
+- Amber (working) when every project's root is held by one of the task's workspaces there, dim otherwise. The tooltip says what a click does: "Spotlight de esta tarea: proyecta sus workspaces en el root de cada proyecto." or "Spotlight prendido para esta tarea. Clic para apagarlo en todos los proyectos."
+- A click runs `spotlight toggle --task <KEY> --group <id>`, which hands the work to a detached `--inline` copy and answers at once (D18):
+  - Lit: each project is turned off in turn: the root restored, its server stopped.
+  - Not lit: first every project of the group lit by no workspace of the task is turned off, then each project the task doesn't hold yet is lit, taking it over from whoever holds it. The ones already held stay as they are.
+  - One project failing never stops the rest, and each failure toasts itself as a workspace's would (its popup action included). The projects say nothing else: one toast sums the batch up, "Spotlight on · AX-3653" / "Spotlight off · AX-3653" when every project went through, "Spotlight on en 1 de 2 proyectos" / "Spotlight off en 1 de 2 proyectos" when some did, none when none did.
+  - Each project is lit through its `direct/<root>` marker, as the workspace flashlight lights it, so Proyectar igual on a refused one works and toasts as usual.
+- While the batch runs (`queue.taskBatch[<groupId>/<KEY>]`) or one of its projects is busy (see Busy), the flashlight is the ring: spinning, "Sincronizando…", no click. Orca's button also spins while it works ("Updating Spotlight…").
+- After it, the task's queue badge (testing, #N in line, paused), the one its workspace rows show, so a folded lane still says it. With the queue off, none.
+- `<KEY>` is the lane as projects-sidebar keys it: a ticket ("AX-3653") or the name lowercased; the CLI also takes a ticket in any spelling (`ax_3653`). `--group` is the projects.v1 group id. A missing `--group`, an unknown group or a key that can't name a task exits 2; `--inline` exits 1 when no project can take part or none went through.
+- Spotlight publishes the lanes of every Task-mode group under `badges.spotlight`, keyed `<groupId>/task:<KEY>` (projects-sidebar's "Badges from other plugins"), whichever group is shown: a lane name can repeat across groups. A group organized by Project gets none.
+- The pieces are `task.js` (`resolveGroupTask`, `taskLit`, `taskKeyFrom`), `cli-task.mjs` (`toggleTask`, `summaryOf`), `badges-model.js` (`taskModeGroups`, the lane badges) and `cli.mjs` (the verb).

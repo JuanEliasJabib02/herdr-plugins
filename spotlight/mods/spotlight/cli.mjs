@@ -5,6 +5,7 @@
 //                                        holding, 1 still waiting, 2 usage)
 //   off [--terminal t]                   give the turn back, nothing else
 //   toggle --workspace p [--force]       a human's on/off, outside the queue
+//   toggle --task KEY --group id         the whole task's, from its lane (D31)
 //   status [--json]                      read-only, no lock, no reap
 //   sync --repo r [--force] [--detach]   restart --repo r [--free-port]
 //   logs [--repo r] [--lines N] [--path] peek --workspace p | --repo r
@@ -24,7 +25,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
-import { resolveTask } from "./task.js";
+import { resolveTask, taskKeyFrom, hasGroup } from "./task.js";
 import { request, release, positionOf } from "./queue.js";
 import { readRefs, assertDeactivatable, toSpotlightError } from "./sync.js";
 import { emptyRepo, rememberVariant } from "./store.js";
@@ -47,6 +48,7 @@ import {
 } from "./cli-work.mjs";
 import { setRootError } from "./server-errors.js";
 import { settleResumes, autoResume, continueTask, classifyTerminal } from "./cli-resume.mjs";
+import { toggleTask } from "./cli-task.mjs";
 
 // Orca's: under an agent shell's 2-minute command cap; `on` is rerun to keep waiting.
 export const DEFAULT_ON_TIMEOUT_MS = 100_000;
@@ -66,6 +68,7 @@ Agents
 
 People and the mod
   spotlight toggle --workspace p [--force]       turn a workspace's Spotlight on or off, outside the queue
+  spotlight toggle --task KEY --group id         turn a whole task's Spotlight on or off in that space
   spotlight sync --repo r [--force] [--detach]   bring the root in step with its holder
   spotlight peek --workspace p | --repo r        look at the server's terminal
   spotlight env --workspace p [--env local|dev|prod] [--variant v]
@@ -89,6 +92,7 @@ const FLAGS = {
   env: "string",
   variant: "string",
   task: "string",
+  group: "string",
   account: "string",
   inline: "bool",
   auto: "bool",
@@ -318,6 +322,7 @@ async function verbOff(cx, opts) {
 // ── toggle ─────────────────────────────────────────────────────────────────
 
 async function verbToggle(cx, opts) {
+  if (opts.task !== undefined || opts.group !== undefined) return verbToggleTask(cx, opts);
   if (!opts.workspace) return usage("spotlight toggle: --workspace <path> is required.");
   const dir = path.resolve(opts.workspace);
   const workspace = await checkoutOf(dir);
@@ -398,6 +403,33 @@ async function verbToggle(cx, opts) {
   await spawnLights(cx, [key]);
   out(`Turning Spotlight on: ${path.basename(workspace)} onto ${name}. \`spotlight status\` shows when it is lit.`);
   return 0;
+}
+
+// `toggle --task <KEY> --group <id>` (D31): the lane's flashlight. Detached
+// unless --inline (D18): a batch lights or turns off a repo after another,
+// and a click's exec dies at 30 s. The detached call checks only what needs
+// no git (the key, the group), so it answers at once.
+async function verbToggleTask(cx, opts) {
+  if (!opts.task || !opts.group) return usage("spotlight toggle: --task <KEY> and --group <id> go together (the lane and its space).");
+  if (opts.workspace || opts.force) return usage("spotlight toggle: --task takes no --workspace or --force.");
+  const task = taskKeyFrom(opts.task);
+  if (!task) return usage(`spotlight toggle: "${opts.task}" can't name a task.`);
+  if (!hasGroup(cx.shared["projects.v1"], opts.group)) return usage(`spotlight toggle: no group "${opts.group}" in projects-sidebar's spaces.`);
+  if (!opts.inline) {
+    cx.spawn(["toggle", "--task", task, "--group", opts.group, "--inline"]);
+    out(`Toggling Spotlight for ${task} in ${opts.group}. \`spotlight status\` shows when it is done.`);
+    return 0;
+  }
+  const r = await toggleTask(cx, { group: opts.group, task, terminals: await terminalFacts() });
+  if (r.code === "no-group" || r.code === "no-task") return usage(`spotlight toggle: ${r.message}`);
+  if (r.code) {
+    err(`${r.code}: ${r.message}`);
+    return 1;
+  }
+  for (const [root, message] of Object.entries(r.errors)) err(`${cx.nameOf(root)}: ${message}`);
+  if (r.skipped.length > 0) out(`Not included: ${r.skipped.join(", ")}.`);
+  if (r.summary) out(r.summary);
+  return r.ok ? 0 : 1;
 }
 
 // ── status ─────────────────────────────────────────────────────────────────

@@ -3,7 +3,10 @@
 // members in the requesting repo's group filtered by `enabled` (D7), the one
 // workspace each member repo puts on its root, and the queue lane (the
 // group). The CLI's `on` resolves a request with it; the queue (queue.js)
-// takes the key, the lane and the members from here.
+// takes the key, the lane and the members from here. The whole-task toggle
+// (D31) resolves a lane's members by the same rules with no cwd
+// (resolveGroupTask), and it and the lane's flashlight share the lit rule
+// (taskLit).
 //
 // This module imports nothing: the mod and the CLI share it, so it can use
 // neither node: nor herdr modules, and projects-sidebar's code is copied
@@ -116,21 +119,33 @@ export function taskOf(checkout) {
   return { key: task.kind === "ticket" ? task.key : task.key.toLowerCase(), label: task.key };
 }
 
+// A task's key as a lane names it (`spotlight toggle --task <KEY>`, D31), in
+// taskOf's form: a ticket in any spelling ("ax_50" → "AX-50"), else the name
+// lowercased; null for what can't name a task ("none", over 200 chars, a
+// special object key, nothing).
+export function taskKeyFrom(raw) {
+  if (typeof raw !== "string") return null;
+  const ticket = findTicket(raw);
+  if (ticket) return ticket;
+  return usableName(raw)?.toLowerCase() ?? null;
+}
+
 // ── Lanes: the groups of projects.v1 ───────────────────────────────────────
 
 // The lane of a repo in no group, or with no readable projects.v1: settings'
 // perSpace key for it too (D7).
 export const SPACELESS = "spaceless";
 
-// The group holding `root` in a stored projects.v1 value, read as
-// projects-sidebar's parseRegistry reads it: a value that isn't a v1
-// registry has no groups; a malformed group is dropped with its projects, a
-// malformed project alone; a group id or a project path listed twice counts
-// the first time only. { id, projects: [{ path, name }] }, or null.
-function groupOf(registry, root) {
-  if (!isObject(registry) || registry.version !== 1 || !Array.isArray(registry.groups)) return null;
+// The groups of a stored projects.v1 value, read as projects-sidebar's
+// parseRegistry reads it: a value that isn't a v1 registry has no groups; a
+// malformed group is dropped with its projects, a malformed project alone; a
+// group id or a project path listed twice counts the first time only.
+// [{ id, projects: [{ path, name }] }].
+function groupsOf(registry) {
+  if (!isObject(registry) || registry.version !== 1 || !Array.isArray(registry.groups)) return [];
   const ids = new Set();
   const paths = new Set();
+  const groups = [];
   for (const g of registry.groups) {
     if (!isObject(g) || typeof g.id !== "string" || g.id === "" || typeof g.name !== "string" || !Array.isArray(g.projects) || ids.has(g.id)) continue;
     ids.add(g.id);
@@ -142,10 +157,16 @@ function groupOf(registry, root) {
       paths.add(path);
       projects.push({ path, name: p.name });
     }
-    if (projects.some((p) => p.path === root)) return { id: g.id, projects };
+    groups.push({ id: g.id, projects });
   }
-  return null;
+  return groups;
 }
+
+// The group holding `root`, { id, projects: [{ path, name }] }, or null.
+const groupOf = (registry, root) => groupsOf(registry).find((g) => g.projects.some((p) => p.path === root)) ?? null;
+
+// Whether a stored projects.v1 value has group `id` (groupsOf's rules).
+export const hasGroup = (registry, id) => groupsOf(registry).some((g) => g.id === id);
 
 // The queue lane of a repo root (D12): the id of the projects.v1 group that
 // holds it, else SPACELESS.
@@ -301,26 +322,14 @@ export async function resolveTask({ cwd, shared, git, enabled, terminals = [] } 
   const cache = parseCache(values["projects.cache.v1"]);
   const projects = group ? group.projects : [{ path: root, name: baseName(root) }];
 
-  let label = task.label;
-  const members = [];
-  const skipped = [];
-  for (const p of projects) {
-    const list = p.path === root ? own : cache[p.path] ?? (await listCheckouts(p.path, git));
-    const workspaces = [];
-    for (const c of list) {
-      const t = taskOf(c);
-      if (t?.key !== task.key) continue;
-      workspaces.push(c);
-      if (t.label < label) label = t.label;
-    }
-    if (workspaces.length === 0) continue;
-    if (!(await enabled(p.path))) {
-      skipped.push(p.name);
-      continue;
-    }
-    const pick = p.path === root ? workspace : await pickWorkspace(workspaces, terminals, git);
-    members.push({ root: p.path, name: p.name, workspace: pick, workspaces: workspaces.map((c) => c.path) });
-  }
+  const { members, skipped, label } = await collectMembers({
+    projects,
+    key: task.key,
+    label: task.label,
+    list: async (p) => (p === root ? own : cache[p] ?? (await listCheckouts(p, git))),
+    enabled,
+    pick: async (p, workspaces) => (p === root ? workspace : pickWorkspace(workspaces, terminals, git)),
+  });
 
   return {
     ok: true,
@@ -334,4 +343,86 @@ export async function resolveTask({ cwd, shared, git, enabled, terminals = [] } 
     skipped,
     slotOnly: members.length === 0,
   };
+}
+
+// The members of task `key` among `projects` (one group's, in order), the
+// rule resolveTask and resolveGroupTask share: one per enabled repo with a
+// worktree of the task, { root, name, workspace, workspaces }, `workspace`
+// from `pick(root, checkouts)`; `skipped`, the names of the repos with one
+// that `enabled` keeps out; `label`, the smallest casing seen, starting from
+// `label` (null: the first seen).
+//   list(root) → Promise<[{ path, branch, main }]>: the repo's checkouts.
+async function collectMembers({ projects, key, label, list, enabled, pick }) {
+  const members = [];
+  const skipped = [];
+  for (const p of projects) {
+    const workspaces = [];
+    for (const c of await list(p.path)) {
+      const t = taskOf(c);
+      if (t?.key !== key) continue;
+      workspaces.push(c);
+      if (label === null || t.label < label) label = t.label;
+    }
+    if (workspaces.length === 0) continue;
+    if (!(await enabled(p.path))) {
+      skipped.push(p.name);
+      continue;
+    }
+    const workspace = await pick(p.path, workspaces);
+    members.push({ root: p.path, name: p.name, workspace, workspaces: workspaces.map((c) => c.path) });
+  }
+  return { members, skipped, label };
+}
+
+// ── The task of a lane: one group, no cwd (D31) ────────────────────────────
+
+// A task lane's members, for the whole-task toggle (`spotlight toggle --task
+// <KEY> --group <id>`): the lane header has no folder, so the task comes from
+// its key and its group, and every repo of the group is listed the way
+// resolveTask lists the others (projects.cache.v1, else git). Per enabled
+// repo with a worktree of the task, the one put on its root: the task's
+// workspace holding it now (`holders`: { [root]: holder path }, state.json's),
+// else pickWorkspace's. Resolves:
+//   { ok: true, group, taskKey, label, members, skipped, projects }
+//     taskKey: taskKeyFrom(task); label: the smallest casing the group shows;
+//     members and skipped: resolveTask's; projects: the group's repos in
+//     order, [{ root, name }] (the switch-away turns off those lit by no member).
+//   { ok: false, code: "no-group" | "no-task", message }
+// Never rejects.
+export async function resolveGroupTask({ group, task, shared, git, enabled, terminals = [], holders = {} } = {}) {
+  const key = taskKeyFrom(task);
+  if (!key) return { ok: false, code: "no-task", message: `"${task}" can't name a task.` };
+  const values = isObject(shared) ? shared : {};
+  const found = groupsOf(values["projects.v1"]).find((g) => g.id === group);
+  if (!found) return { ok: false, code: "no-group", message: `No group "${group}" in projects-sidebar's spaces.` };
+  const cache = parseCache(values["projects.cache.v1"]);
+  const held = (root) => normPath(isObject(holders) ? holders[root] : null);
+  const { members, skipped, label } = await collectMembers({
+    projects: found.projects,
+    key,
+    label: null,
+    list: async (p) => cache[p] ?? (await listCheckouts(p, git)),
+    enabled,
+    pick: async (p, workspaces) => workspaces.find((c) => c.path === held(p))?.path ?? pickWorkspace(workspaces, terminals, git),
+  });
+  return {
+    ok: true,
+    group: found.id,
+    taskKey: key,
+    label: label ?? key,
+    members,
+    skipped,
+    projects: found.projects.map((p) => ({ root: p.path, name: p.name })),
+  };
+}
+
+// Whether a task is lit (D31): it has members, and every member's root is
+// held by one of the task's workspaces in that repo (`repos`: state.json's).
+// Shared by the CLI's toggle and the lane's flashlight (badges-model.js).
+export function taskLit(members, repos) {
+  if (!Array.isArray(members) || members.length === 0) return false;
+  return members.every((m) => {
+    const holder = normPath(isObject(repos) ? repos[m.root]?.holder : null);
+    return holder !== "" && (m.workspaces ?? []).includes(holder);
+  });
 }
