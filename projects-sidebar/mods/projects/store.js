@@ -13,7 +13,7 @@ import { parseBadges } from "./badges-model.js";
 import { parsePrs } from "./pr-model.js";
 import {
   KEYS, changed, normPath,
-  parseRegistry, registryWrites, parseUi, withCollapsed, withTaskCollapsed, parseCache, parseAgents,
+  parseRegistry, registryWrites, parseUi, withCollapsed, withTaskCollapsed, withHideSleeping, withExceptMain, parseCache, parseAgents,
   parseNotes, withNote, notesFull, notesWrites,
 } from "./lib.js";
 import { parseInicio, inicioValue } from "./inicio-model.js";
@@ -46,7 +46,7 @@ export function updateRegistry(fn) {
   return next;
 }
 
-// ── projects.ui.v1: collapsed projects, folded Task lanes ──────────────────
+// ── projects.ui.v1: collapsed projects, folded Task lanes, Hide sleeping ───
 
 export const ui = () => parseUi(shared(KEYS.ui));
 
@@ -64,6 +64,20 @@ export function toggleCollapsed(path) {
 export function toggleTaskCollapsed(lane) {
   const now = ui();
   return saveUi(withTaskCollapsed(now, lane, !(now.tasks ?? []).includes(lane)));
+}
+
+// The sleeping filter (workspace-sleep D8), read by the tree and its popup.
+// Hide sleeping: the popup's first switch and projects.toggle-sleeping, run
+// in the keeper's copy (D7), which reaches the tree only through this key.
+export function toggleSleeping() {
+  const now = ui();
+  return saveUi(withHideSleeping(now, now.hideSleeping !== true));
+}
+
+// Except default branch: the popup's second switch, shown while hiding.
+export function toggleExceptMain() {
+  const now = ui();
+  return saveUi(withExceptMain(now, now.exceptMain === false));
 }
 
 // ── projects.cache.v1: each project's worktree list ────────────────────────

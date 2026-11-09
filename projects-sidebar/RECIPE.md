@@ -19,7 +19,11 @@ across repos.
   in the person's UI font.
 - **Projects tree:**
   - Header: 31 px, 11.5 px `dim` text. It reads "Projects · <group>", or
-    "Projects" for the default group, with a "+" (Add project) on the right.
+    "Projects" for the default group, with a filter button ("Filter
+    workspaces", Orca's three-bar glyph) and a "+" (Add project) on the
+    right. While Hide sleeping is on, the filter button carries Orca's
+    badge, a small `accent` "1" at its top right, and its tooltip reads
+    "Edit filters", as Orca's does.
   - Project rows: 28 px with rounded 8 corners. Each has a chevron (collapse),
     a folder icon, the repo name in `foreground` semibold, and a "+" (New
     workspace) that brightens on hover.
@@ -49,6 +53,15 @@ across repos.
     - The shown workspace has a `selected` background.
   - Agent rows: 24 px, under their workspace. Each shows the program's icon,
     the agent's title, and the time since its tab changed ("2m").
+  - **Hide sleeping** (the filter button's popup, or
+    `projects.toggle-sleeping`; Orca's sleeping filter): asleep workspace
+    rows go, with their agents, those never opened too, as in Orca.
+    - The shown workspace never hides, nor does one whose agent is working,
+      blocked or done: it shows that mark, not the moon.
+    - "Except default branch", on by default, keeps every main checkout.
+    - A project row stays even when all its workspaces hide, and the
+      narrow rail is unchanged.
+    - Both settings survive a reload.
   - Empty group: "No projects in this group yet." and an "Add project" button.
     A project git can't list shows "Can't read this folder."
 - **Groups bar** (drawn like Orca's, so a long name never takes the bar):
@@ -105,9 +118,13 @@ across repos.
     remove one first.").
   - The header gets a branch-icon button, "New workspace", next to Add
     project: the dialog opens on the focused space's project.
+  - Hide sleeping leaves out the same workspaces as in Project mode: a lane
+    counts only the rows it shows, and a lane left with none isn't shown.
+    Servers keeps a project's "Loading…" row.
 - **Narrow sidebar** (under 160 px wide): projects show as initials ("HP" for
   herdr-plugins) with the most urgent status among their workspaces. Group
-  chips shrink to 26 px and center, and "+" hides.
+  chips shrink to 26 px and center, and "+" hides. The tree's header shows
+  its "+" only: the rail has no workspace rows to filter.
 - **New workspace dialog:** a 560 × 600 modal with these parts:
   - Project select: the current group's projects only (the space you're in); switch groups for another's.
   - Name input: takes a name, a branch, `#123`, or a GitHub issue / pull
@@ -186,6 +203,11 @@ across repos.
   - The group menu is a 210 × 200 popup: Organize by Project, Organize by
     Task, a separator, Rename…, Delete group. The New / Rename group form is
     a 380 × 214 dialog.
+  - The filter popup is 240 px wide, at the pointer, as Orca's: "Hide
+    sleeping" with the moon and a switch, off by default; while it's on,
+    "Except default branch" with the branch icon, indented and `muted`, on
+    by default. A click, or Enter or Space on the highlighted row, flips a
+    switch and the popup stays open; ↑/↓ move, Esc closes.
 - **PR card** (the right panel's Changes, above Herdr's diff, as Orca shows
   the PR atop Source Control): a 176 px card with rounded 10 corners, a 1 px
   `border` and the terminals' `background`, 8 px above Changes' own card.
@@ -579,6 +601,7 @@ across repos.
     and its confirm dialog);
   - `create-pr` = `create-pr.js` (Crear PR's dialog);
   - `project-menu`, `workspace-menu`, `group-menu`, `group-form`;
+  - `filter-menu` = `filter-menu.js` (the header's Hide sleeping popup);
   - `keeper` = `keeper.js` (the status bar's 1 px cell, and the only copy
     that reads key commands: `main.js` gives it the whole table), `inicio`
     = `inicio.js` (Inicio's view).
@@ -596,7 +619,10 @@ across repos.
     its workspace with `lib.js` `checkoutAt`, the rule `matchSpaces` places
     spaces by.
   - `store.js` is the only code that touches the shared keys: `projects.v1`
-    (groups and projects), `projects.ui.v1` (collapsed), `projects.cache.v1`
+    (groups and projects), `projects.ui.v1` (collapsed projects, folded
+    lanes, and Hide sleeping: `"hideSleeping": true` only while on,
+    `"exceptMain": false` only while Except default branch is off),
+    `projects.cache.v1`
     (worktree lists), `projects.agents.v1` (`knownAgents()`),
     `projects.notes.v1` (task notes), `projects.prs.v1` (the PR of each
     workspace's branch, `pr-model.js`), `projects.prs-ask.v1` (a number
@@ -618,7 +644,9 @@ across repos.
   round at its next second, so the tree stays the only writer of the PR
   colors),
   `projects.space-next`, `projects.space-prev`,
-  `projects.space-1`..`projects.space-9`. `keys.json` binds, in section
+  `projects.space-1`..`projects.space-9`, `projects.toggle-sleeping`
+  (Hide sleeping on or off, Orca's "Toggle Sleeping Workspaces", with no
+  default key). `keys.json` binds, in section
   `layout:projects`, F1–F3 to the groups, and `cmd-alt-]`, `cmd-alt-[` and
   `ctrl-1`…`ctrl-9` to the space commands. All of them run in the keeper's
   copy.
@@ -857,7 +885,9 @@ against.
   projects-sidebar/mods/projects pr merge-menu merge-pr create-pr` checks
   the PR card, Mergear's popup and dialog, and Crear PR's dialog, and
   `scripts/check-views.sh projects-sidebar/mods/projects inicio keeper`
-  checks Inicio and the keeper. Outside Herdr there is no workspace and no
+  checks Inicio and the keeper, and `scripts/check-views.sh
+  projects-sidebar/mods/projects tree filter-menu` the tree and its filter
+  popup. Outside Herdr there is no workspace and no
   props, so that check draws their empty states only.
 - **The PR card hides by clicking:** its `layout.hide` / `layout.show` is a
   layout click, which Herdr saves in `layouts/.state/`. Moving between a

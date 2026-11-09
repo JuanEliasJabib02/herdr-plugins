@@ -12,7 +12,7 @@ import {
   normPath, placeOf, changed,
   emptyRegistry, parseRegistry, needsBackup, registryWrites, activeGroup, findProject,
   addProject, removeProject, moveProject, addGroup, renameGroup, deleteGroup, selectGroup, setOrganize, setProjectBase,
-  parseUi, withCollapsed, withTaskCollapsed, parseCache, parseAgents,
+  parseUi, withCollapsed, withTaskCollapsed, withHideSleeping, withExceptMain, parseCache, parseAgents,
   noteKeyOf, noteOf, normalizeNote, parseNotes, withNote, notesFull, notesWrites,
   resolveProject, parseWorktrees, listCheckouts,
   matchSpaces, checkoutAt, attentionByGroup,
@@ -434,6 +434,55 @@ test("ui state: folding a project keeps the folded lanes; folding a lane keeps t
   assert.deepEqual(withTaskCollapsed(ui, "task:login", false), { collapsed: ["/a"] }, "the last lane unfolded: no `tasks` key, as parseUi reads it");
   assert.deepEqual(withTaskCollapsed({ collapsed: [] }, "task:AX-7", true), { collapsed: [], tasks: ["task:AX-7"] });
   assert.equal(withTaskCollapsed(ui, `task:${"x".repeat(201)}`, true), ui, "a key parseUi would drop isn't stored");
+});
+
+// The stored text of a value: key order and all, as lib.js `changed` and
+// store.js's writes compare it.
+const stored = (v) => JSON.stringify(v);
+
+test("ui state: the sleeping filter (workspace-sleep D8) keeps hideSleeping only when on and exceptMain only when off, their defaults being no key", () => {
+  assert.deepEqual(parseUi({ collapsed: ["/a"], hideSleeping: true }), { collapsed: ["/a"], hideSleeping: true });
+  assert.deepEqual(parseUi({ collapsed: ["/a"], hideSleeping: true, exceptMain: false }), { collapsed: ["/a"], hideSleeping: true, exceptMain: false });
+  assert.deepEqual(parseUi({ exceptMain: false }), { collapsed: [], exceptMain: false }, "the exemption is kept while sleeping rows show, ready for the next hide");
+  assert.deepEqual(parseUi({ collapsed: ["/a"], hideSleeping: false, exceptMain: true }), { collapsed: ["/a"] }, "the defaults: Hide sleeping off, Except default branch on");
+  for (const bad of ["yes", 1, null, {}, [true]]) {
+    assert.deepEqual(parseUi({ collapsed: [], hideSleeping: bad, exceptMain: bad }), { collapsed: [] }, `not a boolean: ${JSON.stringify(bad)}`);
+  }
+  for (const bad of [undefined, null, 3, "x", []]) assert.deepEqual(parseUi(bad), { collapsed: [] }, "a foreign value still reads as nothing hidden");
+  const all = { collapsed: ["/a"], tasks: ["servers"], hideSleeping: true, exceptMain: false };
+  assert.equal(stored(parseUi(JSON.parse(stored(all)))), stored(all), "reads back as itself, key order included");
+  assert.equal(stored(parseUi({ exceptMain: false, hideSleeping: true, tasks: ["servers"], collapsed: ["/a"] })), stored(all), "in one key order whatever order was stored");
+});
+
+test("ui state: folding a project or a lane keeps the sleeping filter, and the value it gives reads back as itself (D8)", () => {
+  const ui = parseUi({ collapsed: ["/a"], hideSleeping: true, exceptMain: false });
+  const project = withCollapsed(ui, "/b", true);
+  assert.deepEqual(project, { collapsed: ["/a", "/b"], hideSleeping: true, exceptMain: false });
+  assert.equal(stored(parseUi(JSON.parse(stored(project)))), stored(project));
+  const lane = withTaskCollapsed(ui, "servers", true);
+  assert.deepEqual(lane, { collapsed: ["/a"], tasks: ["servers"], hideSleeping: true, exceptMain: false });
+  assert.equal(stored(parseUi(JSON.parse(stored(lane)))), stored(lane), "the new `tasks` key goes where parseUi puts it, before the filter");
+  const back = withTaskCollapsed(lane, "servers", false);
+  assert.deepEqual(back, ui, "the last lane unfolded: no `tasks`, the filter stays");
+  assert.equal(stored(back), stored(ui));
+  assert.equal(withCollapsed(ui, "/a", true), ui, "a no-op is still the same ui");
+});
+
+test("ui state: withHideSleeping and withExceptMain switch one setting, keep the rest, drop the key at its default, and are the same ui on a no-op (D8)", () => {
+  const ui = parseUi({ collapsed: ["/a"], tasks: ["servers"] });
+  const on = withHideSleeping(ui, true);
+  assert.deepEqual(on, { collapsed: ["/a"], tasks: ["servers"], hideSleeping: true });
+  assert.equal(stored(parseUi(JSON.parse(stored(on)))), stored(on), "reads back as itself");
+  assert.equal(withHideSleeping(on, true), on, "already on");
+  assert.equal(withHideSleeping(ui, false), ui, "already off");
+  const off = withExceptMain(on, false);
+  assert.deepEqual(off, { collapsed: ["/a"], tasks: ["servers"], hideSleeping: true, exceptMain: false });
+  assert.equal(stored(parseUi(JSON.parse(stored(off)))), stored(off));
+  assert.equal(withExceptMain(off, false), off, "already off");
+  assert.equal(withExceptMain(ui, true), ui, "on is the default: nothing to store");
+  assert.deepEqual(withHideSleeping(off, false), { collapsed: ["/a"], tasks: ["servers"], exceptMain: false }, "hiding off keeps the exemption for next time");
+  assert.deepEqual(withExceptMain(off, true), on, "the exemption back on: no key");
+  assert.deepEqual(ui, { collapsed: ["/a"], tasks: ["servers"] }, "the input is never changed");
 });
 
 test("worktree cache: keeps valid lists per project, drops anything malformed", () => {

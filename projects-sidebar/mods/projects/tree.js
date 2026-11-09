@@ -7,8 +7,9 @@
 // instead of projects, each row naming its project, and the header gets a
 // New workspace "+"; a lane shows its task's note on hover and has a
 // right-click menu (D34, D35). A workspace row also shows what other
-// plugins publish for it ("badges", D38). Below 160 px of sidebar it is a
-// rail of initials.
+// plugins publish for it ("badges", D38). The header's filter button opens
+// Hide sleeping's popup, which leaves asleep workspaces out of the rows
+// (workspace-sleep D8). Below 160 px of sidebar it is a rail of initials.
 //
 // This copy is also the worktree engine (D6): it lists every group's
 // projects into projects.cache.v1 at start, re-lists one when its
@@ -34,6 +35,7 @@ import { openNewWorkspace } from "./new-workspace.js";
 import { openProjectMenu } from "./project-menu.js";
 import { openWorkspaceMenu } from "./workspace-menu.js";
 import { openTaskMenu } from "./task-menu.js";
+import { openFilterMenu } from "./filter-menu.js";
 import { showPrCard, cardTarget } from "./pr-card.js";
 
 // git listings at once (Juan has ~30 projects).
@@ -313,6 +315,9 @@ export default class Tree {
       home: home(),
       now: Date.now(),
       failed: this.failed,
+      // Hide sleeping (workspace-sleep D8): the rows only, never the rail.
+      hideSleeping: ui.hideSleeping,
+      exceptMain: ui.exceptMain,
     };
     const model = byTask ? buildTaskTree({ ...args, tasks: ui.tasks ?? [] }) : buildTree(args);
     const notes = byTask ? store.notes() : {};
@@ -324,7 +329,7 @@ export default class Tree {
       ? narrow ? [] : [emptyState(t)]
       : narrow ? model.projects.map((p) => railRow(p, t)) : model.rows.map((r) => row(r, t, notes, badges, prs));
     return v_flex().size_full().min_h(0).bg(t.chrome).text_size(13)
-      .child(header(model.group, narrow, byTask, t))
+      .child(header(model.group, narrow, byTask, ui.hideSleeping === true, t))
       .child(v_flex().id("projects-list").flex_1().min_h(0).px(narrow ? 0 : 8).pb(14).overflow_y_scrollbar().mode("always")
         .on_mouse_up("left", (_e, cx) => drop(cx))
         // Leaving the list (or the window) cancels a drag.
@@ -338,8 +343,10 @@ export default class Tree {
 }
 
 // In Task mode no project row carries New workspace's "+", so the header
-// does: for the focused space's project (D32, S13).
-function header(group, narrow, byTask, t) {
+// does: for the focused space's project (D32, S13). Left of Add project, the
+// filter button (workspace-sleep D8); the rail has no rows to filter, so not
+// there. `hiding`: Hide sleeping is on.
+function header(group, narrow, byTask, hiding, t) {
   return h_flex().h(31).flex_none().items_center().gap(6).text_size(11.5).text_color(t.dim)
     .when(narrow, (el) => el.justify_center())
     .when(!narrow, (el) => el.pl(16).pr(10).child(div().flex_1().min_w(0).truncate().child(group.name === "Projects" ? "Projects" : `Projects · ${group.name}`)))
@@ -348,11 +355,38 @@ function header(group, narrow, byTask, t) {
       .tooltip("New workspace")
       .on_click(() => openNewWorkspace(focusedProject()))
       .child(svg(icon("branch")).size(14))))
+    .when(!narrow, (el) => el.child(filterButton(hiding, t)))
     .child(div().id("projects-add").size(26).flex_none().flex().items_center().justify_center().rounded(6)
       .hover((s) => s.bg(t.hover).text_color(t.foreground))
       .tooltip("Add project")
       .on_click((_e, cx) => cx.spawn(async () => addFromPicker()))
       .child(svg(icon("plus")).size(14)));
+}
+
+// Whether the pointer is on the filter button: its glyph is drawn, not an
+// icon, so it can't take the hover's text color as the other buttons do.
+let filterHover = false;
+
+// Orca's filter button (SidebarFilter.tsx): its ListFilter glyph, three
+// bars, drawn here since neither this mod nor Herdr's chrome ships one, and
+// its popup (filter-menu.js) on click. While Hide sleeping is on, Orca's
+// badge at its top right counts the filters on, so a row that went missing
+// has its why in sight, and its tooltip says "Edit filters", as Orca's does.
+function filterButton(hiding, t) {
+  const color = filterHover ? t.foreground : t.dim;
+  const bar = (w) => div().w(w).h(1.5).rounded(1).bg(color);
+  return div().id("projects-filter").relative().size(26).flex_none().flex().items_center().justify_center().rounded(6)
+    .hover((s) => s.bg(t.hover))
+    .on_hover((hovered, cx) => {
+      if (filterHover === hovered) return;
+      filterHover = hovered;
+      cx.notify();
+    })
+    .tooltip(hiding ? "Edit filters" : "Filter workspaces")
+    .on_click(() => openFilterMenu())
+    .child(v_flex().items_center().gap(2).child(bar(11.5)).child(bar(7)).child(bar(3.5)))
+    .when(hiding, (el) => el.child(div().absolute().top(-2).right(-2).min_w(12).h(12).px(2).rounded(6).bg(t.accent)
+      .flex().items_center().justify_center().text_size(9).font_medium().text_color(t.accent_foreground).child("1")));
 }
 
 function emptyState(t) {
@@ -679,6 +713,11 @@ export const commands = {
   // (workspace-sleep D7), so it leaves the ask in the store and the tree in
   // the window in front runs it at its next tick (prTick).
   "refresh-prs": () => store.askPrs(),
+  // Hide sleeping on or off (workspace-sleep D8), Orca's "Toggle Sleeping
+  // Workspaces", with no default key: keys.json can bind it. It runs in the
+  // keeper's copy (D7), so it flips projects.ui.v1, which every tree copy
+  // draws.
+  "toggle-sleeping": () => store.toggleSleeping(),
   // Add project: the focused space's live folder (S5, scriptable).
   "add-here": async () => {
     const at = liveFolder(focused(), spaces(), panes());

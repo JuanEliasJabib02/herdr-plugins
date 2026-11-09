@@ -9,6 +9,8 @@
 //   delete-workspace  the Delete dialog (a worktree, its spaces, its branch)
 //   rename-workspace  the Rename dialog (a worktree's branch and folder)
 //   group-menu        a group's right-click menu
+//   filter-menu       the header's filter popup: Hide sleeping and Except
+//                     default branch (workspace-sleep D8)
 //   group-form        New group / Rename group
 //   task-menu         a task lane's right-click menu (Task mode)
 //   task-note         a task's note
@@ -38,6 +40,7 @@ import RenameWorkspace from "./rename-workspace.js";
 import Groups, { commands as groupsCommands } from "./groups.js";
 import GroupForm from "./group-form.js";
 import GroupMenu from "./group-menu.js";
+import FilterMenu from "./filter-menu.js";
 import TaskMenu from "./task-menu.js";
 import TaskNote from "./task-note.js";
 import DeleteTask from "./delete-task.js";
@@ -64,6 +67,7 @@ const VIEWS = {
   "delete-workspace": DeleteWorkspace,
   "rename-workspace": RenameWorkspace,
   "group-menu": GroupMenu,
+  "filter-menu": FilterMenu,
   "group-form": GroupForm,
   "task-menu": TaskMenu,
   "task-note": TaskNote,

@@ -11,7 +11,8 @@
 // status added `projects.prs.v1`, read and merged by pr-model.js. The PR card
 // shares matchSpaces' rule through checkoutAt, so the two can't drift.
 // workspace-sleep T2 added Inicio's space, `projects.inicio.v1`, whose
-// helpers are in inicio-model.js (D6).
+// helpers are in inicio-model.js (D6); its T5 added the sleeping filter's two
+// optional fields to projects.ui.v1, `hideSleeping` and `exceptMain` (D8).
 
 // ── Persisted keys ─────────────────────────────────────────────────────────
 
@@ -22,7 +23,7 @@
 export const KEYS = {
   registry: "projects.v1", // { version: 1, groups: [{ id, name, projects: [{ path, name, base? }], organize?: "task" }], activeGroup }; base: the project's saved base, "origin/<branch>" (D37)
   registryBackup: "projects.v1.backup", // the first stored projects.v1 that didn't read back as itself, as it was (needsBackup)
-  ui: "projects.ui.v1", // { collapsed: [projectPath], tasks?: [lane] }: tasks, the folded Task-mode lanes, only when there are any
+  ui: "projects.ui.v1", // { collapsed: [projectPath], tasks?: [lane], hideSleeping?: true, exceptMain?: false }: tasks, the folded Task-mode lanes, only when there are any; hideSleeping (Hide sleeping, off by default) only when on and exceptMain (Except default branch, on by default) only when off (workspace-sleep D8)
   cache: "projects.cache.v1", // { [projectPath]: [{ path, branch, main }] }
   agents: "projects.agents.v1", // the last knownAgents() result
   notes: "projects.notes.v1", // { [taskKey]: note }: a task's note, up to 30 chars, at most 500 notes (noteKeyOf, parseNotes)
@@ -274,35 +275,69 @@ export function setProjectBase(registry, path, base) {
 // "task:" and 1–200 chars (a ticket, or a name of up to 200 chars).
 const isLane = (s) => typeof s === "string" && (s === "servers" || (s.startsWith("task:") && s.length > 5 && s.length <= 205));
 
-// `projects.ui.v1`: the collapsed projects, by path, and the folded
-// Task-mode lanes, by lane key. `tasks` is there only when a lane is folded,
-// so a value without it reads as { collapsed }, as before T10.
-export function parseUi(value) {
-  const collapsed = isObject(value) && Array.isArray(value.collapsed) ? value.collapsed : [];
-  const tasks = isObject(value) && Array.isArray(value.tasks) ? [...new Set(value.tasks.filter(isLane))] : [];
-  return { collapsed: [...new Set(collapsed.filter(isAbsolute).map((p) => normPath(p)))], ...(tasks.length ? { tasks } : {}) };
+// A `projects.ui.v1` value in its one key order, with each optional field
+// only when it differs from its default: { collapsed, tasks?, hideSleeping?,
+// exceptMain? }. Every ui this module returns is built here, so a stored
+// value reads back as itself, key order included (`changed` compares text).
+function uiValue({ collapsed, tasks, hideSleeping, exceptMain }) {
+  return {
+    collapsed,
+    ...(tasks?.length ? { tasks } : {}),
+    ...(hideSleeping === true ? { hideSleeping: true } : {}),
+    ...(exceptMain === false ? { exceptMain: false } : {}),
+  };
 }
 
-// A project folded or not; the folded lanes stay.
+// `projects.ui.v1`: the collapsed projects, by path; the folded Task-mode
+// lanes, by lane key; and the sleeping filter (workspace-sleep D8): Hide
+// sleeping, off by default, and Except default branch, on by default, which
+// only counts while hiding (Orca's "absent means on"). `tasks` is there only
+// when a lane is folded, `hideSleeping` only when it is true and
+// `exceptMain` only when it is false, so a value without them reads as
+// { collapsed }, as before T10, and an older build that drops them reads it
+// as before too. Anything but a boolean is its default.
+export function parseUi(value) {
+  const ok = isObject(value);
+  const collapsed = ok && Array.isArray(value.collapsed) ? value.collapsed : [];
+  const tasks = ok && Array.isArray(value.tasks) ? [...new Set(value.tasks.filter(isLane))] : [];
+  return uiValue({
+    collapsed: [...new Set(collapsed.filter(isAbsolute).map((p) => normPath(p)))],
+    tasks,
+    hideSleeping: ok && value.hideSleeping,
+    exceptMain: ok && value.exceptMain === false ? false : undefined,
+  });
+}
+
+// A project folded or not; the folded lanes and the filter stay.
 export function withCollapsed(ui, path, collapsed) {
   const p = normPath(path);
   const rest = ui.collapsed.filter((x) => x !== p);
   const next = collapsed ? [...rest, p] : rest;
-  return next.length === ui.collapsed.length && next.every((x, i) => x === ui.collapsed[i]) ? ui : { ...ui, collapsed: next };
+  return next.length === ui.collapsed.length && next.every((x, i) => x === ui.collapsed[i]) ? ui : uiValue({ ...ui, collapsed: next });
 }
 
-// A Task-mode lane folded or not; the folded projects stay. The same `ui`
-// when nothing changes, or for a key parseUi wouldn't keep. Unfolding the
-// last lane drops `tasks`, which is how parseUi reads it.
+// A Task-mode lane folded or not; the folded projects and the filter stay.
+// The same `ui` when nothing changes, or for a key parseUi wouldn't keep.
+// Unfolding the last lane drops `tasks`, which is how parseUi reads it.
 export function withTaskCollapsed(ui, lane, folded) {
   if (!isLane(lane)) return ui;
   const now = ui.tasks ?? [];
   const rest = now.filter((x) => x !== lane);
   const next = folded ? [...rest, lane] : rest;
   if (next.length === now.length && next.every((x, i) => x === now[i])) return ui;
-  if (next.length) return { ...ui, tasks: next };
-  const { tasks: _, ...without } = ui;
-  return without;
+  return uiValue({ ...ui, tasks: next });
+}
+
+// Hide sleeping on or off (D8: the filter popup and projects.toggle-sleeping);
+// the folds and Except default branch stay. The same `ui` when it already is.
+export function withHideSleeping(ui, on) {
+  return (ui.hideSleeping === true) === (on === true) ? ui : uiValue({ ...ui, hideSleeping: on === true });
+}
+
+// Except default branch on or off (D8: the filter popup); kept while
+// sleeping rows show, for the next hide. The same `ui` when it already is.
+export function withExceptMain(ui, on) {
+  return (ui.exceptMain !== false) === (on !== false) ? ui : uiValue({ ...ui, exceptMain: on !== false });
 }
 
 // `projects.notes.v1`: one short note per task (S29; S31, S32: a word or two
