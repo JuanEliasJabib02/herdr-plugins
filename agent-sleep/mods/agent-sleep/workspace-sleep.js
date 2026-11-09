@@ -17,9 +17,15 @@
 //      manual stop (D11), another program through an interrupt and then a
 //      hang-up (D2 b), anything else left alone;
 //   6. the tabs that came back are settled again, and the entry becomes
-//      `asleep`; a click mid-sleep (`wakeAfter`) wakes it instead (T4).
+//      `asleep`; a click mid-sleep (`wakeAfter`) wakes it instead.
 // A step that fails leaves its terminal running, and a toast names it
 // (didntStopNotice).
+//
+// The wake (D4), when the person comes back to it (cameBack): every tab it
+// lists comes back, the Claudes that were working resume at once, the rest
+// when their tab shows, and the entry goes (wakePlan). Until then the reveal
+// path and Wake all leave its terminals alone (sleptTerminals), and
+// agent-sleep's moon stays off its row (D3).
 
 import { isShellRoot } from "./rules.js";
 import { foregroundIsShell } from "./store.js";
@@ -197,6 +203,64 @@ export function shownEdges(previous, spaces) {
   const edges = new Set();
   if (previous instanceof Set) for (const id of shown) if (!previous.has(id)) edges.add(id);
   return { shown, edges };
+}
+
+// Whether the person just came back to the entry's workspace, from the last
+// pulse's `previous` and `shown` now (shownEdges). A wake reacts to a change,
+// never to a state (D4, R1#2): one of its spaces went from not shown to shown,
+// whichever (the row's click selects only one, R2#3). The first look after a
+// start or a reload never does. One still shown when its stops began
+// (`shownAtSleep`, D10 step 4) comes back only once none of its spaces was
+// shown at the last pulse: looking on at it, or moving to another of its
+// spaces, never undoes the sleep. The coordinator wakes an asleep entry, and
+// marks a sleeping one `wakeAfter`.
+export function cameBack(entry, { previous, shown } = {}) {
+  if (!(previous instanceof Set) || !(shown instanceof Set) || !isObject(entry?.spaces)) return false;
+  const ids = Object.keys(entry.spaces);
+  const now = ids.filter((id) => shown.has(id));
+  if (now.length === 0) return false;
+  if (entry.shownAtSleep === true) return !ids.some((id) => previous.has(id));
+  return now.some((id) => !previous.has(id));
+}
+
+// Every terminal in a space an entry lists, a tab opened in it since
+// included: what a workspace's sleep holds until its wake. The reveal path and
+// Wake all leave them alone (D4: no undo of a sleep, R1#5), and agent-sleep's
+// moon stays off them (D3: projects-sidebar draws the row's own).
+export function sleptTerminals(entries, spaces, panes) {
+  const ids = new Set();
+  const tabs = new Set();
+  for (const e of Object.values(isObject(entries) ? entries : {})) {
+    if (!isObject(e?.spaces)) continue;
+    for (const [id, listed] of Object.entries(e.spaces)) {
+      ids.add(id);
+      for (const tab of list(listed)) tabs.add(tab);
+    }
+  }
+  for (const space of list(spaces)) {
+    if (isObject(space) && ids.has(space.id)) for (const t of list(space.tabs)) if (isObject(t)) tabs.add(t.id);
+  }
+  const out = new Set();
+  for (const p of list(panes)) if (isObject(p) && tabs.has(p.tab) && isAddress(p.terminal)) out.add(p.terminal);
+  return out;
+}
+
+// D4's wake, steps 1–2: `unsettle`, every tab the entry lists that still
+// exists, in its spaces' order (T0: a space.select brings none back, a
+// tab.select only its own); `now`, the Claudes of its terminals asleep with
+// `wake: "now"` (working or blocked when it went to sleep), resumed at once.
+// The rest resume when their tab shows (step 3, the reveal path), and the
+// coordinator drops the entry (step 4).
+export function wakePlan(entry, { spaces, panes, records } = {}) {
+  const listed = new Set(listedTabs(entry));
+  const unsettle = [];
+  for (const space of list(spaces)) {
+    if (!isObject(space) || !Object.hasOwn(entry?.spaces ?? {}, space.id)) continue;
+    for (const t of list(space.tabs)) if (isObject(t) && listed.has(t.id)) unsettle.push(t.id);
+  }
+  const record = (a) => (isObject(records) && Object.hasOwn(records, a) ? records[a] : null);
+  const now = [...sleptTerminals({ entry }, spaces, panes)].filter((a) => record(a)?.state === "asleep" && record(a).wake === "now");
+  return { unsettle, now };
 }
 
 // ── D10 step 6 ──────────────────────────────────────────────────────────────

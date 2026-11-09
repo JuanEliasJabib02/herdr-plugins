@@ -47,10 +47,13 @@ its own.
   then. A line that appears later may be cut, never the buttons. The popup only
   draws and asks: the moon's copy is the one that writes and types.
 - **Sleep now** puts every hidden, finished Claude to sleep at once, without
-  the wait. **Wake all** resumes every sleeping one. Both work while automatic
-  sleep is off.
-- **The workspace's moon.** projects-sidebar also shows one on a workspace with
-  a sleeping Claude (reserved badge key `badges.hibernate`).
+  the wait. **Wake all** resumes every sleeping one, except those of a
+  workspace you put to sleep (see below), which wake with it. Both work while
+  automatic sleep is off.
+- **The workspace's moon.** projects-sidebar also shows one after the label of
+  a workspace that is awake with a sleeping Claude (reserved badge key
+  `badges.hibernate`). A workspace you put to sleep has projects-sidebar's own
+  moon instead.
 - **Sleep a workspace** (`agent-sleep.sleep-workspace`, Orca's "Sleep"): every
   space of the shown workspace goes to sleep without closing, so its tabs,
   splits, sizes, scrollback and terminal addresses are all there when it
@@ -81,10 +84,22 @@ its own.
     sleeps"), one still working after 10 s, and one whose text didn't clear
     keep running, as does a program a hang-up didn't end. A toast names them:
     "<workspace>: <N> terminals didn't stop".
+  - **Waking it** (Orca's click on a sleeping workspace): showing any of its
+    spaces, by a click on its row, the picker, an agent's focus or `herdr-app
+    do`, wakes all of them. Its tabs come back, each Claude that was working
+    when it went to sleep resumes at once, and the others when their tab is
+    shown, each in the account it slept in. A space already shown when Herdr
+    or the mod starts again isn't a wake: leave it and come back.
   - **Shown again mid-sleep** (a click on its row): its remaining stops are
-    dropped, so no `/exit` reaches a Claude you came back to.
-  - Waking it, and the confirm itself, are workspace-sleep's next tasks. Until
-    then a Claude it put to sleep wakes as any other, when its tab is shown.
+    dropped, so no `/exit` reaches a Claude you came back to, and it wakes once
+    the stops already under way are done.
+  - **Still on screen when its stops began** (no Inicio in the layout): it
+    stays asleep while you keep looking at it, or move to another of its
+    spaces, and wakes once you leave it and come back.
+  - **Until it wakes**, showing a tab of it doesn't resume its Claudes, and
+    neither does Wake all. Its row has projects-sidebar's moon, and no moon of
+    this mod after the label.
+  - The confirm itself is workspace-sleep's next task.
 
 **Keys** (projects layout): `cmd-alt-s` Sleep now, `cmd-alt-w` Wake all. Commands
 you can bind or run with `herdr-app do agent-sleep.<name>`: `sleep-now`,

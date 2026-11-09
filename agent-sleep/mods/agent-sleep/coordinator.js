@@ -34,9 +34,12 @@
 //   - a workspace's sleep (workspace-sleep D2, D10; workspace-sleep.js): a
 //     new one's check, entry and settle, or one step of one under way, with
 //     workspaces.json reconciled at start, on ticks and while one runs (D9);
+//     and its wake (workspace-sleep D4) when one of its spaces is shown again;
 //   - "Sleep now" / "Wake all" requests (D9);
 //   - every visible terminal with an `asleep` record is resumed (D8: level,
 //     not edge, so a reveal during a stop resumes once the shell is back).
+//     Wake all and this reveal leave alone the terminals of a workspace put to
+//     sleep as a whole until its wake (workspace-sleep D4: no undo of a sleep).
 // Pulses never overlap: everything that types into a terminal runs one at a
 // time, in the order above (Risk item 4).
 
@@ -53,11 +56,11 @@ import { readPrompt, classifyProbe, promptRestored, PROBE_KEY, ERASE_KEY } from 
 import { resumeFlags, resumeCommand, canResumeIn, hintDifference, REPLAYABLE_ENV } from "./resume.js";
 import {
   WAIT_PULSES, INTERRUPT_DEADLINE_MS, PROGRAM_GRACE_MS, CLEAR_KEY, interruptArgs, localPlaces, shownSpace, entrySpaces,
-  kindOf, UNTOUCHED, flightOf, promptStep, processGroups, hangUpGroup, shownEdges, tabsToSettle, didntStopNotice,
-  parseWorkspaceCommand,
+  kindOf, UNTOUCHED, flightOf, promptStep, processGroups, hangUpGroup, shownEdges, cameBack, sleptTerminals, wakePlan,
+  tabsToSettle, didntStopNotice, parseWorkspaceCommand,
 } from "./workspace-sleep.js";
 import {
-  workspacesPaths, loadWorkspaces, saveWorkspaces, withEntry, listedTabs, terminalsOf, reconcileSpaces,
+  workspacesPaths, loadWorkspaces, saveWorkspaces, withEntry, withoutEntry, listedTabs, terminalsOf, reconcileSpaces,
 } from "./workspaces-store.js";
 
 // This mod's folder under mods/: asset paths go through it, never a literal
@@ -580,29 +583,46 @@ export class Coordinator {
   }
 
   // D9 "Wake all": every asleep Claude, shown or not, through the reveal's
-  // own checks.
+  // own checks. Not those of a workspace put to sleep as a whole: they wake
+  // with their workspace's click (workspace-sleep D4, R1#5), so Wake all stays
+  // the undo of automatic sleep and no moon ever sits over running Claudes.
   async wakeAllStep() {
     this.wakeAllRequested = false;
+    const slept = this.sleptTerminals();
     for (const address of Object.keys(this.records).sort()) {
-      if (this.records[address]?.state === "asleep") await this.resume(address, "wake");
+      if (this.records[address]?.state === "asleep" && !slept.has(address)) await this.resume(address, "wake");
     }
   }
 
-  // D8, level-triggered: every shown terminal with an asleep record.
+  // D8, level-triggered: every shown terminal with an asleep record. A
+  // terminal of a space a workspace's sleep lists waits for that workspace's
+  // wake (workspace-sleep D4): one still on screen when its stops began
+  // (shownAtSleep), or shown again by a reload, would otherwise undo the sleep.
   async revealStep() {
     const now = this.d.now();
-    const visible = visibleTerminals(this.layout());
+    const layout = this.layout();
+    const visible = visibleTerminals(layout);
+    const slept = sleptTerminals(this.workspaces, layout.spaces, layout.panes);
     for (const address of [...visible].sort()) {
-      if (own(this.records, address)?.state !== "asleep") continue;
+      if (own(this.records, address)?.state !== "asleep" || slept.has(address)) continue;
       if ((this.retryAt[address] ?? 0) > now) continue;
       await this.resume(address, "reveal");
     }
   }
 
+  // The terminals the workspaces put to sleep hold until their wake
+  // (workspace-sleep D4), from workspaces.json and Herdr's layout now.
+  sleptTerminals() {
+    return sleptTerminals(this.workspaces, this.safe(() => list(this.d.live.spaces()), []), this.safe(() => list(this.d.live.panes()), []));
+  }
+
   // The moon (D11), published only when it changes: setShared re-renders
-  // every mod. No moon before and none now writes nothing.
+  // every mod. No moon before and none now writes nothing. None for a
+  // workspace put to sleep as a whole (workspace-sleep D3): its row has
+  // projects-sidebar's own.
   publishBadges() {
-    const value = badgeValue({ records: this.records, modFolder: MOD });
+    const slept = { paths: Object.keys(this.workspaces), terminals: this.sleptTerminals() };
+    const value = badgeValue({ records: this.records, modFolder: MOD, slept });
     const empty = (v) => !isObject(v) || Object.keys(v).length === 0;
     if (empty(value) && empty(this.badge)) return false;
     if (sameValue(value, this.badge)) return false;
@@ -972,16 +992,24 @@ export class Coordinator {
     else await this.jobStep();
   }
 
-  // D4, mid-sleep: one of its spaces went from not shown to shown (a click on
-  // its row, the picker, an agent's focus). The rest of its stops are
-  // dropped, so no /exit reaches a Claude the person just came back to, and
-  // `wakeAfter` makes step 6 wake it. The first look after a start is no edge.
+  // D4: the person came back to a workspace put to sleep (cameBack: one of
+  // its spaces went from not shown to shown, by a click on its row, the
+  // picker, an agent's focus or `herdr-app do`). Asleep, it wakes now.
+  // Mid-sleep, the rest of its stops are dropped, so no /exit reaches a Claude
+  // the person just came back to, and `wakeAfter` makes step 6 wake it. The
+  // first look after a start is no edge.
   async watchShown(spaces) {
-    const { shown, edges } = shownEdges(this.shownSpaces, spaces);
+    const previous = this.shownSpaces;
+    const { shown, edges } = shownEdges(previous, spaces);
     this.shownSpaces = shown;
     if (edges.size === 0) return;
     for (const [path, e] of Object.entries(this.workspaces)) {
-      if (e.state !== "sleeping" || e.wakeAfter === true || !Object.keys(e.spaces).some((id) => edges.has(id))) continue;
+      if (!cameBack(e, { previous, shown })) continue;
+      if (e.state === "asleep") {
+        await this.wakeWorkspace(path);
+        continue;
+      }
+      if (e.state !== "sleeping" || e.wakeAfter === true) continue;
       delete this.jobs[path];
       const saved = await this.updateEntries((entries) => {
         const cur = own(entries, path);
@@ -1325,16 +1353,45 @@ export class Coordinator {
 
   // D10 step 6: the listed tabs that came back are settled again, then the
   // entry is asleep. One shown again mid-sleep (wakeAfter) is woken here
-  // instead, and not put away: the wake is workspace-sleep's T4.
+  // instead, and not put away (D4).
   async finishSleep(path) {
     const entry = own(this.workspaces, path);
-    if (!entry || entry.state !== "sleeping" || entry.wakeAfter === true) return;
+    if (!entry || entry.state !== "sleeping") return;
+    if (entry.wakeAfter === true) return this.wakeWorkspace(path);
     for (const id of tabsToSettle(entry, this.safe(() => list(this.d.live.spaces()), []))) this.herdr("tab.settle", { id });
     const saved = await this.updateEntries((entries) => {
       const cur = own(entries, path);
       return cur?.state === "sleeping" && cur.wakeAfter !== true ? withEntry(entries, path, { ...cur, state: "asleep" }) : null;
     });
     if (saved) this.lastEvent = `${basename(path) || path} asleep`;
+  }
+
+  // D4's wake, in one pulse: every tab the entry lists comes back
+  // (tab.unsettle: a space.select brings none back, T0), each Claude asleep
+  // with wake: "now" (working or blocked when it went to sleep) is resumed at
+  // once, shown or not, and the entry is dropped, which lifts the reveal
+  // path's skip: the rest resume when their tab shows, this pulse's reveal
+  // included. Both resumes go through resume(): a bare prompt, its account,
+  // claimed before anything is typed. A wake: "now" one that can't be resumed
+  // yet (a typed shell line, another program in front) waits for its tab as
+  // the rest do. A reload before the drop leaves an entry with its tabs back,
+  // which D9's rule 2 drops at start.
+  async wakeWorkspace(path) {
+    const entry = own(this.workspaces, path);
+    if (!entry) return;
+    const label = basename(path) || path;
+    const { unsettle, now } = wakePlan(entry, {
+      spaces: this.safe(() => list(this.d.live.spaces()), []),
+      panes: this.safe(() => list(this.d.live.panes()), []),
+      records: this.records,
+    });
+    for (const id of unsettle) this.herdr("tab.unsettle", { id });
+    let resumed = 0;
+    for (const address of now) if (await this.resume(address, "wake")) resumed += 1;
+    delete this.jobs[path];
+    const saved = await this.updateEntries((entries) => (own(entries, path) ? withoutEntry(entries, path) : null));
+    this.log(`${path}: woken, ${unsettle.length} tab(s) back, ${resumed} of ${now.length} wake: "now" Claude(s) resumed${saved ? "" : " (workspaces.json not written)"}`);
+    if (resumed === 0) this.lastEvent = `${label} awake`; // a resume says "Woke <label>" itself
   }
 
   // Terminals as Core has them now, in the order asked, those it still has.

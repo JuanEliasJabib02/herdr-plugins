@@ -5,7 +5,9 @@
 // mod's own folder. Pure: the mod passes the records, its folder name and
 // publishes only when sameValue() says the value changed, because setShared
 // re-renders every mod. A bare moon with the time in the tooltip, never a
-// per-minute text. No action: showing the tab is what wakes a Claude.
+// per-minute text. No action: showing the tab is what wakes a Claude. None on
+// a workspace put to sleep as a whole (workspace-sleep D3): its row has
+// projects-sidebar's own moon.
 
 export const BADGE_KEY = "badges.hibernate";
 
@@ -54,15 +56,25 @@ function tooltip(count, since) {
     : `${count} Claudes asleep since ${since} · wake when you show their tabs`;
 }
 
+const toSet = (v) => (v instanceof Set ? v : new Set(Array.isArray(v) ? v : []));
+
 // One badge per workspace with at least one "asleep" record; {} when none,
 // which clears projects-sidebar's moons. Keys sorted, so equal records give
 // an equal value. `formatTime` is injectable for tests in other time zones.
-export function badgeValue({ records, modFolder, formatTime = clock }) {
+// `slept`: { paths, terminals } of the workspaces put to sleep as a whole
+// (workspace-sleep D3, D9), their paths and the terminals in their spaces.
+// projects-sidebar draws its own moon on those rows, so a record whose
+// terminal is in one of their spaces, or whose workspace is one, gets none
+// from here: the moon after the label is only for a Claude asleep in a
+// workspace that is awake.
+export function badgeValue({ records, modFolder, formatTime = clock, slept = null }) {
+  const sleptPaths = new Set([...toSet(slept?.paths)].map(trimSlash));
+  const sleptTerminals = toSet(slept?.terminals);
   const groups = new Map();
-  for (const r of Object.values(records ?? {})) {
-    if (!r || r.state !== "asleep") continue;
+  for (const [address, r] of Object.entries(records ?? {})) {
+    if (!r || r.state !== "asleep" || sleptTerminals.has(address)) continue;
     const path = trimSlash(r.workspacePath) || trimSlash(r.cwd);
-    if (!path) continue;
+    if (!path || sleptPaths.has(path)) continue;
     const g = groups.get(path) ?? { count: 0, since: Infinity };
     g.count += 1;
     g.since = Math.min(g.since, r.at);
