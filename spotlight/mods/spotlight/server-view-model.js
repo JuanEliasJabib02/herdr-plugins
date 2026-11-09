@@ -12,6 +12,10 @@
 //             on the env the server still runs when that differs
 //   envNote   the selected env couldn't start (the record's envFailed): what
 //             runs instead and how to try again; else null
+//   serverNote  why a stopped server was left so, when the start says
+//             (the record's serverReason): its terminal ran something
+//             else and was left alone (D40, Orca's), "Su terminal está
+//             ocupada: no se tocó."; else null
 //   variants  the variant chips: the plan's candidates while it asks, else
 //             the repo's dev:<v> apps; the running one selected, the
 //             inferred one marked (its note, inferredVariantNote)
@@ -55,6 +59,11 @@ import { ENV_LABELS, recordEnv, storedEnv, checkoutEnvKey } from "./task-env.js"
 const FORCE_CODES = new Set(["root-diverged", "untracked-collision"]);
 // A server that's up (state.json's serverState).
 const RUNNING = new Set(["starting", "listening"]);
+// Why a stopped server was left so (the record's serverReason), as the
+// popup says it.
+const STOPPED_BECAUSE = {
+  "terminal-busy": "Su terminal está ocupada: no se tocó.",
+};
 
 const baseName = (p) => normRoot(p).split("/").filter(Boolean).pop() ?? p;
 
@@ -185,6 +194,9 @@ export function serverViewModel({ state, settings, repo, workspace, detection, b
     ...errorLines(error),
     envs,
     envNote,
+    serverNote: record?.serverState === "stopped" && Object.hasOwn(STOPPED_BECAUSE, record.serverReason ?? "")
+      ? STOPPED_BECAUSE[record.serverReason]
+      : null,
     variants: chips,
     urls,
     actions,

@@ -1,22 +1,26 @@
-// T5b: the repo's server terminal (D10). M/server.js drives one hidden hc
-// terminal per repo through an injected exec: it creates it in the root,
-// types the server line wrapped in `script -F -q -a <logPath> /bin/zsh -c
-// '<line>'` only when the shell owns the foreground, never over a process
-// Spotlight didn't start (ownership by the foreground's argv: `script` plus
-// this repo's logPath; the recorded pid is only a cross-check), restarts it
-// with `hc interrupt` + resend, stops it on toggle off, and reads it as gone,
-// stopped, starting or listening. A fake hc stands in for herdr-core; the
-// quoting test runs a real zsh.
+// T5b: the repo's server terminal (D10). M/server.js drives the repo's hc
+// terminal through an injected exec: the root's own terminal (D40), else
+// one it creates in the root; it types `spotlight-serve '<line>'` (the
+// helper execs `script -F -q -a <logPath> /bin/zsh -c '<line>'`) only when
+// the shell owns the foreground, never over a process Spotlight didn't start
+// (ownership by the foreground's argv: `script` plus this repo's logPath; the
+// recorded pid is only a cross-check), restarts it with `hc interrupt` +
+// resend, stops it on toggle off, and reads it as gone, stopped, starting or
+// listening. A fake hc stands in for herdr-core; the quoting test runs a
+// real zsh through the real helper.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
-import { mkdtempSync, writeFileSync, readFileSync, chmodSync, realpathSync, rmSync, existsSync } from "node:fs";
+import { execFileSync, spawnSync } from "node:child_process";
+import {
+  mkdtempSync, mkdirSync, writeFileSync, readFileSync, copyFileSync, chmodSync, symlinkSync, realpathSync, rmSync, existsSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   SERVER_LABEL, serverTerminalName, normalizeServerLine, shellQuote, wrapServerLine, createTerminalArgv,
   isShellForeground, ownsForeground, classifyTerminal, ensureServerTerminal, inspectServer, readServerState,
-  startServer, restartServer, stopServer, serverLogs, peekArgv, peekServer, STOP_WAIT_MS,
+  stopServer, serverLogs, peekArgv, peekServer, STOP_WAIT_MS,
 } from "../mods/spotlight/server.js";
 import * as serverModule from "../mods/spotlight/server.js";
 // ports.js runs every lstart read as `/usr/bin/env LC_ALL=C TZ=UTC ps …`
@@ -25,17 +29,44 @@ import { unwrapEnv } from "./fake-ps.mjs";
 
 const ROOT = "/Users/demo/code/app";
 const tmp = () => realpathSync(mkdtempSync(join(tmpdir(), "sl-server-")));
+// The helper Spotlight types (D40), as the installer links it.
+const SERVE_BIN = join(dirname(fileURLToPath(import.meta.url)), "..", "mods", "spotlight", "bin", "spotlight-serve");
 
 // How zsh splits a typed line into argv (quote removal, nothing run).
 const zshWords = (line) =>
   execFileSync("/bin/zsh", ["-f", "-c", `print -rN -- ${line}`], { encoding: "utf8" }).split("\0").slice(0, -1);
+
+// What `spotlight logs --path` prints in the root (D40): the log the CLI
+// gives every start of that root, so the fake's spotlight-serve writes to
+// the log its start was given. startServer and restartServer below note it
+// before calling server.js's; a fake given `serveLog` uses that one instead.
+const served = { log: null };
+const startServer = (args, deps) => {
+  served.log = args?.logPath ?? null;
+  return serverModule.startServer(args, deps);
+};
+const restartServer = (args, deps) => {
+  served.log = args?.logPath ?? null;
+  return serverModule.restartServer(args, deps);
+};
+
+// A typed `[cd '<dir>' && ]spotlight-serve '<command>'` (D40): the folder it
+// moves to (null: none) and the command, unquoted by zsh; null for any other line.
+const SERVE_LINE = /^(?:cd ('(?:[^']|'\\'')*') && )?spotlight-serve ('(?:[^']|'\\'')*')$/;
+function servedOf(line) {
+  const m = SERVE_LINE.exec(line);
+  return m ? { cd: m[1] ? zshWords(m[1])[0] : null, command: zshWords(m[2])[0] } : null;
+}
 
 // ── A fake hc ──────────────────────────────────────────────────────────────
 // Terminals by address, names unique among live ones, the JSON shapes and
 // exit codes the real hc printed in the T5b probe (RECIPE.md "Server terminal
 // probe"): `get` of a missing terminal exits 3 with error kind not_found, a
 // live name taken exits 1 with name_taken, `send` to a finished one exits 11.
-// A typed `script …` line becomes the foreground with zsh's argv; an
+// A typed `spotlight-serve '<command>'` line (D40) becomes what the helper
+// execs in front: `script -F -q -a <log> /bin/zsh -c <command>`, the log
+// being `serveLog`, else the one the last start was given (`served`); a
+// `cd '<dir>' && ` before it moves the terminal there first. An
 // interrupt hands the prompt back after `lingers` more reads (live, `script`
 // was still the foreground right after `hc interrupt` said "stopped").
 // `shellReads`: a terminal `hc run` makes shows `startupFg` (none, as live) for
@@ -63,7 +94,7 @@ const zshWords = (line) =>
 const FAKE_START = "Sun Nov  8 22:00:00 2026";
 function fakeHc({
   lingers = 1, ports = {}, readText = "", shellReads = null, startupFg = null, children = {}, procs = {}, fgIgnoresTerm = false,
-  starts = {}, herdr = false,
+  starts = {}, herdr = false, serveLog = null,
 } = {}) {
   const terms = new Map();
   const calls = [];
@@ -259,8 +290,10 @@ function fakeHc({
         if (!t) return fail(3, "not_found", "no terminal");
         if (t.state !== "live") return fail(11, "finished", `${t.address} has finished`);
         sent.push({ terminal: t.address, text: rest[1] });
-        if (rest[1].startsWith("script ")) {
-          const argv = zshWords(rest[1]);
+        const typed = servedOf(rest[1]);
+        if (typed) {
+          if (typed.cd) t.cwd = typed.cd;
+          const argv = ["script", "-F", "-q", "-a", serveLog ?? served.log, "/bin/zsh", "-c", typed.command];
           t.foreground = { argv, cwd: t.cwd, name: "script", pid: nextPid++ };
         }
         return ok({ started: null, status: null, turn: 0 });
@@ -313,35 +346,92 @@ function fakeClock(start = new Date(2026, 10, 6, 22, 58, 4).getTime()) {
 
 // ── Quoting (Risk item 2) ──────────────────────────────────────────────────
 
-test("wrapServerLine: a line with ', $ and ; reaches zsh unchanged, through the real outer shell", () => {
-  const dir = tmp();
+// The real spotlight-serve, copied into `dir`/bin beside a stand-in
+// `spotlight` (what it asks for the log: `logs --path` prints $SL_LOG, its
+// folder goes to $SL_CWD; no $SL_LOG → it fails as the CLI does outside a
+// repo), and a stand-in `script` in `dir`/fakes that records its argv in
+// $ARGV_OUT, drops `-F -q -a <log>` and runs the rest. Plus a link to the
+// helper from another folder, as the installer's ~/.local/bin one.
+function serveBench(dir) {
   const bin = join(dir, "bin");
-  execFileSync("mkdir", ["-p", bin]);
-  const argvOut = join(dir, "argv.json");
-  // A stand-in for `script`: records its argv, drops `-F -q -a <log>`, runs the rest.
+  const fakes = join(dir, "fakes");
+  mkdirSync(bin, { recursive: true });
+  mkdirSync(fakes, { recursive: true });
+  copyFileSync(SERVE_BIN, join(bin, "spotlight-serve"));
+  chmodSync(join(bin, "spotlight-serve"), 0o755);
   writeFileSync(
-    join(bin, "script"),
+    join(bin, "spotlight"),
+    `#!/bin/sh\npwd -P > "$SL_CWD"\n[ "$1 $2" = "logs --path" ] || exit 2\nif [ -z "$SL_LOG" ]; then echo "spotlight logs: run it inside the repo." >&2; exit 2; fi\nprintf '%s\\n' "$SL_LOG"\n`,
+  );
+  chmodSync(join(bin, "spotlight"), 0o755);
+  writeFileSync(
+    join(fakes, "script"),
     `#!/bin/sh\n"${process.execPath}" -e 'require("fs").writeFileSync(process.argv[1], JSON.stringify(process.argv.slice(2)))' "$ARGV_OUT" "$@"\nshift 4\nexec "$@"\n`,
   );
-  chmodSync(join(bin, "script"), 0o755);
+  chmodSync(join(fakes, "script"), 0o755);
+  const links = join(dir, "local-bin");
+  mkdirSync(links, { recursive: true });
+  symlinkSync(join(bin, "spotlight-serve"), join(links, "spotlight-serve"));
+  const env = (over = {}) => ({
+    ...process.env, PATH: `${links}:${fakes}:${process.env.PATH}`, ARGV_OUT: join(dir, "argv.json"), SL_CWD: join(dir, "cwd.txt"),
+    HOME: "/home/demo", ...over,
+  });
+  return { link: join(links, "spotlight-serve"), env, argv: () => JSON.parse(readFileSync(join(dir, "argv.json"), "utf8")) };
+}
+
+test("spotlight-serve (D40): the line wrapServerLine types runs `script -F -q -a <log> /bin/zsh -c <line>` with the line unchanged, the log from `spotlight logs --path` asked in the root; the script it leaves in front is Spotlight's own server", () => {
+  const dir = tmp();
+  const root = join(dir, "it's root");
+  const elsewhere = join(dir, "elsewhere");
+  mkdirSync(root);
+  mkdirSync(elsewhere);
+  const bench = serveBench(dir);
   const logPath = join(dir, "it's logs", "app.log");
   const line = `printf '%s|%s\\n' "it's" '$HOME'; echo "a;b" $((1+2)) \`echo tick\` 'q"q' \\!`;
-  const wrapped = wrapServerLine(line, logPath);
-  const out = execFileSync("/bin/zsh", ["-f", "-c", wrapped], {
-    encoding: "utf8",
-    env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, ARGV_OUT: argvOut, HOME: "/home/demo" },
-  });
-  assert.deepEqual(JSON.parse(readFileSync(argvOut, "utf8")), ["-F", "-q", "-a", logPath, "/bin/zsh", "-c", line]);
+  // The terminal's shell is elsewhere: the line goes to the root first.
+  const typed = wrapServerLine(line, { root, cwd: elsewhere });
+  assert.ok(typed.startsWith(`cd ${shellQuote(root)} && spotlight-serve `), typed);
+  const out = execFileSync("/bin/zsh", ["-f", "-c", typed], { cwd: elsewhere, encoding: "utf8", env: bench.env({ SL_LOG: logPath }) });
+  const argv = bench.argv();
+  assert.deepEqual(argv, ["-F", "-q", "-a", logPath, "/bin/zsh", "-c", line]);
   assert.equal(out, `it's|$HOME\na;b 3 tick q"q !\n`);
+  assert.equal(readFileSync(join(dir, "cwd.txt"), "utf8").trim(), root, "`spotlight logs --path` ran in the root");
+
+  // The own-server check: `script` (exec'd by the helper, so it leads the
+  // terminal) writing this repo's log is Spotlight's server; another log's isn't.
+  const fg = { argv: ["script", ...argv], cwd: root, name: "script", pid: 4242 };
+  assert.equal(ownsForeground(fg, { logPath }), true);
+  const shown = { address: "t5", pid: 4000, state: "live", labels: { [SERVER_LABEL]: root }, foreground: fg };
+  assert.equal(classifyTerminal(shown, { logPath }).kind, "spotlight");
+  assert.equal(classifyTerminal(shown, { logPath: join(dir, "other.log") }).kind, "foreign");
   rmSync(dir, { recursive: true, force: true });
 });
 
-test("wrapServerLine: the shape D10 names; shellQuote escapes ' as '\\''", () => {
+test("spotlight-serve (D40): no log path (spotlight logs fails) or no command runs nothing and fails; `sh -n` passes", () => {
+  const dir = tmp();
+  const bench = serveBench(dir);
+  const noLog = spawnSync(bench.link, ["pnpm dev"], { cwd: dir, encoding: "utf8", env: bench.env({ SL_LOG: "" }) });
+  assert.notEqual(noLog.status, 0);
+  assert.match(noLog.stderr, /spotlight-serve: /);
+  const bare = spawnSync(bench.link, [], { cwd: dir, encoding: "utf8", env: bench.env({ SL_LOG: join(dir, "app.log") }) });
+  assert.equal(bare.status, 2);
+  assert.match(bare.stderr, /usage: spotlight-serve <command>/);
+  assert.equal(existsSync(join(dir, "argv.json")), false, "script never ran");
+  assert.equal(spawnSync("sh", ["-n", SERVE_BIN]).status, 0);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("wrapServerLine (D40): `spotlight-serve '<line>'`, after `cd '<root>' && ` unless the terminal's folder is the root; shellQuote escapes ' as '\\''", () => {
   assert.equal(shellQuote("it's"), `'it'\\''s'`);
-  assert.equal(
-    wrapServerLine("pnpm dev --port 3000", "/Users/demo/.local/state/herdr-spotlight/logs/app-abc123.log"),
-    "script -F -q -a '/Users/demo/.local/state/herdr-spotlight/logs/app-abc123.log' /bin/zsh -c 'pnpm dev --port 3000'",
-  );
+  assert.equal(wrapServerLine("pnpm dev --port 3000", { root: ROOT, cwd: ROOT }), "spotlight-serve 'pnpm dev --port 3000'");
+  assert.equal(wrapServerLine("pnpm dev", { root: ROOT, cwd: `${ROOT}/` }), "spotlight-serve 'pnpm dev'");
+  assert.equal(wrapServerLine("pnpm dev", { root: ROOT, cwd: `${ROOT}/apps/web` }), `cd '${ROOT}' && spotlight-serve 'pnpm dev'`);
+  // A folder hc didn't say: the root may not be where it is.
+  assert.equal(wrapServerLine("pnpm dev", { root: ROOT, cwd: null }), `cd '${ROOT}' && spotlight-serve 'pnpm dev'`);
+  assert.equal(wrapServerLine("pnpm dev", { root: ROOT }), `cd '${ROOT}' && spotlight-serve 'pnpm dev'`);
+  assert.equal(wrapServerLine("pnpm dev", { root: "/x/it's", cwd: "/y" }), `cd '/x/it'\\''s' && spotlight-serve 'pnpm dev'`);
+  // A root with control bytes is never typed.
+  assert.equal(wrapServerLine("pnpm dev", { root: "/x/a\nb", cwd: "/y" }), null);
 });
 
 test("normalizeServerLine: one non-empty line with no control bytes, trimmed (Orca's rule); anything else is never typed", () => {
@@ -350,7 +440,7 @@ test("normalizeServerLine: one non-empty line with no control bytes, trimmed (Or
   assert.equal(normalizeServerLine("pnpm dev\r\n"), "pnpm dev");
   for (const bad of ["", "   ", "pnpm dev\nrm -rf ~", "pnpm\rdev", "a\u0003b", "a\u007fb", "a\u001b[Ab", null, 3, undefined]) {
     assert.equal(normalizeServerLine(bad), null, JSON.stringify(bad));
-    assert.equal(wrapServerLine(bad, "/l.log"), null, JSON.stringify(bad));
+    assert.equal(wrapServerLine(bad, { root: ROOT, cwd: ROOT }), null, JSON.stringify(bad));
   }
 });
 
@@ -485,12 +575,13 @@ test("ensureServerTerminal: a finished one is removed and replaced; a name taken
   assert.equal(other.verbs().includes("run"), false);
 });
 
-// ── Where the server shows (D38, T29) ─────────────────────────────────────
-// The server runs in the root's main terminal, as Orca: Spotlight's own
-// terminal is reused; else it replaces the root's active (or first) plain
-// terminal, killing what ran there; else it gets a tab of its own. Its tab
-// is named "Spotlight" and never takes focus. Herdr's side is the fake
-// world above (`herdr: true`).
+// ── Where the server shows (D38, T29; D40, T35) ───────────────────────────
+// The server runs in the root's own terminal, as Orca: the terminal
+// labeled for the root is reused; else the root's active (or first) plain
+// terminal is labeled and the server typed into it, never killed, moved or
+// replaced, and left alone while it runs something; else it gets a tab of
+// its own. Its tab is named "Spotlight" and never takes focus. Herdr's side
+// is the fake world above (`herdr: true`).
 
 // The new names T29 exports, read off the module so a missing one fails its
 // own tests, not the whole file's load.
@@ -527,84 +618,134 @@ test("findRootSpace (D38): the root's space is the one whose first pane lives in
   assert.equal((await findRootSpace(ROOT, { exec: fakeHc().exec })).ok, false);
 });
 
-test("ensureServerTerminal (D38): the active tab's plain terminal is replaced: hc run with herdr.space=<its space>, then tab.rename Spotlight, tab.move to its tab's place, then hc kill of it, in that order", async () => {
+test("startServer (D40): the root's idle plain terminal (the active tab's) is labeled for the root, its tab renamed Spotlight, and gets `spotlight-serve '<command>'` typed: no terminal made, killed or moved, no focus asked", async () => {
+  const dir = tmp();
+  const logPath = join(dir, "app.log");
   const hc = fakeHc({ herdr: true });
-  const s = hc.addSpace({ id: "spRoot", active: 1, tabs: [[{ app: "claude" }], [{ fg: { ...VIM_FG } }], [{}]] });
-  const adopted = s.tabs[1].terminals[0].terminal;
-  const r = await ensureServerTerminal({ root: ROOT }, { exec: hc.exec, ...fakeClock() });
-  assert.equal(r.ok, true);
-  assert.equal(r.created, true);
-  assert.equal(r.space, "spRoot");
-  assert.equal(r.adopted, adopted);
-
-  const run = at(hc, hcCall("run"));
-  const rename = at(hc, doCall("tab.rename"));
-  const move = at(hc, doCall("tab.move"));
-  const kill = at(hc, hcCall("kill"));
-  assert.ok(run >= 0 && run < rename && rename < move && move < kill, JSON.stringify(hc.calls));
-  assert.deepEqual(hc.calls[run], createTerminalArgv(ROOT, { space: "spRoot" }));
-  assert.deepEqual(didOf(hc, "tab.rename"), [{ id: r.tab, name: "Spotlight" }]);
-  assert.deepEqual(didOf(hc, "tab.move"), [{ id: r.tab, index: 2 }]);
-  assert.deepEqual(hc.calls[kill], ["hc", "kill", adopted, "--json"]);
-  assert.equal(hc.calls.filter(hcCall("kill")).length, 1, "only that terminal goes");
-  // What Juan sees: tab 2 is "Spotlight" in the old one's place; the agent's tab and tab 3 untouched; no focus asked.
+  const s = hc.addSpace({ id: "spRoot", active: 1, tabs: [[{ app: "claude" }], [{}], [{}]] });
+  const mine = s.tabs[1].terminals[0].terminal;
+  const r = await startServer({ root: ROOT, line: "pnpm dev", logPath, workspace: "login", branch: "feat/login" }, { exec: hc.exec, ...fakeClock() });
+  assert.deepEqual({ ok: r.ok, started: r.started, created: r.created, terminal: r.terminal }, { ok: true, started: true, created: false, terminal: mine });
+  assert.deepEqual(hc.calls.filter(hcCall("label")), [["hc", "label", mine, `${SERVER_LABEL}=${ROOT}`]]);
+  assert.equal(hc.terms.get(mine).labels[SERVER_LABEL], ROOT);
+  assert.deepEqual(didOf(hc, "tab.rename"), [{ id: "spRoot-tb2", name: "Spotlight" }]);
   assert.deepEqual(hc.world[0].tabs.map((t) => t.name), ["1", "Spotlight", "3"]);
-  assert.equal(hc.terms.get(adopted).state, "finished");
-  assert.equal(hc.terms.get(s.tabs[0].terminals[0].terminal).state, "live");
-  assert.deepEqual([...didOf(hc, "space.select"), ...didOf(hc, "tab.select")], []);
-  assert.deepEqual(hc.sent, [], "ensuring types nothing");
+  // Its folder is the root: no cd.
+  assert.deepEqual(hc.sent, [{ terminal: mine, text: "spotlight-serve 'pnpm dev'" }]);
+  for (const verb of ["run", "kill", "interrupt", "rm"]) assert.equal(hc.verbs().includes(verb), false, verb);
+  assert.deepEqual([...didOf(hc, "tab.move"), ...didOf(hc, "space.select"), ...didOf(hc, "tab.select")], []);
+  // The script the helper leaves in front is Spotlight's own server, writing this log.
+  assert.ok(Number.isInteger(r.pid));
+  assert.deepEqual(hc.terms.get(mine).foreground.argv, ["script", "-F", "-q", "-a", logPath, "/bin/zsh", "-c", "pnpm dev"]);
+  assert.equal(readFileSync(logPath, "utf8"), "\n── Spotlight: login (feat/login) · started: pnpm dev · 22:58:04 ──\n");
+  // A second start finds that terminal by its label (and its recorded
+  // address): nothing labeled or renamed again, nothing typed over its server.
+  for (const terminal of [mine, undefined]) {
+    const again = await startServer({ root: ROOT, terminal, line: "pnpm dev", logPath, serverPid: r.pid, workspace: "login", branch: "feat/login" }, { exec: hc.exec, ...fakeClock() });
+    assert.deepEqual({ ok: again.ok, reason: again.reason, terminal: again.terminal }, { ok: true, reason: "already-running", terminal: mine });
+  }
+  assert.equal(hc.calls.filter(hcCall("label")).length, 1);
+  assert.equal(didOf(hc, "tab.rename").length, 1);
+  assert.equal(hc.sent.length, 1);
+  rmSync(dir, { recursive: true, force: true });
 });
 
-test("ensureServerTerminal (D38): the active tab holding an agent → the first plain terminal in tab order is the one replaced; an active tab with a plain one beside its agent gives that one", async () => {
+test("startServer (D40): a chosen terminal whose folder isn't the root gets `cd '<root>' && ` before the helper, and the server runs in the root", async () => {
+  const dir = tmp();
+  const logPath = join(dir, "app.log");
   const hc = fakeHc({ herdr: true });
-  const s = hc.addSpace({ id: "spRoot", active: 1, tabs: [[{}], [{ app: "claude" }]] });
-  const first = s.tabs[0].terminals[0].terminal;
-  const r = await ensureServerTerminal({ root: ROOT }, { exec: hc.exec, ...fakeClock() });
-  assert.equal(r.adopted, first);
-  assert.deepEqual(didOf(hc, "tab.move"), [{ id: r.tab, index: 1 }]);
-  assert.deepEqual(hc.calls.filter(hcCall("kill")), [["hc", "kill", first, "--json"]]);
-  assert.equal(hc.terms.get(s.tabs[1].terminals[0].terminal).state, "live", "the agent lives");
-  assert.deepEqual(hc.world[0].tabs.map((t) => t.name), ["Spotlight", "2"]);
+  // The space is the root's (its first pane lives there); the active tab's shell is in a subfolder.
+  const s = hc.addSpace({ id: "spRoot", active: 1, tabs: [[{ app: "claude" }], [{ cwd: `${ROOT}/apps/web` }]] });
+  const mine = s.tabs[1].terminals[0].terminal;
+  const r = await startServer({ root: ROOT, line: "pnpm dev", logPath, workspace: "login", branch: "feat/login" }, { exec: hc.exec, ...fakeClock() });
+  assert.deepEqual({ ok: r.ok, started: r.started, terminal: r.terminal }, { ok: true, started: true, terminal: mine });
+  assert.deepEqual(hc.sent, [{ terminal: mine, text: `cd '${ROOT}' && spotlight-serve 'pnpm dev'` }]);
+  assert.equal(hc.terms.get(mine).cwd, ROOT);
+  assert.ok(Number.isInteger(r.pid), "still Spotlight's own server");
+  rmSync(dir, { recursive: true, force: true });
+});
 
+test("startServer, restartServer (D40): a chosen terminal that runs something is left alone, as Orca: nothing typed, no Ctrl-C, terminal-busy, and the log says so", async () => {
+  const dir = tmp();
+  const logPath = join(dir, "app.log");
+  const hc = fakeHc({ herdr: true });
+  const s = hc.addSpace({ id: "spRoot", tabs: [[{ fg: { ...VIM_FG } }]] });
+  const mine = s.tabs[0].terminals[0].terminal;
+  const deps = { exec: hc.exec, ...fakeClock() };
+  const r = await startServer({ root: ROOT, line: "pnpm dev", logPath, workspace: "login", branch: "feat/login" }, deps);
+  assert.deepEqual(
+    { ok: r.ok, started: r.started, reason: r.reason, terminal: r.terminal }, { ok: true, started: false, reason: "terminal-busy", terminal: mine },
+  );
+  assert.match(readFileSync(logPath, "utf8").trimEnd().split("\n").at(-1), /· Server left alone — the Spotlight terminal is busy · \d\d:\d\d:\d\d ──$/);
+  // Chosen all the same: labeled and named, so the next start finds it.
+  assert.equal(hc.terms.get(mine).labels[SERVER_LABEL], ROOT);
+  assert.deepEqual(hc.world[0].tabs.map((t) => t.name), ["Spotlight"]);
+  // Reiniciar over it: the same, with no Ctrl-C.
+  const again = await restartServer({ root: ROOT, terminal: mine, line: "pnpm dev", logPath, workspace: "login", branch: "feat/login" }, deps);
+  assert.deepEqual({ ok: again.ok, started: again.started, reason: again.reason }, { ok: true, started: false, reason: "terminal-busy" });
+  assert.deepEqual(hc.sent, []);
+  for (const verb of ["interrupt", "kill", "run"]) assert.equal(hc.verbs().includes(verb), false, verb);
+  assert.deepEqual(hc.signals, []);
+  assert.equal(hc.terms.get(mine).foreground.name, "vim", "what ran there still runs");
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("ensureServerTerminal (D40): Orca's order in the root's space: the plain terminal labeled for this root first; else the active tab's first plain one; else the first plain one in tab order", async () => {
+  // Labeled for this root (chosen before), in a tab that isn't the active one: it wins.
+  const hc = fakeHc({ herdr: true });
+  const s = hc.addSpace({ id: "spRoot", active: 0, tabs: [[{}], [{ labels: { [SERVER_LABEL]: ROOT } }]] });
+  const labeled = s.tabs[1].terminals[0].terminal;
+  const r = await ensureServerTerminal({ root: ROOT }, { exec: hc.exec, ...fakeClock() });
+  assert.deepEqual({ ok: r.ok, terminal: r.terminal, created: r.created }, { ok: true, terminal: labeled, created: false });
+  assert.equal(hc.verbs().includes("label"), false, "already labeled");
+  assert.deepEqual(hc.world[0].tabs.map((t) => t.name), ["1", "Spotlight"]);
+
+  // The active tab holds an agent: the first plain one in tab order.
+  const first = fakeHc({ herdr: true });
+  const f = first.addSpace({ id: "spRoot", active: 1, tabs: [[{}], [{ app: "claude" }]] });
+  const r2 = await ensureServerTerminal({ root: ROOT }, { exec: first.exec, ...fakeClock() });
+  assert.equal(r2.terminal, f.tabs[0].terminals[0].terminal);
+  assert.equal(first.terms.get(f.tabs[1].terminals[0].terminal).labels[SERVER_LABEL], undefined, "the agent's is never labeled");
+
+  // The active tab has a plain one beside its agent: that one.
   const beside = fakeHc({ herdr: true });
   const b = beside.addSpace({ id: "spRoot", active: 1, tabs: [[{}], [{ app: "claude" }, {}]] });
-  const plain = b.tabs[1].terminals[1].terminal;
-  const r2 = await ensureServerTerminal({ root: ROOT }, { exec: beside.exec, ...fakeClock() });
-  assert.equal(r2.adopted, plain);
-  assert.deepEqual(didOf(beside, "tab.move"), [{ id: r2.tab, index: 2 }]);
-  // Only that terminal goes: the agent stays, in its tab.
-  assert.deepEqual(beside.world[0].tabs.map((t) => [t.name, t.terminals.length]), [["1", 1], ["Spotlight", 1], ["2", 1]]);
+  const r3 = await ensureServerTerminal({ root: ROOT }, { exec: beside.exec, ...fakeClock() });
+  assert.equal(r3.terminal, b.tabs[1].terminals[1].terminal);
+  assert.deepEqual(beside.world[0].tabs.map((t) => [t.name, t.terminals.length]), [["1", 1], ["Spotlight", 2]]);
+
+  for (const w of [hc, first, beside]) {
+    for (const verb of ["run", "kill"]) assert.equal(w.verbs().includes(verb), false, verb);
+    assert.deepEqual([...didOf(w, "tab.move"), ...didOf(w, "space.select"), ...didOf(w, "tab.select")], []);
+    assert.ok([...w.terms.values()].every((t) => t.state === "live"), "nothing killed");
+  }
 });
 
-test("ensureServerTerminal (D38): the terminal Spotlight was called from is never the one replaced: the next plain one is, or with none a new tab, so `spotlight restart` typed in the root's shell doesn't kill itself", async () => {
+test("ensureServerTerminal (D40): never an agent's terminal, another repo's, nor the one Spotlight was called from; with no plain one left, only a new tab named Spotlight at the end, not focused", async () => {
+  const otherRepo = { name: "sl-other-123456", labels: { [SERVER_LABEL]: "/Users/demo/other" } };
+  // The caller's shell is skipped for the next plain one.
   const hc = fakeHc({ herdr: true });
-  const s = hc.addSpace({ id: "spRoot", active: 0, tabs: [[{}], [{}]] });
+  const s = hc.addSpace({ id: "spRoot", active: 0, tabs: [[{}], [otherRepo], [{}]] });
   const self = s.tabs[0].terminals[0].terminal;
-  const next = s.tabs[1].terminals[0].terminal;
   const r = await ensureServerTerminal({ root: ROOT }, { exec: hc.exec, self, ...fakeClock() });
-  assert.equal(r.adopted, next);
-  assert.deepEqual(hc.calls.filter(hcCall("kill")), [["hc", "kill", next, "--json"]]);
-  assert.equal(hc.terms.get(self).state, "live", "the caller's shell lives");
+  assert.equal(r.terminal, s.tabs[2].terminals[0].terminal);
+  assert.equal(hc.terms.get(self).labels[SERVER_LABEL], undefined);
+  assert.equal(hc.terms.get(s.tabs[1].terminals[0].terminal).labels[SERVER_LABEL], "/Users/demo/other");
 
-  const alone = fakeHc({ herdr: true });
-  const a = alone.addSpace({ id: "spRoot", tabs: [[{}]] });
-  const only = a.tabs[0].terminals[0].terminal;
-  const r2 = await ensureServerTerminal({ root: ROOT }, { exec: alone.exec, self: only, ...fakeClock() });
-  assert.deepEqual({ created: r2.created, adopted: r2.adopted }, { created: true, adopted: null });
-  assert.equal(alone.verbs().includes("kill"), false);
-  assert.deepEqual(alone.world[0].tabs.map((t) => t.name), ["1", "Spotlight"]);
-});
-
-test("ensureServerTerminal (D38): no plain terminal in the root's space → only a new tab named Spotlight, at the end: no move, no kill", async () => {
-  const hc = fakeHc({ herdr: true });
-  hc.addSpace({ id: "spRoot", tabs: [[{ app: "claude" }], [{ app: "codex" }]] });
-  const r = await ensureServerTerminal({ root: ROOT }, { exec: hc.exec, ...fakeClock() });
-  assert.deepEqual({ ok: r.ok, created: r.created, space: r.space, adopted: r.adopted }, { ok: true, created: true, space: "spRoot", adopted: null });
-  assert.deepEqual(hc.calls.find(hcCall("run")), createTerminalArgv(ROOT, { space: "spRoot" }));
-  assert.deepEqual(didOf(hc, "tab.rename"), [{ id: r.tab, name: "Spotlight" }]);
-  assert.deepEqual(didOf(hc, "tab.move"), []);
-  assert.equal(hc.verbs().includes("kill"), false);
-  assert.deepEqual(hc.world[0].tabs.map((t) => t.name), ["1", "2", "Spotlight"]);
+  // Only agents, another repo's terminal and the caller's: a new tab.
+  const none = fakeHc({ herdr: true });
+  const n = none.addSpace({ id: "spRoot", active: 0, tabs: [[{}], [{ app: "claude" }], [otherRepo], [{ app: "codex" }]] });
+  const caller = n.tabs[0].terminals[0].terminal;
+  const r2 = await ensureServerTerminal({ root: ROOT }, { exec: none.exec, self: caller, ...fakeClock() });
+  assert.deepEqual({ ok: r2.ok, created: r2.created, space: r2.space }, { ok: true, created: true, space: "spRoot" });
+  assert.deepEqual(none.calls.find(hcCall("run")), createTerminalArgv(ROOT, { space: "spRoot" }));
+  assert.deepEqual(didOf(none, "tab.rename"), [{ id: r2.tab, name: "Spotlight" }]);
+  assert.deepEqual(none.world[0].tabs.map((t) => t.name), ["1", "2", "3", "4", "Spotlight"]);
+  assert.equal(none.verbs().includes("label"), false, "no terminal of Juan's labeled");
+  for (const w of [hc, none]) {
+    assert.equal(w.verbs().includes("kill"), false);
+    assert.deepEqual([...didOf(w, "tab.move"), ...didOf(w, "space.select"), ...didOf(w, "tab.select")], []);
+  }
 });
 
 test("ensureServerTerminal (D38): no space for the root → a fresh sp… id, so Herdr makes one; its tab is named Spotlight; nothing moved or killed", async () => {
@@ -615,7 +756,8 @@ test("ensureServerTerminal (D38): no space for the root → a fresh sp… id, so
   const space = labelOf(run, "herdr.space");
   assert.match(space, SPACE_ID);
   assert.deepEqual(run, createTerminalArgv(ROOT, { space }));
-  assert.deepEqual({ ok: r.ok, created: r.created, space: r.space, adopted: r.adopted }, { ok: true, created: true, space, adopted: null });
+  assert.deepEqual({ ok: r.ok, created: r.created, space: r.space, chosen: r.chosen }, { ok: true, created: true, space, chosen: undefined });
+  assert.equal(hc.verbs().includes("label"), false, "another space's terminal is never chosen");
   assert.deepEqual(didOf(hc, "tab.rename"), [{ id: r.tab, name: "Spotlight" }]);
   assert.deepEqual(didOf(hc, "tab.move"), []);
   assert.equal(hc.verbs().includes("kill"), false);
@@ -680,42 +822,7 @@ test("ensureServerTerminal (D38): a hidden Spotlight terminal it finds is shown 
   for (const verb of ["run", "kill"]) assert.equal(hc.verbs().includes(verb), false, verb);
 });
 
-test("ensureServerTerminal (D38): another repo's Spotlight terminal is never picked: the next plain one is, and with none left only a tab is made", async () => {
-  const otherRepo = { name: "sl-other-123456", labels: { [SERVER_LABEL]: "/Users/demo/other" } };
-  const hc = fakeHc({ herdr: true });
-  const s = hc.addSpace({ id: "spRoot", active: 0, tabs: [[otherRepo], [{}]] });
-  const [theirs, plain] = s.tabs.map((tab) => tab.terminals[0].terminal);
-  const r = await ensureServerTerminal({ root: ROOT }, { exec: hc.exec, ...fakeClock() });
-  assert.equal(r.adopted, plain);
-  assert.equal(hc.terms.get(theirs).state, "live");
-
-  const only = fakeHc({ herdr: true });
-  const o = only.addSpace({ id: "spRoot", tabs: [[otherRepo]] });
-  const r2 = await ensureServerTerminal({ root: ROOT }, { exec: only.exec, ...fakeClock() });
-  assert.equal(r2.adopted, null);
-  assert.equal(only.verbs().includes("kill"), false);
-  assert.equal(only.terms.get(o.tabs[0].terminals[0].terminal).state, "live");
-});
-
-test("startServer (D38): through an adopted terminal the server line, the log mirror and the terminal's argv are those of D10, unchanged", async () => {
-  const dir = tmp();
-  const logPath = join(dir, "app.log");
-  const hc = fakeHc({ herdr: true });
-  hc.addSpace({ id: "spRoot", tabs: [[{}]] });
-  const r = await startServer({ root: ROOT, line: "pnpm dev", logPath, workspace: "login", branch: "feat/login" }, { exec: hc.exec, ...fakeClock() });
-  assert.deepEqual({ ok: r.ok, started: r.started, created: r.created }, { ok: true, started: true, created: true });
-  // D10's argv, with the space's label after the repo's.
-  const base = createTerminalArgv(ROOT);
-  const i = base.indexOf(`${SERVER_LABEL}=${ROOT}`) + 1;
-  assert.deepEqual(hc.calls.find(hcCall("run")), [...base.slice(0, i), "--label", `${SPACE_LABEL}=spRoot`, ...base.slice(i)]);
-  assert.deepEqual(hc.sent, [{ terminal: r.terminal, text: wrapServerLine("pnpm dev", logPath) }]);
-  assert.equal(readFileSync(logPath, "utf8"), "\n── Spotlight: login (feat/login) · started: pnpm dev · 22:58:04 ──\n");
-  // The kill came before the line was typed.
-  assert.ok(at(hc, hcCall("kill")) < at(hc, hcCall("send")));
-  rmSync(dir, { recursive: true, force: true });
-});
-
-test("startServer: in a fresh terminal it types the wrapped line, logs a header, and reports the script's pid", async () => {
+test("startServer: in a fresh terminal (made in the root) it types the helper line, logs a header, and reports the script's pid", async () => {
   const dir = tmp();
   const logPath = join(dir, "logs", "app.log");
   const hc = fakeHc();
@@ -726,7 +833,7 @@ test("startServer: in a fresh terminal it types the wrapped line, logs a header,
   assert.equal(r.terminal, "t1");
   assert.equal(r.command, "pnpm dev");
   assert.ok(Number.isInteger(r.pid));
-  assert.deepEqual(hc.sent, [{ terminal: "t1", text: wrapServerLine("pnpm dev", logPath) }]);
+  assert.deepEqual(hc.sent, [{ terminal: "t1", text: "spotlight-serve 'pnpm dev'" }]);
   assert.equal(readFileSync(logPath, "utf8"), "\n── Spotlight: login (feat/login) · started: pnpm dev · 22:58:04 ──\n");
   // A second start finds Spotlight's own server and types nothing.
   const again = await startServer({ root: ROOT, terminal: "t1", line: "pnpm dev", logPath, serverPid: r.pid }, { exec: hc.exec, ...fakeClock() });
@@ -741,7 +848,7 @@ test("startServer: waits for a new terminal's shell before typing (hc shows no f
   const hc = fakeHc({ shellReads: 3 });
   const r = await startServer({ root: ROOT, line: "pnpm dev", logPath }, { exec: hc.exec, ...fakeClock() });
   assert.deepEqual({ ok: r.ok, started: r.started, created: r.created }, { ok: true, started: true, created: true });
-  assert.deepEqual(hc.sent, [{ terminal: "t1", text: wrapServerLine("pnpm dev", logPath) }]);
+  assert.deepEqual(hc.sent, [{ terminal: "t1", text: "spotlight-serve 'pnpm dev'" }]);
   rmSync(dir, { recursive: true, force: true });
 });
 
@@ -788,15 +895,15 @@ test("restartServer: a closed terminal is made again and the server starts once 
   rmSync(dir, { recursive: true, force: true });
 });
 
-test("startServer: never types over a process Spotlight didn't start", async () => {
+test("startServer (D40): never types over a process Spotlight didn't start: terminal-busy, and the log says the terminal is busy", async () => {
   const dir = tmp();
   const logPath = join(dir, "app.log");
   const hc = fakeHc();
   const t = hc.add({ name: serverTerminalName(ROOT), labels: { [SERVER_LABEL]: ROOT }, fg: VIM_FG });
   const r = await startServer({ root: ROOT, terminal: t.address, line: "pnpm dev", logPath }, { exec: hc.exec, ...fakeClock() });
-  assert.deepEqual({ ok: r.ok, started: r.started, reason: r.reason }, { ok: true, started: false, reason: "busy" });
+  assert.deepEqual({ ok: r.ok, started: r.started, reason: r.reason }, { ok: true, started: false, reason: "terminal-busy" });
   assert.deepEqual(hc.sent, []);
-  assert.match(readFileSync(logPath, "utf8"), /Server left alone — the Spotlight terminal runs something Spotlight didn't start/);
+  assert.match(readFileSync(logPath, "utf8"), /Server left alone — the Spotlight terminal is busy/);
   rmSync(dir, { recursive: true, force: true });
 });
 
@@ -834,7 +941,7 @@ test("startServer: rotates a log past 4 MB before the header", async () => {
 
 // ── Restart and stop ─────────────────────────────────────────────────────
 
-test("restartServer: interrupt, wait for the prompt, resend; the log says restarted", async () => {
+test("restartServer (D40): Spotlight's own server (its `script` writing this repo's log) restarts as before: interrupt, wait for the prompt, type the helper line with the new command; the log says restarted", async () => {
   const dir = tmp();
   const logPath = join(dir, "app.log");
   const hc = fakeHc({ lingers: 2 });
@@ -847,7 +954,9 @@ test("restartServer: interrupt, wait for the prompt, resend; the log says restar
   assert.notEqual(r.pid, s.pid);
   const verbs = hc.verbs();
   assert.deepEqual(verbs.slice(verbs.indexOf("interrupt")).filter((v) => v !== "get"), ["interrupt", "send"]);
-  assert.equal(hc.sent.at(-1).text, wrapServerLine("pnpm install --frozen-lockfile && pnpm dev", logPath));
+  assert.deepEqual(hc.sent.map((x) => x.text), ["spotlight-serve 'pnpm dev'", "spotlight-serve 'pnpm install --frozen-lockfile && pnpm dev'"]);
+  assert.equal(hc.terms.get(r.terminal).foreground.argv.at(-1), "pnpm install --frozen-lockfile && pnpm dev");
+  assert.equal(r.terminal, s.terminal);
   assert.match(readFileSync(logPath, "utf8"), /── Spotlight: restarted: pnpm install --frozen-lockfile && pnpm dev · \d\d:\d\d:\d\d ──\n$/);
   rmSync(dir, { recursive: true, force: true });
 });
@@ -874,7 +983,7 @@ test("restartServer: a foreign foreground is left alone; a server that won't sto
   const hc = fakeHc();
   const t = hc.add({ name: serverTerminalName(ROOT), labels: { [SERVER_LABEL]: ROOT }, fg: VIM_FG });
   const r = await restartServer({ root: ROOT, terminal: t.address, line: "pnpm dev", logPath }, { exec: hc.exec, ...fakeClock() });
-  assert.deepEqual({ ok: r.ok, started: r.started, reason: r.reason }, { ok: true, started: false, reason: "busy" });
+  assert.deepEqual({ ok: r.ok, started: r.started, reason: r.reason }, { ok: true, started: false, reason: "terminal-busy" });
   assert.equal(hc.verbs().includes("interrupt"), false);
   assert.deepEqual(hc.sent, []);
 

@@ -101,6 +101,24 @@ function words(line) {
   if (cur !== null) list.push(cur);
   return list;
 }
+// D40: a typed \`[cd '<dir>' && ]spotlight-serve '<line>'\`: the folder it
+// moves to (null: none) and the line; null for any other text.
+function serveOf(text) {
+  const m = /^(?:cd ('(?:[^']|'\\\\'')*') && )?spotlight-serve ('(?:[^']|'\\\\'')*')$/.exec(text);
+  return m ? { cd: m[1] ? words(m[1])[0] : null, command: words(m[2])[0] } : null;
+}
+// What \`spotlight logs --path\` prints in a root: its record's log in
+// state.json, else server-log.js's logPathFor under this world's HOME.
+function logPathFor(root) {
+  const p = String(root).replace(/\\/+$/, "") || "/";
+  try {
+    const kept = JSON.parse(fs.readFileSync(process.env.HERDR_APP_HOME + "/spotlight/state.json", "utf8")).repos?.[p]?.logPath;
+    if (kept) return kept;
+  } catch {}
+  const base = require("path").basename(p).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 22).replace(/-+$/, "") || "repo";
+  const hash = require("crypto").createHash("sha1").update(p).digest("hex").slice(0, 6);
+  return require("path").join(process.env.HOME, ".local", "state", "herdr-spotlight", "logs", base + "-" + hash + ".log");
+}
 lock();
 try {
   const s = load();
@@ -141,8 +159,13 @@ try {
       if (t.state !== "live") { out(11, undefined, { kind: "finished", message: "finished" }); break; }
       const text = rest[1];
       s.sent.push({ terminal: t.address, text });
-      if (text.startsWith("script ")) {
-        const argv = words(text);
+      // D40: \`[cd '<dir>' && ]spotlight-serve '<line>'\` leads the terminal
+      // with what the helper execs: script writing the repo's log (what
+      // \`spotlight logs --path\` prints there: the CLI's logPathFor).
+      const served = serveOf(text);
+      if (served) {
+        if (served.cd) t.cwd = served.cd;
+        const argv = ["script", "-F", "-q", "-a", logPathFor(t.cwd), "/bin/zsh", "-c", served.command];
         t.foreground = { pid: s.nextPid++, name: "script", argv, cwd: t.cwd };
         try { fs.appendFileSync(argv[4], "fake server: " + argv[7] + "\\r\\n"); } catch {}
         if (s.listen[t.cwd]) t.serverPorts = s.listen[t.cwd];
@@ -587,7 +610,7 @@ test("a server that never opens a port exits 0 at the deadline: 'starting (port 
   assert.match(r.stdout, /^Not every server is listening yet\. Read its log, or run `spotlight on` again to keep waiting\.$/m);
   assert.ok(r.ms >= 3000, `returned before the deadline (${r.ms} ms)`);
   const sent = w.hc().sent.map((x) => x.text);
-  assert.ok(sent.some((x) => x.startsWith("script -F -q -a ") && x.endsWith("/bin/zsh -c 'npm run dev --'")), sent.join("\n"));
+  assert.ok(sent.some((x) => /(^| && )spotlight-serve 'npm run dev --'$/.test(x)), sent.join("\n"));
 });
 
 test("an edit in the holder with auto-sync off: the next `on` leaves the root with the edit", async () => {
@@ -856,14 +879,14 @@ test("a sync that changes pnpm-lock.yaml restarts the server with the install ch
   await w.until((s) => s.queue.lighting[`direct/${shop.root}`]?.phase === "done", { what: "lit" });
   const first = w.hc().sent.map((x) => x.text);
   assert.equal(first.length, 1, first.join("\n"));
-  assert.match(first[0], /\/bin\/zsh -c 'pnpm dev'$/);
+  assert.match(first[0], /spotlight-serve 'pnpm dev'$/);
 
   write(ws, "pnpm-lock.yaml", "lockfileVersion: '9.0'\npackages: {}\n");
   const r = await w.cli(["sync", "--repo", shop.root]);
   assert.equal(r.code, 0, r.stderr + r.stdout);
   const hc = w.hc();
   assert.ok(hc.calls.some((c) => c[0] === "interrupt"), "the running server was interrupted");
-  assert.match(hc.sent.at(-1).text, /\/bin\/zsh -c 'pnpm install --frozen-lockfile && pnpm dev'$/);
+  assert.match(hc.sent.at(-1).text, /spotlight-serve 'pnpm install --frozen-lockfile && pnpm dev'$/);
   assert.deepEqual(w.state().repos[shop.root].pendingInstalls, []);
 
   const server = w.serverTerminal(shop.root);
@@ -1340,7 +1363,7 @@ test("J-002: the settings' env is the default and a change restarts the server o
   const ws = app.ws["AX-16"];
   const t = w.agent(ws);
   const typed = () => w.hc().sent.map((x) => x.text);
-  const runs = (env) => new RegExp(`/bin/zsh -c 'npm run ${env} --'$`);
+  const runs = (env) => new RegExp(`spotlight-serve 'npm run ${env} --'$`);
   const record = () => w.state().repos[app.root];
 
   assert.equal((await w.cli(["on"], { terminal: t, cwd: ws })).code, 0);
@@ -1709,7 +1732,7 @@ const alive = (pid) => {
     return false;
   }
 };
-const scriptLines = (w) => w.hc().sent.filter((x) => x.text.startsWith("script "));
+const scriptLines = (w) => w.hc().sent.filter((x) => /(^| && )spotlight-serve '/.test(x.text));
 const serverNoteAction = (workspace) => ({ name: `spotlight.server.${sha1(workspace).slice(0, 12)}` });
 
 test("a listener outside the server terminal's tree on the expected port: port-busy with pid, command and cwd, no line typed, a toast that opens the popup; nothing is killed without --free-port", async () => {
@@ -2460,7 +2483,7 @@ test("D31: `toggle --task AX-70 --group g1` hands the batch to a detached copy: 
 // ── T22 (D32): the env per task, through the CLI ───────────────────────────
 
 const ENV_PKG = { scripts: { local: "vite", dev: "vite --mode dev", prod: "vite --mode prod" } };
-const runsEnv = (env) => new RegExp(`/bin/zsh -c 'npm run ${env} --'$`);
+const runsEnv = (env) => new RegExp(`spotlight-serve 'npm run ${env} --'$`);
 
 test("D32: `env --task AX-50 --group g1 --env dev` stores envs[\"g1/AX-50\"] and restarts only the lit repos AX-50 holds whose command changes; detached it stores, answers at once and restarts after", async () => {
   const w = makeWorld();

@@ -196,6 +196,8 @@ export default class ServerView {
         .child(div().text_color(t.blocked).child(m.errorTitle))
         // The engine's message, only when the words above don't carry it (T2).
         .when(Boolean(m.errorDetail), (box) => box.child(div().text_size(11).text_color(t.dim).truncate().child(m.errorDetail)))))
+      // A server left alone in a busy terminal (D40): no error, just why.
+      .when(Boolean(m.serverNote), (el) => el.child(div().text_size(11).text_color(t.dim).child(m.serverNote)))
       .when(this.detection === null, (el) => el.child(div().text_size(11).text_color(t.dim).child("Leyendo package.json…")))
       .when(m.envs.length > 0, (el) => el.child(label("Entorno")).children(m.envs.map(envRow)))
       .when(Boolean(m.envNote), (el) => el.child(div().text_size(11).text_color(t.blocked).child(m.envNote)))

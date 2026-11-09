@@ -1,0 +1,32 @@
+#!/bin/sh
+# spotlight-serve: runs a repo's dev server with Spotlight's log mirror (D40).
+# Spotlight types it into the root's own terminal, from the root:
+#   spotlight-serve '<command>'
+# and it execs `script -F -q -a <log> /bin/zsh -c <command>`: the log is the
+# repo's (`spotlight logs --path`, asked here, in the root), so `spotlight
+# logs` reads all the server prints, and the `script` that leads the
+# terminal with that log is how Spotlight knows its own server (D10, D11).
+# Installed as ~/.local/bin/spotlight-serve, a symlink to this file, beside
+# `spotlight`: it follows its own links to run the `spotlight` next to it.
+if [ $# -eq 0 ]; then
+  echo "usage: spotlight-serve <command>" >&2
+  exit 2
+fi
+self=$0
+while [ -L "$self" ]; do
+  link=$(readlink "$self")
+  case $link in
+    /*) self=$link ;;
+    *) self=$(dirname "$self")/$link ;;
+  esac
+done
+here=$(cd "$(dirname "$self")" && pwd -P) || exit 1
+log=$("$here/spotlight" logs --path) || {
+  echo "spotlight-serve: spotlight logs --path failed in $(pwd): the server was not started" >&2
+  exit 1
+}
+if [ -z "$log" ]; then
+  echo "spotlight-serve: spotlight logs --path gave no log in $(pwd): the server was not started" >&2
+  exit 1
+fi
+exec script -F -q -a "$log" /bin/zsh -c "$*"

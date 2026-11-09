@@ -35,7 +35,7 @@ import { release, pause, regrant, snapshot } from "./queue.js";
 import {
   decideTurnEnd, activityUpdate, lightingMarker, lightAlive, needsLight, memberLit, classifyStep,
 } from "./cli-turns.mjs";
-import { branchOf, hcGet, hcReadText, registeredRoots, sleep, taskKeyOfWorkspace } from "./cli-env.mjs";
+import { branchOf, hcGet, hcReadText, registeredRoots, taskKeyOfWorkspace } from "./cli-env.mjs";
 import { recordEnv, envKeyOf } from "./task-env.js";
 import {
   SERVER_ERRORS, PORT_BUSY, SERVER_EXITED, SERVER_START_FAILED, SERVER_SURVIVED, SERVER_NOT_STOPPED, isServerError, serverErrorOf,
@@ -284,6 +284,8 @@ const SERVER_WORDS = {
   // The old server never let go of the prompt and still runs (M3).
   "still-running": "server sin reiniciar",
   "port-busy": "puerto ocupado",
+  // Its terminal runs something else: left alone (D40).
+  "terminal-busy": "terminal ocupada",
 };
 
 // One repo of a lighting: activate (fresh or takeover), or sync when the
@@ -375,9 +377,10 @@ async function lightMember(cx, member, { force, taskKey, quiet = false }) {
 // ── The server (D10) ───────────────────────────────────────────────────────
 
 // Why a start didn't go through, in Spanish, by startServer's or
-// restartServer's reason (K3): the words after "El server no arrancó: ".
+// restartServer's reason (K3): the words after "El server no arrancó: ". A
+// terminal that runs something else (terminal-busy) is no failed start: it
+// is left alone, as Orca (D40, planAndStart).
 const START_FAILURES = {
-  busy: "su terminal corre otro programa (no se tocó)",
   "invalid-command": "su comando no es una sola línea que se pueda escribir",
   "name-taken": "otra terminal viva tiene el nombre de la suya",
   "terminal-failed": "hc no pudo crear su terminal",
@@ -420,10 +423,11 @@ const RUNNING = new Set(["starting", "listening"]);
 // restart would type into it: a free prompt, none yet, Spotlight's server.
 const TYPES_INTO = new Set(["shell", "gone", "spotlight"]);
 // A failed start's reasons that show Spotlight's old server no longer leads
-// its terminal (N3): the terminal closed, its prompt was free to type into,
-// or another program leads it. Any other failure over a terminal that showed
-// that server, or that hc couldn't read, may have left it running.
-const LEFT_THE_FRONT = new Set(["terminal-gone", "send-failed", "busy"]);
+// its terminal (N3): the terminal closed, or its prompt was free to type
+// into (another program leading it is terminal-busy, no failure). Any other
+// failure over a terminal that showed that server, or that hc couldn't
+// read, may have left it running.
+const LEFT_THE_FRONT = new Set(["terminal-gone", "send-failed"]);
 
 // Spotlight's server runs in another env than the effective one, and that
 // env starts something: it restarts, as on a command change (D10, J-002).
@@ -506,6 +510,12 @@ function serverBusyOp({ restart = false, envName, chosenVariant }) {
 // An old server that never let go of the prompt is no failed start: its own
 // state, still-running (M3), toasted as a failure is (the record's
 // restartStuck says the cause a sync already told, M1).
+// A server terminal that runs something Spotlight didn't start (the root's
+// own, Juan's program in it) is left alone, as Orca (D40): nothing typed, no
+// Ctrl-C, its port never checked, no failed start and no toast of it; the
+// record's server is stopped with the reason terminal-busy (serverReason),
+// which the popup says, and server.js's start leaves its line in the log.
+// Its state word: terminal-busy.
 // A plan that asks for a variant starts nothing: the record waits in
 // needs-variant, and every start asked for toasts "Elige una variante para
 // <repo>", opening the popup's chips (D36).
@@ -518,7 +528,7 @@ function serverBusyOp({ restart = false, envName, chosenVariant }) {
 // that ends the last holder's on a takeover only (G1); otherwise it stays
 // (H1: a port-busy a refused restart left over a server that kept
 // listening, D24).
-// → { state: started | running | still-running | needs-variant | none | pending | failed | port-busy, … }
+// → { state: started | running | still-running | terminal-busy | needs-variant | none | pending | failed | port-busy, … }
 export async function ensureServer(cx, root, opts = {}) {
   const op = serverBusyOp(opts);
   if (!op) return planAndStart(cx, root, opts);
@@ -610,20 +620,27 @@ async function planAndStart(cx, root, opts) {
     // as a stranger holding the port.
     let ensured;
     if (TYPES_INTO.has(seen.kind)) {
-      // D38: the terminal comes first. Taking the root's main terminal kills
-      // what ran there, so a server started by hand in it frees its port
-      // before the check; a listener anywhere else is still D24's. The check
-      // runs whatever the terminal's answer, as before T29: a busy port is
-      // said before a terminal that couldn't be made.
+      // D38, D40: the terminal comes first, so the port is checked from the
+      // one the line goes to: the root's own terminal, chosen now, or one
+      // made. One chosen now that runs something Spotlight didn't start
+      // (Juan's server, maybe on this very port) is left alone without a
+      // check: the start answers terminal-busy. The check runs whatever the
+      // terminal's answer, as before T29: a busy port is said before a
+      // terminal that couldn't be made.
       ensured = await ensureServerTerminal({ root, terminal: record.serverTerminal }, cx.serverDeps);
-      const port = await checkPortAfter(cx, root, {
-        command: plan.command, settings: repoSet, rootPid: seen.rootPid ?? null, freePort: opts.freePort,
-        shown: serverErrorOf(record.lastError),
-      }, Boolean(ensured.adopted));
-      freed = port.freed;
-      if (port.busy) {
-        const terminal = ensured.ok ? ensured.terminal : null;
-        return refusePort(cx, root, { busy: port.busy, freed, plan, seen, logPath, workspace, branch, now, terminal });
+      const chosen = ensured.ok && ensured.terminal !== seen.terminal
+        ? await inspectServer({ terminal: ensured.terminal, logPath, serverPid: record.serverPid }, cx.serverDeps)
+        : seen;
+      if (chosen.kind !== "foreign") {
+        const port = await checkPort(cx, root, {
+          command: plan.command, settings: repoSet, rootPid: chosen.rootPid ?? null, freePort: opts.freePort,
+          shown: serverErrorOf(record.lastError),
+        });
+        freed = port.freed;
+        if (port.busy) {
+          const terminal = ensured.ok ? ensured.terminal : null;
+          return refusePort(cx, root, { busy: port.busy, freed, plan, seen, logPath, workspace, branch, now, terminal });
+        }
       }
     }
     // A terminal that couldn't be ensured goes through the start too, which
@@ -632,9 +649,11 @@ async function planAndStart(cx, root, opts) {
     r = seen.kind === "spotlight" ? await restartServer(start, cx.serverDeps) : await startServer(start, cx.serverDeps);
   }
   const ran = r.ok && (r.started || r.reason === "already-running");
+  // Its terminal runs something else: left alone, no failed start (D40).
+  const leftAlone = r.ok && !r.started && r.reason === "terminal-busy";
   // An old server that never let go of the prompt still runs: no start
   // failed (restartServer's oldServerRuns, L1).
-  const failure = ran || r.oldServerRuns ? null : startFailedError(r);
+  const failure = ran || leftAlone || r.oldServerRuns ? null : startFailedError(r);
   // A failed start over a terminal that showed Spotlight's server, or that
   // hc couldn't read, which nothing after showed gone from its front (N3):
   // not a restart that saw the old server leave it (restartServer's
@@ -646,7 +665,18 @@ async function planAndStart(cx, root, opts) {
     rec.logPath = logPath;
     if (freed?.ok) addNote(s, { repo: root, text: `${cx.nameOf(root)}: ${freedText(freed)}` }, now);
     if (r.terminal) rec.serverTerminal = r.terminal;
-    if (r.ok && r.started) {
+    // Why the server was left stopped is this start's to say, or nobody's.
+    delete rec.serverReason;
+    if (leftAlone) {
+      // D40: the terminal runs something Spotlight didn't start, left as it
+      // is (Orca's): nothing of Spotlight's runs there, so its server is
+      // stopped with that reason, which the popup says; no server error
+      // and no toast (an old one says nothing of this start), and the
+      // cause of a stuck restart is no more. The log has server.js's line.
+      Object.assign(rec, { serverState: "stopped", serverReason: "terminal-busy" });
+      delete rec.restartStuck;
+      clearServerError(rec);
+    } else if (r.ok && r.started) {
       // serverEnv says what runs now (J-002, J-008): written only when it
       // starts. serverProcs is kept (F1): a child of the last run that escaped
       // holding a port must still die at the turn-off; a dead identity never
@@ -718,8 +748,9 @@ async function planAndStart(cx, root, opts) {
       if (!repeat) errorNote(s, { root, name: cx.nameOf(root), workspace: workspace ?? rec.holder, error: failure, now, top: rec.lastError });
     }
   });
-  // An old server still running is its own state, never a failed start (M3).
-  const word = ran ? (r.started ? "started" : "running") : failure ? "failed" : "still-running";
+  // An old server still running is its own state, never a failed start (M3);
+  // so is a terminal left alone (D40).
+  const word = ran ? (r.started ? "started" : "running") : leftAlone ? "terminal-busy" : failure ? "failed" : "still-running";
   return { state: word, result: r, plan, freed, ...(failure ? { error: failure } : {}) };
 }
 
@@ -828,23 +859,6 @@ async function checkPort(cx, root, { command, settings, rootPid, freePort, shown
   return { busy, freed };
 }
 
-// After D38 killed the root's main terminal for the server (`adopted`), a
-// server that ran in it may hold its port a moment after hc reads the
-// terminal finished: checkPort asks again, every PORT_SETTLE_POLL_MS for up
-// to PORT_SETTLE_MS, before it calls the port busy. Otherwise once.
-const PORT_SETTLE_MS = 3000;
-const PORT_SETTLE_POLL_MS = 250;
-async function checkPortAfter(cx, root, opts, adopted) {
-  const now = cx.serverDeps.now ?? Date.now;
-  const wait = cx.serverDeps.sleep ?? sleep;
-  const until = now() + (adopted ? PORT_SETTLE_MS : 0);
-  for (;;) {
-    const port = await checkPort(cx, root, opts);
-    if (!port.busy || port.freed || now() >= until) return port;
-    await wait(PORT_SETTLE_POLL_MS);
-  }
-}
-
 // What a stopped holder leaves in the notes.
 function freedText({ port, pid, command, killed }) {
   const forced = killed?.length > 0 ? `; ${killed.length} no paró con SIGTERM y se mató con SIGKILL` : "";
@@ -854,7 +868,8 @@ function freedText({ port, pid, command, killed }) {
 // The start refused: the server error port-busy (under a root error the
 // record has, F7), one toast per new holder (it opens the popup), a line in
 // the server's log, nothing typed. `terminal`: the server terminal ensured
-// before the check (D38: it may be a new one), kept on the record.
+// before the check (D38, D40: the root's own, chosen now, or a new one),
+// kept on the record. The busy port is why now, not a busy terminal.
 async function refusePort(cx, root, { busy, freed, plan, seen, logPath, workspace, branch, now, terminal = null }) {
   const error = portBusyError(busy);
   const name = cx.nameOf(root);
@@ -862,6 +877,7 @@ async function refusePort(cx, root, { busy, freed, plan, seen, logPath, workspac
     const rec = s.repos[root];
     if (!rec) return;
     if (terminal) rec.serverTerminal = terminal;
+    delete rec.serverReason;
     const known = shownAlready(rec, error);
     setServerError(rec, { ...error, at: now });
     // A server Spotlight runs keeps its state: the restart didn't touch it.
@@ -887,6 +903,17 @@ const DEAD_START_LOCK_MS = 300;
 // again with no port open (server.js readServerState: stopped, no owner).
 const diedAtStart = (record, live) =>
   record?.serverState === "starting" && live?.state === "stopped" && live.owner === null;
+
+// D40: a look (readServerState's) at a terminal Spotlight left alone
+// (serverReason terminal-busy) that still runs what Spotlight didn't start
+// reads no server of Spotlight's: stopped, with no ports, whatever that
+// program listens on (Juan's own server in the root's terminal), so the
+// reap and `on` keep the record stopped as the start left it. Any other look
+// as it came.
+const leftAloneLook = (record, live) =>
+  record?.serverReason === "terminal-busy" && live?.owner === "foreign"
+    ? { ...live, state: "stopped", ports: [], procs: [], port: null, url: null, label: "" }
+    : live;
 
 function serverExitedError(line) {
   return { code: SERVER_EXITED, message: line ? `El server se cayó al arrancar: ${line}` : "El server se cayó al arrancar." };
@@ -1072,9 +1099,11 @@ export function rememberProcs(known, seen, gone = new Set()) {
 // child that left the server's tree holding a port, or a server pushed to
 // another port by an old child, is no longer in the live tree by the
 // turn-off; stopServer kills such an escaped listener only when its pid and
-// start time are one of these (D26).
+// start time are one of these (D26). A server seen anything but stopped
+// drops why it was left stopped (serverReason, D40): that stands no more.
 function noteLive(record, { state, ports, procs }, gone) {
   clearOnListen(record, state);
+  if (state !== "stopped") delete record.serverReason;
   record.serverState = state;
   record.ports = ports;
   record.serverProcs = rememberProcs(record.serverProcs, procs, gone);
@@ -1090,10 +1119,11 @@ const goneOf = (cx, repos, roots) =>
 
 // Why the restart a sync asked for didn't happen, for `spotlight sync`'s line:
 // a failed start's reason, the old server's (still-running's: it ignored the
-// Ctrl-C, or never got it), or port-busy.
+// Ctrl-C, or never got it), port-busy, or terminal-busy (its terminal runs
+// something else, left alone, D40).
 const restartFailure = (server) => {
   if (server?.state === "failed" || server?.state === "still-running") return server.result.reason;
-  return server?.state === "port-busy" ? "port-busy" : null;
+  return server?.state === "port-busy" || server?.state === "terminal-busy" ? server.state : null;
 };
 
 // D35: the toast of a Forzar sync that went through (Orca's "Spotlight
@@ -1420,10 +1450,10 @@ export async function describeServer(cx, state, member, key, syncErrors = {}) {
   if (!lit) return { ...base, error: marker?.errors?.[member.root] ?? record?.lastError?.message ?? marker?.error ?? undefined };
   const syncError = syncErrors[member.root];
   if (record.serverState === "needs-variant") return { ...base, needsVariant: true, server: "stopped", syncError };
-  const live = await serverOf(cx).readServerState(
+  const live = leftAloneLook(record, await serverOf(cx).readServerState(
     { root: member.root, terminal: record.serverTerminal, logPath, serverPid: record.serverPid, port: configured },
     cx.serverDeps,
-  );
+  ));
   const running = live.state === "listening" || live.state === "starting";
   // D25: a start that looks dead is settled under the repo lock first (R6):
   // a start or restart in flight holds that lock and leaves the shell in
@@ -1675,10 +1705,10 @@ export async function reap(cx, { full = true, skip = null } = {}) {
   for (const [root, rec] of full ? Object.entries(state.repos) : []) {
     if (rec.logPath) rotateLog(rec.logPath);
     if (!rec.serverTerminal || rec.serverState === "needs-variant") continue;
-    const live = await serverOf(cx).readServerState(
+    const live = leftAloneLook(rec, await serverOf(cx).readServerState(
       { root, terminal: rec.serverTerminal, logPath: rec.logPath, serverPid: rec.serverPid, port: repoSettings(cx.settings, root).port },
       cx.serverDeps,
-    );
+    ));
     // D25: a start that died is decided under the repo lock, which writes
     // its state; until then it stays `starting`.
     if (diedAtStart(rec, live)) {

@@ -370,6 +370,24 @@ test("a gone server (its tab closed): no Ver server nor Ver log, Reiniciar and A
   }
 });
 
+test("D40: a server left alone because its terminal was busy says so: the popup's line, with Ver server, Reiniciar and Apagar; any other state or reason has none", () => {
+  const busy = model({ state: stateWith(repo({ serverState: "stopped", serverReason: "terminal-busy", ports: [] })) });
+  assert.equal(busy.serverNote, "Su terminal está ocupada: no se tocó.");
+  assert.deepEqual(busy.actions.map((a) => a.label), ["Ver server", "Reiniciar", "Apagar"]);
+  assert.equal(busy.errorTitle, null);
+  // A reason the record no longer stands by (the server runs again) or never had.
+  for (const fields of [
+    { serverState: "listening", serverReason: "terminal-busy" },
+    { serverState: "starting", serverReason: "terminal-busy" },
+    { serverState: "stopped" },
+    { serverState: "stopped", serverReason: "something-else" },
+    { serverState: "gone", serverReason: "terminal-busy" },
+  ]) {
+    assert.equal(model({ state: stateWith(repo(fields)) }).serverNote, null, JSON.stringify(fields));
+  }
+  assert.equal(model({ state: stateWith(null) }).serverNote, null);
+});
+
 // F6, F7: a server error can sit under a root error (lastError.serverError).
 // The popup follows the error on top: under orca-holds no Ver log, Reintentar
 // nor Liberar puerto y arrancar (D27); under root-diverged its force path.
