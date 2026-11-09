@@ -57,12 +57,13 @@ test("projects layout: agent-sleep's moon is the status bar's last cell, nothing
   assert.ok(requires.split("\n").includes("agent-sleep"));
 });
 
-test("projects layout: the status bar is a row, workspace-status, the spotlight flask, the claude-accounts footer, keep-awake's cup, then agent-sleep's moon (claude-accounts D10, spotlight D20, keep-awake D10, agent-sleep D14)", () => {
+test("projects layout: the status bar is a row, the projects keeper's 1 px cell, workspace-status, the spotlight flask, the claude-accounts footer, keep-awake's cup, then agent-sleep's moon (workspace-sleep D7, claude-accounts D10, spotlight D20, keep-awake D10, agent-sleep D14)", () => {
   const status = find(read("layouts/projects.json"), "status");
   assert.equal(status.type, "row");
   assert.equal(status.resizable, false);
   assert.deepEqual(status.size, { px: 28 });
   assert.deepEqual(status.children, [
+    { id: "status-projects-keeper", type: "block", size: { px: 1 }, content: { mod: "projects", props: { view: "keeper" } } },
     { id: "status-workspace", type: "block", size: { weight: 1 }, content: { mod: "workspace-status" } },
     { id: "status-spotlight", type: "block", size: { px: 40 }, content: { mod: "spotlight", props: { view: "footer" } } },
     { id: "status-usage", type: "block", size: { weight: 1 }, content: { mod: "claude-accounts", props: { view: "footer" } } },
@@ -204,18 +205,25 @@ test("S4: Mergear ▾ opens the methods popup, which opens a modal confirm dialo
   assert.match(card, /openMergeMenu\(/, "an enabled Mergear ▾ opens the popup");
 });
 
-test("D8: after a merge the dialog asks the tree for a PR round; the tree runs one, or one more after the one running; the card reads again when the tree's word changes", () => {
+test("D8: after a merge the dialog asks the tree for a PR round; the tree runs one, or one more after the one running; the card reads again when the tree's word changes. The ask goes through the store, since the keeper runs every command (workspace-sleep D7)", () => {
   const src = (f) => readFileSync(new URL(`../projects-sidebar/mods/projects/${f}`, import.meta.url), "utf8");
   const merge = src("merge-pr.js");
   assert.match(merge, /run\("projects\.refresh-prs"\)/);
   const tree = src("tree.js");
-  assert.match(tree, /"refresh-prs":\s*\(\{ cx, view \}\) => view\?\.askPrs\?\.\(cx\)/, "a key command, run only in the tree copy");
+  assert.match(tree, /"refresh-prs":\s*\(\) => store\.askPrs\(\)/, "a key command: the keeper's copy runs it, so it leaves the ask in the store");
+  const tick = tree.slice(tree.indexOf("  prTick(cx) {"), tree.indexOf("\n  }\n", tree.indexOf("  prTick(cx) {")));
+  assert.match(tick, /const asked = store\.prsAsked\(\);[\s\S]*?const wanted = asked > this\.prAsked;[\s\S]*?this\.prAsked = asked;/, "each tick, the tree sees whether an ask came since the last one");
+  assert.ok(tick.indexOf("if (!active) return;") < tick.indexOf("if (wanted)"), "only the window in front runs the asked round");
+  assert.match(tick, /if \(wanted\) \{\s*this\.askPrs\(cx\);\s*return;\s*\}/, "the asked round runs through askPrs: one more after the one running");
+  assert.match(tree, /this\.prAsked = store\.prsAsked\(\);/, "an ask stored before this copy started isn't run again");
   const ask = tree.slice(tree.indexOf("  askPrs("), tree.indexOf("\n  }\n", tree.indexOf("  askPrs(")));
   assert.match(ask, /if \(this\.prBusy\) \{\s*this\.prAgain = true;/, "a round in flight gets one more after it");
   const round = tree.slice(tree.indexOf("  refreshPrs("), tree.indexOf("\n  }\n", tree.indexOf("  refreshPrs(")));
   assert.match(round, /this\.prAgain = false;/, "a round started now covers what was asked before it");
   assert.match(round, /finally \{[\s\S]*?this\.prBusy = false;[\s\S]*?if \(this\.prAgain\)[\s\S]*?this\.refreshPrs\(/, "the queued round runs once this one ends");
-  assert.match(src("main.js"), /handler\(\{ cx, copy, view: this\.view \}\)/, "the tree's commands reach the tree");
+  const store = src("store.js");
+  assert.match(store, /export function askPrs\(\) \{\s*setShared\(KEYS\.prsAsk, Math\.max\(Date\.now\(\), prsAsked\(\) \+ 1\)\);/, "each ask is a larger number than the last, even in the same millisecond");
+  assert.match(store, /export const prsAsked = \(\) => \{\s*const v = shared\(KEYS\.prsAsk\);\s*return Number\.isFinite\(v\) \? v : 0;/, "a foreign value reads as no ask");
   const card = src("pr-card.js");
   assert.match(card, /store\.prs\(\)/, "the card follows the tree's stored PR for its workspace");
   for (const f of ["pr-card.js", "merge-pr.js"]) assert.doesNotMatch(src(f), /savePrs\(/, `${f}: the tree is the only writer of projects.prs.v1`);
@@ -255,6 +263,47 @@ test("projects layout: keep-awake's cup sits right before the moon, with no prop
   assert.deepEqual(cells.at(-2), { id: "status-keep-awake", type: "block", size: { px: 64 }, content: { mod: "keep-awake" } });
   const requires = readFileSync(new URL("../projects-sidebar/requires", import.meta.url), "utf8");
   assert.ok(requires.split("\n").includes("keep-awake"));
+});
+
+test("the keeper's cell is the status bar's first, so a sidebar that starts hidden still starts it, and the moon stays last (workspace-sleep D7, R1#10)", () => {
+  const layout = read("layouts/projects.json");
+  const cells = find(layout, "status").children;
+  assert.equal(cells[0].id, "status-projects-keeper");
+  assert.equal(cells.at(-1).id, "status-agent-sleep");
+  const keepers = [];
+  (function walk(node) {
+    if (node?.content?.props?.view === "keeper") keepers.push(node.id);
+    for (const child of node?.children ?? []) walk(child);
+  })(layout);
+  assert.deepEqual(keepers, ["status-projects-keeper"], "one keeper, outside the sidebar");
+});
+
+test("Inicio and the keeper are views of the mod; check-views can draw each (workspace-sleep D6, D7)", () => {
+  const src = (f) => readFileSync(new URL(`../projects-sidebar/mods/projects/${f}`, import.meta.url), "utf8");
+  const main = src("main.js");
+  assert.match(main, /^const DEFAULT_VIEW = "tree";$/m, "scripts/check-views.sh rewrites this line");
+  assert.match(main, /this\.name = pr\.view \?\? DEFAULT_VIEW/);
+  assert.match(main, /^\s+inicio:\s*Inicio,$/m);
+  assert.match(main, /^\s+keeper:\s*Keeper,$/m);
+  const keeper = src("keeper.js");
+  assert.match(keeper, /export default class Keeper/);
+  const init = keeper.slice(keeper.indexOf("  init("), keeper.indexOf("\n  }\n", keeper.indexOf("  init(")));
+  assert.doesNotMatch(init, /window\(\)|return;/, "the window isn't read once at init: a copy started before it would never look (workspace-sleep step 4's F1)");
+  assert.match(init, /cx\.timer\.every\(TICK,/, "its look's timer starts, window or not");
+  const wake = keeper.slice(keeper.indexOf("  wake(cx) {"), keeper.indexOf("\n  }\n", keeper.indexOf("  wake(cx) {")));
+  assert.match(wake, /if \(!window\(\)\) \{\s*this\.last = null;\s*return;\s*\}/, "each look is inert without a window: herdr-app check never makes a space");
+  assert.ok(wake.indexOf("if (!window())") < wake.indexOf("cx.spawn("), "before anything is spawned");
+  const render = keeper.slice(keeper.indexOf("  render("));
+  assert.doesNotMatch(render, /\brun\(|setShared\(|store\.save/, "never writes from render()");
+  assert.match(keeper, /cx\.spawn\(async \(cx\) =>/, "it acts from a spawned task");
+  assert.match(keeper, /localReady\(machines\(\)\)/, "nothing is made while this computer's layout loads");
+  assert.match(src("store.js"), /export const inicio = \(\) => parseInicio\(shared\(KEYS\.inicio\)\)/);
+  assert.match(src("tree.js"), /^export async function addFromPicker\(/m, "the tree's Add project, exported");
+  const view = src("inicio.js");
+  assert.match(view, /import \{[^}]*\baddFromPicker\b[^}]*\} from "\.\/tree\.js"/, "Inicio's Add project runs in its own copy (R1#10)");
+  assert.match(view, /openNewWorkspace\(null\)/, "Create workspace: the dialog on the group's first project");
+  assert.match(view, /image\("frame\/welcome\/herdr\.png"\)/, "the brand icon workspace-chrome draws");
+  assert.match(view, /keys\(\)/, "its shortcut rows come from keys()");
 });
 
 test("the workspace menu is a view of the mod (D20)", () => {

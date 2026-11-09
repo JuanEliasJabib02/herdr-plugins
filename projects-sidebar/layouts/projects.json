@@ -245,6 +245,19 @@
           },
           "children": [
             {
+              "id": "status-projects-keeper",
+              "type": "block",
+              "size": {
+                "px": 1
+              },
+              "content": {
+                "mod": "projects",
+                "props": {
+                  "view": "keeper"
+                }
+              }
+            },
+            {
               "id": "status-workspace",
               "type": "block",
               "size": {

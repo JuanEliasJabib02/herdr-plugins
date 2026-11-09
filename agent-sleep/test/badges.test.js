@@ -106,6 +106,21 @@ test("keys come out sorted, so the same records give the same value", () => {
   assert.deepEqual(Object.keys(badgeValue({ records, modFolder: "agent-sleep" })), ["/r/a", "/r/b"]);
 });
 
+test("workspace-sleep D3: no moon for a workspace asleep as a whole, by its path or by a terminal in one of its spaces", () => {
+  const records = {
+    t1: rec({ workspacePath: "/r/slept" }), // in the workspace put to sleep
+    t6: rec({ workspacePath: "/r/awake" }), // its terminal is in a slept space (one with panes in two worktrees)
+    t2: rec({ workspacePath: "/r/awake", at: at(9, 5) }), // asleep in an awake workspace
+  };
+  const value = badgeValue({ records, modFolder: "agent-sleep", slept: { paths: ["/r/slept/"], terminals: new Set(["t6"]) } });
+  assert.deepEqual(Object.keys(value), ["/r/awake"]);
+  assert.equal(value["/r/awake"][0].tooltip, "Claude asleep since 09:05 · wakes when you show its tab");
+  const before = badgeValue({ records, modFolder: "agent-sleep" });
+  assert.deepEqual(Object.keys(before), ["/r/awake", "/r/slept"]);
+  assert.deepEqual(badgeValue({ records, modFolder: "agent-sleep", slept: { paths: [], terminals: [] } }), before, "nothing slept: as before");
+  assert.deepEqual(badgeValue({ records, modFolder: "agent-sleep", slept: { paths: "/r/slept", terminals: null } }), before, "a malformed one is nothing");
+});
+
 test("no sleeping Claude → {} (clears the badges)", () => {
   assert.deepEqual(badgeValue({ records: {}, modFolder: "agent-sleep" }), {});
 });

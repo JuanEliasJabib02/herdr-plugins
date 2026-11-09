@@ -43,24 +43,84 @@ its own.
 - **The popup** (a click on the moon): the headline, whose tooltip ("fields:")
   says where it got each terminal's details; "Sleep idle agents"; "After 30
   min" with −/+; why a Claude stays asleep if one does, the next one due, the
-  last event; and Sleep now and Wake all. It opens as tall as those lines are
-  then. A line that appears later may be cut, never the buttons. The popup only
-  draws and asks: the moon's copy is the one that writes and types.
+  last event; "Sleep this workspace" with its Sleep button; and Sleep now and
+  Wake all. It opens as tall as those lines are then. A line that appears later
+  may be cut, never the rows or the buttons. The popup only draws and asks: the
+  moon's copy is the one that writes and types.
 - **Sleep now** puts every hidden, finished Claude to sleep at once, without
-  the wait. **Wake all** resumes every sleeping one. Both work while automatic
-  sleep is off.
-- **The workspace's moon.** projects-sidebar also shows one on a workspace with
-  a sleeping Claude (reserved badge key `badges.hibernate`).
+  the wait. **Wake all** resumes every sleeping one, except those of a
+  workspace you put to sleep (see below), which wake with it; it is greyed out
+  when it has nothing of its own to wake. Both work while automatic sleep is
+  off.
+- **The workspace's moon.** projects-sidebar also shows one after the label of
+  a workspace that is awake with a sleeping Claude (reserved badge key
+  `badges.hibernate`). A workspace you put to sleep has projects-sidebar's own
+  moon instead.
+- **Sleep a workspace** (the popup's "Sleep this workspace", or
+  `agent-sleep.sleep-workspace`; Orca's "Sleep"): every space of the shown
+  workspace goes to sleep without closing, so its tabs, splits, sizes,
+  scrollback and terminal addresses are all there when it wakes. It works
+  whether automatic sleep is on or off.
+  - **Which spaces.** A space belongs to the workspace its first pane with a
+    folder is in (else the folder it was made in), as projects-sidebar
+    decides. A space with no terminal pane, like Inicio, belongs to none.
+  - **It asks first** when any agent it would stop is working (or blocked),
+    whatever the agent: a Claude, Codex, or any other that reports its
+    status to Herdr. It asks too when a Claude may have text you haven't
+    sent. An agent it leaves alone (see below) doesn't count. A dialog in
+    the middle of the window, titled with the workspace, says "<N> agents
+    are working or may have unsent text. Sleep anyway?" ("1 agent is" for
+    one), with Cancel and Sleep. It opens whether
+    the popup is open or not. Nothing changes until you answer, and Cancel
+    changes nothing; so does closing it any other way (Esc, a click beside it),
+    as in Orca. Asking again while it is open replaces it with the new
+    question. A hidden line of text gets the probe below; text on a tab you can
+    see always counts.
+  - **What it does, in order.** Its tabs are put away at once (`tab.settle`),
+    so its row shows the moon and projects-sidebar shows Inicio. The stops wait
+    until none of its spaces is shown, for up to 3 seconds. Then, one terminal
+    a second:
+    - a Claude that is working gets `hc interrupt` and has 10 s to finish its
+      turn. A draft on its prompt line is cleared with one `ctrl+c`. Then it
+      gets `/exit` and resumes like any other, with `wake: "now"` on its record
+      when it was working;
+    - any other program in front of the shell gets `hc interrupt`, and if it
+      is still there 3 s later its process group gets SIGHUP, as closing the
+      terminal would send. The shell itself is never signalled;
+    - bare shells, sub-agents, remote terminals, terminals whose own program
+      isn't a shell, and terminals without a pane are left alone.
+    - Last, the tabs an interrupt brought back are put away again.
+  - **What stays running.** A Claude that couldn't come back (see "What
+    sleeps"), one still working after 10 s, and one whose text didn't clear
+    keep running, as does a program a hang-up didn't end. A toast names them:
+    "<workspace>: <N> terminals didn't stop".
+  - **Waking it** (Orca's click on a sleeping workspace): showing any of its
+    spaces, by a click on its row, the picker, an agent's focus or `herdr-app
+    do`, wakes all of them. Its tabs come back, each Claude that was working
+    when it went to sleep resumes at once, and the others when their tab is
+    shown, each in the account it slept in. A space already shown when Herdr
+    or the mod starts again isn't a wake: leave it and come back.
+  - **Shown again mid-sleep** (a click on its row): its remaining stops are
+    dropped, so no `/exit` reaches a Claude you came back to, and it wakes once
+    the stops already under way are done.
+  - **Still on screen when its stops began** (no Inicio in the layout): it
+    stays asleep while you keep looking at it, or move to another of its
+    spaces, and wakes once you leave it and come back.
+  - **Until it wakes**, showing a tab of it doesn't resume its Claudes, and
+    neither does Wake all. Its row has projects-sidebar's moon, and no moon of
+    this mod after the label.
 
 **Keys** (projects layout): `cmd-alt-s` Sleep now, `cmd-alt-w` Wake all. Commands
 you can bind or run with `herdr-app do agent-sleep.<name>`: `sleep-now`,
 `wake-all`, `toggle` (automatic sleep), `less` and `more` (the wait), `panel`
-(the popup).
+(the popup), `sleep-workspace` (no key, as in Orca; the popup's row runs it).
 
 **Files:** `<Herdr home>/agent-sleep/settings.json` (`enabled`, `idleMinutes`)
 and `sleeping.json` (one record per Claude: session id, folder, flags, and its
 account's folder, `configDir`, null for `~/.claude`). A broken `sleeping.json`
-is kept as `sleeping.json.bak`.
+is kept as `sleeping.json.bak`. `workspaces.json` holds the workspaces you put
+to sleep, by path: their spaces and tabs, and whether each is still going to
+sleep or asleep. A broken one is kept as `workspaces.json.bak`.
 
 **Install:** `scripts/install.sh agent-sleep`. The mod only runs while its moon
 is in the shown layout, and projects-sidebar's status bar has it.
@@ -114,11 +174,24 @@ is in the shown layout, and projects-sidebar's status bar has it.
   first time its tab is shown once the mod is back.
 - **Off doesn't wake anyone.** A Claude already asleep when you turn it off
   still wakes when you show its tab.
+- **Sleeping a workspace stops what runs in it.** A program other than Claude
+  gets the stop key and then SIGHUP, so an editor with unsaved changes or a
+  build is ended as a closing terminal would end it. Claudes that were
+  working lose that turn.
+- **`/exit` must come from the mod, not from a terminal.** Typed with `hc send`
+  from inside a Herdr terminal, it arrives wrapped in `<hc from="…">` and
+  Claude reads it as a message. The mod's own `hc` runs from the app, which
+  should carry no `HC_TERMINAL_ID`; that is checked live.
+- **Which spaces are a workspace's can differ from projects-sidebar's.**
+  projects-sidebar takes the deepest checkout you registered, while this mod
+  takes the deepest entry of the folder's own `git worktree list`. A space
+  inside a git submodule or a repo nested in another can get two answers:
+  its row and its sleep may not match. Known, and not fixed.
 - **Two Herdr windows on one Core.** Each one showing the moon runs its own
   loop and can type into terminals, so run it in one. `sleeping.json` is
   written with a compare-and-swap before each `/exit` and each resume, so the
   copy whose write comes second drops that step. Nothing covers the rest: the
   probe's `x` is typed before any write, so both can type one, and each copy
   sees only its own window, so a Claude shown only in the other can be stopped.
-  A popup's clicks only reach the window that opened it, but its lines can be
-  the other window's.
+  A popup's clicks, and a confirm's answer, only reach the window that opened
+  it, but the popup's lines can be the other window's.

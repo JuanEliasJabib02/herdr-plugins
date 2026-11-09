@@ -2,9 +2,10 @@
 // `node --test` can load it: the rows of the active group (projects, their
 // workspaces and agents) from the registry, the worktree cache and Herdr's
 // live spaces; what a click opens (D8); Add project (D10) with the herdr side
-// passed in; the project and workspace menus' items; what the Delete and
-// Rename dialogs say and what their outcomes do (D22, D25, D28); the narrow
-// rail; and the helpers of the worktree engine (D6). tree.js, the menus,
+// passed in; the project and workspace menus' items; Hide sleeping and its
+// popup's items (workspace-sleep D8); what the Delete and Rename dialogs say
+// and what their outcomes do (D22, D25, D28); the narrow rail; and the
+// helpers of the worktree engine (D6). tree.js, the menus, filter-menu.js,
 // delete-workspace.js and rename-workspace.js draw and act on it.
 
 import { normPath, baseName, placeOf, activeGroup, findProject, addProject, matchSpaces } from "./lib.js";
@@ -70,9 +71,18 @@ export function ago(ms) {
 
 // ── The tree ───────────────────────────────────────────────────────────────
 
+// A space nobody can see: every tab of it put away (`tab.settle`). A space
+// with no tabs listed isn't taken as one.
+function putAway(s) {
+  const tabs = s.tabs ?? [];
+  return tabs.length > 0 && tabs.every((t) => t.settled === true);
+}
+
 // A project's workspaces, from its worktree list (projects.cache.v1) and the
 // spaces matchSpaces() put on each. `space` is the one a click selects: the
-// shown one, else the first.
+// shown one, else the first. `asleep` (Orca's moon, workspace-sleep D3): no
+// space shows it, or every space on it is put away; nothing here knows who
+// put it away.
 export function workspacesOf(list, { matches, spaces, agents, tabs, now }) {
   return (list ?? []).map((c) => {
     const path = normPath(c.path);
@@ -86,6 +96,7 @@ export function workspacesOf(list, { matches, spaces, agents, tabs, now }) {
       label: workspaceLabel({ ...c, path }),
       space: shown?.id ?? null,
       open: on.length > 0,
+      asleep: on.every(putAway),
       selected: on.some((s) => s.active),
       status: mostUrgent(on.map((s) => s.status)),
       agents: (agents ?? []).filter((a) => ids.has(a.space)).map((a) => {
@@ -103,17 +114,33 @@ export function workspacesOf(list, { matches, spaces, agents, tabs, now }) {
   });
 }
 
+// Whether Hide sleeping (workspace-sleep D8, Orca's workspace-row-filters.ts
+// sleeping sweep) leaves a workspace out of the rows: it is asleep by D3's
+// rule (never opened included, as in Orca), shows the moon (an agent that
+// needs attention keeps its mark, D3, so it stays, as Orca keeps a worktree
+// with a live agent), isn't the shown one, and isn't a main checkout kept by
+// Except default branch. `w`: a workspacesOf() entry.
+export function hiddenAsleep(w, { hideSleeping = false, exceptMain = true } = {}) {
+  if (hideSleeping !== true || !w.asleep || w.selected) return false;
+  if (Boolean(w.status) && w.status !== "idle") return false;
+  return !(exceptMain !== false && w.main);
+}
+
 // The active group's tree: { group, empty, projects, rows }.
 //   registry: projects.v1; cache: projects.cache.v1 (every group's lists, so
 //   the deepest checkout wins across projects); spaces, panes, agents: Herdr's
 //   live lists; collapsed: projects.ui.v1's paths; home: for `~`; now: ms;
-//   failed: paths whose last listing failed (git couldn't run there).
+//   failed: paths whose last listing failed (git couldn't run there);
+//   hideSleeping, exceptMain: projects.ui.v1's sleeping filter (D8),
+//   off and on by default.
 // `projects` carry what the narrow rail shows (initials, most urgent status,
-// selected). `rows` is what the wide tree draws, in order: a project, then,
-// unless collapsed, its workspaces (or, while it has no list, one loading
-// row, or a missing row once listing it failed), each followed by its
-// agents. Spaces outside every registered project appear nowhere (S14, S15).
-export function buildTree({ registry, cache, spaces, panes, agents, collapsed, home, now, failed }) {
+// selected), every workspace included: the filter only drops rows. `rows` is
+// what the wide tree draws, in order: a project, then, unless collapsed, its
+// workspaces (or, while it has no list, one loading row, or a missing row
+// once listing it failed), each followed by its agents. A workspace Hide
+// sleeping leaves out (hiddenAsleep) goes with its agents; its project's row
+// stays. Spaces outside every registered project appear nowhere (S14, S15).
+export function buildTree({ registry, cache, spaces, panes, agents, collapsed, home, now, failed, hideSleeping = false, exceptMain = true }) {
   const group = activeGroup(registry);
   const matches = matchSpaces(cache, spaces, panes, home);
   const tabs = new Map((spaces ?? []).flatMap((s) => s.tabs ?? []).map((t) => [t.id, t]));
@@ -134,6 +161,7 @@ export function buildTree({ registry, cache, spaces, panes, agents, collapsed, h
       workspaces,
     };
   });
+  const filter = { hideSleeping, exceptMain };
   const rows = [];
   for (const p of projects) {
     rows.push({ kind: "project", ...p });
@@ -141,6 +169,7 @@ export function buildTree({ registry, cache, spaces, panes, agents, collapsed, h
     if (p.loading) rows.push({ kind: "loading", project: p.path });
     if (p.missing) rows.push({ kind: "missing", project: p.path });
     for (const w of p.workspaces) {
+      if (hiddenAsleep(w, filter)) continue;
       rows.push({ kind: "workspace", project: p.path, ...w });
       for (const a of w.agents) rows.push({ kind: "agent", project: p.path, workspace: w.path, ...a });
     }
@@ -229,6 +258,21 @@ export async function addProjectAt(folder, io) {
   const action = openMainAction({ project: path, cache, spaces: io.spaces(), panes: io.panes(), home: io.home });
   io.run(action.name, action.args);
   return { project: { path, name: project.name }, action };
+}
+
+// ── Filter popup (workspace-sleep D8) ──────────────────────────────────────
+
+// The header's filter popup, Orca's SidebarFilter.tsx: [{ id, label, icon,
+// on, indented? }], each a switch. "Hide sleeping" (the moon), off by
+// default; while it's on, "Except default branch" (the branch), indented,
+// on by default. `ui`: projects.ui.v1 (lib.js parseUi). `icon` is one of
+// this mod's icons (config.js icon).
+export function filterMenuItems(ui) {
+  const hiding = ui?.hideSleeping === true;
+  return [
+    { id: "hide-sleeping", label: "Hide sleeping", icon: "moon", on: hiding },
+    ...(hiding ? [{ id: "except-main", label: "Except default branch", icon: "branch", on: ui.exceptMain !== false, indented: true }] : []),
+  ];
 }
 
 // ── Workspace menu (D20) ───────────────────────────────────────────────────

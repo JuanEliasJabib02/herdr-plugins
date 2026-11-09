@@ -47,9 +47,9 @@ icons.
 - **The bar's toggle** opens the panel on the panel it last showed, the Explorer
   if that one isn't on offer. **A header icon** shows its panel; the header's
   panel icon closes the panel.
-- The panel's width is kept with the layout's other clicks, by Herdr.
-- **Each space remembers its panel:** which one was open, or closed. Switching
-  away and back brings it back; a space that never had one shows it closed.
+- **The panel is one for the whole window,** as in Orca: open or closed, on the
+  Explorer or on Changes, it stays as it is when you switch spaces, and after a
+  restart. Herdr keeps it with the layout's other clicks, its width too.
 - **Tabs:** a click selects, a drag moves, the wheel goes to the next or previous
   one, a right click opens Herdr's tab menu, and `+` opens Herdr's new-tab menu.
 - **A double click** pins a file's preview, so the next preview doesn't replace
@@ -74,7 +74,7 @@ icons.
 - **Mod `mods/code-tabs/`** (`mod.json` `{ "place": "none" }`, with `cloned_from`
   Herdr's `tabs` 0.1.13): a copy of Herdr's `tabs` mod under its Apache License
   2.0, in `LICENSE`, with its window icons. `tabs-model.js` holds the decisions,
-  including the per-space memory, and `main.js` draws. It reads the shared keys
+  and `main.js` draws. It reads the shared keys
   `code-editor.docs` (`{ [tabId]: { doc, file, preview } }`, written by the
   Explorer) and `code-editor.live` (`{ [doc]: { dirty, pinned } }`, written by the
   file) and `workspace.panels`, and writes nothing shared; a docs entry counts only
@@ -103,7 +103,7 @@ icons.
   children `explorer` → `{ "mod": "code-explorer" }` and `changes`, a column
   (`"resizable": false`, gap 8) holding projects-sidebar's PR card, `pr-card` →
   `{ "mod": "projects", "props": { "view": "pr" } }` (px 176), above `changes-diff`
-  → `{ "mod": "changes" }` (weight 1). The header and its per-space memory know
+  → `{ "mod": "changes" }` (weight 1). The header knows
   only the stack's child ids, `explorer` and `changes`, so what `changes` holds
   is projects-sidebar's. projects-sidebar's `requires` installs this plugin
   first.
@@ -113,17 +113,14 @@ icons.
 - **A `cmd-l` you already bind in `layout:projects` stays yours:** the install
   says so, and then the key doesn't toggle the panel.
 - **Don't put Herdr's `tabs` mod back in this layout.** Its "Files" button selects
-  a stack child `files`, which is gone, and its per-space memory of the panel only
-  knows `files` and `changes`, so switching spaces closes an open Explorer.
+  a stack child `files`, which is gone, and it remembers the panel per space, and
+  only `files` and `changes`, so switching spaces would close an open Explorer.
 - **The Explorer is always on offer,** whatever `workspace.panels` says: its first
   look in Herdr's welcome leaves an empty list, and `cmd-l` opens the Explorer
-  anyway, so leaving it out would close it at the next change of space.
+  anyway, so leaving it out would leave the header without its icon.
 - **A `<mod>.<command>` reaches only the copy in the shown tab,** so only the active
   tab can be closed from the bar, and an inactive tab's dot doesn't close it.
 - **Close in the tab's right-click menu is Herdr's:** it doesn't ask the file.
-- **The header is a second copy of `code-tabs`:** it only draws, and the bar's
-  copy keeps the per-space memory, so a layout with the header and no bar forgets
-  the panel per space.
 - **The active tab's text is `foreground`** (`#abb2bf`). The design's `#d7dae0` has
   no theme name of its own, and the dot's `ansi3` (`#d18f52`) stands in for its
   `#e5c07b`: both follow the theme picker this way.

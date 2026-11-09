@@ -4,16 +4,25 @@
 // popup opens and how tall, the command table through a pulse, a request taken
 // once. main.js and the views need Herdr to load, so they are checked by their
 // source here and by `herdr-app check`.
+//
+// workspace-sleep T7 (S5 piece 2, S9) adds the popup's "Sleep this workspace"
+// row and the confirm a workspace's sleep opens when it asks first (D5), with
+// the views table that keeps every copy but the moon's out of the loop.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
 import {
-  Coordinator, COMMANDS, REQUEST_KEY, VIEW_KEY, MOD, stepMinutes,
+  Coordinator, COMMANDS, REQUEST_KEY, VIEW_KEY, MOD, PULSE_MS, stepMinutes, isLoopCopy, blockModel,
 } from "../mods/agent-sleep/coordinator.js";
 import {
   PANEL, overlayAt, zoomOf, moonBounds, anchorFrom, panelLines, panelHeight, panelSpec, panelView, moonTone, closedJustNow, CLOSE_GUARD_MS, makeRequest,
+  CONFIRM, confirmModel, confirmAnswer, confirmSpec, confirmStep,
 } from "../mods/agent-sleep/panel-model.js";
-import { NOW, COPY, SETTINGS, SHELL_BARE, SID1, deps, setup, exitClaude, storeRecord, records, exits, resumes, at } from "./harness.js";
+import { SLEEP_WORKSPACE, answerCommand } from "../mods/agent-sleep/workspace-sleep.js";
+import {
+  NOW, COPY, HOME, SETTINGS, SHELL_BARE, SID1, SID2, IDLE_319, EXIT, deps, setup, exitClaude, storeRecord, records, exits, resumes, at,
+  workspaceSetup, spacesWorld, showSpace, addClaude, addShell, settledTabs, entries,
+} from "./harness.js";
 
 const mod = (f) => new URL(`../mods/agent-sleep/${f}`, import.meta.url);
 const src = (f) => readFileSync(mod(f), "utf8");
@@ -71,7 +80,7 @@ test("moonBounds: the last cell of the status row, from the window's size and th
 
 // ── How tall it opens (S12) ────────────────────────────────────────────────
 
-const VIEW = { headline: "Agent sleep · nothing asleep", next: null, last: null, holds: [], debug: null, asleep: 0, settings: { enabled: true, idleMinutes: 30 } };
+const VIEW = { headline: "Agent sleep · nothing asleep", next: null, last: null, holds: [], debug: null, asleep: 0, wakeable: 0, settings: { enabled: true, idleMinutes: 30 } };
 
 test("panelLines counts what sits between the rows and the buttons: holds, next, last", () => {
   assert.equal(panelLines(VIEW), 0);
@@ -90,7 +99,7 @@ test("panelHeight grows by each line and stops at 6 lines", () => {
 });
 
 test("panelHeight keeps one line free for what the buttons report, on top of the headline, rows and buttons", () => {
-  const fixed = PANEL.frame + 2 * PANEL.padY + PANEL.headline + 2 * PANEL.row + PANEL.buttons + 4 * PANEL.gap;
+  const fixed = PANEL.frame + 2 * PANEL.padY + PANEL.headline + 3 * PANEL.row + PANEL.buttons + 5 * PANEL.gap;
   assert.equal(panelHeight(VIEW), fixed + PANEL.line, "no last yet: its line is there for Sleep now's result");
   assert.equal(panelHeight({ ...VIEW, last: "Woke app" }), fixed + PANEL.line, "a last already has it");
   assert.equal(panelHeight({ ...VIEW, next: "Automatic sleep is off" }), fixed + 2 * PANEL.line + PANEL.lineGap);
@@ -456,7 +465,7 @@ test("the sidebar block is gone: its files, the rail and the settings mode", () 
 
 test("only the loop copy has a coordinator: the panel view draws from shared and asks by naming a command", () => {
   const main = src("main.js");
-  assert.match(main, /if \(!isLoopCopy\(pr\)\) return;\s*this\.co = new Coordinator\(/);
+  assert.match(main, /if \(!isLoopCopy\(pr, DEFAULT_VIEW\)\) return;\s*this\.co = new Coordinator\(/);
   assert.match(main, /panelView\(shared\(VIEW_KEY\)\)/);
   assert.match(main, /setShared\(REQUEST_KEY, makeRequest\(/);
   const panel = src("views/panel.js");
@@ -496,11 +505,260 @@ test("the popup's text area gives way, its buttons never: flex_1 + min_h(0) + ov
   assert.match(panel, /\.tooltip\(view\.debug\)/, "the headline's tooltip is the debug line");
 });
 
-test("herdr-app check has no window: that copy draws and starts nothing", () => {
-  assert.match(src("main.js"), /if \(!appWindow\(\)\) return;\s*startLoop\(/);
+test("herdr-app check has no window: that copy's pulses do nothing; each pulse looks, so a copy started before its window works once one is there (workspace-sleep step 4's F1)", () => {
+  const main = src("main.js");
+  assert.match(main, /startLoop\(pr, cx\.timer, \(cx\) => \{\s*(\/\/[^\n]*\s*)*if \(!appWindow\(\)\) return;\s*cx\.spawn\(/, "the window is looked for on each pulse");
+  assert.doesNotMatch(main, /if \(!appWindow\(\)\) return;\s*startLoop\(/, "never once at init, before the loop starts");
+  const init = main.slice(main.indexOf("class Moon {"), main.indexOf("  // \"agent-sleep.<name>\""));
+  assert.match(init, /\}\);\s*this\.listen\(cx\);\s*\}\s*$/, "the listener starts with the loop, window or not");
 });
 
 test("the panel command opens the popup from main.js; every other name goes to the table", () => {
   assert.match(src("main.js"), /c === "panel"[\s\S]{0,60}this\.openPanel\(\)[\s\S]{0,60}this\.co\.command\(c\)/);
   assert.equal(Object.hasOwn(COMMANDS, "panel"), false);
+});
+
+// ── workspace-sleep T7: the popup's row and the confirm (S5 piece 2, S9) ────
+
+const IDLE = { app: "claude-code", state: "idle" };
+const WORKING = { app: "claude-code", state: "working" };
+const QUESTION = Object.freeze({ id: "q1-1", label: "app", count: 2 });
+
+// /code/app has two spaces: sa, shown, with a Claude in t1 (tab a1) and a
+// bare shell in t3 (a2), and sa2 with a bare shell in t4. /code/checkout-flow
+// has a Claude in t2 (sb). Inicio holds only projects-sidebar's pane
+// (workspace-sleep D6).
+const LAYOUT = [
+  { id: "sa", tabs: { a1: [["pa1", "t1", "/code/app"]], a2: [["pa2", "t3", "/code/app"]] } },
+  { id: "sa2", tabs: { a3: [["pa3", "t4", "/code/app/src"]] } },
+  { id: "sb", tabs: { b1: [["pb1", "t2", "/code/checkout-flow"]] } },
+  { id: "inicio", folder: HOME, tabs: { i1: [["pi1", null, null]] } },
+];
+
+// Each Claude ends when /exit reaches it, printing its own resume hint.
+const exitOnSend = (address, text, w) => {
+  if (text === "/exit") exitClaude(w, address, address === "t2" ? EXIT.replaceAll(SID1, SID2) : EXIT);
+};
+
+// The world above, `build` changing it before the first pulse.
+async function workspaceWorld(build = () => {}) {
+  const { w, co } = workspaceSetup();
+  spacesWorld(w, LAYOUT, "sa");
+  addClaude(w, "t1", { pid: 100, fgPid: 200, sid: SID1, screen: IDLE_319, status: IDLE });
+  addShell(w, "t3", { pid: 103 });
+  addShell(w, "t4", { pid: 104, cwd: "/code/app/src" });
+  addClaude(w, "t2", { pid: 101, fgPid: 201, sid: SID2, cwd: "/code/checkout-flow", screen: IDLE_319, status: IDLE });
+  w.onSend = exitOnSend;
+  build(w);
+  await at(co, w, NOW);
+  return { w, co };
+}
+
+const step = (co, w) => at(co, w, w.now + PULSE_MS);
+async function steps(co, w, n) {
+  for (let i = 0; i < n; i++) await step(co, w);
+}
+
+// t1 working, so the sleep asks first: the bare command, then its pulse.
+async function asked() {
+  const { w, co } = await workspaceWorld((w) => {
+    w.core.t1.status = WORKING;
+  });
+  co.command(SLEEP_WORKSPACE);
+  await step(co, w);
+  const question = co.view().question;
+  assert.equal(question?.count, 1, "the sleep asks first");
+  return { w, co, question };
+}
+
+// What a click in the confirm leaves in shared: main.js's Confirm sends its
+// props' question's answer to its props' owner.
+function click(w, question, yes, owner = COPY) {
+  const { props } = confirmSpec({ question, owner });
+  w.shared[REQUEST_KEY] = makeRequest(confirmAnswer(props.question, yes), w.now, props.owner);
+}
+
+// Nothing of the workspace's sleep happened: no entry, no tab put away, nothing typed.
+function nothingChanged(w) {
+  assert.deepEqual(entries(w), {});
+  assert.deepEqual(w.runs, []);
+  assert.deepEqual(settledTabs(w), []);
+  assert.deepEqual([w.sends, w.keys, w.interrupts], [[], [], []]);
+}
+
+test("T7, the row: \"Sleep this workspace\" with a Sleep button, so the popup opens one row taller", () => {
+  const before = PANEL.frame + 2 * PANEL.padY + PANEL.headline + 2 * PANEL.row + PANEL.buttons + 4 * PANEL.gap + PANEL.line;
+  assert.equal(panelHeight(VIEW) - before, PANEL.row + PANEL.gap, "the row and the gap beside it");
+  assert.equal(SLEEP_WORKSPACE, "sleep-workspace");
+  const panel = src("views/panel.js");
+  assert.match(panel, /\.child\(row\("Sleep this workspace", button\(t, "agent-sleep-sleep-workspace", "Sleep", true, ask\("sleep-workspace"\)\)\)\)/);
+  assert.equal(Object.hasOwn(COMMANDS, "sleep-workspace"), false, "the row isn't one of the five buttons' table: it asks by name, as a key does");
+});
+
+test("T7, the row: its click asks the loop copy for the shown workspace's sleep, as the bare command does", async () => {
+  const { w, co } = await workspaceWorld();
+  ask(w, "row-1", SLEEP_WORKSPACE);
+  await step(co, w);
+  assert.equal(entries(w)["/code/app"]?.state, "sleeping");
+  assert.deepEqual(settledTabs(w), ["a1", "a2", "a3"]);
+  assert.equal(co.view().question, null, "nothing in flight: nothing asked");
+});
+
+test("T7, the confirm: it shows N and D5's question, with Cancel and Sleep", () => {
+  assert.deepEqual(confirmModel(QUESTION), {
+    title: "Sleep app",
+    body: "2 agents are working or may have unsent text. Sleep anyway?",
+    cancel: "Cancel",
+    sleep: "Sleep",
+    enabled: true,
+  });
+  assert.equal(confirmModel({ ...QUESTION, count: 1 }).body, "1 agent is working or may have unsent text. Sleep anyway?");
+  assert.equal(confirmModel({ ...QUESTION, count: 12 }).body, "12 agents are working or may have unsent text. Sleep anyway?");
+  const view = src("views/confirm.js");
+  for (const part of ["model.title", "model.body", "model.cancel", "model.sleep"]) assert.ok(view.includes(part), part);
+});
+
+test("T7, the confirm: with no question it can't answer (herdr-app check draws it so)", () => {
+  for (const bad of [null, undefined, "q1-1", {}, { id: "q1-1", label: "app" }, { ...QUESTION, count: 0 }, { ...QUESTION, count: 1.5 }, { ...QUESTION, id: "a b" }, { ...QUESTION, id: "__proto__" }, { ...QUESTION, label: 3 }]) {
+    const m = confirmModel(bad);
+    assert.equal(m.enabled, false, JSON.stringify(bad));
+    assert.equal(m.body, "Nothing to confirm.", JSON.stringify(bad));
+    assert.equal(confirmAnswer(bad, true), null, JSON.stringify(bad));
+    assert.equal(confirmAnswer(bad, false), null, JSON.stringify(bad));
+  }
+});
+
+test("T7, the confirm: its answers name the question they answer, as T3's commands do", () => {
+  assert.equal(confirmAnswer(QUESTION, true), answerCommand("q1-1", true));
+  assert.equal(confirmAnswer(QUESTION, false), answerCommand("q1-1", false));
+  assert.equal(confirmAnswer(QUESTION, true), "confirm-sleep.q1-1");
+  assert.equal(confirmAnswer(QUESTION, false), "cancel-sleep.q1-1");
+});
+
+test("T7, the confirm: a dialog of this mod a click beside closes, carrying its question and the copy it answers", () => {
+  const spec = confirmSpec({ question: QUESTION, owner: COPY });
+  assert.deepEqual(spec, { mod: MOD, kind: "dialog", width: CONFIRM.width, props: { view: "confirm", owner: COPY, question: { id: "q1-1", label: "app", count: 2 } } });
+  assert.equal("modal" in spec, false, "a click beside it closes it, and that is Cancel");
+  assert.equal("height" in spec, false, "as tall as what it says");
+});
+
+test("T7, the moon's confirm: one per question; a new question replaces the one open, one answered or dropped closes it", () => {
+  const none = { close: false, open: null };
+  assert.deepEqual(confirmStep(null, null), none);
+  assert.deepEqual(confirmStep(null, QUESTION), { close: false, open: QUESTION });
+  assert.deepEqual(confirmStep("q1-1", QUESTION), none, "already open for it");
+  assert.deepEqual(confirmStep("q1-1", { ...QUESTION, id: "q2-2" }), { close: true, open: { ...QUESTION, id: "q2-2" } });
+  assert.deepEqual(confirmStep("q1-1", null), { close: true, open: null });
+  assert.deepEqual(confirmStep("q1-1", { id: "q1-1" }), { close: true, open: null }, "a question it can't draw opens nothing");
+});
+
+test("T7, through the loop copy: the confirm's Sleep answers its question, and the sleep goes on without asking again", async () => {
+  const { w, co, question } = await asked();
+  nothingChanged(w);
+  click(w, question, true);
+  await step(co, w);
+  assert.equal(co.view().question, null);
+  assert.equal(entries(w)["/code/app"]?.state, "sleeping");
+  assert.deepEqual(settledTabs(w), ["a1", "a2", "a3"]);
+});
+
+test("T7, through the loop copy: Cancel drops the question and changes nothing", async () => {
+  const { w, co, question } = await asked();
+  click(w, question, false);
+  await step(co, w);
+  assert.equal(co.view().question, null);
+  await steps(co, w, 3);
+  nothingChanged(w);
+});
+
+test("T7, through the loop copy: a request whose owner is gone (the loop copy reloaded) is dropped", async () => {
+  const { w, co, question } = await asked();
+  const fresh = new Coordinator({ ...deps(w), copyId: "after-reload" });
+  await at(fresh, w, w.now + PULSE_MS);
+  click(w, question, true); // the confirm still open answers its old owner
+  assert.equal(fresh.takeRequest(), false);
+  await steps(fresh, w, 3);
+  nothingChanged(w);
+  assert.equal(fresh.view().question, null, "the new copy has nothing to ask");
+  assert.equal(co.view().question.id, question.id, "and the old one is gone with its question");
+});
+
+test("T7, closing the confirm without an answer (Esc, a click beside it, the moon closing it) is Cancel, as Orca's dialog is", () => {
+  const main = src("main.js");
+  assert.match(main, /async close\(\) \{\s*if \(this\.overlay && !this\.answered\) this\.send\(false\);\s*\}/);
+  assert.match(main, /send\(yes\) \{\s*const command = confirmAnswer\(this\.question, yes\);\s*if \(this\.answered \|\| command === null\) return;\s*this\.answered = true;\s*setShared\(REQUEST_KEY, makeRequest\(command, Date\.now\(\), this\.owner\)\);/);
+  assert.match(main, /answer\(yes\) \{\s*this\.send\(yes\);\s*if \(this\.overlay\) closeOverlay\(this\.overlay\);/, "a click answers, then closes: its close() doesn't answer again");
+});
+
+test("T7, the moon opens the confirm after a pulse, naming itself, so it asks with no popup open", () => {
+  const main = src("main.js");
+  assert.match(main, /\|\| this\.anchor === null\) cx\.notify\(\);\s*this\.syncConfirm\(\);/);
+  assert.match(main, /confirmStep\(this\.confirm\?\.question \?\? null, this\.co\.view\(\)\.question\)/);
+  assert.match(main, /openOverlay\(confirmSpec\(\{ question: step\.open, owner: this\.co\.d\.copyId \}\)\)/);
+  const confirm = src("views/confirm.js");
+  for (const io of [/from\s+["']herdr["']/, /\bCoordinator\b/, /writeTextFile|readTextFile|\bhc\(|\bexec\(/]) assert.doesNotMatch(confirm, io);
+});
+
+test("T7, the views table: only the moon copy, with no overlay, runs the loop; a panel or confirm copy starts no Coordinator", () => {
+  assert.equal(isLoopCopy({}), true, "the status row's cell has no props: the moon");
+  assert.equal(isLoopCopy({ view: "moon" }), true);
+  for (const props of [{ view: "panel" }, { view: "confirm" }, { view: "moon", overlay: "o1" }, { overlay: "o2" }, { view: "nope" }]) {
+    assert.equal(isLoopCopy(props), false, JSON.stringify(props));
+  }
+  // check-views.sh draws each view with no props, DEFAULT_VIEW rewritten.
+  assert.equal(isLoopCopy({}, "panel"), false);
+  assert.equal(isLoopCopy({}, "confirm"), false);
+  assert.equal(isLoopCopy({}, "moon"), true);
+  const main = src("main.js");
+  assert.match(main, /^const DEFAULT_VIEW = "moon";$/m);
+  assert.match(main, /const VIEWS = \{\s*moon: Moon,\s*panel: Panel,\s*confirm: Confirm,\s*\};/);
+  assert.match(main, /this\.name = pr\.view \?\? DEFAULT_VIEW;/);
+  const only = (name) => main.slice(main.indexOf(`class ${name} {`), main.indexOf("\n}\n", main.indexOf(`class ${name} {`)));
+  for (const name of ["Panel", "Confirm"]) {
+    assert.ok(only(name).length > 0, name);
+    assert.doesNotMatch(only(name), /new Coordinator|startLoop|nextCommand/, name);
+  }
+});
+
+test("T7, Wake all counts only what it would wake: not the Claudes of a workspace put to sleep as a whole", () => {
+  const asleep = { state: "asleep", rssKb: 307_200 };
+  const base = { now: NOW, settings: { enabled: true, idleMinutes: 30 }, due: {}, labels: {}, lastEvent: null, holds: {}, fields: null };
+  const records = { t1: asleep, t2: asleep, t3: { state: "stopping" } };
+  assert.equal(blockModel({ ...base, records }).wakeable, 2);
+  const m = blockModel({ ...base, records, slept: new Set(["t1"]) });
+  assert.equal(m.asleep, 2, "the moon still counts every Claude asleep");
+  assert.equal(m.wakeable, 1);
+  assert.equal(blockModel({ ...base, records, slept: new Set(["t1", "t2"]) }).wakeable, 0);
+  assert.match(src("views/panel.js"), /button\(t, "agent-sleep-wake-all", "Wake all", view\.wakeable > 0, ask\("wake-all"\)\)/);
+  assert.equal(panelView({ ...VIEW, wakeable: 3 }).wakeable, 3);
+  for (const bad of [undefined, -1, 1.5, "2"]) assert.equal(panelView({ ...VIEW, wakeable: bad }).wakeable, 0, String(bad));
+});
+
+test("T7, Wake all through the loop copy: off while every Claude asleep is in a slept workspace, on with one asleep on its own", async () => {
+  const sleepApp = async (co, w) => {
+    co.command(SLEEP_WORKSPACE);
+    await step(co, w);
+    showSpace(w, "inicio"); // the keeper (workspace-sleep T2)
+    for (let i = 0; i < 30 && entries(w)["/code/app"]?.state !== "asleep"; i++) await step(co, w);
+    assert.equal(entries(w)["/code/app"]?.state, "asleep");
+    assert.equal(records(w).t1?.state, "asleep");
+  };
+
+  const alone = await workspaceWorld();
+  await sleepApp(alone.co, alone.w);
+  assert.equal(alone.co.view().asleep, 1);
+  assert.equal(alone.co.view().wakeable, 0, "Wake all would wake nothing: its button is off");
+  alone.co.command("wake-all");
+  await step(alone.co, alone.w);
+  assert.deepEqual(resumes(alone.w), []);
+
+  const both = await workspaceWorld((w) => {
+    exitClaude(w, "t2", EXIT.replaceAll(SID1, SID2));
+    storeRecord(w, "t2", { sessionId: SID2, cwd: "/code/checkout-flow", workspacePath: "/code/checkout-flow", rootPid: 101 });
+  });
+  assert.equal(both.co.view().wakeable, 1);
+  await sleepApp(both.co, both.w);
+  assert.equal(both.co.view().asleep, 2);
+  assert.equal(both.co.view().wakeable, 1, "t2, asleep on its own");
+  assert.equal(panelView(both.co.view()).wakeable, 1);
 });

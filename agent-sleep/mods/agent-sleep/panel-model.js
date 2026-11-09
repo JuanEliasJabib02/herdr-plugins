@@ -2,12 +2,15 @@
 // tall, the moon's color, and what the popup leaves in shared. Pure: main.js
 // passes it settings(), the window's size and the cell's bounds. The pattern is
 // claude-accounts' footer (footer-model.js overlayAt, zoomOf, moonBounds).
+// And the confirm a workspace's sleep opens when it asks first
+// (workspace-sleep D5, T7): what it says, how it opens, what it answers.
 //
 // Units: on_size_change, a press's e.bounds and `at` are window px; an overlay's
 // width and height are layout px, which Herdr multiplies by the zoom.
 
 import { MOD } from "./coordinator.js";
 import { DEFAULT_SETTINGS } from "./store.js";
+import { answerCommand, parseWorkspaceCommand } from "./workspace-sleep.js";
 
 const isObject = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
 const isNumber = (v) => typeof v === "number" && Number.isFinite(v);
@@ -75,6 +78,7 @@ export function panelView(raw) {
     holds: Array.isArray(v.holds) ? v.holds.filter((h) => typeof h === "string") : [],
     debug: text(v.debug),
     asleep: Number.isInteger(v.asleep) ? v.asleep : 0,
+    wakeable: Number.isInteger(v.wakeable) && v.wakeable > 0 ? v.wakeable : 0,
     settings: { ...DEFAULT_SETTINGS, ...(isObject(v.settings) ? v.settings : {}) },
   };
 }
@@ -86,14 +90,19 @@ export function panelLines(view) {
   return v.holds.length + (v.next ? 1 : 0) + (v.last ? 1 : 0);
 }
 
+// The popup's rows: "Sleep idle agents", "After 30 min" and "Sleep this
+// workspace" (workspace-sleep T7).
+const ROWS = 3;
+
 // From the lines at open, up to maxLines, with `last`'s line always counted:
-// it is what Sleep now and Wake all report. An open popup can't change its
-// size: any other line that appears later clips in the text area, never over
-// the buttons.
+// it is what Sleep now, Wake all and Sleep this workspace report. An open
+// popup can't change its size: any other line that appears later clips in the
+// text area, never over the rows or the buttons. A gap between each two of its
+// parts: the headline, the rows, the text area and the buttons.
 export function panelHeight(view) {
   const lines = Math.min(panelLines(view) + (panelView(view).last ? 0 : 1), PANEL.maxLines);
   const area = lines * PANEL.line + Math.max(0, lines - 1) * PANEL.lineGap;
-  return PANEL.frame + 2 * PANEL.padY + PANEL.headline + 2 * PANEL.row + area + PANEL.buttons + 4 * PANEL.gap;
+  return PANEL.frame + 2 * PANEL.padY + PANEL.headline + ROWS * PANEL.row + area + PANEL.buttons + (ROWS + 2) * PANEL.gap;
 }
 
 // openOverlay's argument. `owner`: the loop copy its clicks ask (makeRequest).
@@ -134,4 +143,57 @@ let requests = 0;
 export function makeRequest(command, now, owner) {
   requests += 1;
   return { id: `${now}-${requests}`, owner, command };
+}
+
+// ── The confirm (workspace-sleep D5, T7) ───────────────────────────────────
+
+// A dialog, centered, as Orca's: wide enough for its question on two lines.
+// No height: it is as tall as what it says.
+export const CONFIRM = Object.freeze({ width: 360 });
+
+const isCount = (n) => Number.isInteger(n) && n > 0;
+
+// The question a workspace's sleep waits on, as the loop copy's view() gives
+// it ({ id, label, count }), or null for anything else: an id its answer
+// couldn't name (answerCommand, parseWorkspaceCommand), no label, no count.
+export function questionOf(raw) {
+  if (!isObject(raw) || typeof raw.id !== "string" || typeof raw.label !== "string" || !isCount(raw.count)) return null;
+  if (parseWorkspaceCommand(answerCommand(raw.id, true))?.question !== raw.id) return null;
+  return { id: raw.id, label: raw.label, count: raw.count };
+}
+
+// What it says (D5's question), and whether its buttons can answer. With no
+// question (a copy herdr-app check draws) there is nothing to answer.
+export function confirmModel(raw) {
+  const q = questionOf(raw);
+  const base = { cancel: "Cancel", sleep: "Sleep" };
+  if (q === null) return { title: "Sleep this workspace", body: "Nothing to confirm.", ...base, enabled: false };
+  const agents = q.count === 1 ? "1 agent is" : `${q.count} agents are`;
+  return { title: `Sleep ${q.label}`, body: `${agents} working or may have unsent text. Sleep anyway?`, ...base, enabled: true };
+}
+
+// The command its Sleep (yes) or Cancel leaves for the loop copy, naming the
+// question it answers (T3's confirm-sleep.<id> / cancel-sleep.<id>), or null
+// with no question. Closing it without an answer sends Cancel's.
+export function confirmAnswer(raw, yes) {
+  const q = questionOf(raw);
+  return q === null ? null : answerCommand(q.id, yes === true);
+}
+
+// openOverlay's argument, from the loop copy: its question, and `owner`, the
+// copy whose question it is (makeRequest). Not modal: a click beside it closes
+// it, which is Cancel, as Esc is.
+export function confirmSpec({ question, owner = null } = {}) {
+  return { mod: MOD, kind: "dialog", width: CONFIRM.width, props: { view: "confirm", owner, question: questionOf(question) } };
+}
+
+// The loop copy's confirm after a pulse: `openFor`, the question id of the one
+// it has open (null for none), against the question its view has now. One
+// confirm per question: a new one replaces it, and one answered, dropped or
+// replaced closes it. → { close, open: the question to open it for, or null }.
+export function confirmStep(openFor, question) {
+  const q = questionOf(question);
+  const id = q?.id ?? null;
+  if (id !== null && id === openFor) return { close: false, open: null };
+  return { close: typeof openFor === "string", open: q };
 }

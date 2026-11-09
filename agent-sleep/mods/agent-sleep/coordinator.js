@@ -12,15 +12,18 @@
 //     now()                     ms since the epoch
 //     live: { terminals(), spaces(), panes(), focused() }   herdr's live data
 //     notify(n), shared(key), setShared(key, value)
+//     herdrRun(name, args)      herdr's run(), for tab.settle / tab.unsettle
+//                               (not `run`: Coordinator.run wraps exec)
 //     home, appHome             herdr's home() / appHome()
 //     log(line)                 optional
 //   }
 //
-// One copy runs it (D11): the one with no props().view and no
-// props().overlay, the moon in the status row. main.js calls pulse() every
-// PULSE_MS, and takeRequest(), observeNow() and viewToPublish() on every
-// render. It is the one writer (D14): the popup draws what viewToPublish gave
-// and asks by naming a command. A pulse is cheap unless there is work:
+// One copy runs it (D11): the moon's (view "moon", the one a copy with no
+// props().view gets, and no props().overlay), in the status row. main.js
+// calls pulse() every PULSE_MS, and takeRequest(), observeNow() and
+// viewToPublish() on every render. It is the one writer (D14): the popup and
+// the confirm draw what they are handed and ask by naming a command. A pulse
+// is cheap unless there is work:
 //   - a request the popup left is taken, and a settings change saved, first;
 //   - every TICK_MS a tick (D2): settings and records read again, Core's
 //     terminals gathered, records reconciled (D4), the folders a Claude's
@@ -29,9 +32,15 @@
 //     confirmed against the last tick, and at most one stop;
 //   - while a stop is young (SETTLE_MS), its terminal is checked each pulse,
 //     so a Claude that exits in 12 s is asleep a second later (D4);
+//   - a workspace's sleep (workspace-sleep D2, D10; workspace-sleep.js): a
+//     new one's check, entry and settle, or one step of one under way, with
+//     workspaces.json reconciled at start, on ticks and while one runs (D9);
+//     and its wake (workspace-sleep D4) when one of its spaces is shown again;
 //   - "Sleep now" / "Wake all" requests (D9);
 //   - every visible terminal with an `asleep` record is resumed (D8: level,
 //     not edge, so a reveal during a stop resumes once the shell is back).
+//     Wake all and this reveal leave alone the terminals of a workspace put to
+//     sleep as a whole until its wake (workspace-sleep D4: no undo of a sleep).
 // Pulses never overlap: everything that types into a terminal runs one at a
 // time, in the order above (Risk item 4).
 
@@ -46,6 +55,14 @@ import { BADGE_KEY, badgeValue, sameValue, workspaceOf, parseWorktreeList } from
 import { loadSession, loadConfigDirs, isClaudeName, parseExitScreen, exitSessionId, sessionFilePath } from "./claude-session.js";
 import { readPrompt, classifyProbe, promptRestored, PROBE_KEY, ERASE_KEY } from "./prompt.js";
 import { resumeFlags, resumeCommand, canResumeIn, hintDifference, REPLAYABLE_ENV } from "./resume.js";
+import {
+  WAIT_PULSES, INTERRUPT_DEADLINE_MS, PROGRAM_GRACE_MS, CLEAR_KEY, interruptArgs, localPlaces, shownSpace, entrySpaces,
+  kindOf, UNTOUCHED, flightOf, promptStep, processGroups, hangUpGroup, shownEdges, cameBack, sleptTerminals, wakePlan,
+  tabsToSettle, didntStopNotice, parseWorkspaceCommand,
+} from "./workspace-sleep.js";
+import {
+  workspacesPaths, loadWorkspaces, saveWorkspaces, withEntry, withoutEntry, listedTabs, terminalsOf, reconcileSpaces,
+} from "./workspaces-store.js";
 
 // This mod's folder under mods/: asset paths go through it, never a literal
 // (Herdr's mod.clone rewrites it in a copy).
@@ -104,8 +121,16 @@ const goneHold = (label) => `${label} stays asleep: its account folder is gone`;
 
 // ── Which copy runs the loop (D11) ─────────────────────────────────────────
 
-export function isLoopCopy(props) {
-  return !(isObject(props) && (props.view || props.overlay));
+// The view of the copy that runs it: the moon, in the status row with no
+// props. main.js's views table names each copy's view (props().view, else its
+// DEFAULT_VIEW), so `defaultView` is that line's: scripts/check-views.sh
+// rewrites it to draw the popup or the confirm, and those copies, an overlay
+// too, start no loop (workspace-sleep T7).
+export const LOOP_VIEW = "moon";
+
+export function isLoopCopy(props, defaultView = LOOP_VIEW) {
+  const p = isObject(props) ? props : {};
+  return (p.view ?? defaultView) === LOOP_VIEW && !p.overlay;
 }
 
 // Starts the pulse timer in the loop copy only. `timer` is cx.timer;
@@ -166,10 +191,15 @@ export function windowLabel(minutes) {
 //   debug     which path gave Core's fields ("fields: terminals()" or
 //             "fields: hc get ×N (…)"), the headline's tooltip in the popup, or
 //             null before the first tick
-//   asleep    how many are asleep (the moon's number; Wake all has nothing to
-//             do at 0)
-export function blockModel({ now, records, settings, due, labels, lastEvent, holds, fields }) {
-  const asleep = Object.values(isObject(records) ? records : {}).filter((r) => isObject(r) && r.state === "asleep");
+//   asleep    how many are asleep (the moon's number)
+//   wakeable  how many of them Wake all would wake: not those `slept` holds,
+//             the terminals of a workspace put to sleep as a whole, which wake
+//             with it (workspace-sleep D4). Wake all has nothing to do at 0
+export function blockModel({ now, records, settings, due, labels, lastEvent, holds, fields, slept }) {
+  const asleepEntries = Object.entries(isObject(records) ? records : {}).filter(([, r]) => isObject(r) && r.state === "asleep");
+  const asleep = asleepEntries.map(([, r]) => r);
+  const held = slept instanceof Set ? slept : new Set();
+  const wakeable = asleepEntries.filter(([address]) => !held.has(address)).length;
   const kb = asleep.reduce((sum, r) => sum + (Number.isFinite(r.rssKb) && r.rssKb > 0 ? r.rssKb : 0), 0);
   const mb = Math.round(kb / 1024);
   const parts = ["Agent sleep"];
@@ -198,6 +228,7 @@ export function blockModel({ now, records, settings, due, labels, lastEvent, hol
     holds: Object.values(isObject(holds) ? holds : {}).filter((h) => typeof h === "string").sort(),
     debug: typeof fields === "string" ? `fields: ${fields}` : null,
     asleep: asleep.length,
+    wakeable,
   };
 }
 
@@ -214,6 +245,25 @@ export const COMMANDS = Object.freeze({
   less: (co) => co.requestSettings({ idleMinutes: stepMinutes(co.shownSettings().idleMinutes, -1) }),
   more: (co) => co.requestSettings({ idleMinutes: stepMinutes(co.shownSettings().idleMinutes, 1) }),
 });
+
+// A command by name: the table's, or a workspace sleep's (workspace-sleep
+// D5), which stay out of the table the popup's buttons are: `sleep-workspace`
+// sleeps the shown workspace, and the confirm's answers
+// (`confirm-sleep.<question>`, `cancel-sleep.<question>`) name the question
+// they answer. None does I/O either. Null for any other name.
+export function commandOf(name) {
+  if (typeof name !== "string") return null;
+  if (Object.hasOwn(COMMANDS, name)) return COMMANDS[name];
+  const c = parseWorkspaceCommand(name);
+  if (c?.kind === "sleep") return (co) => co.requestSleepWorkspace();
+  if (c?.kind === "answer") return (co) => co.answerQuestion(c.question, c.yes);
+  return null;
+}
+
+// A workspace's sleep in this copy, from D10 step 4 on: waiting for its
+// spaces to leave the screen (`pulses` counted), then its stops, one
+// terminal at a time (`current`), and the ones that didn't stop.
+const newJob = () => ({ phase: "wait", pulses: 0, queue: [], current: null, failed: [] });
 
 // ── The coordinator ────────────────────────────────────────────────────────
 
@@ -256,6 +306,16 @@ export class Coordinator {
     this.worktrees = new Map(); // cwd → workspace path (or null)
     this.transcripts = new Map(); // find argv → its result, found transcripts only
     this.configDirs = null; // D15: where a Claude's session file can be, listed once per tick
+    // A workspace's sleep (workspace-sleep D9, D10).
+    this.wp = workspacesPaths(deps.appHome);
+    this.workspaces = {}; // workspaces.json's entries
+    this.workspacesText = null;
+    this.jobs = {}; // path → its sleep's steps 4–5, while this copy runs them
+    this.sleepRequest = null; // { path, force }: a sleep asked for, taken by the next pulse
+    this.question = null; // { id, path, label, count, at }: the confirm that sleep waits on (D5)
+    this.questions = 0;
+    this.shownSpaces = null; // the spaces shown at the last pulse (D4's edge); null before the first look
+    this.spacesStarted = false; // the start reconcile (D9 rule 3) ran
   }
 
   // ── Entry points ──
@@ -274,12 +334,15 @@ export class Coordinator {
       if (this.pendingSettings) await this.applySettings();
       this.observeNow();
       const now = this.d.now();
+      let ticked = false;
       if (this.lastTickAt === null || now - this.lastTickAt >= TICK_MS || now < this.lastTickAt) {
         this.lastTickAt = now;
+        ticked = true;
         await this.tick();
       } else if (this.youngStop(now)) {
         await this.settle();
       }
+      await this.workspaceStep({ ticked });
       if (this.sleepNowRequested || this.queue) await this.manualStep();
       if (this.wakeAllRequested) await this.wakeAllStep();
       await this.revealStep();
@@ -314,6 +377,25 @@ export class Coordinator {
     this.wakeAllRequested = true;
   }
 
+  // workspace-sleep D5: a workspace's sleep, by its path, or the shown one's
+  // (the bare command). The next pulse takes it.
+  requestSleepWorkspace(path = null) {
+    this.sleepRequest = { path: typeof path === "string" && path !== "" ? path : null, force: false };
+  }
+
+  // The confirm's answer (D5): Sleep goes on with the sleep it asked about,
+  // without asking again; Cancel changes nothing. An answer to any other
+  // question (an older confirm) does nothing.
+  answerQuestion(id, yes) {
+    const q = this.question;
+    if (q === null || q.id !== id) {
+      this.log(`no question ${JSON.stringify(id)} to answer`);
+      return;
+    }
+    this.question = null;
+    if (yes) this.sleepRequest = { path: q.path, force: true };
+  }
+
   // The popup's switch and −/+: a change is shown at once and saved by the
   // next pulse, so it never races a tick's read of settings.json.
   requestSettings(change) {
@@ -336,23 +418,27 @@ export class Coordinator {
       lastEvent: this.lastEvent,
       holds: { ...this.envHolds(), ...this.holds },
       fields: this.fields,
+      slept: this.sleptTerminals(),
     });
   }
 
-  // Everything the popup draws: its lines and the settings rows.
+  // Everything the popup draws: its lines and the settings rows, and the
+  // question a workspace's sleep waits on (D5: what its confirm draws), or null.
   view() {
-    return { ...this.model(), settings: this.shownSettings() };
+    const q = this.question;
+    return { ...this.model(), settings: this.shownSettings(), question: q ? { id: q.id, label: q.label, count: q.count } : null };
   }
 
-  // A command by name, from a key or a request. False, with a log line, for a
-  // name the table doesn't have. Until the settings are read it waits: toggle
-  // would flip the defaults instead of what the file says.
+  // A command by name (commandOf), from a key or a request. False, with a log
+  // line, for a name it doesn't know. Until the settings are read it waits:
+  // toggle would flip the defaults instead of what the file says.
   command(name) {
-    if (typeof name !== "string" || !Object.hasOwn(COMMANDS, name)) {
+    const run = commandOf(name);
+    if (run === null) {
       this.log(`no command ${JSON.stringify(name)}`);
       return false;
     }
-    if (this.loaded) COMMANDS[name](this);
+    if (this.loaded) run(this);
     else this.deferred.push(name);
     return true;
   }
@@ -438,6 +524,7 @@ export class Coordinator {
     this.started = true;
     await this.loadSettings();
     await this.loadRecords();
+    await this.loadEntries();
     this.badge = this.safe(() => this.d.shared(BADGE_KEY), undefined);
     this.loaded = true;
     for (const name of this.deferred.splice(0)) this.command(name);
@@ -512,29 +599,46 @@ export class Coordinator {
   }
 
   // D9 "Wake all": every asleep Claude, shown or not, through the reveal's
-  // own checks.
+  // own checks. Not those of a workspace put to sleep as a whole: they wake
+  // with their workspace's click (workspace-sleep D4, R1#5), so Wake all stays
+  // the undo of automatic sleep and no moon ever sits over running Claudes.
   async wakeAllStep() {
     this.wakeAllRequested = false;
+    const slept = this.sleptTerminals();
     for (const address of Object.keys(this.records).sort()) {
-      if (this.records[address]?.state === "asleep") await this.resume(address, "wake");
+      if (this.records[address]?.state === "asleep" && !slept.has(address)) await this.resume(address, "wake");
     }
   }
 
-  // D8, level-triggered: every shown terminal with an asleep record.
+  // D8, level-triggered: every shown terminal with an asleep record. A
+  // terminal of a space a workspace's sleep lists waits for that workspace's
+  // wake (workspace-sleep D4): one still on screen when its stops began
+  // (shownAtSleep), or shown again by a reload, would otherwise undo the sleep.
   async revealStep() {
     const now = this.d.now();
-    const visible = visibleTerminals(this.layout());
+    const layout = this.layout();
+    const visible = visibleTerminals(layout);
+    const slept = sleptTerminals(this.workspaces, layout.spaces, layout.panes);
     for (const address of [...visible].sort()) {
-      if (own(this.records, address)?.state !== "asleep") continue;
+      if (own(this.records, address)?.state !== "asleep" || slept.has(address)) continue;
       if ((this.retryAt[address] ?? 0) > now) continue;
       await this.resume(address, "reveal");
     }
   }
 
+  // The terminals the workspaces put to sleep hold until their wake
+  // (workspace-sleep D4), from workspaces.json and Herdr's layout now.
+  sleptTerminals() {
+    return sleptTerminals(this.workspaces, this.safe(() => list(this.d.live.spaces()), []), this.safe(() => list(this.d.live.panes()), []));
+  }
+
   // The moon (D11), published only when it changes: setShared re-renders
-  // every mod. No moon before and none now writes nothing.
+  // every mod. No moon before and none now writes nothing. None for a
+  // workspace put to sleep as a whole (workspace-sleep D3): its row has
+  // projects-sidebar's own.
   publishBadges() {
-    const value = badgeValue({ records: this.records, modFolder: MOD });
+    const slept = { paths: Object.keys(this.workspaces), terminals: this.sleptTerminals() };
+    const value = badgeValue({ records: this.records, modFolder: MOD, slept });
     const empty = (v) => !isObject(v) || Object.keys(v).length === 0;
     if (empty(value) && empty(this.badge)) return false;
     if (sameValue(value, this.badge)) return false;
@@ -887,6 +991,440 @@ export class Coordinator {
     this.retryAt[address] = now + TICK_MS;
   }
 
+  // ── A workspace's sleep (workspace-sleep D2, D5, D9–D12) ──
+
+  // Everything it does in one pulse: the shown edge (D4), the reconcile (D9)
+  // at start, on a tick and while a sleep is under way, then a new sleep's
+  // steps 1–3 or one step of one that runs (D10). With no workspace asleep
+  // and none asked for it does no I/O. Without spaces there is no evidence.
+  async workspaceStep({ ticked }) {
+    const spaces = this.safe(() => list(this.d.live.spaces()), []);
+    if (spaces.length === 0) return;
+    if (ticked) await this.loadEntries();
+    await this.watchShown(spaces);
+    const sleeping = Object.values(this.workspaces).some((e) => e?.state === "sleeping");
+    if (!this.spacesStarted || ticked || sleeping) await this.reconcileWorkspaces();
+    if (this.sleepRequest) await this.beginSleep(this.sleepRequest);
+    else await this.jobStep();
+  }
+
+  // D4: the person came back to a workspace put to sleep (cameBack: one of
+  // its spaces went from not shown to shown, by a click on its row, the
+  // picker, an agent's focus or `herdr-app do`). Asleep, it wakes now.
+  // Mid-sleep, the rest of its stops are dropped, so no /exit reaches a Claude
+  // the person just came back to, and `wakeAfter` makes step 6 wake it. The
+  // first look after a start is no edge.
+  async watchShown(spaces) {
+    const previous = this.shownSpaces;
+    const { shown, edges } = shownEdges(previous, spaces);
+    this.shownSpaces = shown;
+    if (edges.size === 0) return;
+    for (const [path, e] of Object.entries(this.workspaces)) {
+      if (!cameBack(e, { previous, shown })) continue;
+      if (e.state === "asleep") {
+        await this.wakeWorkspace(path);
+        continue;
+      }
+      if (e.state !== "sleeping" || e.wakeAfter === true) continue;
+      delete this.jobs[path];
+      const saved = await this.updateEntries((entries) => {
+        const cur = own(entries, path);
+        return cur?.state === "sleeping" ? withEntry(entries, path, { ...cur, wakeAfter: true }) : null;
+      });
+      this.log(`${path}: shown again while going to sleep; its stops are dropped${saved ? "" : " (workspaces.json not written)"}`);
+    }
+  }
+
+  // D9: workspaces.json against Herdr's spaces (reconcileSpaces), saved with a
+  // compare-and-swap that, on a file changed under it, runs again on what the
+  // file says now. Then: a sleep a reload interrupted is planned again
+  // (rule 3), and one whose stops are done gets its step 6 (rule 4).
+  async reconcileWorkspaces() {
+    const start = !this.spacesStarted;
+    this.spacesStarted = true;
+    const input = () => ({
+      entries: this.workspaces,
+      spaces: this.safe(() => list(this.d.live.spaces()), []),
+      panes: this.safe(() => list(this.d.live.panes()), []),
+      records: this.records,
+      queued: new Set(Object.keys(this.jobs)),
+      start,
+    });
+    let result = reconcileSpaces(input());
+    if (result.changed && !(await this.saveEntries(result.entries))) {
+      result = reconcileSpaces(input());
+      if (result.changed && !(await this.saveEntries(result.entries))) return;
+    }
+    for (const path of Object.keys(this.jobs)) if (!own(this.workspaces, path)) delete this.jobs[path];
+    for (const path of result.replan) this.jobs[path] = newJob();
+    for (const path of result.finish) await this.finishSleep(path);
+  }
+
+  // D10 steps 1–3, in one pulse. The workspace (the request's path, else the
+  // shown space's, D12) and its spaces; work in flight asks first (D5) and
+  // changes nothing until the answer; then the entry is written sleeping and
+  // every tab settled, before any stop.
+  async beginSleep({ path, force }) {
+    this.sleepRequest = null;
+    this.question = null; // a new request asks again
+    const spaces = this.safe(() => list(this.d.live.spaces()), []);
+    const panes = this.safe(() => list(this.d.live.panes()), []);
+    const owners = await this.spaceWorkspaces(spaces, panes);
+    const target = path ?? owners.get(shownSpace(spaces)?.id) ?? null;
+    if (target === null) {
+      this.lastEvent = "The shown space is in no workspace";
+      return;
+    }
+    const label = basename(target) || target;
+    const existing = own(this.workspaces, target);
+    if (existing) {
+      this.lastEvent = existing.state === "asleep" ? `${label} is already asleep` : `${label} is already going to sleep`;
+      return;
+    }
+    const ids = [...owners].filter(([, p]) => p === target).map(([id]) => id);
+    if (ids.length === 0) {
+      this.lastEvent = `${label} has no open space`;
+      return;
+    }
+    const tabs = entrySpaces(spaces, ids);
+    if (!force) {
+      const count = await this.inFlight(terminalsOf({ spaces: tabs }, panes));
+      if (count > 0) {
+        const now = this.d.now();
+        this.questions += 1;
+        this.question = { id: `q${now}-${this.questions}`, path: target, label, count, at: now };
+        this.log(`${label}: ${count} working or with unsent text; asking first`);
+        return;
+      }
+    }
+    const entry = { spaces: tabs, state: "sleeping", at: this.d.now() };
+    const saved = await this.updateEntries((entries) => (own(entries, target) ? null : withEntry(entries, target, entry)));
+    if (!saved) {
+      this.lastEvent = `Couldn't put ${label} to sleep`;
+      return;
+    }
+    for (const id of listedTabs(entry)) this.herdr("tab.settle", { id });
+    this.jobs[target] = newJob();
+    this.lastEvent = `Putting ${label} to sleep`;
+  }
+
+  // D12: each local space's workspace, from its place through agent-sleep's
+  // own workspaceOf (the deepest worktree of that folder's `git worktree
+  // list`), asked once per place. → Map(spaceId → path or null).
+  async spaceWorkspaces(spaces, panes) {
+    const byPlace = new Map();
+    const out = new Map();
+    for (const { id, place } of localPlaces(spaces, panes, this.d.home)) {
+      if (!byPlace.has(place)) byPlace.set(place, await this.workspaceOf(place, { fresh: true }));
+      out.set(id, byPlace.get(place));
+    }
+    return out;
+  }
+
+  // D5: how many of the agents this sleep would stop are working, or, for a
+  // Claude, may have unsent text (flightOf). Any other agent Core says is
+  // working or blocked counts, whatever it is (step 4's F2): the stop
+  // interrupts it and then hangs up (D2 b). Of the Claudes, only one that can
+  // come back counts: one the gate refuses keeps running anyway. A hidden
+  // line of text gets agent-sleep's probe, which never types where the person
+  // can see it. What the sleep leaves alone (kindOf's UNTOUCHED) never counts.
+  async inFlight(addresses) {
+    let count = 0;
+    for (const t of await this.freshTerminals(addresses)) {
+      const kind = kindOf(t, { record: own(this.records, t.address), claude: isClaudeCodeTerminal(t) });
+      if (kind === "program") {
+        if (flightOf({ kind, status: statusWord(t.status) }) === "working") count += 1;
+        continue;
+      }
+      if (kind !== "claude") continue;
+      if (!(await this.gateClaude(t)).ok) continue;
+      const screen = await this.read(t.address);
+      const flight = flightOf({ kind, status: statusWord(t.status), prompt: readPrompt(screen, t.foreground.name), visible: this.isVisible(t.address) });
+      if (flight === "clear") continue;
+      if (flight === "probe" && (await this.probe(t.address, screen)) === "suggestion") continue;
+      count += 1;
+    }
+    return count;
+  }
+
+  // D11 step 1: the Claude can come back, by agent-sleep's own checks: a
+  // session file it trusts, its transcript, and resumable() (its flags, its
+  // shell, its cwd, its account). → { ok, session, res } or { ok: false, why }.
+  async gateClaude(t) {
+    if (!isClaudeName(t.foreground?.name)) return { ok: false, why: "a Claude whose session it can't find" };
+    const session = (await this.sessionsOf([t]))[t.address];
+    if (!session) return { ok: false, why: "no session file it can trust" };
+    if (session.transcript !== true) return { ok: false, why: "no transcript to resume" };
+    const res = this.resumable(t, session);
+    return res.ok ? { ok: true, session, res } : { ok: false, why: `it couldn't come back (${res.reason})` };
+  }
+
+  // D10 steps 4–5. A sleep waiting for its spaces to leave the screen looks
+  // again; after WAIT_PULSES still shown (no keeper in this layout) it marks
+  // shownAtSleep and its stops start anyway. Then one terminal's step, of the
+  // first sleep whose stops run.
+  async jobStep() {
+    const spaces = this.safe(() => list(this.d.live.spaces()), []);
+    for (const [path, job] of Object.entries(this.jobs)) {
+      if (job.phase !== "wait") continue;
+      const entry = own(this.workspaces, path);
+      if (!entry) {
+        delete this.jobs[path];
+        continue;
+      }
+      if (spaces.some((s) => s?.active === true && Object.hasOwn(entry.spaces, s.id))) {
+        job.pulses += 1;
+        if (job.pulses < WAIT_PULSES) continue;
+        await this.updateEntries((entries) => {
+          const cur = own(entries, path);
+          return cur?.state === "sleeping" ? withEntry(entries, path, { ...cur, shownAtSleep: true }) : null;
+        });
+      }
+      job.phase = "stops";
+      job.queue = terminalsOf(entry, this.safe(() => list(this.d.live.panes()), []));
+    }
+    const path = Object.keys(this.jobs).find((p) => this.jobs[p].phase === "stops");
+    if (path !== undefined) await this.stopStep(path, this.jobs[path]);
+  }
+
+  // One terminal's step. A terminal with nothing to stop (D2's untouched,
+  // a Claude asleep already, one closed meanwhile) takes no step, so the
+  // next one goes in the same pulse.
+  async stopStep(path, job) {
+    for (;;) {
+      if (job.current === null) {
+        if (job.queue.length === 0) return this.endJob(path, job);
+        job.current = { address: job.queue.shift(), phase: "start", at: null, wake: false, signalled: false };
+      }
+      const outcome = await this.advance(job, job.current);
+      if (outcome === "wait") return;
+      job.current = null;
+      if (outcome === "done") {
+        if (job.queue.length === 0) await this.endJob(path, job);
+        return;
+      }
+    }
+  }
+
+  // Its stops are done: the toast names what didn't stop (D10). Step 6 comes
+  // with the next reconcile, once no stop of it is still exiting.
+  async endJob(path, job) {
+    delete this.jobs[path];
+    const notice = didntStopNotice(basename(path) || path, job.failed);
+    if (notice) this.d.notify(notice);
+  }
+
+  // One terminal of the queue, phase by phase → "wait" (look again next
+  // pulse), "done" (stopped, or left running and counted) or "skip".
+  //   start        what it is (kindOf): left alone; another program gets the
+  //                interrupt (D2 b); a Claude the gate (D11 step 1), then
+  //                the interrupt when working or blocked (step 2), or its
+  //                prompt line and /exit (steps 3–4)
+  //   interrupted  a Claude: looked at until Core reads idle or done, for
+  //                INTERRUPT_DEADLINE_MS, then steps 3–4
+  //   program      another program after its interrupt: the shell back in
+  //                front within PROGRAM_GRACE_MS, else the hang-up
+  //   hup          after the hang-up: the shell back within the grace, else counted
+  async advance(job, cur) {
+    const address = cur.address;
+    const [t] = await this.freshTerminals([address]);
+    if (!t) return cur.phase === "start" ? "skip" : "done";
+    const fail = (why) => {
+      job.failed.push({ address, why });
+      this.log(`${address}: left running: ${why}`);
+      return "done";
+    };
+    if (cur.phase === "start") {
+      const kind = kindOf(t, { record: own(this.records, address), claude: isClaudeCodeTerminal(t) });
+      if (UNTOUCHED.includes(kind)) return "skip";
+      if (kind === "program") {
+        await this.interrupt(address);
+        cur.phase = "program";
+        cur.at = this.d.now();
+        return "wait";
+      }
+      const gate = await this.gateClaude(t);
+      if (!gate.ok) return fail(gate.why);
+      const status = statusWord(t.status);
+      if (status === "working" || status === "blocked") {
+        await this.interrupt(address);
+        cur.phase = "interrupted";
+        cur.at = this.d.now();
+        cur.wake = true;
+        return "wait";
+      }
+      if (status !== "idle" && status !== "done") return fail(`Claude's status is ${status ?? "unknown"}`);
+      return this.claudeExit(t, gate, cur, fail);
+    }
+    if (cur.phase === "interrupted") {
+      const status = statusWord(t.status);
+      if (status === "idle" || status === "done") {
+        const gate = await this.gateClaude(t);
+        return gate.ok ? this.claudeExit(t, gate, cur, fail) : fail(gate.why);
+      }
+      if (foregroundIsShell(t)) return "done"; // it ended on its own
+      return this.d.now() - cur.at >= INTERRUPT_DEADLINE_MS ? fail("still working 10 s after the interrupt") : "wait";
+    }
+    // Another program (D2 b). Core may still show it right after an
+    // interrupt that worked (T0b item 7), so it gets the grace first.
+    if (foregroundIsShell(t)) return "done";
+    if (this.d.now() - cur.at < PROGRAM_GRACE_MS) return "wait";
+    if (cur.phase === "hup") {
+      return fail(cur.signalled ? "still running after SIGHUP" : "still in front, in the shell's own process group");
+    }
+    const hup = await this.hangUp(t);
+    if (hup.error) return fail(hup.error);
+    cur.phase = "hup";
+    cur.at = this.d.now();
+    cur.signalled = hup.signalled;
+    return "wait";
+  }
+
+  // `hc interrupt <t> --timeout 3 --json`: the stop key, watched for 3 s. Its
+  // report decides nothing (T0b item 7: `stopped` with the program still in
+  // front, `unknown` with it gone later); Core is looked at afterwards.
+  async interrupt(address) {
+    const r = await this.call(interruptArgs(address));
+    this.log(`${address}: interrupt ${r.code === 0 ? r.stdout.trim() : `failed (${(r.stderr || r.stdout || "").trim()})`}`);
+    return r;
+  }
+
+  // D2 (b): SIGHUP to the terminal's foreground process group, as a closing
+  // terminal sends. Core's `foreground` is a pid, so the group comes from
+  // `ps` on the root shell, and the signal goes only to a group that isn't the
+  // shell's own (so the shell is never signalled; T0b item 5: the job ends,
+  // the shell comes back in front, the terminal stays).
+  // → { signalled } or { error }.
+  async hangUp(t) {
+    if (!Number.isInteger(t.pid) || t.pid <= 0) return { error: "no root pid to find its process group" };
+    const r = await this.run("ps", ["-o", "pgid=,tpgid=", "-p", String(t.pid)]);
+    const groups = r.code === 0 ? processGroups(r.stdout) : null;
+    if (groups === null) return { error: "its process group couldn't be read" };
+    const group = hangUpGroup(groups);
+    if (group === null) {
+      this.log(`${t.address}: no signal, the shell's own process group is in front`);
+      return { signalled: false };
+    }
+    const k = await this.run("kill", ["-HUP", "--", `-${group}`]);
+    if (k.code !== 0) return { error: `SIGHUP not sent (${(k.stderr || k.stdout || "").trim()})` };
+    this.log(`${t.address}: SIGHUP to process group ${group}`);
+    return { signalled: true };
+  }
+
+  // D11 steps 3–4, once Core reads idle or done. Its prompt line: empty
+  // exits; text gets one ctrl+c and must then be empty or, hidden, what the
+  // probe calls a suggestion; anything else, or text still on a shown
+  // terminal, means no /exit (it would reach Claude as "<text>/exit"). Then
+  // the record `stopping` (by: "manual", wake: "now" for one that was
+  // working), Core read once more, and /exit as stop() sends it (`--if idle`
+  // when Core says idle), whose tail writes asleep once the shell is back.
+  async claudeExit(t, gate, cur, fail) {
+    const address = t.address;
+    const name = t.foreground.name;
+    let screen = await this.read(address);
+    let next = promptStep(readPrompt(screen, name), { visible: this.isVisible(address), cleared: false });
+    if (next === "refuse") return fail("its prompt line couldn't be read");
+    if (next === "clear") {
+      const sent = await this.call(["keys", address, CLEAR_KEY]);
+      if (sent.code !== 0) return fail(`its prompt line wasn't cleared (${(sent.stderr || sent.stdout || "").trim()})`);
+      screen = await this.read(address);
+      for (let i = 1; i < PROBE_READS && readPrompt(screen, name).state !== "empty"; i++) {
+        await this.sleep(PROBE_WAIT_MS); // Claude redrawing
+        screen = await this.read(address);
+      }
+      next = promptStep(readPrompt(screen, name), { visible: this.isVisible(address), cleared: true });
+      if (next === "probe") next = (await this.probe(address, screen)) === "suggestion" ? "exit" : "refuse";
+      if (next !== "exit") return fail(this.isVisible(address) ? "text still on its prompt line, on screen" : "its draft didn't clear");
+    }
+    const { session, res } = gate;
+    const record = {
+      state: "stopping",
+      sessionId: session.sessionId,
+      cwd: res.cwd,
+      flags: res.flags,
+      configDir: res.configDir,
+      workspacePath: await this.workspaceOf(res.cwd, { fresh: true }),
+      rssKb: await this.rssKb(t.foreground.pid),
+      rootPid: Number.isInteger(t.pid) ? t.pid : null,
+      holder: await this.holder(),
+      at: this.d.now(),
+      by: "manual",
+      ...(cur.wake ? { wake: "now" } : {}),
+    };
+    let previous = own(this.records, address);
+    if (!(await this.save(withRecord(this.records, address, record)))) {
+      previous = own(this.records, address); // the file as it is now
+      if (previous?.state === "asleep" || previous?.state === "stopping") return "done"; // another stop got there
+      if (!(await this.save(withRecord(this.records, address, record)))) return fail("sleeping.json changed under it");
+    }
+    const undo = async () => {
+      await this.save(previous ? withRecord(this.records, address, previous) : withoutRecord(this.records, address));
+    };
+    const fresh = await this.getTerminal(address);
+    const core = statusWord(fresh?.status);
+    if (!isObject(fresh?.foreground) || fresh.foreground.pid !== t.foreground.pid || (core !== "idle" && core !== "done")) {
+      await undo();
+      return fail("Claude started again before /exit");
+    }
+    const sent = await this.call(core === "idle" ? ["send", "--if", "idle", address, "/exit"] : ["send", address, "/exit"]);
+    if (sent.code !== 0) {
+      await undo();
+      return fail(`/exit not sent (${(sent.stderr || sent.stdout || "").trim()})`);
+    }
+    this.log(`${address}: /exit sent (manual, its workspace's sleep)`);
+    return "done";
+  }
+
+  // D10 step 6: the listed tabs that came back are settled again, then the
+  // entry is asleep. One shown again mid-sleep (wakeAfter) is woken here
+  // instead, and not put away (D4).
+  async finishSleep(path) {
+    const entry = own(this.workspaces, path);
+    if (!entry || entry.state !== "sleeping") return;
+    if (entry.wakeAfter === true) return this.wakeWorkspace(path);
+    for (const id of tabsToSettle(entry, this.safe(() => list(this.d.live.spaces()), []))) this.herdr("tab.settle", { id });
+    const saved = await this.updateEntries((entries) => {
+      const cur = own(entries, path);
+      return cur?.state === "sleeping" && cur.wakeAfter !== true ? withEntry(entries, path, { ...cur, state: "asleep" }) : null;
+    });
+    if (saved) this.lastEvent = `${basename(path) || path} asleep`;
+  }
+
+  // D4's wake, in one pulse: every tab the entry lists comes back
+  // (tab.unsettle: a space.select brings none back, T0), each Claude asleep
+  // with wake: "now" (working or blocked when it went to sleep) is resumed at
+  // once, shown or not, and the entry is dropped, which lifts the reveal
+  // path's skip: the rest resume when their tab shows, this pulse's reveal
+  // included. Both resumes go through resume(): a bare prompt, its account,
+  // claimed before anything is typed. A wake: "now" one that can't be resumed
+  // yet (a typed shell line, another program in front) waits for its tab as
+  // the rest do. A reload before the drop leaves an entry with its tabs back,
+  // which D9's rule 2 drops at start.
+  async wakeWorkspace(path) {
+    const entry = own(this.workspaces, path);
+    if (!entry) return;
+    const label = basename(path) || path;
+    const { unsettle, now } = wakePlan(entry, {
+      spaces: this.safe(() => list(this.d.live.spaces()), []),
+      panes: this.safe(() => list(this.d.live.panes()), []),
+      records: this.records,
+    });
+    for (const id of unsettle) this.herdr("tab.unsettle", { id });
+    let resumed = 0;
+    for (const address of now) if (await this.resume(address, "wake")) resumed += 1;
+    delete this.jobs[path];
+    const saved = await this.updateEntries((entries) => (own(entries, path) ? withoutEntry(entries, path) : null));
+    this.log(`${path}: woken, ${unsettle.length} tab(s) back, ${resumed} of ${now.length} wake: "now" Claude(s) resumed${saved ? "" : " (workspaces.json not written)"}`);
+    if (resumed === 0) this.lastEvent = `${label} awake`; // a resume says "Woke <label>" itself
+  }
+
+  // Terminals as Core has them now, in the order asked, those it still has.
+  async freshTerminals(addresses) {
+    const want = new Set(addresses);
+    const byAddress = new Map((await this.gather({ only: want })).filter((t) => want.has(t.address)).map((t) => [t.address, t]));
+    return addresses.filter((a) => byAddress.has(a)).map((a) => byAddress.get(a));
+  }
+
   // ── Evidence ──
 
   // Core's terminals. `only`: complete just these addresses (a settle);
@@ -1092,6 +1630,18 @@ export class Coordinator {
     }
   }
 
+  // One of Herdr's commands (run(): tab.settle, tab.unsettle). They apply
+  // right after the call returns; a failure is logged, never thrown.
+  herdr(name, args) {
+    try {
+      this.d.herdrRun(name, args);
+      return true;
+    } catch (e) {
+      this.log(`${name} ${JSON.stringify(args)} failed: ${e}`);
+      return false;
+    }
+  }
+
   io() {
     return { read: this.d.files.read, write: this.d.files.write, mkdirp: this.d.files.mkdirp };
   }
@@ -1114,6 +1664,43 @@ export class Coordinator {
     } catch (e) {
       this.log(`sleeping.json unreadable: ${e}`);
     }
+  }
+
+  // workspaces.json (workspace-sleep D9); a bad file is kept as .bak.
+  async loadEntries() {
+    try {
+      const { entries, text } = await loadWorkspaces(this.io(), this.wp);
+      this.workspaces = entries;
+      this.workspacesText = text ?? null;
+    } catch (e) {
+      this.log(`workspaces.json unreadable: ${e}`);
+    }
+  }
+
+  // Its compare-and-swap save: false, with the file read again, on a stale snapshot.
+  async saveEntries(next) {
+    if (next === this.workspaces) return true;
+    try {
+      this.workspacesText = await saveWorkspaces(this.io(), this.wp, next, this.workspacesText);
+      this.workspaces = next;
+      return true;
+    } catch (e) {
+      this.log(`workspaces.json changed under it, reloaded: ${e}`);
+      await this.loadEntries();
+      return false;
+    }
+  }
+
+  // A change to workspaces.json: `change(entries)` → the new entries, or null
+  // for none. On a stale snapshot the file is read again and the change made
+  // once more on what it says now (another write kept, not undone).
+  async updateEntries(change) {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const next = change(this.workspaces);
+      if (next === null || next === undefined) return false;
+      if (await this.saveEntries(next)) return true;
+    }
+    return false;
   }
 
   // Compare-and-swap save (D11). On a stale snapshot the file is read again
