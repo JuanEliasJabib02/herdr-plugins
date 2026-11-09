@@ -288,7 +288,11 @@ export default class CreatePr {
     const label = (s) => div().pt(12).pb(6).text_size(11.5).text_color(t.dim).child(s);
     const line = (s, color) => div().pt(6).text_size(11.5).text_color(color).child(s);
     const body = v_flex().id("cp-body").flex_1().min_h(0).px(18).pb(10).overflow_y_scrollbar()
-      .child(div().pt(4).truncate().text_color(t.muted).child(p.branches))
+      // head → base as the card draws it (J-011): the head truncates on its
+      // own and "→ base" (… until one is picked) never shrinks.
+      .child(h_flex().pt(4).min_w(0).gap(4).items_center().text_color(t.muted)
+        .child(div().min_w(0).truncate().child(this.seen.branch))
+        .child(div().flex_none().child(`→ ${base || "…"}`)))
       .child(label("Base"))
       .child(this.baseSelect(t, base))
       .child(label("Título"))

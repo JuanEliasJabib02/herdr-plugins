@@ -31,12 +31,13 @@ const run = (conclusion, status = "COMPLETED") => ({ __typename: "CheckRun", sta
 const commitStatus = (state) => ({ __typename: "StatusContext", state });
 
 // GitHub's PullRequest node as the card's query asks for it: S5's PR #161.
+// isCrossRepository: its head is a fork's branch of the same name (J-002).
 function prNode({
   number = 161, state = "OPEN", isDraft = false, mergeable = "MERGEABLE", mergeStateStatus = "CLEAN",
-  reviewDecision = null, reviews = [], checks = [], additions = 2305, deletions = 942, headRefOid = SHA,
+  reviewDecision = null, reviews = [], checks = [], additions = 2305, deletions = 942, headRefOid = SHA, isCrossRepository = false,
 } = {}) {
   return {
-    number, title: "Fix checkout totals", state, isDraft,
+    number, title: "Fix checkout totals", state, isDraft, isCrossRepository,
     url: `https://github.com/Arctic-Grey/Target-Sports-USA/pull/${number}`,
     baseRefName: "main", headRefName: "juan/fix-totals", headRefOid, additions, deletions,
     mergeable, mergeStateStatus, reviewDecision,
@@ -46,12 +47,12 @@ function prNode({
 }
 
 // The query's answer: the repo's default branch and merge methods, and the
-// branch's newest PR (none: no node).
+// branch's newest PRs (one node, a list newest first, or none).
 const cardAnswer = (pr, repo = {}) => JSON.stringify({
   data: {
     repository: {
       defaultBranchRef: { name: "main" }, squashMergeAllowed: true, mergeCommitAllowed: true, rebaseMergeAllowed: false,
-      pullRequests: { nodes: pr ? [pr] : [] },
+      pullRequests: { nodes: Array.isArray(pr) ? pr : pr ? [pr] : [] },
       ...repo,
     },
   },
@@ -79,8 +80,8 @@ test("query: one gh api graphql call for the branch's newest PR, the repo's merg
   const query = fields[0];
   assert.match(query, /^query=query\(\$o:String!,\$r:String!,\$b:String!\)\{repository\(owner:\$o,name:\$r\)\{/);
   assert.match(query, /defaultBranchRef\{name\} squashMergeAllowed mergeCommitAllowed rebaseMergeAllowed /);
-  assert.match(query, /pullRequests\(headRefName:\$b,first:1,orderBy:\{field:CREATED_AT,direction:DESC\}\)/);
-  for (const f of ["number", "title", "state", "isDraft", "url", "baseRefName", "headRefName", "headRefOid", "additions", "deletions", "mergeable", "mergeStateStatus", "reviewDecision"]) {
+  assert.match(query, /pullRequests\(headRefName:\$b,first:5,orderBy:\{field:CREATED_AT,direction:DESC\}\)/, "a few, newest first: a fork's PR may come first (J-002)");
+  for (const f of ["number", "title", "state", "isDraft", "url", "baseRefName", "headRefName", "headRefOid", "additions", "deletions", "mergeable", "mergeStateStatus", "reviewDecision", "isCrossRepository"]) {
     assert.match(query, new RegExp(`[{ ]${f}[ }]`), `asks for ${f}`);
   }
   assert.match(query, /latestReviews\(first:100\)\{nodes\{state\}\}/);
@@ -109,6 +110,14 @@ test("answer: a repo the account can't see reads as notFound; anything else unre
   assert.deepEqual(parseCardAnswer(JSON.stringify({ errors: [{ type: "RATE_LIMITED" }] })), { ok: false, notFound: false });
 });
 
+test("answer: a fork's PR from a branch of the same name is never the branch's: the newest PR whose head is in the repo is; only forks' PRs is no PR (J-002)", () => {
+  const fork = prNode({ number: 170, isCrossRepository: true });
+  assert.equal(parseCardAnswer(cardAnswer([fork, prNode()])).pr.number, 161);
+  assert.equal(parseCardAnswer(cardAnswer([fork, prNode({ number: 171, isCrossRepository: true })])).pr, null);
+  const { isCrossRepository: _unsaid, ...unsaid } = prNode();
+  assert.equal(parseCardAnswer(cardAnswer([unsaid])).pr, null, "a node that doesn't say where its head is counts as a fork's");
+});
+
 test("answer: a node that isn't a PR (no number, an unknown state, a URL off GitHub) reads as no PR", () => {
   for (const bad of [{ number: "1" }, { state: "WEIRD" }, { url: "javascript:alert(1)" }]) {
     const node = { ...prNode(), ...bad };
@@ -125,13 +134,15 @@ test("answer: a node that isn't a PR (no number, an unknown state, a URL off Git
 // args], every git call as [cwd, args].
 function fakeIo({
   url = "git@github.com:Arctic-Grey/Target-Sports-USA.git", sees = null, out = cardAnswer(prNode()),
-  accounts = ["juanjabibarcticgrey", "JuanEliasJabib02"], fails = false, sync = "9\t4",
+  accounts = ["juanjabibarcticgrey", "JuanEliasJabib02"], fails = false, sync = "9\t4", loggedOut = [],
 } = {}) {
   const calls = [];
   const gits = [];
   const reply = (who, args) => {
     calls.push([who, args]);
     if (fails) return { ok: false, code: 1, out: "", err: "gh: Server Error (HTTP 502)" };
+    // A login gh is no longer logged into: git.js AS_ACCOUNT exits 4.
+    if (who !== null && loggedOut.includes(who)) return { ok: false, code: 4, out: "", err: "" };
     if (who !== sees) return { ok: false, code: 1, out: NOT_FOUND, err: "gh: Could not resolve to a Repository" };
     // A query of the sidebar's (pr-model.js): its branches, none with a PR.
     const names = args.filter((a) => /^b\d+=/.test(a));
@@ -387,6 +398,39 @@ test("account: a remembered account that stops seeing the repo falls back to the
   assert.equal(data.who, null, "the folder answered, not the login that stopped seeing it");
 });
 
+test("account: a remembered login gh logged out of is forgotten, and the card is read through the folder's account (J-003)", async () => {
+  const memo = prMemo();
+  memo.owners.set("arctic-grey", "JuanEliasJabib02");
+  const { io, calls } = fakeIo({ sees: null, loggedOut: ["JuanEliasJabib02"] });
+  const data = await readCard(SPACE, io, memo);
+  assert.equal(cardState(data).header, "PR #161 · Open");
+  assert.deepEqual(calls.map(([who]) => who), ["JuanEliasJabib02", null]);
+  assert.equal(data.who, null, "Mergear and Crear PR act with the account that answered");
+  assert.equal(memo.owners.has("arctic-grey"), false);
+});
+
+test("account: the remembered login, the only one that sees the repo, failing for a while (a 502) with the others answering NOT_FOUND: the card says GitHub didn't answer, not that no account sees it (J-009)", async () => {
+  const memo = prMemo();
+  memo.owners.set("arctic-grey", "JuanEliasJabib02");
+  const { io, calls } = fakeIo({ sees: "JuanEliasJabib02" });
+  const ghAs = io.ghAs;
+  io.ghAs = async (login, cwd, args) => {
+    if (login !== "JuanEliasJabib02") return ghAs(login, cwd, args);
+    calls.push([login, args]);
+    return { ok: false, code: 1, out: "", err: "gh: Server Error (HTTP 502)" };
+  };
+  const data = await readCard(SPACE, io, memo);
+  assert.equal(data.unseen, false);
+  assert.deepEqual(cardState(data), { kind: "failed", text: "GitHub no respondió", color: "dim" });
+  assert.deepEqual(calls.map(([who]) => who), ["JuanEliasJabib02", null, "juanjabibarcticgrey"]);
+  assert.equal(memo.owners.has("arctic-grey"), false, "forgotten: the next read asks the folder, then the others, and finds it again");
+  io.ghAs = ghAs;
+  calls.length = 0;
+  assert.equal(cardState(await readCard(SPACE, io, memo)).header, "PR #161 · Open");
+  assert.deepEqual(calls.map(([who]) => who), [null, "juanjabibarcticgrey", "JuanEliasJabib02"]);
+  assert.equal(memo.owners.get("arctic-grey"), "JuanEliasJabib02");
+});
+
 test("account: no account sees the repo: the card names it", async () => {
   const { io, calls } = fakeIo({ sees: "nobody" });
   assert.deepEqual(cardState(await readCard(SPACE, io, prMemo())), { kind: "failed", text: "Ninguna cuenta de gh ve Arctic-Grey/Target-Sports-USA", color: "dim" });
@@ -508,8 +552,9 @@ test("S2 Mergear: the card hands the popup the PR it read, its head commit, and 
 test("S5 confirm dialog: the props are checked before anything is shown or sent (seen)", () => {
   assert.deepEqual(seenOf({ ...SEEN }), SEEN);
   assert.deepEqual(seenOf({ ...SEEN, who: "JuanEliasJabib02", extra: 1 }), { ...SEEN, who: "JuanEliasJabib02" });
+  assert.deepEqual(seenOf({ ...SEEN, who: "juan_arcticgrey" }), { ...SEEN, who: "juan_arcticgrey" }, "an Enterprise Managed User's login has a _ (J-004)");
   for (const bad of [
-    { headOid: "main" }, { number: "161" }, { number: 0 }, { method: "fast-forward" }, { method: undefined }, { who: "-x" }, { who: "" },
+    { headOid: "main" }, { number: "161" }, { number: 0 }, { method: "fast-forward" }, { method: undefined }, { who: "-x" }, { who: "_x" }, { who: "" },
     { who: undefined }, { owner: "a/b" }, { repo: "" }, { head: "" }, { base: null },
   ]) {
     assert.equal(seenOf({ ...SEEN, ...bad }), null, JSON.stringify(bad));
@@ -574,6 +619,16 @@ test("S4 merge: a PR that changed since the card read it (state, draft, base, he
     assert.deepEqual(await mergePr({ project: "/p", seen: SEEN }, io), { status: "changed", err, note: "" }, err);
     assert.ok(!calls.some(isPut), `no PUT: ${err}`);
   }
+});
+
+test("S4 merge: the check again passes over a fork's newer PR from a branch of the same name; with only forks' PRs the card's PR is gone and nothing is sent (J-002)", async () => {
+  const fork = prNode({ number: 170, isCrossRepository: true });
+  const own = mergeIo({ reads: [cardAnswer([fork, prNode()])] });
+  assert.deepEqual(await mergePr({ project: "/p", seen: SEEN }, own.io), { status: "merged", err: "", note: "" });
+  assert.deepEqual(own.calls.filter(isPut).map(([, args]) => args), [PUT_161]);
+  const forks = mergeIo({ reads: [cardAnswer([fork])] });
+  assert.deepEqual(await mergePr({ project: "/p", seen: SEEN }, forks.io), { status: "changed", err: "juan/fix-totals ya no tiene el PR #161: no se mergeó nada.", note: "" });
+  assert.ok(!forks.calls.some(isPut));
 });
 
 test("S4 merge: a PR someone merged meanwhile is merged: nothing is sent, and it says so", async () => {
@@ -756,9 +811,10 @@ test("S5 create dialog: the props are checked before anything is shown or sent",
   assert.deepEqual(createSeenOf({ ...CREATE_SEEN }), CREATE_SEEN);
   assert.deepEqual(createSeenOf({ ...CREATE_SEEN, who: "JuanEliasJabib02", extra: 1 }), { ...CREATE_SEEN, who: "JuanEliasJabib02" });
   assert.deepEqual(createSeenOf({ ...CREATE_SEEN, defaultBranch: "" }), { ...CREATE_SEEN, defaultBranch: "" }, "a repo GitHub gave no default branch: the base is picked");
+  assert.deepEqual(createSeenOf({ ...CREATE_SEEN, who: "juan_arcticgrey" }), { ...CREATE_SEEN, who: "juan_arcticgrey" }, "an Enterprise Managed User's login has a _ (J-004)");
   for (const bad of [
     { owner: "a/b" }, { repo: "" }, { branch: "" }, { branch: "-x" }, { branch: "a b" }, { branch: null }, { defaultBranch: null },
-    { defaultBranch: "-main" }, { who: "-x" }, { who: "" }, { who: undefined },
+    { defaultBranch: "-main" }, { who: "-x" }, { who: "_x" }, { who: "" }, { who: undefined },
   ]) {
     assert.equal(createSeenOf({ ...CREATE_SEEN, ...bad }), null, JSON.stringify(bad));
   }
@@ -1005,6 +1061,14 @@ test("S4 create outcome: no answer in time, or a server error, reads the branch 
   const other = { ...prNode({ number: 163 }), baseRefName: "release" };
   assert.equal((await createPr(CREATE, createIo({ remote: HEAD, post: "reject", reads: [cardAnswer(other)] }).io)).status, "unsure", "one into another base isn't either");
   assert.deepEqual(createOutcome({ call: { ok: true, rejected: false, out: "garbage", err: "" }, after: null, seen: CREATE_SEEN, base: "main" }).status, "unsure", "an answer that isn't a PR proves nothing");
+});
+
+test("S4 create outcome: a fork's open PR from a branch of the same name, read after no answer, isn't the one made (J-002)", async () => {
+  const fork = prNode({ number: 170, isCrossRepository: true });
+  const r = await createPr(CREATE, createIo({ remote: HEAD, post: "reject", reads: [cardAnswer(fork)] }).io);
+  assert.equal(r.status, "unsure");
+  const both = await createPr(CREATE, createIo({ remote: HEAD, post: "reject", reads: [cardAnswer([fork, prNode({ number: 162, isDraft: true })])] }).io);
+  assert.deepEqual(both.pr, { number: 162, url: URL162, draft: true }, "the branch's own PR behind it is");
 });
 
 test("S4 create report: created closes the dialog with a toast; anything else stays in the dialog, or is a toast once it closed", () => {

@@ -34,6 +34,7 @@ import { openNewWorkspace } from "./new-workspace.js";
 import { openProjectMenu } from "./project-menu.js";
 import { openWorkspaceMenu } from "./workspace-menu.js";
 import { openTaskMenu } from "./task-menu.js";
+import { showPrCard, cardTarget } from "./pr-card.js";
 
 // git listings at once (Juan has ~30 projects).
 const LISTERS = 4;
@@ -47,6 +48,11 @@ const SETTLE = 500;
 // in the browser) or switching groups, at most every PR_AGAIN.
 const PR_EVERY = 60000;
 const PR_AGAIN = 10000;
+// At most this many shows of the PR card's block per layout load (J-010):
+// enough for a show Herdr ignored on a slow cold start to be run again, and
+// a bound on the flashes when the card hides itself right after one (an
+// origin that isn't GitHub, read fast).
+const CARD_ASKS = 5;
 
 // Herdr's shipped chrome icons (chevrons): there in every install.
 const chrome = (name) => `mods/workspace-chrome/${name}.svg`;
@@ -81,10 +87,20 @@ export default class Tree {
     this.prAt = 0;
     this.wasActive = false;
     this.prGroup = null;
+    // The PR card's block, if Herdr kept it hidden in this layout: shown, so
+    // the card starts and decides itself whether it has something to say
+    // (cardTick, J-001, J-010). This copy starts on every layout load; the
+    // show waits for the ticks, since on a cold start Herdr ignores it from
+    // init (seen live after a restart). How many shows were run, and whether
+    // the card's copy is known to run.
+    this.cardAsks = 0;
+    this.cardDone = false;
     this.sync(cx);
-    // New or removed projects (Add project here, the project menu in its
-    // popup), and whether the PRs are due.
+    // The PR card's block until its copy runs; new or removed projects (Add
+    // project here, the project menu in its popup), and whether the PRs are
+    // due.
     cx.timer.every(1000, (cx) => {
+      if (!this.cardDone) this.cardTick();
       this.sync(cx);
       this.prTick(cx);
     });
@@ -93,6 +109,26 @@ export default class Tree {
     });
     // The agents' "time since" moves on its own.
     cx.timer.every(30000, (cx) => cx.notify());
+  }
+
+  // ── The PR card's block (J-001, J-010) ───────────────────────────────────
+
+  // Each tick until the card's copy is known to run: the card's block shown
+  // when Herdr kept it hidden and the card has something to say for the
+  // shown space (pr-card.js cardTarget, the card's own rule: never on a main
+  // checkout, so it doesn't flash there). A start on a main checkout keeps
+  // watching, so the first workspace with something to say shows it however
+  // late (seen live: a 5-tick limit left it hidden). No block yet (the layout
+  // not applied), a block still hidden, or one that shows before any show
+  // ran (its saved hidden flag may still come): the next tick looks again.
+  // Shown after a show: the card's copy has started and decides from then
+  // on, so this is done; so it is after CARD_ASKS shows.
+  cardTick() {
+    const step = showPrCard(cardTarget() !== null);
+    if (step === "asked") {
+      this.cardAsks++;
+      if (this.cardAsks >= CARD_ASKS) this.cardDone = true;
+    } else if (step === "shown" && this.cardAsks > 0) this.cardDone = true;
   }
 
   // ── Worktree engine (D6) ─────────────────────────────────────────────────

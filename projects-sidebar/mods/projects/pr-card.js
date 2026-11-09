@@ -2,10 +2,11 @@
 // Changes shows, drawn right above it, as Orca draws the PR atop Source
 // Control. Its block, `pr-card`, is the fixed-height top of the stack child
 // `changes` in layouts/projects.json (D3, D4): "PR #161 · Open" in the
-// sidebar icon's color with +/−, the title, head → base with ↑↓, the checks,
-// the reviews, then [Abrir en GitHub] and [Mergear ▾] (D6: the methods
-// popup and the confirm dialog of merge-pr.js; drawn off, with the reason as
-// its hover, when GitHub wouldn't take it). A branch without a PR says so,
+// sidebar icon's color with +/−, the title, head → base with ↑↓ (a long
+// head truncates; the base always shows), the checks, the reviews, then
+// [Abrir en GitHub] and [Mergear ▾] (D6: the methods popup and the confirm
+// dialog of merge-pr.js; drawn off, with the reason beside it and as its
+// hover, when GitHub wouldn't take it). A branch without a PR says so,
 // with [Crear PR] (D4, D7: the dialog of create-pr.js). The model is
 // pr-card-model.js (readCard, cardState, mergeRequest, createRequest); this
 // file picks the workspace, asks, and draws.
@@ -28,7 +29,12 @@
 // every project, a project's main checkout (the sidebar doesn't color it
 // either), or an origin that isn't GitHub. The card hides its own block
 // (layout.hide), and Changes takes the whole panel until a workspace with
-// something to say shows again.
+// something to say shows again. Herdr keeps that hidden per layout, and a
+// copy starts only the first time it shows, so a layout loaded with the
+// block hidden would never start the card: the tree, started fresh on every
+// layout load, shows it (showPrCard) where the card has something to say
+// (cardTarget), trying on its first ticks until it shows, and the card
+// decides again.
 
 import { div, svg } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
@@ -78,13 +84,36 @@ function location() {
 
 // The workspace the card is about, { key, project, path, branch }, or null
 // when it has nothing to say there (D9): another machine, a folder outside
-// every project, or a project's main checkout.
-function target() {
+// every project, or a project's main checkout. The tree asks it too
+// (J-010): it shows the card's block only where this says the card has
+// something to say, so the two never disagree.
+export function cardTarget() {
   const { cwd, on } = location();
   if (on) return null;
   const c = checkoutAt(store.cache(), cwd, home());
   if (!c || c.main) return null;
   return { key: JSON.stringify([c.path, c.branch]), project: c.project, path: c.path, branch: c.branch };
+}
+
+// J-001, J-010: the card's block shown when Herdr kept it hidden, so the
+// card's copy starts (only a shown copy does) and its place() decides again.
+// The tree runs it on its first ticks (tree.js cardTick), until the block
+// shows after a show. say: whether the card has something to say for the
+// shown space (cardTarget), so a main checkout never flashes. → "missing":
+// the layout has no card block (yet); "shown": it shows, left alone;
+// "hidden": hidden, and left so; "asked": hidden, and layout.show ran.
+export function showPrCard(say) {
+  const node = find(layout(), BLOCK);
+  if (!node) return "missing";
+  if (!node.hidden) return "shown";
+  if (!say) return "hidden";
+  try {
+    run("layout.show", { id: BLOCK });
+    return "asked";
+  } catch {
+    // The layout isn't there to change (another machine's, unavailable).
+    return "hidden";
+  }
 }
 
 // Whether Changes shows: the panel open on it (code-explorer's isShown, for
@@ -99,7 +128,7 @@ export default class PrCard {
   init(_props, cx) {
     this.memo = prMemo(); // which account sees each owner: the card's own (a copy can't share the tree's)
     this.key = undefined; // the shown workspace's key; null: none, nothing to say
-    this.target = null; // target() for that key
+    this.target = null; // cardTarget() for that key
     this.state = null; // cardState of its last answer; null while the first is read
     this.at = 0; // when that answer came
     this.busy = false; // a read is running
@@ -123,7 +152,7 @@ export default class PrCard {
   // Follows Changes to its workspace, shows or hides the block, and reads
   // when one is due and Changes shows.
   tick(cx) {
-    const now = target();
+    const now = cardTarget();
     if ((now?.key ?? null) !== this.key) {
       this.retarget(now);
       cx.notify();
@@ -207,7 +236,7 @@ export default class PrCard {
   }
 
   render(cx) {
-    const now = target();
+    const now = cardTarget();
     if ((now?.key ?? null) !== this.key) {
       this.retarget(now);
       cx.spawn(async (cx) => this.tick(cx));
@@ -242,6 +271,8 @@ function note(s, t, create) {
 
 // S5's rows: the header in the PR's color with +/−, the title, head → base
 // with ↑↓, Checks, Reviews, then the buttons. merge(cx): [Mergear ▾]'s click.
+// J-005: the head truncates on its own and "→ base" never shrinks, so a long
+// head (Target-Sports #161's) never hides the base; ↑↓ stays at the right.
 function prRows(s, t, merge) {
   const color = t[s.color] ?? t.dim;
   return [
@@ -252,7 +283,9 @@ function prRows(s, t, merge) {
       .child(div().flex_none().text_size(11).text_color(t.ansi1).child(s.removed)),
     div().h(20).flex_none().truncate().text_size(13).child(s.title),
     h_flex().h(18).flex_none().gap(8).items_center()
-      .child(div().flex_1().min_w(0).truncate().text_color(t.muted).child(s.branches))
+      .child(h_flex().flex_1().min_w(0).gap(4).items_center().text_color(t.muted)
+        .child(div().min_w(0).truncate().child(s.head))
+        .child(div().flex_none().child(`→ ${s.base}`)))
       .when(Boolean(s.sync), (el) => el.child(div().flex_none().text_size(11).text_color(t.dim).child(s.sync))),
     line("Checks", s.checks, t),
     line("Reviews", s.reviews, t),
@@ -263,14 +296,16 @@ function prRows(s, t, merge) {
         .on_click((_e, cx) => openPr(s.url, cx))
         .child("Abrir en GitHub"))
       // Mergear (D6): the methods popup while GitHub would take it; else
-      // drawn off, its hover saying why not.
+      // drawn off, why not beside it (J-006: on the card, dim, truncated in
+      // what the row leaves, so the card keeps its height) and as its hover.
       .child(div().id("pr-merge").h(26).px(10).flex().items_center().rounded(6).text_size(12)
         .when(Boolean(s.merge?.enabled), (el) => el.bg(t.solid).text_color(t.solid_foreground).cursor_pointer()
           .hover((st) => st.opacity(0.88))
           .on_click((_e, cx) => merge(cx)))
         .when(!s.merge?.enabled, (el) => el.bg(t.raised).text_color(t.dim))
         .when(Boolean(s.merge?.reason), (el) => el.tooltip(s.merge.reason))
-        .child("Mergear ▾")),
+        .child("Mergear ▾"))
+      .when(Boolean(s.merge?.reason), (el) => el.child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.dim).child(s.merge.reason))),
   ];
 }
 

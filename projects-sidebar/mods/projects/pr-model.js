@@ -13,7 +13,7 @@
 // repo (it belongs to the other account), each other account gh is logged
 // into is tried, through GH_TOKEN set inside a shell (git.js ghAs: the token
 // never comes into the mod), and the one that sees it is remembered for that
-// owner until it stops seeing it. The PR card in the right panel
+// owner until it stops answering. The PR card in the right panel
 // (pr-card-model.js) asks through the same path (askGitHub).
 
 import { githubOf } from "./rename-workspace-model.js";
@@ -27,6 +27,11 @@ const WORDS = { open: "Open", merged: "Merged", closed: "Closed", draft: "Draft"
 
 // Branches asked in one call.
 export const CHUNK = 25;
+
+// PRs asked per branch, newest first. A fork's PR from a branch of the same
+// name is listed under it too, maybe newer (J-002), so a few are asked and
+// ownNode picks the branch's own.
+export const PRS_ASKED = 5;
 
 // The hover of a colored icon: "PR #161 · Open".
 export const prLabel = (pr) => `PR #${pr.number} · ${WORDS[pr.state] ?? pr.state}`;
@@ -53,13 +58,21 @@ export function prFromNode(n) {
   return prOf({ number: n.number, state, url: n.url });
 }
 
-// The gh argv that asks for `branches`' newest PRs in `repo`. The owner, the
-// repo and every branch are raw fields (-f: never read as @file), so no name
-// is ever part of the query's text.
+// The branch's own PR among GitHub's nodes, newest first: the first whose
+// head is a branch of the repo itself (isCrossRepository false), undefined
+// when none is. A fork's PR from a branch of the same name is never it
+// (J-002): the card would show someone else's PR, and Mergear merge it. The
+// sidebar's colors and every read of the card (Mergear's check again, Crear
+// PR's read after) pick through here.
+export const ownNode = (nodes) => (Array.isArray(nodes) ? nodes.find((n) => isObject(n) && n.isCrossRepository === false) : undefined);
+
+// The gh argv that asks for `branches`' newest PRs in `repo` (PRS_ASKED of
+// each, for ownNode). The owner, the repo and every branch are raw fields
+// (-f: never read as @file), so no name is ever part of the query's text.
 export function prQueryArgs({ owner, repo }, branches) {
   const vars = branches.map((_, i) => `,$b${i}:String!`).join("");
   const fields = branches
-    .map((_, i) => `b${i}:pullRequests(headRefName:$b${i},first:1,orderBy:{field:CREATED_AT,direction:DESC}){nodes{number state isDraft url}}`)
+    .map((_, i) => `b${i}:pullRequests(headRefName:$b${i},first:${PRS_ASKED},orderBy:{field:CREATED_AT,direction:DESC}){nodes{number state isDraft url isCrossRepository}}`)
     .join(" ");
   const query = `query($o:String!,$r:String!${vars}){repository(owner:$o,name:$r){${fields}}}`;
   return ["api", "graphql", "-f", `query=${query}`, "-f", `o=${owner}`, "-f", `r=${repo}`, ...branches.flatMap((b, i) => ["-f", `b${i}=${b}`])];
@@ -83,15 +96,14 @@ export function repositoryAnswer(out) {
 }
 
 // GitHub's answer to prQueryArgs: { ok, notFound, prs: { [branch]: pr |
-// null } } (repositoryAnswer).
+// null } } (repositoryAnswer): each branch's own newest PR (ownNode).
 export function parsePrAnswer(out, branches) {
   const a = repositoryAnswer(out);
   if (!a.ok) return { ok: false, notFound: a.notFound, prs: {} };
   const repository = a.repository;
   const prs = {};
   branches.forEach((b, i) => {
-    const nodes = repository[`b${i}`]?.nodes;
-    prs[b] = Array.isArray(nodes) ? prFromNode(nodes[0]) : null;
+    prs[b] = prFromNode(ownNode(repository[`b${i}`]?.nodes));
   });
   return { ok: true, notFound: false, prs };
 }
@@ -139,17 +151,29 @@ async function accounts(io, memo) {
 // One `gh api graphql` call about `repo`, through whoever sees it: the
 // account remembered for its owner, then the project's folder, then each
 // other account. Stops at the first answer, or at a failure that isn't
-// "can't see it" (GitHub down, rate limit: another account wouldn't help).
+// "can't see it" (GitHub down, rate limit: another account wouldn't help),
+// but for the remembered login's: any failure of it (gh logged out of it, a
+// revoked token's 401) forgets it and goes on to the others (J-003). Reads
+// only: a write goes through the one account that read (ghBy), never here.
 // The sidebar's colors (projectPrs) and the PR card (pr-card-model.js) both
 // ask through here, each with the memo (prMemo) its caller keeps.
 //   args: the gh argv   parse(out) → { ok, notFound, … } (repositoryAnswer)
 // Resolves what parse returned, with `who` on an answer: the account that
 // gave it (null: gh in the project's folder, else the login asked through
 // io.ghAs), so a later write goes through the same one. { ok: false,
-// notFound: true } when no account sees the repo; never rejects.
+// notFound: true } when no account sees the repo; never rejects. When none
+// answers and one failed otherwise (the remembered login's 5xx, rate limit
+// or exec's limit, the others then saying NOT_FOUND), that failure (J-009):
+// the only account that sees the repo failing for a while isn't "no account
+// sees it".
 export async function askGitHub(io, project, repo, args, parse, memo) {
   const owner = repo.owner.toLowerCase();
+  // A login, or undefined: the folder is asked first.
+  const remembered = memo.owners.get(owner);
   const tried = new Set();
+  // The first failure that wasn't "can't see it": the result when no
+  // account answers (J-009).
+  let failed = null;
   // The answer, a failure to stop at, or null to try the next one.
   const attempt = async (who) => {
     if (tried.has(who)) return null;
@@ -160,9 +184,16 @@ export async function askGitHub(io, project, repo, args, parse, memo) {
       else memo.owners.set(owner, who);
       return { ...r, who };
     }
+    if (!r.notFound) failed ??= r;
+    // Kept, a login that no longer answers would stop every read here
+    // until the mod reloads: it is forgotten, and the others are asked.
+    if (remembered !== undefined && who === remembered) {
+      if (memo.owners.get(owner) === who) memo.owners.delete(owner);
+      return null;
+    }
     return r.notFound ? null : r;
   };
-  const first = memo.owners.has(owner) ? [memo.owners.get(owner), null] : [null];
+  const first = remembered === undefined ? [null] : [remembered, null];
   for (const who of first) {
     const r = await attempt(who);
     if (r) return r;
@@ -171,7 +202,7 @@ export async function askGitHub(io, project, repo, args, parse, memo) {
     const r = await attempt(who);
     if (r) return r;
   }
-  return { ok: false, notFound: true };
+  return failed ?? { ok: false, notFound: true };
 }
 
 // One chunk of branches (askGitHub).

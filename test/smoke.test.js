@@ -118,6 +118,66 @@ test("S5: the card shows the workspace of the folder Changes shows, asks one at 
   assert.doesNotMatch(card, /open_url\(/);
 });
 
+test("J-001, J-010: the tree, started fresh on every layout load, shows the card's block when Herdr kept it hidden and the card has something to say, watching every tick until a show it ran is seen shown (at most 5 shows), so the card's copy starts and its own place() decides again, even after a start on a main checkout (D9)", () => {
+  const src = (f) => readFileSync(new URL(`../projects-sidebar/mods/projects/${f}`, import.meta.url), "utf8");
+  const card = src("pr-card.js");
+  // One rule for where the card has something to say: the card's own, which
+  // the tree asks too.
+  assert.match(card, /^export function cardTarget\(\) \{$/m, "pr-card.js exports its target() decision");
+  assert.doesNotMatch(card, /^function target\(\)/m, "no second copy of the rule");
+  assert.equal(card.match(/const now = cardTarget\(\);/g)?.length, 2, "the card's tick and render follow it");
+  const at = card.indexOf("export function showPrCard(say) {");
+  assert.ok(at >= 0, "pr-card.js exports showPrCard(say)");
+  const show = card.slice(at, card.indexOf("\n}\n", at));
+  assert.match(show, /const node = find\(layout\(\), BLOCK\);/, "the card's block in the layout now");
+  assert.match(show, /if \(!node\) return "missing";/, "no block yet (layout not applied): the tree tries again");
+  assert.match(show, /if \(!node\.hidden\) return "shown";/, "a shown block is left alone");
+  assert.match(show, /if \(!say\) return "hidden";/, "never shown where the card has nothing to say: a main checkout doesn't flash");
+  assert.match(show, /try \{\s+run\("layout\.show", \{ id: BLOCK \}\);\s+return "asked";\s+\} catch \{/, "the show, kept in its try/catch");
+  const tree = src("tree.js");
+  assert.match(tree, /^import \{ showPrCard, cardTarget \} from "\.\/pr-card\.js";$/m);
+  assert.match(tree, /^const CARD_ASKS = 5;$/m, "at most 5 shows: a card that hides itself right away (origin not GitHub) can't make it flash forever");
+  assert.doesNotMatch(tree, /CARD_TICKS/, "no limit in ticks: a start on a main checkout must still show the card on the first workspace with a PR, however late (live)");
+  assert.equal(tree.match(/showPrCard\(/g)?.length, 1, "called in one place only");
+  assert.equal(tree.match(/this\.cardTick\(\)/g)?.length, 1);
+  const start = tree.indexOf("  init(_props, cx) {");
+  const init = tree.slice(start, tree.indexOf("\n  }\n", start));
+  assert.doesNotMatch(init, /showPrCard\(/, "never from init itself, where Herdr ignores it on a cold start (live, after a restart)");
+  assert.match(init, /this\.cardAsks = 0;/);
+  assert.match(init, /this\.cardDone = false;/);
+  assert.match(init, /cx\.timer\.every\(1000, \(cx\) => \{\s+if \(!this\.cardDone\) this\.cardTick\(\);/, "on every 1 s tick until done");
+  const tickAt = tree.indexOf("  cardTick() {");
+  assert.ok(tickAt >= 0, "tree.js runs one try in cardTick");
+  const tick = tree.slice(tickAt, tree.indexOf("\n  }\n", tickAt));
+  assert.match(tick, /const step = showPrCard\(cardTarget\(\) !== null\);/, "shown only where the card's own rule says it has something to say");
+  assert.match(tick, /if \(step === "asked"\) \{\s+this\.cardAsks\+\+;\s+if \(this\.cardAsks >= CARD_ASKS\) this\.cardDone = true;\s+\}/, "each show counted, at most CARD_ASKS");
+  assert.match(tick, /else if \(step === "shown" && this\.cardAsks > 0\) this\.cardDone = true;/, "shown after a show: the card's copy has started, the tree is done");
+});
+
+test("J-005, J-006: the head truncates on its own and → base never shrinks; Mergear off says why on the card, dim and truncated beside it, keeping the hover (D6)", () => {
+  const card = readFileSync(new URL("../projects-sidebar/mods/projects/pr-card.js", import.meta.url), "utf8");
+  const at = card.indexOf("function prRows(");
+  const rows = card.slice(at, card.indexOf("\n}\n", at));
+  assert.match(rows, /div\(\)\.min_w\(0\)\.truncate\(\)\.child\(s\.head\)/, "the head gives way first");
+  assert.match(rows, /div\(\)\.flex_none\(\)\.child\(`→ \$\{s\.base\}`\)/, "the base always shows");
+  assert.doesNotMatch(rows, /\.child\(s\.branches\)/, "never one string truncated as a whole");
+  assert.match(rows, /div\(\)\.flex_none\(\)\.text_size\(11\)\.text_color\(t\.dim\)\.child\(s\.sync\)/, "↑↓ stays at the right");
+  assert.match(rows, /\.when\(Boolean\(s\.merge\?\.reason\), \(el\) => el\.tooltip\(s\.merge\.reason\)\)/, "the hover stays");
+  assert.match(rows, /\.when\(Boolean\(s\.merge\?\.reason\), \(el\) => el\.child\(div\(\)\.flex_1\(\)\.min_w\(0\)\.truncate\(\)\.text_size\(11\)\.text_color\(t\.dim\)\.child\(s\.merge\.reason\)\)\)/, "the reason on the button row: no row added to the 176 px card");
+});
+
+test("J-011: the merge and create dialogs draw head → base as the card does: the head truncates on its own and → base never shrinks", () => {
+  const src = (f) => readFileSync(new URL(`../projects-sidebar/mods/projects/${f}`, import.meta.url), "utf8");
+  const merge = src("merge-pr.js");
+  assert.match(merge, /div\(\)\.min_w\(0\)\.truncate\(\)\.child\(this\.seen\.head\)/, "Mergear's head gives way first");
+  assert.match(merge, /div\(\)\.flex_none\(\)\.child\(`→ \$\{this\.seen\.base\}`\)/, "Mergear's base always shows");
+  assert.doesNotMatch(merge, /p\.branches/, "never one string as a whole");
+  const create = src("create-pr.js");
+  assert.match(create, /div\(\)\.min_w\(0\)\.truncate\(\)\.child\(this\.seen\.branch\)/, "Crear PR's head gives way first");
+  assert.match(create, /div\(\)\.flex_none\(\)\.child\(`→ \$\{base \|\| "…"\}`\)/, "Crear PR's base, or … until one is picked, always shows");
+  assert.doesNotMatch(create, /p\.branches/, "never one string as a whole");
+});
+
 test("S4: Mergear ▾ opens the methods popup, which opens a modal confirm dialog; both are views of the mod, and the merge outlives the dialog (D6)", () => {
   const src = (f) => readFileSync(new URL(`../projects-sidebar/mods/projects/${f}`, import.meta.url), "utf8");
   const main = src("main.js");

@@ -214,7 +214,11 @@ export default class MergePr {
     const line = (text, color) => div().pt(8).text_color(color).child(text);
     const body = v_flex().id("mp-body").flex_1().min_h(0).px(18).pb(10).overflow_y_scrollbar()
       .when(Boolean(p.title), (el) => el.child(div().pt(4).truncate().child(p.title)))
-      .child(line(p.branches, t.muted))
+      // head → base as the card draws it (J-011): the head truncates on its
+      // own and "→ base" never shrinks, so a long head never hides the base.
+      .child(h_flex().pt(8).min_w(0).gap(4).items_center().text_color(t.muted)
+        .child(div().min_w(0).truncate().child(this.seen.head))
+        .child(div().flex_none().child(`→ ${this.seen.base}`)))
       .child(line(p.method, t.foreground))
       .child(line(p.account, t.dim))
       .child(line(p.note, t.dim))

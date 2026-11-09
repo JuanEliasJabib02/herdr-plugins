@@ -28,7 +28,7 @@
 // draws the dialog; git.js binds readCreateFacts and createPr to exec.
 
 import { githubOf } from "./rename-workspace-model.js";
-import { PR_COLORS, prLabel, prFromNode, repositoryAnswer, askGitHub, askAs, ghBy } from "./pr-model.js";
+import { PR_COLORS, PRS_ASKED, prLabel, prFromNode, ownNode, repositoryAnswer, askGitHub, askAs, ghBy } from "./pr-model.js";
 
 const isObject = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
 const str = (v) => (typeof v === "string" ? v : "");
@@ -41,17 +41,18 @@ const METHODS = [["squash", "squashMergeAllowed"], ["merge", "mergeCommitAllowed
 // A head commit's id: what Mergear pins the merge to (D6 `sha`).
 const SHA = /^[0-9a-f]{40}$/;
 
-// The gh argv that asks for `branch`'s newest PR in `repo`, with the repo's
-// default branch and allowed merge methods. The owner, the repo and the
-// branch are raw fields (-f: never read as @file), never part of the query's
-// text.
+// The gh argv that asks for `branch`'s newest PRs in `repo` (PRS_ASKED, for
+// pr-model.js ownNode: a fork's PR from a branch of the same name may be
+// newer, J-002), with the repo's default branch and allowed merge methods.
+// The owner, the repo and the branch are raw fields (-f: never read as
+// @file), never part of the query's text.
 export function cardQueryArgs({ owner, repo }, branch) {
   const checks = "commits(last:1){nodes{commit{statusCheckRollup{contexts(first:100){nodes{__typename ...on CheckRun{status conclusion} ...on StatusContext{state}}}}}}}";
-  const pr = "number title state isDraft url baseRefName headRefName headRefOid additions deletions mergeable mergeStateStatus reviewDecision"
+  const pr = "number title state isDraft url isCrossRepository baseRefName headRefName headRefOid additions deletions mergeable mergeStateStatus reviewDecision"
     + ` latestReviews(first:100){nodes{state}} ${checks}`;
   const query = "query($o:String!,$r:String!,$b:String!){repository(owner:$o,name:$r){"
     + "defaultBranchRef{name} squashMergeAllowed mergeCommitAllowed rebaseMergeAllowed "
-    + `pullRequests(headRefName:$b,first:1,orderBy:{field:CREATED_AT,direction:DESC}){nodes{${pr}}}}}`;
+    + `pullRequests(headRefName:$b,first:${PRS_ASKED},orderBy:{field:CREATED_AT,direction:DESC}){nodes{${pr}}}}}`;
   return ["api", "graphql", "-f", `query=${query}`, "-f", `o=${owner}`, "-f", `r=${repo}`, "-f", `b=${branch}`];
 }
 
@@ -102,17 +103,16 @@ function detailOf(n) {
 // GitHub's answer to cardQueryArgs: { ok: true, notFound: false, repo: {
 // defaultBranch, methods }, pr: the card's PR | null } or, when it isn't
 // one, { ok: false, notFound } (repositoryAnswer: notFound lets another
-// account try).
+// account try). pr: the branch's own newest PR (ownNode), never a fork's.
 export function parseCardAnswer(out) {
   const a = repositoryAnswer(out);
   if (!a.ok) return { ok: false, notFound: a.notFound };
   const r = a.repository;
-  const nodes = r.pullRequests?.nodes;
   return {
     ok: true,
     notFound: false,
     repo: { defaultBranch: str(r.defaultBranchRef?.name), methods: METHODS.filter(([, field]) => r[field] === true).map(([m]) => m) },
-    pr: Array.isArray(nodes) ? detailOf(nodes[0]) : null,
+    pr: detailOf(ownNode(r.pullRequests?.nodes)),
   };
 }
 
@@ -270,11 +270,11 @@ const METHOD_LABELS = { squash: "Squash y mergear", merge: "Crear un merge commi
 
 // An owner or a repo as a segment of a REST path (githubRepoOf's names), a
 // PR number, and a GitHub login as ghAs hands it to `gh auth token --user`
-// (never a flag).
+// (never a flag; an Enterprise Managed User's has a "_", J-004).
 const NAME = /^[A-Za-z0-9_.-]+$/;
 const isName = (v) => typeof v === "string" && NAME.test(v) && !/^\.+$/.test(v);
 const isNumber = (n) => Number.isInteger(n) && n >= 1;
-const LOGIN = /^[A-Za-z0-9][A-Za-z0-9-]*$/;
+const LOGIN = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
 
 // Said after every refusal that sent nothing.
 const NOTHING = ": no se mergeó nada.";
