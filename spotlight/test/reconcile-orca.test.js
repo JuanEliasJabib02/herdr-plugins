@@ -14,6 +14,8 @@
 // base), M9 (the turn-off's fallback line). Review r8: N1–N4, N7 (what a
 // stuck restart repeats, a given-up env under installs and asked syncs, a
 // failed start over a server that may still run, a diverged root's base).
+// Review r9: P1 (a forced sync's base over a diverged root), P3 (a restart
+// whose Ctrl-C freed the prompt runs no server, whatever the next read says).
 import { test, beforeEach, afterEach, after } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
@@ -1476,6 +1478,89 @@ test("N7: a forced takeover of a diverged root compares the lockfiles from the r
   assert.deepEqual((await lightTask(fullCx({ planGit: spyGit }), key)).errors, {});
   assert.equal(state.repos[root].holder, wt2);
   assert.deepEqual(froms, [moved]);
+});
+
+// ── Review r9: P1, P3 ──────────────────────────────────────────────────────
+
+test("P1: Forzar sync over a root that checked out another branch with another lockfile compares the lockfiles from the root's own HEAD, so the install is chained", async () => {
+  // The holder's lockfile (A) is on the root, as the snapshot it projected,
+  // and its install ran.
+  write(wt, "pnpm-lock.yaml", "lockfileVersion: '9.0'\n# A\n");
+  assert.equal((await syncRepo(fullCx(), root)).ok, true);
+  state.repos[root].pendingInstalls = [];
+  const projected = state.repos[root].lastSnapshotSha;
+  // The root checks out another branch, with another lockfile (B), and installs there.
+  run(root, "checkout", "-q", "-b", "other", "main");
+  write(root, "pnpm-lock.yaml", "lockfileVersion: '9.0'\n# B\n");
+  run(root, "add", "-A");
+  run(root, "commit", "-qm", "another branch's lockfile");
+  const moved = run(root, "rev-parse", "HEAD");
+  assert.notEqual(moved, projected);
+  const froms = [];
+  const spyGit = async (cwd, args) => {
+    if (args[0] === "diff-tree") froms.push(args[2]);
+    return planGit(cwd, args);
+  };
+  const r = await syncRepo(fullCx({ planGit: spyGit }), root, { force: true });
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.deepEqual(froms, [moved]);
+  assert.deepEqual(r.installs, ["pnpm"], "the root's B goes back to the holder's A: its node_modules are B's");
+  assert.deepEqual(state.repos[root].pendingInstalls, ["pnpm"]);
+});
+
+// Spotlight's server (`command`, writing `logPath`) in front of t1 until a
+// Ctrl-C; what hc reads of t1 after it, read by read, is `after`'s (the
+// prompt back, or hc failing), its last entry for every read past them.
+function interruptedWorld(logPath, command, after) {
+  const ps = psExec(new Map());
+  const world = { interrupts: 0, sends: 0, reads: 0 };
+  const shown = (fg) => ({ code: 0, stdout: JSON.stringify({ address: "t1", pid: 100, state: "live", labels: { "spotlight.repo": root }, foreground: fg }), stderr: "" });
+  world.exec = async (file, args, opts) => {
+    if (file === "hc" && args[0] === "get") {
+      if (world.interrupts === 0) return shown({ pid: 101, name: "script", argv: ["script", "-F", "-q", "-a", logPath, "/bin/zsh", "-c", command] });
+      const read = after[Math.min(world.reads, after.length - 1)];
+      world.reads += 1;
+      return read === "shell"
+        ? shown({ pid: 100, name: "zsh", argv: ["/bin/zsh", "-l"] })
+        : { code: 1, stdout: "", stderr: JSON.stringify({ error: { kind: "io", message: "hc: no route to core" } }) };
+    }
+    if (file === "hc" && args[0] === "interrupt") {
+      world.interrupts += 1;
+      return { code: 0, stdout: JSON.stringify({ key: "ctrl+c", outcome: "stopped" }), stderr: "" };
+    }
+    if (file === "hc" && args[0] === "send") {
+      world.sends += 1;
+      return { code: 0, stdout: "{}", stderr: "" };
+    }
+    return ps.exec(file, args, opts);
+  };
+  return world;
+}
+
+test("P3: a restart whose Ctrl-C brought the prompt back, then hc couldn't read the terminal, runs no server: the record goes stopped and drops restartStuck; one whose Ctrl-C hc couldn't follow keeps them (doubt)", async () => {
+  write(wt, "package.json", PKG);
+  write(root, "package.json", PKG);
+  const logPath = join(base, "root.log");
+  const STUCK = { reason: "still-running", env: "local", command: "pnpm old" };
+  const running = { serverTerminal: "t1", serverPid: 101, serverState: "listening", serverCommand: "pnpm old", serverEnv: "local", ports: [3000], logPath };
+
+  // The prompt came back after the Ctrl-C; the read before typing failed.
+  let world = interruptedWorld(logPath, "pnpm old", ["shell", "unreadable"]);
+  Object.assign(state.repos[root], running, { restartStuck: { ...STUCK }, lastError: null });
+  let r = await ensureServer(fullCx({ serverDeps: { exec: world.exec, ...fakeClock() } }), root, { workspace: wt, keepVariant: true, restart: true });
+  assert.deepEqual({ state: r.state, reason: r.result?.reason, interrupted: r.result?.interrupted }, { state: "failed", reason: "unreadable", interrupted: true });
+  assert.deepEqual({ interrupts: world.interrupts, sends: world.sends }, { interrupts: 1, sends: 0 });
+  assert.equal(state.repos[root].serverState, "stopped");
+  assert.equal("restartStuck" in state.repos[root], false);
+  assert.equal(state.repos[root].lastError?.code, "server-start-failed");
+
+  // hc couldn't read the terminal from the Ctrl-C on: the old server may still run (N3).
+  world = interruptedWorld(logPath, "pnpm old", ["unreadable"]);
+  Object.assign(state.repos[root], running, { restartStuck: { ...STUCK }, lastError: null });
+  r = await ensureServer(fullCx({ serverDeps: { exec: world.exec, ...fakeClock() } }), root, { workspace: wt, keepVariant: true, restart: true });
+  assert.deepEqual({ state: r.state, reason: r.result?.reason, interrupted: r.result?.interrupted }, { state: "failed", reason: "unreadable", interrupted: undefined });
+  assert.deepEqual({ serverState: state.repos[root].serverState, restartStuck: state.repos[root].restartStuck }, { serverState: "listening", restartStuck: STUCK });
+  assert.equal(state.repos[root].lastError?.code, "server-start-failed");
 });
 
 // ── G3: the identities the reap and `on` keep are the live ones ────────────

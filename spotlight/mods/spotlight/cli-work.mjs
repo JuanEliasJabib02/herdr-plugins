@@ -500,8 +500,9 @@ function serverBusyOp({ restart = false, envName, chosenVariant }) {
 // asked for this start (a light, Reiniciar, Reintentar, Liberar puerto, env,
 // variant), the same failure too; a sync toasts it once per new error (L3).
 // A failed start that may have left Spotlight's old server in front (it was
-// there, or hc couldn't say, and nothing after showed it gone: oldMayRun)
-// keeps the record's state and restartStuck (N3).
+// there, or hc couldn't say, and nothing after showed it gone, as a
+// restart's Ctrl-C that freed its front does, P3: oldMayRun) keeps the
+// record's state and restartStuck (N3).
 // An old server that never let go of the prompt is no failed start: its own
 // state, still-running (M3), toasted as a failure is (the record's
 // restartStuck says the cause a sync already told, M1).
@@ -635,8 +636,10 @@ async function planAndStart(cx, root, opts) {
   // failed (restartServer's oldServerRuns, L1).
   const failure = ran || r.oldServerRuns ? null : startFailedError(r);
   // A failed start over a terminal that showed Spotlight's server, or that
-  // hc couldn't read, which nothing after showed gone from its front (N3).
-  const oldMayRun = failure !== null && (seen.kind === "spotlight" || seen.kind === "unknown") && !LEFT_THE_FRONT.has(r.reason);
+  // hc couldn't read, which nothing after showed gone from its front (N3):
+  // not a restart that saw the old server leave it (restartServer's
+  // `interrupted`, P3), whatever the read after that said.
+  const oldMayRun = failure !== null && !r.interrupted && (seen.kind === "spotlight" || seen.kind === "unknown") && !LEFT_THE_FRONT.has(r.reason);
   await cx.store.updateState((s) => {
     const rec = s.repos[root];
     if (!rec) return;
@@ -1129,6 +1132,10 @@ export async function syncRepo(cx, root, { force = false, asked = false, onlyIf,
     if (!record?.holder) return { ok: false, code: "not-active", message: `Spotlight is not on in ${cx.nameOf(root)}.` };
     if (onlyIf && !onlyIf(record)) return { ok: true, skipped: true, notLit: true, holder: record.holder };
     const holder = record.holder;
+    // What the root has before the sync writes over it: only a forced sync
+    // goes past a root that moved off the snapshot (an unforced one finds it
+    // there or refuses), so only a forced one reads it (P1).
+    const rootHad = force ? (await readRefs(root)).rootHeadSha : null;
     let result;
     try {
       result = await sync(cx.gitCtx, root, holder, { force });
@@ -1171,7 +1178,12 @@ export async function syncRepo(cx, root, { force = false, asked = false, onlyIf,
       const server = (await drifted()) ? await refreshServer() : null;
       return { ok: true, skipped: true, holder, restarted: server?.state === "started", restartFailed: restartFailure(server) };
     }
-    const installs = await lockfileInstalls({ git: cx.planGit, root, fromSha: record.lastSnapshotSha, toSha: result.snapshotSha });
+    // The lockfiles are compared from what the root had (as a light's, N7):
+    // the snapshot last projected there, or the root's own HEAD when Forzar
+    // sync goes past a root that checked out another commit, whose
+    // node_modules or .venv are that commit's (P1).
+    const fromSha = rootHad ?? record.lastSnapshotSha;
+    const installs = await lockfileInstalls({ git: cx.planGit, root, fromSha, toSha: result.snapshotSha });
     const now = cx.now();
     await cx.store.updateState((s) => {
       const r = s.repos[root];

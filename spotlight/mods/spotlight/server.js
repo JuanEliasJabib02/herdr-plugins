@@ -666,8 +666,12 @@ export async function startServer({ root, terminal, line, logPath, serverPid, wo
 // answers are startServer's, plus { ok: false, reason: "interrupt-failed" |
 // "still-running", oldServerRuns: true, … }: the old server never let go of
 // the prompt and still runs (L1; after a Ctrl-C hc couldn't send, only while
-// hc still shows it in front or can't read the terminal, M4). Each ok: false
-// is logged as startServer's (notStarted). `ensured`: as startServer's.
+// hc still shows it in front or can't read the terminal, M4). An ok: false
+// after the old server was seen leaving the front (the prompt back, the
+// terminal gone, another program there) carries `interrupted: true`: no
+// server of Spotlight's runs there now, whatever the next read said (P3).
+// Each ok: false is logged as startServer's (notStarted). `ensured`: as
+// startServer's.
 export async function restartServer({ root, terminal, line, logPath, serverPid, workspace, branch, ensured: given } = {}, deps) {
   const wrapped = wrapServerLine(line, logPath);
   if (!wrapped) return { ok: false, reason: "invalid-command" };
@@ -677,16 +681,20 @@ export async function restartServer({ root, terminal, line, logPath, serverPid, 
   const t = ensured.terminal;
   const seen = await inspectServer({ terminal: t, logPath, serverPid }, deps);
   let restarted = false;
+  let interrupted = false;
   if (seen.kind === "spotlight") {
     const stopped = await interruptAndWait(t, { logPath, serverPid }, deps);
     if (!stopped.ok) return notStarted(logPath, head, stopped, deps);
     restarted = true;
+    // A read hc couldn't make after the Ctrl-C says nothing of the old
+    // server: doubt is never death (N3).
+    interrupted = stopped.seen.kind !== "unknown";
   }
   const r = await typeWhenIdle({
     terminal: t, created: ensured.created, command: normalizeServerLine(line), wrapped,
     logPath, serverPid, workspace, branch, event: "restarted",
   }, deps);
-  if (!r.ok) return notStarted(logPath, head, r, deps);
+  if (!r.ok) return notStarted(logPath, head, interrupted ? { ...r, interrupted } : r, deps);
   return r.started ? { ...r, restarted } : r;
 }
 
