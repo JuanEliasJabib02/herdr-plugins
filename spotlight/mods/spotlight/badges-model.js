@@ -43,7 +43,8 @@ const PER_ROW = 3;
 const isObject = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
 const isAbsolute = (p) => typeof p === "string" && p.startsWith("/");
 const baseName = (p) => normRoot(p).split("/").filter(Boolean).pop() ?? p;
-const oneLine = (s) => String(s).replace(/\s+/g, " ").trim();
+// Text on one line, every run of whitespace one space (the popup's too).
+export const oneLine = (s) => String(s).replace(/\s+/g, " ").trim();
 const cut = (s, max) => {
   const chars = [...s];
   return chars.length <= max ? s : `${chars.slice(0, max - 1).join("")}…`;

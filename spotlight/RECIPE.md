@@ -92,24 +92,44 @@ Orca leaves such a server "stopped" with nothing said; here it is an error.
 
 Turn-off (`toggle` off, Apagar, Apagar igual) always leaves the server dead (D26). Orca stops at the Ctrl-C (`spotlight-server-turn-off.ts:48-65`). Here the Ctrl-C comes first too, and is usually all it takes: live on 2026-11-08, a Next server (script → sh pnpm → pnpm → next → next-server) died whole on it. The rest is a safety net for a child that ignores SIGINT, or one that leaves the tree when the Ctrl-C takes its parent.
 
+- Who a listener is. While the server runs, every read of its state (`server.js` `readServerState`: the reap, `spotlight on`, `status`) also names each process that listens under Spotlight's own `script`: `procs: [{pid, start, port}]`, the start time as `ps -o lstart=` prints it with its runs of spaces folded. The CLI keeps these identities on the repo's record and gives them back to the turn-off. A pid is the same process only while its start time is: compared as `ps` prints it, never parsed, since its words follow the locale. The shell's own helpers and a job put in the background there get no identity, and neither does a process `ps` can't place under the `script`.
 - Before the Ctrl-C, `server.js` `stopServer` reads the server:
-  - Every process under the server's own process (the `script` Spotlight typed, which leads the terminal), each with its start time and command (`ps -o pid=,ppid=,stat=,lstart=`, `ps -o pid=,command=`). The start time is compared as `ps` prints it, never parsed: its words follow the locale. The `script` must be the shell's child and every process below it its parent's child, as `ps` reads them; a pid that changed hands between the reads is left out.
-  - The ports those processes listen on, plus the ports recorded for the server.
-  - Who else listens on those ports from outside the terminal, each with its start time.
+  - Every process under the server's own process (the `script` Spotlight typed, which leads the terminal), each with its start time and command (`ps -o pid=,ppid=,stat=,lstart=`, `ps -o pid=,command=`). The `script` must be the shell's child and every process below it its parent's child, as `ps` reads them; a pid that changed hands between the reads is left out.
+  - The ports those processes listen on, plus the ports recorded for the server and those of its identities.
+  - Who else listens on those ports from outside the terminal, but only a process whose pid and start time match one of the recorded identities: a server child that left the tree earlier.
+- A server started by hand on one of those ports, in the root or not, is never touched: it has no identity. The same goes for a process that got a recorded pid later (another start time). This holds on every path: with the server running, at a free prompt and with the terminal gone. Only "Liberar puerto y arrancar" (a click, D24) ever stops a process Spotlight didn't start. A record from before identities existed carries none, so its turn-off kills no listener outside the tree; the server's own tree, read from its pid at the turn-off, is killed as always.
 - The terminal's shell is no part of the server, and neither are its own helpers (powerlevel10k's gitstatusd, a zsh-async worker, a job put in the background): they are never waited on and never signalled.
 - After the Ctrl-C, the stop waits up to 8 s for the prompt to come back and these leftovers to be gone:
   - A process of the server that still runs as the same process (same pid, same start time, not a zombie), wherever it went. One the Ctrl-C reparented to launchd counts, even if it listens on nothing: spotlight-lab's `rama-terca` runs `(trap '' INT TERM HUP; exec sleep 900) &` next to `next dev`, and that `sleep` is killed. A pid another process took since (another start time) is never a leftover.
-  - A listener read before the Ctrl-C, outside the terminal, still on one of those ports and running inside the root (`lsof -a -p <pid> -d cwd`): a server child that escaped an earlier run. One running outside the root is never a leftover, and neither is one in a folder that only shares the root's name as a prefix.
-- Leftovers still there after the 8 s are killed together with whatever runs under them now: SIGTERM, up to 3 s, then SIGKILL. A zombie counts as gone.
+  - A recorded listener read before the Ctrl-C, outside the terminal, still on one of those ports and running inside the root (`lsof -a -p <pid> -d cwd`). One running outside the root is never a leftover, and neither is one in a folder that only shares the root's name as a prefix.
+- When hc can't send the Ctrl-C, the stop doesn't give up and doesn't wait: what it read before is killed at once. The result carries `interruptError`.
+- Leftovers still there after the 8 s are killed together with whatever runs under them now: SIGTERM, up to 3 s, then SIGKILL. A zombie counts as gone. Each process's children are read once (`pgrep -P`), however the leftovers' trees overlap.
 - The server log says which: "Spotlight off — server stopped (interrupt sent)" or "Spotlight off — server stopped (forced: 2 processes)".
-- A process still alive after the SIGKILL (not ours to signal, or stuck in the kernel) means the server did not die (S17): the stop fails with `reason: "survived"` and the survivors' pids, and the log says "Spotlight off — server NOT stopped: 1 processes survived (pids 4242)".
-- With the prompt already free (the server had stopped on its own), or no server terminal at all, nothing is interrupted, but a listener on a recorded port running inside the root is still killed, at once. The result lists it under `escaped` and the log says "(forced: 1 processes)".
+- A failed stop (`ok: false`) always means the server may still be up:
+  - `survived`: a process still alive after the SIGKILL (not ours to signal, or stuck in the kernel), or a leftover never signalled because its tree holds the CLI itself or the terminal's shell (`refused`, counted among the survivors). The server did not die (S17). The log says "Spotlight off — server NOT stopped: 1 processes survived (pids 4242)", with "; not signalled: 4242" for a refused one.
+  - `unreadable`: hc can't read the terminal, so there is no server pid to read and nothing is signalled.
+  - `interrupt-failed`: the Ctrl-C couldn't be sent, and afterwards neither hc nor `ps` showed anything to kill or showed the server gone.
+  - `still-running`: its processes were killed, but hc still shows Spotlight's old `script` in front.
+- Any `ok: false` fails the turn-off. The root is restored all the same, the CLI exits 1, and an error toast replaces "Spotlight off — root restaurado". `survived` gives `server-survived`, naming who lived through SIGKILL and who couldn't be signalled. Every other reason gives `server-not-stopped`: "El server no paró al apagar Spotlight: <detalle> (el root sí se restauró)."
+- The identities live on the record as `serverProcs`: every `procs` the reap and `spotlight on` saw while the repo was lit, across restarts, one per pid and start time, the newest 32 (`cli-work.mjs` `rememberProcs`). A restart keeps them: an old child that escaped holding 3000 while the restarted server moved to 3001 still dies at the turn-off, and a dead identity never matches again. `ports` stays what listens now. The turn-off passes `procs: serverProcs`, and as `ports` the live ports plus those of the remembered processes.
+- With the prompt already free (the server had stopped on its own), or no server terminal at all, nothing is interrupted, but a recorded listener on a recorded port running inside the root is still killed, at once. The result lists it under `escaped` and the log says "(forced: 1 processes)".
 - Never killed:
   - The terminal, its shell and the shell's helpers. The terminal stays for the next start, as in Orca.
-  - The CLI itself: a leftover whose tree holds it is left alone.
-  - Anything that started after the Ctrl-C, such as a restart typed into the terminal during the wait or a server started by hand in the root. Only processes read before the Ctrl-C are ever leftovers. Spotlight's own starts and restarts can't land in the wait anyway: the stop runs under the repo's lock, which every start takes.
+  - The CLI itself: a leftover whose tree holds it is left alone, and the stop says the server was NOT stopped.
+  - Anything that started after the Ctrl-C, such as a restart typed into the terminal during the wait, and any listener Spotlight never recorded, such as a server started by hand in the root. Spotlight's own starts and restarts can't land in the wait anyway: the stop runs under the repo's lock, which every start takes.
 - A process Spotlight didn't start in front of the terminal: nothing is sent or killed.
-- The pieces are `ports.js` (`serverSnapshot`, `serverLeftovers`, `stopLeftovers`, which share T13's TERM-then-KILL with `stopProcessTree`) and `server.js` (`stopServer`).
+- Every signal goes through the injected `kill` (`deps.kill`, process.kill's shape). `stopServer`, `stopLeftovers` and `stopProcessTree` throw without one; nothing falls back to the real `process.kill`.
+- The pieces are `ports.js` (`treeListening`, `serverSnapshot`, `serverLeftovers`, `stopLeftovers`, which share T13's TERM-then-KILL with `stopProcessTree`) and `server.js` (`readServerState`, `stopServer`).
+
+## A root error and a server error
+
+`lastError` holds one root error (any code but `port-busy`, `server-exited`, `server-survived` and `server-not-stopped`) and one server error (`SERVER_ERRORS`, `server-errors.js`). The root error is on top, with the server error under it as `lastError.serverError`.
+
+- Writing a root error keeps the server error underneath. Clearing it (a sync, Forzar sync or lighting that goes through, or Orca letting go) gives the server error back.
+- A dead start or a busy port under a root error goes underneath and toasts once; the toast opens the popup only when the popup can act on the top error.
+- A listen, or a start that goes through, clears the server error wherever it is.
+- `status --json`, the badges, the popup and the hook show the top error; `spotlight on` reports the server error in force.
+- Every writer goes through `setRootError`, `setServerError`, `clearRootError` and `clearServerError`. `store.js` `reconcileRepo` writes `lastError` itself, so `cli-work.mjs` wraps it (`underRootError`).
 
 ## A root Orca's Spotlight holds
 

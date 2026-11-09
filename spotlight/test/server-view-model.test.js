@@ -305,6 +305,31 @@ test("a server error over a server still up (a refused restart, D24): Ver server
   }
 });
 
+// F6, F7: a server error can sit under a root error (lastError.serverError).
+// The popup follows the error on top: under orca-holds no Ver log, Reintentar
+// nor Liberar puerto y arrancar (D27); under root-diverged its force path.
+test("a server error under a root error: the popup follows the root error on top", () => {
+  const ORCA = { code: "orca-holds", message: "Este root lo tiene el Spotlight de Orca: apágalo allá primero.", at: 3 };
+  for (const serverError of [PORT_BUSY, SERVER_EXITED]) {
+    const held = model({ state: stateWith(repo({ serverState: "stopped", ports: [], lastError: { ...ORCA, serverError } })) });
+    assert.deepEqual(held.actions.map((a) => a.label), ["Ver server", "Reiniciar", "Apagar"], serverError.code);
+    assert.deepEqual(held.force, [], serverError.code);
+    assert.equal(held.errorTitle, `Spotlight: ${ORCA.message}`);
+    const diverged = { code: "root-diverged", message: "m", at: 3, serverError };
+    const moved = model({ state: stateWith(repo({ serverState: "stopped", ports: [], lastError: diverged })) });
+    assert.deepEqual(moved.actions.map((a) => a.label), ["Ver server", "Reiniciar", "Apagar"], serverError.code);
+    assert.deepEqual(ids(moved.force), ["force-sync", "off-anyway"], serverError.code);
+    assert.equal(moved.errorTitle, "Root desviado: abre el server para forzar");
+  }
+});
+
+// F9: one oneLine, badges-model's.
+test("the popup flattens text with badges-model's oneLine, not one of its own", () => {
+  const src = fs.readFileSync(new URL("../mods/spotlight/server-view-model.js", import.meta.url), "utf8");
+  assert.doesNotMatch(src, /const oneLine\s*=/);
+  assert.match(src, /import \{[^}]*\boneLine\b[^}]*\} from "\.\/badges-model\.js";/);
+});
+
 // T2 (live test): the popup showed the error twice, a red "Spotlight: <msg>"
 // and a grey, cut copy of the same text. It says it once; the grey line is
 // only for an engine message the red line's words don't carry.

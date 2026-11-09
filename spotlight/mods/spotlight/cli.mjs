@@ -43,8 +43,9 @@ import {
 } from "./cli-format.mjs";
 import {
   markGranted, spawnLights, dropStaleMarkers, lightTask, syncRepo, deactivateRepo, ensureServer, waitForTurnServers,
-  recordServers, reap, rescuedNotes, errorNote, coverError,
+  recordServers, reap, rescuedNotes, errorNote, survivorsPhrase,
 } from "./cli-work.mjs";
+import { setRootError } from "./server-errors.js";
 import { settleResumes, autoResume, continueTask, classifyTerminal } from "./cli-resume.mjs";
 
 // Orca's: under an agent shell's 2-minute command cap; `on` is rerun to keep waiting.
@@ -334,8 +335,9 @@ async function verbToggle(cx, opts) {
     if (opts.inline) {
       const r = await deactivateRepo(cx, root, { force });
       if (!r.ok) {
-        // server-survived: the root was restored, and what the turn-off did
-        // with files in its way still applies.
+        // A refusal (the root untouched), or server-survived /
+        // server-not-stopped (the root was restored, and what the turn-off
+        // did with files in its way still applies).
         err(`${r.code}: ${r.message}`);
         for (const line of rescuedNotes(r.rescued, r.discardedRepos)) out(line);
         return 1;
@@ -355,13 +357,14 @@ async function verbToggle(cx, opts) {
         : "";
       // The popup offers Apagar igual from the record's error; orca-holds is
       // recorded too, so the popup says why at once instead of after a reap
-      // (D27), keeping a server error it covers (R8). A refused click on
-      // orca-holds also answers with a toast (T1), with no popup action: no
-      // force path takes a root from Orca, as with orca-active.
+      // (D27), over a server error the record has, which still applies (R8,
+      // F6). A refused click on orca-holds also answers with a toast (T1),
+      // with no popup action: no force path takes a root from Orca, as with
+      // orca-active.
       if (forceable || error.code === "orca-holds") {
         const now = cx.now();
         await cx.store.updateState((s) => {
-          if (s.repos[root]) s.repos[root].lastError = coverError(s.repos[root].lastError, { ...error, at: now });
+          if (s.repos[root]) setRootError(s.repos[root], { ...error, at: now });
           if (error.code === "orca-holds") errorNote(s, { root, name, workspace, error, now });
         });
       }
@@ -467,9 +470,8 @@ async function verbRestart(cx, opts) {
 export function portBusyLine(r) {
   let kept = "";
   if (r.freed?.ok === false && r.freed.reason === "survived") {
-    const pids = Array.isArray(r.freed.survivors) ? r.freed.survivors : [];
-    const who = pids.length === 1 ? `El proceso ${pids[0]} siguió vivo` : `Los procesos ${pids.join(", ")} siguieron vivos`;
-    kept = ` ${who} después de SIGKILL: Spotlight no pudo liberar el puerto.`;
+    const who = survivorsPhrase(r.freed.survivors);
+    kept = ` ${who[0].toUpperCase()}${who.slice(1)} después de SIGKILL: Spotlight no pudo liberar el puerto.`;
   } else if (r.freed?.ok === false) {
     kept = " Spotlight no lo paró: de ese proceso dependen Herdr o el server.";
   }

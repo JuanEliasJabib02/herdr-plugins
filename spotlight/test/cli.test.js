@@ -120,7 +120,8 @@ try {
   const t = rest[0] ? find(rest[0]) : null;
   const missing = () => out(3, undefined, { kind: "not_found", message: "no terminal " + rest[0] });
   switch (verb) {
-    case "get": t ? out(0, view(t)) : missing(); break;
+    // A terminal whose \`getFails\` is set: hc can't read it (not "no such terminal").
+    case "get": t?.getFails ? out(1, undefined, { kind: "io", message: t.getFails }) : t ? out(0, view(t)) : missing(); break;
     case "ls": out(0, { terminals: all.filter((x) => x.state === "live").map(view), hidden_finished: 0, machines: [] }); break;
     case "run": {
       const opt = (k) => args[args.indexOf(k) + 1];
@@ -2184,4 +2185,145 @@ test("R10: a dead start's error is computed once: what `on` prints is what is re
   assert.deepEqual(state.notes.filter((n) => n.toast).map((n) => n.text), [`speaking: ${message}`]);
   assert.equal(calls.filter((c) => c[0] === "lsof" && c.includes("-iTCP:3008")).length, 1, "the port's holder is looked up once");
   assert.equal(state.repos[DS_ROOT].serverState, "stopped");
+});
+
+// ── F7: a server error written under a root error ──────────────────────────
+
+const ORCA_HOLDS = { code: "orca-holds", message: "Este root lo tiene el Spotlight de Orca: apágalo allá primero.", at: 1 };
+const ROOT_DIVERGED = { code: "root-diverged", message: "El root se movió del snapshot de Spotlight.", at: 1 };
+
+test("F7: a start that died under a root error goes under it: the root error stays on top, one toast, opening the popup only when the popup can act on the top error", async () => {
+  const busy = "El puerto 3008 estaba ocupado al arrancar el server.";
+  for (const [rootError, action] of [[ORCA_HOLDS, undefined], [ROOT_DIVERGED, serverNoteAction(DS_WS)]]) {
+    const state = deadStartState();
+    state.repos[DS_ROOT].lastError = rootError;
+    const cx = memoryCx({ state, exec: shellExec().exec });
+    const seen = await describeServer(cx, cx.store.readState(), DS_MEMBER, DS_KEY);
+    await recordServers(cx, [seen]);
+    // `on` says why the server is down.
+    assert.equal(seen.serverError, true, rootError.code);
+    assert.equal(seen.error, busy);
+    const { serverError, ...top } = state.repos[DS_ROOT].lastError;
+    assert.deepEqual(top, rootError, "the root error stays on top");
+    assert.equal(serverError?.code, "port-busy", rootError.code);
+    assert.equal(serverError.message, busy);
+    assert.equal(state.repos[DS_ROOT].serverState, "stopped");
+    const toasts = () => state.notes.filter((n) => n.toast);
+    assert.deepEqual(toasts().map((n) => n.text), [`speaking: ${busy}`], rootError.code);
+    assert.deepEqual(toasts()[0].action, action, rootError.code);
+    // A later `on` still reads it as why, and nothing toasts again.
+    const again = await describeServer(cx, cx.store.readState(), DS_MEMBER, DS_KEY);
+    assert.equal(again.serverError, true);
+    assert.equal(again.error, busy);
+    assert.equal(toasts().length, 1);
+    assert.deepEqual(state.repos[DS_ROOT].lastError.code, rootError.code);
+  }
+});
+
+test("F7: a start a busy port refuses under a root error: port-busy goes under it and toasts once; the root error stays on top", async () => {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), "sl-f7-")));
+  worlds.push({ dir });
+  const root = join(dir, "busy");
+  mkdirSync(root);
+  write(root, "package.json", JSON.stringify({ scripts: { dev: "next dev -p 3008" } }));
+  const holder = 9_000_001; // no OS hands out this pid
+  const { exec } = shellExec({ holders: [holder, holder] });
+  const state = {
+    version: 1,
+    repos: {
+      [root]: {
+        holder: "/Users/u/ws/busy/ax-9", lastSnapshotSha: "a".repeat(40), lastSyncAt: 1, lastError: ROOT_DIVERGED, serverTerminal: "t1",
+        serverPid: null, serverStartedAt: null, serverCommand: null, serverEnv: null, serverVariant: null, serverState: "stopped",
+        pendingInstalls: [], ports: [], logPath: join(dir, "busy.log"),
+      },
+    },
+    queue: { requests: [], lighting: {} },
+    notes: [],
+    variants: {},
+  };
+  const cx = memoryCx({ state, exec, kill: () => true });
+  const message = `El puerto 3008 lo tiene next-server (v16.0.1) (pid ${holder}, en /Users/u/old).`;
+  for (let i = 0; i < 2; i += 1) {
+    const r = await ensureServer(cx, root, { workspace: "/Users/u/ws/busy/ax-9", restart: true });
+    assert.equal(r.state, "port-busy", JSON.stringify(r));
+  }
+  const { serverError, ...top } = state.repos[root].lastError;
+  assert.deepEqual(top, ROOT_DIVERGED);
+  assert.equal(serverError?.code, "port-busy");
+  assert.equal(serverError.pid, holder);
+  assert.equal(serverError.message, message);
+  assert.deepEqual(state.notes.filter((n) => n.toast).map((n) => n.text), [`busy: ${message}`]);
+});
+
+// ── F1: a restart keeps the processes of the run before ────────────────────
+// An old child that escaped holding 3000 while the restarted server moved to
+// 3001 must still die at the turn-off, so the identities outlive a restart.
+// A dead one can never match again (a reused pid has another start time),
+// and the list is capped (SERVER_PROCS_MAX).
+
+test("F1: a restart typed keeps the server processes the record remembered of the run before", async () => {
+  const w = makeWorld();
+  const app = makeRepo(w, "app", { pkg: DEV, tasks: ["AX-50"] });
+  w.register([{ id: "g1", repos: [app] }]);
+  const ws = app.ws["AX-50"];
+  assert.equal((await w.cli(["toggle", "--workspace", ws])).code, 0);
+  await w.until((s) => s.queue.lighting[`direct/${app.root}`]?.phase === "done", { what: "lit" });
+  const s = w.state();
+  s.repos[app.root].serverProcs = [{ pid: 50990, start: "Sat Nov  8 10:00:00 2026", port: 3000 }];
+  w.writeState(s);
+  const r = await w.cli(["restart", "--repo", app.root]);
+  assert.equal(r.code, 0, r.stderr + r.stdout);
+  assert.equal(scriptLines(w).length, 2);
+  assert.deepEqual(w.state().repos[app.root].serverProcs, [{ pid: 50990, start: "Sat Nov  8 10:00:00 2026", port: 3000 }]);
+});
+
+// ── F3: every turn-off whose server didn't stop is an error ────────────────
+
+test("F3: a turn-off whose server terminal hc can't read restores the root, exits 1 with server-not-stopped, and never says 'root restaurado'", async () => {
+  const w = makeWorld();
+  const app = makeRepo(w, "app", { pkg: DEV, tasks: ["AX-51"] });
+  w.register([{ id: "g1", repos: [app] }]);
+  const ws = app.ws["AX-51"];
+  assert.equal((await w.cli(["toggle", "--workspace", ws])).code, 0);
+  await w.until((s) => s.queue.lighting[`direct/${app.root}`]?.phase === "done", { what: "lit" });
+  w.hcUpdate((s) => {
+    Object.values(s.terminals).find((x) => x.labels?.["spotlight.repo"] === app.root).getFails = "socket closed";
+  });
+
+  const off = await w.cli(["toggle", "--workspace", ws, "--inline"]);
+  assert.equal(off.code, 1, off.stdout + off.stderr);
+  const line = off.stderr.trim();
+  const prefix = "server-not-stopped: El server no paró al apagar Spotlight: ";
+  assert.ok(line.startsWith(prefix) && line.endsWith(" (el root sí se restauró)."), line);
+  assert.doesNotMatch(off.stdout, /root restored/);
+  const message = line.slice("server-not-stopped: ".length);
+  const notes = w.state().notes.filter((n) => n.repo === app.root);
+  assert.ok(notes.some((n) => n.toast && n.text === `app: ${message}`), JSON.stringify(notes));
+  assert.ok(!notes.some((n) => n.text === "Spotlight off — root restaurado"), JSON.stringify(notes));
+  assert.equal(git(app.root, "symbolic-ref", "--short", "HEAD"), "main");
+  assert.equal(w.state().repos[app.root], undefined);
+});
+
+// ── F9: one phrasing of the survivors ──────────────────────────────────────
+
+test("F9: the survivors are phrased once (survivorsPhrase), for the turn-off's error and for Liberar puerto y arrancar's line", async () => {
+  const { survivorsPhrase, survivedError } = await import("../mods/spotlight/cli-work.mjs");
+  assert.equal(survivorsPhrase([900]), "el proceso 900 siguió vivo");
+  assert.equal(survivorsPhrase([900, 901]), "los procesos 900, 901 siguieron vivos");
+  assert.equal(
+    survivedError([900, 901]).message,
+    "El server no paró al apagar Spotlight: los procesos 900, 901 siguieron vivos después de SIGKILL (el root sí se restauró).",
+  );
+  // A refused pid (counted among the survivors) was never signalled: no SIGKILL in its words.
+  assert.equal(
+    survivedError([900, 901], [900, 901]).message,
+    "El server no paró al apagar Spotlight: los procesos 900, 901 no se pudieron señalar (el root sí se restauró).",
+  );
+  assert.equal(
+    survivedError([900, 901, 902], [902]).message,
+    "El server no paró al apagar Spotlight: los procesos 900, 901 siguieron vivos después de SIGKILL y el proceso 902 no se pudo señalar (el root sí se restauró).",
+  );
+  const src = readFileSync(CLI, "utf8");
+  assert.doesNotMatch(src, /siguió vivo|siguieron vivos/, "cli.mjs spells the survivors itself");
+  assert.match(src, /survivorsPhrase/);
 });

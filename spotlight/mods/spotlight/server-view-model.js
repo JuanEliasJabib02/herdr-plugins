@@ -27,6 +27,10 @@
 //             process holding the server's port, then starts the server);
 //             never on orca-holds (D27: Orca's Spotlight has the root, and
 //             the engine refuses it forced too): only its message, in error
+// The error, the actions and the force path follow the error on top: a
+// server error under a root error (lastError.serverError, server-errors.js)
+// changes none of them, so orca-holds never shows Ver log, Reintentar nor
+// Liberar puerto y arrancar (D27).
 // Changing env or variant runs `spotlight env`, which restarts only a server
 // whose command or env changes. The popup's props, D22's shape shared with T8's
 // board row and the toasts' action: { view: "server", repo, workspace }
@@ -36,7 +40,7 @@ import { normRoot, repoSettings } from "./settings.js";
 import { serverEnvsWithCommand, commandTemplate, isSafeVariant, formatVariant, inferredVariantNote } from "./server-plan.js";
 import { pickPort, portUrl } from "./ports.js";
 import { serverDown } from "./server-errors.js";
-import { errorText } from "./badges-model.js";
+import { errorText, oneLine } from "./badges-model.js";
 
 const ENV_LABELS = { local: "Local", dev: "Dev", prod: "Prod" };
 // Never orca-holds nor orca-active: forcing can't take a root from Orca (D27).
@@ -45,7 +49,6 @@ const FORCE_CODES = new Set(["root-diverged", "untracked-collision"]);
 const RUNNING = new Set(["starting", "listening"]);
 
 const baseName = (p) => normRoot(p).split("/").filter(Boolean).pop() ?? p;
-const oneLine = (s) => String(s).replace(/\s+/g, " ").trim();
 
 // The error's two lines (T2): the badge's words, and the engine's message
 // when those words don't already say it.

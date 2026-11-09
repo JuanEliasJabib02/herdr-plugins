@@ -277,11 +277,37 @@ test("a server that didn't come up (D24, D25): the server badge is red and its t
   assert.equal(build(back).value[B1][1].text, ":3000+1");
 });
 
+// F6, F7: a server error under a root error (lastError.serverError). The
+// badges show the error on top: the root's, on the flashlight; the server
+// badge reads the server as stopped, not the error under it.
+test("a server error under a root error: the badges show the root error on top", () => {
+  const ORCA = { code: "orca-holds", message: "Este root lo tiene el Spotlight de Orca: apágalo allá primero.", at: 5 };
+  const busy = { code: "port-busy", port: 3008, pid: null, command: null, cwd: null, message: "El puerto 3008 estaba ocupado al arrancar el server.", at: 4 };
+  const s = baseState();
+  Object.assign(s.repos[BACK], { serverState: "stopped", ports: [], lastError: { ...ORCA, serverError: busy } });
+  const { value } = build(s);
+  for (const at of [B1, BACK]) {
+    assert.equal(value[at][0].tone, "blocked");
+    assert.equal(value[at][0].tooltip, `Spotlight: ${ORCA.message}`);
+    assert.equal(value[at][1].tone, "blocked");
+    assert.notEqual(value[at][1].tooltip, busy.message);
+  }
+  assertContract(value);
+});
+
+// F9: one oneLine, exported for the popup.
+test("oneLine flattens whitespace to single spaces", async () => {
+  const { oneLine } = await import("../mods/spotlight/badges-model.js");
+  assert.equal(oneLine("  a\n\tb   c "), "a b c");
+  assert.equal(oneLine(42), "42");
+});
+
 // R9: the server errors were spelled three times (the CLI, the badges, the
-// popup); one constant now, which the three import.
-test("the server errors (port-busy, server-exited) are one constant, imported by the CLI, the badges and the popup", async () => {
+// popup); one constant now, which the three import. F3: the turn-off's
+// (server-survived, server-not-stopped) are server errors too.
+test("the server errors (port-busy, server-exited and the turn-off's) are one constant, imported by the CLI, the badges and the popup", async () => {
   const { SERVER_ERRORS } = await import("../mods/spotlight/server-errors.js");
-  assert.deepEqual([...SERVER_ERRORS].sort(), ["port-busy", "server-exited"]);
+  assert.deepEqual([...SERVER_ERRORS].sort(), ["port-busy", "server-exited", "server-not-stopped", "server-survived"]);
   for (const file of ["cli-work.mjs", "badges-model.js", "server-view-model.js"]) {
     const src = fs.readFileSync(path.join(MOD_DIR, file), "utf8");
     assert.match(src, /from "\.\/server-errors\.js";/, `${file} imports it`);
