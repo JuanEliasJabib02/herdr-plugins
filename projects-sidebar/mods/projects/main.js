@@ -14,6 +14,10 @@
 //   task-menu         a task lane's right-click menu (Task mode)
 //   task-note         a task's note
 //   delete-task       the Delete task dialog (a task lane's workspaces)
+//   keeper            the status row's 1 px cell: makes Inicio and keeps it
+//                     right after the shown space (workspace-sleep D6, D7)
+//   inicio            Inicio, the only pane of Inicio's space: Orca's
+//                     Landing, shown when the shown space closes or sleeps
 // Copies never reach into each other: they share state through store.js
 // (setShared re-renders every copy) and act through herdr commands.
 
@@ -32,9 +36,17 @@ import TaskMenu from "./task-menu.js";
 import TaskNote from "./task-note.js";
 import DeleteTask from "./delete-task.js";
 import NewWorkspace, { commands as newWorkspaceCommands } from "./new-workspace.js";
+import Inicio from "./inicio.js";
+import Keeper from "./keeper.js";
+
+// A copy without a view is the tree. scripts/check-views.sh rewrites this
+// line in a tmp copy, because herdr-app check draws only the default view.
+const DEFAULT_VIEW = "tree";
 
 const VIEWS = {
   tree: Tree,
+  inicio: Inicio,
+  keeper: Keeper,
   groups: Groups,
   "new-workspace": NewWorkspace,
   "project-menu": ProjectMenu,
@@ -56,7 +68,7 @@ const COMMANDS = { ...treeCommands, ...groupsCommands, ...newWorkspaceCommands }
 export default class Projects extends View {
   init(p, cx) {
     const pr = props() ?? p ?? {};
-    this.name = pr.view ?? "tree";
+    this.name = pr.view ?? DEFAULT_VIEW;
     const V = VIEWS[this.name];
     this.view = V ? new V() : null;
     this.view?.init?.(pr, cx);

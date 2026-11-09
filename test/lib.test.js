@@ -32,7 +32,7 @@ const pathsOf = (r, i) => r.groups[i].projects.map((p) => p.path);
 
 // ── Persisted keys ─────────────────────────────────────────────────────────
 
-test("persisted keys: the four versioned names of D3, plus the registry's backup, and the task notes with theirs (D34)", () => {
+test("persisted keys: the four versioned names of D3, plus the registry's backup, the task notes with theirs (D34), and Inicio's space (workspace-sleep D6)", () => {
   assert.deepEqual(KEYS, {
     registry: "projects.v1",
     registryBackup: "projects.v1.backup",
@@ -41,6 +41,7 @@ test("persisted keys: the four versioned names of D3, plus the registry's backup
     agents: "projects.agents.v1",
     notes: "projects.notes.v1",
     notesBackup: "projects.notes.v1.backup",
+    inicio: "projects.inicio.v1",
   });
 });
 

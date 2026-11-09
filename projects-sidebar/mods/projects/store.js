@@ -15,6 +15,7 @@ import {
   parseRegistry, registryWrites, parseUi, withCollapsed, withTaskCollapsed, parseCache, parseAgents,
   parseNotes, withNote, notesFull, notesWrites,
 } from "./lib.js";
+import { parseInicio, inicioValue } from "./inicio-model.js";
 
 function write(key, value) {
   if (!changed(shared(key), value)) return false;
@@ -118,3 +119,16 @@ export function saveAgents(list) {
 // by badges-model.js; tree.js reads it once per render.
 
 export const badges = () => parseBadges(BADGE_KEYS.map((k) => shared(k)));
+
+// ── projects.inicio.v1: Inicio's space (workspace-sleep D6) ─────────────────
+// Written only by the keeper (keeper.js), from a spawned task: the id it
+// made, or null once that space is no longer Inicio. panes() exposes no
+// props, so Inicio is remembered by id (R1#7); only one a reload left
+// half-made, never stored, is told by its shape (inicio-model.js
+// inicioState).
+
+export const inicio = () => parseInicio(shared(KEYS.inicio));
+
+export function saveInicio(id) {
+  return write(KEYS.inicio, inicioValue(id));
+}

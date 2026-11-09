@@ -57,12 +57,13 @@ test("projects layout: agent-sleep's moon is the status bar's last cell, nothing
   assert.ok(requires.split("\n").includes("agent-sleep"));
 });
 
-test("projects layout: the status bar is a row, workspace-status, the spotlight flask, the claude-accounts footer, keep-awake's cup, then agent-sleep's moon (claude-accounts D10, spotlight D20, keep-awake D10, agent-sleep D14)", () => {
+test("projects layout: the status bar is a row, the projects keeper's 1 px cell, workspace-status, the spotlight flask, the claude-accounts footer, keep-awake's cup, then agent-sleep's moon (workspace-sleep D7, claude-accounts D10, spotlight D20, keep-awake D10, agent-sleep D14)", () => {
   const status = find(read("layouts/projects.json"), "status");
   assert.equal(status.type, "row");
   assert.equal(status.resizable, false);
   assert.deepEqual(status.size, { px: 28 });
   assert.deepEqual(status.children, [
+    { id: "status-projects-keeper", type: "block", size: { px: 1 }, content: { mod: "projects", props: { view: "keeper" } } },
     { id: "status-workspace", type: "block", size: { weight: 1 }, content: { mod: "workspace-status" } },
     { id: "status-spotlight", type: "block", size: { px: 40 }, content: { mod: "spotlight", props: { view: "footer" } } },
     { id: "status-usage", type: "block", size: { weight: 1 }, content: { mod: "claude-accounts", props: { view: "footer" } } },
@@ -76,6 +77,44 @@ test("projects layout: keep-awake's cup sits right before the moon, with no prop
   assert.deepEqual(cells.at(-2), { id: "status-keep-awake", type: "block", size: { px: 64 }, content: { mod: "keep-awake" } });
   const requires = readFileSync(new URL("../projects-sidebar/requires", import.meta.url), "utf8");
   assert.ok(requires.split("\n").includes("keep-awake"));
+});
+
+test("the keeper's cell is the status bar's first, so a sidebar that starts hidden still starts it, and the moon stays last (workspace-sleep D7, R1#10)", () => {
+  const layout = read("layouts/projects.json");
+  const cells = find(layout, "status").children;
+  assert.equal(cells[0].id, "status-projects-keeper");
+  assert.equal(cells.at(-1).id, "status-agent-sleep");
+  const keepers = [];
+  (function walk(node) {
+    if (node?.content?.props?.view === "keeper") keepers.push(node.id);
+    for (const child of node?.children ?? []) walk(child);
+  })(layout);
+  assert.deepEqual(keepers, ["status-projects-keeper"], "one keeper, outside the sidebar");
+});
+
+test("Inicio and the keeper are views of the mod; check-views can draw each (workspace-sleep D6, D7)", () => {
+  const src = (f) => readFileSync(new URL(`../projects-sidebar/mods/projects/${f}`, import.meta.url), "utf8");
+  const main = src("main.js");
+  assert.match(main, /^const DEFAULT_VIEW = "tree";$/m, "scripts/check-views.sh rewrites this line");
+  assert.match(main, /this\.name = pr\.view \?\? DEFAULT_VIEW/);
+  assert.match(main, /^\s+inicio:\s*Inicio,$/m);
+  assert.match(main, /^\s+keeper:\s*Keeper,$/m);
+  const keeper = src("keeper.js");
+  assert.match(keeper, /export default class Keeper/);
+  const init = keeper.slice(keeper.indexOf("  init("), keeper.indexOf("\n  }\n", keeper.indexOf("  init(")));
+  assert.match(init, /if \(!this\.live\) return;/, "inert without a window: herdr-app check never makes a space");
+  assert.match(init, /this\.live = Boolean\(window\(\)\)/);
+  const render = keeper.slice(keeper.indexOf("  render("));
+  assert.doesNotMatch(render, /\brun\(|setShared\(|store\.save/, "never writes from render()");
+  assert.match(keeper, /cx\.spawn\(async \(cx\) =>/, "it acts from a spawned task");
+  assert.match(keeper, /localReady\(machines\(\)\)/, "nothing is made while this computer's layout loads");
+  assert.match(src("store.js"), /export const inicio = \(\) => parseInicio\(shared\(KEYS\.inicio\)\)/);
+  assert.match(src("tree.js"), /^export async function addFromPicker\(/m, "the tree's Add project, exported");
+  const view = src("inicio.js");
+  assert.match(view, /import \{[^}]*\baddFromPicker\b[^}]*\} from "\.\/tree\.js"/, "Inicio's Add project runs in its own copy (R1#10)");
+  assert.match(view, /openNewWorkspace\(null\)/, "Create workspace: the dialog on the group's first project");
+  assert.match(view, /image\("frame\/welcome\/herdr\.png"\)/, "the brand icon workspace-chrome draws");
+  assert.match(view, /keys\(\)/, "its shortcut rows come from keys()");
 });
 
 test("the workspace menu is a view of the mod (D20)", () => {

@@ -513,8 +513,9 @@ async function addFolder(folder) {
 }
 
 // The header's "+" and `projects.add`: the system's folder picker. Needs no
-// open space (S6).
-async function addFromPicker() {
+// open space (S6). Inicio's Add project runs it in its own copy
+// (workspace-sleep D6, R1#10).
+export async function addFromPicker() {
   const folder = await pickFolder({ prompt: "Add project" });
   if (folder) await addFolder(folder);
 }
