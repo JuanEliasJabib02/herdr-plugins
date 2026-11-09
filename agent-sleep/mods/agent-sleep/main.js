@@ -18,7 +18,7 @@
 
 import { View, div } from "gpui-kit";
 import {
-  props, hc, exec, home, appHome, readTextFile, writeTextFile, settings, openOverlay, closeOverlay,
+  props, hc, exec, run, home, appHome, readTextFile, writeTextFile, settings, openOverlay, closeOverlay,
   terminals, spaces, panes, focused, notify, shared, setShared, theme, nextCommand, window as appWindow,
 } from "herdr";
 import { Coordinator, MOD, VIEW_KEY, REQUEST_KEY, isLoopCopy, startLoop, windowLabel } from "./coordinator.js";
@@ -36,6 +36,9 @@ function herdrDeps() {
     copyId: `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
     hc: (args) => hc(args),
     exec: (cmd, args, options) => exec(cmd, args, options),
+    // Herdr's commands, for a workspace's sleep (tab.settle, tab.unsettle).
+    // Not `run`: Coordinator.run wraps exec.
+    herdrRun: (name, args) => run(name, args),
     files: {
       read: (path) => readTextFile(path),
       write: (path, text, expected) => writeTextFile(path, text, expected),
