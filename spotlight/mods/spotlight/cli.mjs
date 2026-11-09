@@ -5,13 +5,22 @@
 //                                        holding, 1 still waiting, 2 usage)
 //   off [--terminal t]                   give the turn back, nothing else
 //   toggle --workspace p [--force]       a human's on/off, outside the queue
+//   toggle --task KEY --group id         the whole task's, from its lane (D31)
 //   status [--json]                      read-only, no lock, no reap
-//   sync --repo r [--force] [--detach]   restart --repo r
+//   sync --repo r [--force] [--detach]   restart --repo r [--free-port]
 //   logs [--repo r] [--lines N] [--path] peek --workspace p | --repo r
 //   env --workspace p [--env e] [--variant v]   reap
+//   env --task KEY --group id --env e    the task's env, from its lane's pill (D32)
 //   continue [--terminal t] [--account id]  Continuar on a paused or idle agent (T11)
 //   internal: light --task k [--force], classify --terminal t,
-//             continue --inline [--auto]
+//             continue --inline [--auto], env --task k --group id --inline,
+//             sync --repo r --auto (auto-sync's and the reap's: an
+//             automatic sync, which leaves an env that couldn't run, N4)
+//
+// `restart --free-port` is the server popup's "Liberar puerto y arrancar"
+// (D24): it stops the process the recorded port-busy error names, then
+// starts the server. Only that click ever stops a process Spotlight didn't
+// start, so USAGE and the agents' skill leave it out.
 //
 // The terminal is --terminal or $HC_TERMINAL_ID. Long work never runs in a
 // caller Herdr can kill (D18): toggle, reap, `sync --detach`, `continue` and
@@ -19,15 +28,16 @@
 
 import fs from "node:fs";
 import path from "node:path";
-import { resolveTask } from "./task.js";
+import { resolveTask, taskKeyFrom, hasGroup } from "./task.js";
 import { request, release, positionOf } from "./queue.js";
 import { readRefs, assertDeactivatable, toSpotlightError } from "./sync.js";
-import { emptyRepo, rememberVariant } from "./store.js";
+import { rememberVariant } from "./store.js";
+import { envKeyOf } from "./task-env.js";
 import { pidAlive, LockError } from "./locks.js";
 import { normRoot } from "./settings.js";
 import { isSafeVariant, isServerEnv, SERVER_ENVS } from "./server-plan.js";
-import { serverTerminalName, serverLogs, peekServer } from "./server.js";
-import { logPathFor, formatClock } from "./server-log.js";
+import { serverTerminalName, serverLogs, showServer } from "./server.js";
+import { logPathFor, logDir, repoSlug, formatClock } from "./server-log.js";
 import {
   CLI_PATH, makeContext, terminalFacts, hcGet, repoRootOf, checkoutOf, branchOf, taskKeyOfWorkspace, registeredRoots,
   folderTask,
@@ -38,9 +48,11 @@ import {
 } from "./cli-format.mjs";
 import {
   markGranted, spawnLights, dropStaleMarkers, lightTask, syncRepo, deactivateRepo, ensureServer, waitForTurnServers,
-  recordServers, reap, rescuedNotes,
+  recordServers, reap, rescuedNotes, errorNote, survivorsPhrase, writeEnv, applyEnv,
 } from "./cli-work.mjs";
+import { setRootError } from "./server-errors.js";
 import { settleResumes, autoResume, continueTask, classifyTerminal } from "./cli-resume.mjs";
+import { toggleTask } from "./cli-task.mjs";
 
 // Orca's: under an agent shell's 2-minute command cap; `on` is rerun to keep waiting.
 export const DEFAULT_ON_TIMEOUT_MS = 100_000;
@@ -60,9 +72,12 @@ Agents
 
 People and the mod
   spotlight toggle --workspace p [--force]       turn a workspace's Spotlight on or off, outside the queue
+  spotlight toggle --task KEY --group id         turn a whole task's Spotlight on or off in that space
   spotlight sync --repo r [--force] [--detach]   bring the root in step with its holder
-  spotlight peek --workspace p | --repo r        look at the server's terminal
+  spotlight peek --workspace p | --repo r        show the server's Spotlight tab (or peek at its terminal)
   spotlight env --workspace p [--env local|dev|prod] [--variant v]
+  spotlight env --task KEY --group id --env local|dev|prod
+                                                 the env of a whole task in that space (kept after the turn-off)
   spotlight reap                                 turn ends, gone servers, idle times, grants
   spotlight continue [--terminal t] [--account id]
                                                  Continuar: resume a paused agent on the account with
@@ -83,9 +98,11 @@ const FLAGS = {
   env: "string",
   variant: "string",
   task: "string",
+  group: "string",
   account: "string",
   inline: "bool",
   auto: "bool",
+  "free-port": "bool",
   help: "bool",
 };
 
@@ -128,12 +145,32 @@ const usage = (text) => {
 const terminalOf = (opts) => (opts.terminal || process.env.HC_TERMINAL_ID || "").trim() || null;
 
 // A repo given as a path (a root or any checkout of it) or as its name
-// (projects.v1's, or the folder's, among the repos Spotlight knows).
+// (projects.v1's, or the folder's, among the repos Spotlight knows: state,
+// projects.v1 and settings, so a repo turned off and not in a space still
+// answers, D28).
 async function resolveRepo(cx, value) {
   if (!value) return null;
   if (value.includes("/")) return repoRootOf(path.resolve(value));
-  const known = [...new Set([...Object.keys(cx.store.readState().repos), ...registeredRoots(cx.shared)])];
+  const configured = Object.keys(cx.store.readSettings({ keepBackup: false }).settings.repos ?? {});
+  const known = [...new Set([...Object.keys(cx.store.readState().repos), ...registeredRoots(cx.shared), ...configured])];
   return known.find((root) => cx.nameOf(root) === value) ?? known.find((root) => path.basename(root) === value) ?? null;
+}
+
+// D28: a name Spotlight no longer knows still finds its server's log, when
+// exactly one log file carries that folder name (<slug>-<6 hex>.log; the
+// slug of "/<name>" gives the same folder part repoSlug builds). Null when
+// none or several match.
+function logFileByName(value) {
+  if (!value || value.includes("/")) return null;
+  const base = repoSlug(`/${value}`).slice(0, -7);
+  let names;
+  try {
+    names = fs.readdirSync(logDir());
+  } catch {
+    return null;
+  }
+  const matches = names.filter((n) => n.startsWith(`${base}-`) && /^-[0-9a-f]{6}\.log$/.test(n.slice(base.length)));
+  return matches.length === 1 ? path.join(logDir(), matches[0]) : null;
 }
 
 // The repo root of --repo, else of the folder the CLI runs in.
@@ -291,6 +328,7 @@ async function verbOff(cx, opts) {
 // ── toggle ─────────────────────────────────────────────────────────────────
 
 async function verbToggle(cx, opts) {
+  if (opts.task !== undefined || opts.group !== undefined) return verbToggleTask(cx, opts);
   if (!opts.workspace) return usage("spotlight toggle: --workspace <path> is required.");
   const dir = path.resolve(opts.workspace);
   const workspace = await checkoutOf(dir);
@@ -308,7 +346,11 @@ async function verbToggle(cx, opts) {
     if (opts.inline) {
       const r = await deactivateRepo(cx, root, { force });
       if (!r.ok) {
+        // A refusal (the root untouched), or server-survived /
+        // server-not-stopped (the root was restored, and what the turn-off
+        // did with files in its way still applies).
         err(`${r.code}: ${r.message}`);
+        for (const line of rescuedNotes(r.rescued, r.discardedRepos)) out(line);
         return 1;
       }
       out(`Spotlight off in ${name}: root restored.${r.warning ? ` ${r.warning.message}` : ""}`);
@@ -324,11 +366,17 @@ async function verbToggle(cx, opts) {
       const hint = forceable
         ? ` Para apagarlo igual: \`spotlight toggle --workspace ${workspace} --force\` (Apagar igual).`
         : "";
-      // The popup offers Apagar igual from the record's error.
-      if (forceable) {
+      // The popup offers Apagar igual from the record's error; orca-holds is
+      // recorded too, so the popup says why at once instead of after a reap
+      // (D27), over a server error the record has, which still applies (R8,
+      // F6). A refused click on orca-holds also answers with a toast (T1),
+      // with no popup action: no force path takes a root from Orca, as with
+      // orca-active.
+      if (forceable || error.code === "orca-holds") {
         const now = cx.now();
         await cx.store.updateState((s) => {
-          if (s.repos[root]) s.repos[root].lastError = { ...error, at: now };
+          if (s.repos[root]) setRootError(s.repos[root], { ...error, at: now });
+          if (error.code === "orca-holds") errorNote(s, { root, name, workspace, error, now });
         });
       }
       err(`${error.code}: ${error.message}${hint}`);
@@ -363,6 +411,33 @@ async function verbToggle(cx, opts) {
   return 0;
 }
 
+// `toggle --task <KEY> --group <id>` (D31): the lane's flashlight. Detached
+// unless --inline (D18): a batch lights or turns off a repo after another,
+// and a click's exec dies at 30 s. The detached call checks only what needs
+// no git (the key, the group), so it answers at once.
+async function verbToggleTask(cx, opts) {
+  if (!opts.task || !opts.group) return usage("spotlight toggle: --task <KEY> and --group <id> go together (the lane and its space).");
+  if (opts.workspace || opts.force) return usage("spotlight toggle: --task takes no --workspace or --force.");
+  const task = taskKeyFrom(opts.task);
+  if (!task) return usage(`spotlight toggle: "${opts.task}" can't name a task.`);
+  if (!hasGroup(cx.shared["projects.v1"], opts.group)) return usage(`spotlight toggle: no group "${opts.group}" in projects-sidebar's spaces.`);
+  if (!opts.inline) {
+    cx.spawn(["toggle", "--task", task, "--group", opts.group, "--inline"]);
+    out(`Toggling Spotlight for ${task} in ${opts.group}. \`spotlight status\` shows when it is done.`);
+    return 0;
+  }
+  const r = await toggleTask(cx, { group: opts.group, task, terminals: await terminalFacts() });
+  if (r.code === "no-group" || r.code === "no-task") return usage(`spotlight toggle: ${r.message}`);
+  if (r.code) {
+    err(`${r.code}: ${r.message}`);
+    return 1;
+  }
+  for (const [root, message] of Object.entries(r.errors)) err(`${cx.nameOf(root)}: ${message}`);
+  if (r.skipped.length > 0) out(`Not included: ${r.skipped.join(", ")}.`);
+  if (r.summary) out(r.summary);
+  return r.ok ? 0 : 1;
+}
+
 // ── status ─────────────────────────────────────────────────────────────────
 
 // Read-only and lock-free (the hook kills it at 10 s): no reap, no grant,
@@ -377,15 +452,19 @@ async function verbStatus(cx, opts) {
 
 // ── sync, restart, logs, peek, env ─────────────────────────────────────────
 
+// `spotlight sync`. Typed by hand, or Forzar sync, it is a new ask: it
+// tries an env that couldn't run again, as Reiniciar (N4); `--auto` marks
+// auto-sync's (watch-filter.js syncArgv, carried to its detached copy) and
+// the reap's, which leave it until settings are saved (M1).
 async function verbSync(cx, opts) {
   const root = await resolveRepo(cx, opts.repo);
   if (!root) return usage(`spotlight sync: --repo <path or name> is required${opts.repo ? ` (no repo "${opts.repo}")` : ""}.`);
   if (opts.detach) {
-    cx.spawn(["sync", "--repo", root, ...(opts.force ? ["--force"] : [])]);
+    cx.spawn(["sync", "--repo", root, ...(opts.force ? ["--force"] : []), ...(opts.auto ? ["--auto"] : [])]);
     out(`Syncing ${cx.nameOf(root)}.`);
     return 0;
   }
-  const r = await syncRepo(cx, root, { force: Boolean(opts.force) });
+  const r = await syncRepo(cx, root, { force: Boolean(opts.force), asked: !opts.auto });
   if (!r.ok) {
     err(`${r.code}: ${r.message}`);
     return 1;
@@ -404,14 +483,24 @@ async function verbRestart(cx, opts) {
   const r = await cx.store.withRepoLock(root, async () => {
     const record = cx.store.readState().repos[root];
     if (!record?.holder) return null;
-    return ensureServer(cx, root, { workspace: record.holder, branch: await branchOf(record.holder), keepVariant: true, restart: true });
+    return ensureServer(cx, root, {
+      workspace: record.holder, branch: await branchOf(record.holder), keepVariant: true, restart: true, freePort: Boolean(opts["free-port"]),
+    });
   });
   if (!r) {
     err(`not-active: Spotlight is not on in ${cx.nameOf(root)}.`);
     return 1;
   }
+  if (r.state === "port-busy") {
+    err(portBusyLine(r));
+    return 1;
+  }
   if (r.state === "started") out(`Restarted ${cx.nameOf(root)}'s server: ${r.plan.command}`);
-  else if (r.state === "needs-variant") out(`${cx.nameOf(root)}: needs a variant: pick it in the server popup (spotlight env --variant <v>).`);
+  else if (r.state === "still-running") {
+    // The old server ignored the Ctrl-C, or never got it: no start failed (M3).
+    err(`${cx.nameOf(root)}: the server did not restart: the old one still runs (${r.result?.reason}).`);
+    return 1;
+  } else if (r.state === "needs-variant") out(`${cx.nameOf(root)}: needs a variant: pick it in the server popup (spotlight env --variant <v>).`);
   else if (r.state === "none") out(`${cx.nameOf(root)} has no server command for this env.`);
   else {
     err(`${cx.nameOf(root)}: the server did not restart (${r.result?.reason ?? r.state}).`);
@@ -420,25 +509,40 @@ async function verbRestart(cx, opts) {
   return 0;
 }
 
+// A start refused over a busy port (D24), and why a --free-port didn't free
+// it: the holder's tree holds Herdr or the server's shell (ports.js
+// stopProcessTree "protected"), or some of it lived through SIGKILL
+// ("survived": stuck in the kernel, or not ours to signal).
+export function portBusyLine(r) {
+  let kept = "";
+  if (r.freed?.ok === false && r.freed.reason === "survived") {
+    const who = survivorsPhrase(r.freed.survivors);
+    kept = ` ${who[0].toUpperCase()}${who.slice(1)} después de SIGKILL: Spotlight no pudo liberar el puerto.`;
+  } else if (r.freed?.ok === false) {
+    kept = " Spotlight no lo paró: de ese proceso dependen Herdr o el server.";
+  }
+  return `${r.error.code}: ${r.error.message}${kept}`;
+}
+
 async function verbLogs(cx, opts) {
   const root = await repoOrCwd(cx, opts);
-  if (!root) return usage("spotlight logs: --repo <path or name>, or run it inside the repo.");
   const state = cx.store.readState();
-  const record = state.repos[root] ?? null;
-  const logPath = record?.logPath ?? logPathFor(root);
+  const record = root ? (state.repos[root] ?? null) : null;
+  const logPath = root ? (record?.logPath ?? logPathFor(root)) : logFileByName(opts.repo);
+  if (!logPath) return usage("spotlight logs: --repo <path or name>, or run it inside the repo.");
   if (opts.path) {
     out(logPath);
     return 0;
   }
   // D11: the CLI's notes first, then the server's own output.
-  const notes = state.notes.filter((n) => n.repo === root).slice(-NOTES_SHOWN);
+  const notes = root ? state.notes.filter((n) => n.repo === root).slice(-NOTES_SHOWN) : [];
   if (notes.length > 0) {
     out("Spotlight notes:");
     for (const n of notes) out(`  ${formatClock(n.at)}  ${n.text}`);
     out("");
   }
   const r = await serverLogs({ logPath, terminal: record?.serverTerminal ?? null, lines: opts.lines }, cx.serverDeps);
-  if (r.source === null) out(`No server log yet for ${cx.nameOf(root)} (${logPath}).`);
+  if (r.source === null) out(`No server log yet for ${root ? cx.nameOf(root) : opts.repo} (${logPath}).`);
   else process.stdout.write(r.text);
   return 0;
 }
@@ -448,11 +552,13 @@ async function workspaceRoot(opts) {
   return workspace ? { workspace, root: await repoRootOf(workspace) } : { workspace: null, root: null };
 }
 
+// "Ver server" (D38): shows the server's Spotlight tab (its space, then the
+// tab); Herdr's peek for a server terminal in no tab.
 async function verbPeek(cx, opts) {
   const root = opts.workspace ? (await workspaceRoot(opts)).root : await repoOrCwd(cx, opts);
   if (!root) return usage("spotlight peek: --workspace <path> or --repo <path or name>.");
   const terminal = cx.store.readState().repos[root]?.serverTerminal ?? serverTerminalName(root);
-  const r = await peekServer(terminal, cx.serverDeps);
+  const r = await showServer(terminal, cx.serverDeps);
   if (!r.ok) {
     err(`spotlight peek: ${r.message}`);
     return 1;
@@ -460,7 +566,19 @@ async function verbPeek(cx, opts) {
   return 0;
 }
 
+// `env --workspace p` (the server popup, D32): the pick is stored under the
+// workspace's key (its task's `<lane>/<KEY>`, else ws:<path>), for every repo
+// of that task there, and survives the turn-off. It reaches a running server
+// only when this repo's holder has that key (record.envKey: the workspace
+// holds it, or another workspace of its task does); a workspace that doesn't
+// hold the root just stores it. A variant is remembered for the workspace's
+// task and applies to it only while it holds the root: picked for a
+// workspace another one took the root from (a popup or prompt answered
+// late), it starts nothing and exits 1, "ya no tiene el root" (D36, Orca's
+// chooseSpotlightVariant). On a root nobody holds it is only remembered.
 async function verbEnv(cx, opts) {
+  if (opts.task !== undefined || opts.group !== undefined) return verbEnvTask(cx, opts);
+  if (opts.inline) return usage("spotlight env: --inline goes with --task and --group.");
   if (opts.variant !== undefined && !isSafeVariant(opts.variant)) {
     return usage(`spotlight env: invalid variant "${opts.variant}": only letters, digits, "_" and "-" (at most 64).`);
   }
@@ -471,32 +589,97 @@ async function verbEnv(cx, opts) {
   const { workspace, root } = await workspaceRoot(opts);
   if (!root) return usage(`spotlight env: ${opts.workspace} is not in a git repository.`);
   const taskKey = await taskKeyOfWorkspace(workspace, root, cx.shared);
+  const key = envKeyOf(taskKey, workspace);
   const r = await cx.store.withRepoLock(root, async () => {
-    await cx.store.updateState((s) => {
-      if (opts.variant && taskKey) rememberVariant(s, `${taskKey}::${normRoot(root)}`, opts.variant);
-      // J-002: the popup's pick overrides settings' env until `toggle` off
-      // drops the record; serverEnv stays what runs.
-      if (opts.env) s.repos[root] = { ...emptyRepo(), ...(s.repos[root] ?? {}), envOverride: opts.env };
-    });
+    if (opts.variant && taskKey) {
+      await cx.store.updateState((s) => {
+        rememberVariant(s, `${taskKey}::${normRoot(root)}`, opts.variant);
+      });
+    }
+    if (opts.env) await writeEnv(cx, key, opts.env);
     const record = cx.store.readState().repos[root];
     if (!record?.holder) return { state: "stored" };
-    // Changing env or variant restarts only a server whose command or env changes (D22).
+    if (opts.variant !== undefined && record.holder !== workspace) return { state: "lost-root", holder: record.holder };
+    // The pick is this holder's only when it holds W's key (D32).
+    const envHere = opts.env !== undefined && record.envKey === key;
+    if (!envHere && opts.variant === undefined) return { state: "stored" };
+    // An env restarts only a server whose command changes; a variant, one
+    // whose command or env changes (D22).
     return ensureServer(cx, root, {
       workspace: record.holder,
       branch: await branchOf(record.holder),
       taskKey: record.holder === workspace ? taskKey : await taskKeyOfWorkspace(record.holder, root, cx.shared),
-      envName: opts.env,
+      envName: envHere ? opts.env : undefined,
       chosenVariant: opts.variant,
       keepVariant: opts.variant === undefined,
     });
   });
+  if (r.state === "lost-root") {
+    const env = opts.env ? ` (el env ${opts.env} sí quedó guardado)` : "";
+    err(
+      `spotlight env: ${path.basename(workspace)} ya no tiene el root de ${cx.nameOf(root)} (lo tiene ${path.basename(r.holder)}): ` +
+        `la variante ${opts.variant} no arrancó nada${env}.`,
+    );
+    return 1;
+  }
   const what = [opts.env && `env ${opts.env}`, opts.variant && `variant ${opts.variant}`].filter(Boolean).join(", ");
+  return reportEnv(cx, root, what, r);
+}
+
+// An env or variant pick's line for one repo (ensureServer's answer, or
+// { state: "stored" }): 0, or 1 when its server didn't start.
+function reportEnv(cx, root, what, r) {
   if (r.state === "started") out(`${cx.nameOf(root)}: ${what}; the server restarted: ${r.plan.command}`);
-  else if (r.state === "failed") {
+  else if (r.state === "port-busy") {
+    err(`${cx.nameOf(root)}: ${what} saved; the server did not start. ${portBusyLine(r)}`);
+    return 1;
+  } else if (r.state === "still-running") {
+    // The old server ignored the Ctrl-C, or never got it, and still runs in
+    // the env of before: no start failed (M3).
+    err(`${cx.nameOf(root)}: ${what} saved; the server did not restart: the old one still runs (${r.result?.reason}).`);
+    return 1;
+  } else if (r.state === "failed") {
     err(`${cx.nameOf(root)}: ${what} saved; the server did not start (${r.result?.reason}).`);
     return 1;
   } else out(`${cx.nameOf(root)}: ${what} saved.`);
   return 0;
+}
+
+// `env --task <KEY> --group <id> --env <e>` (D32): the lane's env pill. The
+// pick is stored under `<id>/<KEY>` before it answers (writeEnv); the lit
+// repos the task holds there run it after, in a detached `--inline` copy
+// (D18), which restarts only the servers whose command changes (applyEnv).
+// That copy gets no --env: it runs what is stored when it gets there, so
+// two picks in a row end in the last one. The detached call checks only
+// what needs no git, so it answers at once.
+async function verbEnvTask(cx, opts) {
+  if (!opts.task || !opts.group) return usage("spotlight env: --task <KEY> and --group <id> go together (the lane and its space).");
+  if (opts.workspace !== undefined || opts.variant !== undefined) return usage("spotlight env: --task takes no --workspace or --variant.");
+  if (opts.env !== undefined && !isServerEnv(opts.env)) return usage(`spotlight env: --env is one of ${SERVER_ENVS.join(", ")}.`);
+  if (opts.env === undefined && !opts.inline) return usage("spotlight env: --task needs --env <env>.");
+  const task = taskKeyFrom(opts.task);
+  if (!task) return usage(`spotlight env: "${opts.task}" can't name a task.`);
+  if (!hasGroup(cx.shared["projects.v1"], opts.group)) return usage(`spotlight env: no group "${opts.group}" in projects-sidebar's spaces.`);
+  const key = `${opts.group}/${task}`;
+  if (opts.env !== undefined) await writeEnv(cx, key, opts.env);
+  if (!opts.inline) {
+    cx.spawn(["env", "--task", task, "--group", opts.group, "--inline"]);
+    out(`Env ${opts.env} saved for ${task} in ${opts.group}; its lit repos switch in the background. \`spotlight status\` shows when it is done.`);
+    return 0;
+  }
+  const results = await applyEnv(cx, key);
+  if (Object.keys(results).length === 0) {
+    out(`${task}: env ${cx.store.readState().envs?.[key] ?? "of each repo's settings"} saved; none of its repos is lit.`);
+    return 0;
+  }
+  let code = 0;
+  for (const [root, r] of Object.entries(results)) {
+    if (r.error) {
+      err(`${cx.nameOf(root)}: ${r.error.code}: ${r.error.message}`);
+      code = 1;
+    } else if (reportEnv(cx, root, `env ${r.env}`, r.server) !== 0) code = 1;
+  }
+  return code;
 }
 
 // ── reap, light, continue, classify ────────────────────────────────────────

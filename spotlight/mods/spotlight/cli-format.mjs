@@ -36,13 +36,15 @@ export function serverWord(s) {
 }
 
 // `spotlight on` holding (or with the queue off). `servers`: one per repo of
-// the turn ({ name, url, logPath, lit, listening, server, error, syncError,
-// stillLit: its repo lock stayed held past the deadline, no sync, J-001 }).
+// the turn ({ name, url, logPath, lit, listening, server, error (on a lit
+// repo: why its server can't start, D24), syncError, stillLit: its repo
+// lock stayed held past the deadline, no sync, J-001 }).
 export function formatOn({ label, servers = [], skipped = [], ready, note }) {
   const lines = note ? [`Your test turn for ${label} is on.`, note] : [`Spotlight on for ${label}.`];
   const width = Math.max(0, ...servers.map((s) => s.name.length));
   for (const s of servers) {
     lines.push(`  ${s.name.padEnd(width)}  ${s.url ?? "-"}  ${serverWord(s)}`);
+    if (s.lit && s.error) lines.push(`  ${" ".repeat(width)}  ${s.error}`);
     if (s.syncError) lines.push(`  ${" ".repeat(width)}  sync failed: ${s.syncError}`);
     if (s.stillLit) lines.push(`  ${" ".repeat(width)}  the root is still being lit: run \`${REQUEST_ON}\` again to sync it`);
   }

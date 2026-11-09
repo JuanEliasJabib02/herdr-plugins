@@ -25,7 +25,7 @@ import {
   variantKey, rememberedVariant, rememberVariant,
   planServerCommand, planServer, inferredVariantNote,
   lockfileInstalls, missingInstalls, installsFor, chainInstall,
-  nodeIo,
+  nodeIo, expectedPort, portFromCommand,
 } from "../mods/spotlight/server-plan.js";
 
 const io = nodeIo(fs);
@@ -972,4 +972,76 @@ test("chainInstall: installs first, each only if the previous one succeeded", ()
   assert.equal(chainInstall(COMMAND, ["uv", "pnpm"]), BOTH_CHAIN);
   assert.equal(chainInstall(COMMAND, []), COMMAND);
   assert.equal(chainInstall(COMMAND, ["bogus"]), COMMAND);
+});
+
+// ── The port a start will take (T13, D23) ──────────────────────────────────
+// Read before typing the server line, so a port someone else holds is caught
+// first (D24). speaking-english's live incident: `pnpm dev` runs
+// `npm-run-all --parallel dev:next dev:convex`, and dev:next is
+// `next dev -p 3008`.
+
+const SPEAKING_ENGLISH = {
+  dev: "npm-run-all --parallel dev:next dev:convex",
+  "dev:next": "next dev -p 3008",
+  "dev:convex": "convex dev",
+};
+
+test("expectedPort: settings.port wins over what package.json says", async () => {
+  const root = tempDir("sl-port-settings-");
+  writePackageJson(root, { scripts: SPEAKING_ENGLISH });
+  assert.equal(await expectedPort({ root, command: "pnpm dev --port 4100", settings: { port: 4100 }, io }), 4100);
+  // An out-of-range port in settings is no port: package.json decides.
+  assert.equal(await expectedPort({ root, command: "pnpm dev", settings: { port: 70000 }, io }), 3008);
+});
+
+test("expectedPort: next dev -p 3008 behind pnpm dev → npm-run-all --parallel dev:next dev:convex", async () => {
+  const root = tempDir("sl-port-se-");
+  writePackageJson(root, { scripts: SPEAKING_ENGLISH });
+  assert.equal(await expectedPort({ root, command: "pnpm dev", settings: {}, io }), 3008);
+  // npm-run-all's own -p (--parallel) is never read as a port.
+  assert.equal(portFromCommand("pnpm dev", { ...SPEAKING_ENGLISH, dev: "npm-run-all -p dev:convex dev:next" }), 3008);
+  // The lockfile install chained first changes nothing.
+  assert.equal(portFromCommand("pnpm install --frozen-lockfile && pnpm dev", SPEAKING_ENGLISH), 3008);
+});
+
+test("expectedPort: --port=5173, --port N and PORT=4000 next dev", () => {
+  assert.equal(portFromCommand("pnpm dev", { dev: "vite --port=5173" }), 5173);
+  assert.equal(portFromCommand("npm run dev --", { dev: "astro dev --port 4321" }), 4321);
+  assert.equal(portFromCommand("yarn dev", { dev: "PORT=4000 next dev" }), 4000);
+  assert.equal(portFromCommand("bun run dev", { dev: "cross-env PORT=4000 next dev" }), 4000);
+  // A flag on the server's line beats the PORT it inherits.
+  assert.equal(portFromCommand("pnpm dev", { dev: "PORT=4000 next dev -p 3000" }), 3000);
+  // A command typed in settings, straight to the server.
+  assert.equal(portFromCommand("npx next dev -p 3001", {}), 3001);
+  // Extra args reach the script, as npm, pnpm and yarn pass them.
+  assert.equal(portFromCommand("pnpm dev --port 4000", { dev: "vite" }), 4000);
+  assert.equal(portFromCommand("npm run dev -- -p 4001", { dev: "next dev" }), 4001);
+  for (const server of ["nuxt dev", "remix vite:dev", "react-router dev", "webpack-dev-server", "serve"]) {
+    assert.equal(portFromCommand("pnpm dev", { dev: `${server} --port 8123` }), 8123, server);
+  }
+});
+
+test("expectedPort: run-p / run-s globs and concurrently's commands are followed", () => {
+  const scripts = { "dev:api": "node api.js -p 9", "dev:web": "vite --port 5174" };
+  assert.equal(portFromCommand("pnpm dev", { ...scripts, dev: "run-p dev:*" }), 5174);
+  assert.equal(portFromCommand("pnpm dev", { ...scripts, dev: "run-s dev:api dev:web" }), 5174);
+  assert.equal(portFromCommand("pnpm dev", { ...scripts, dev: 'concurrently -n api,web "convex dev" "next dev -p 3005"' }), 3005);
+  assert.equal(portFromCommand("pnpm dev", { ...scripts, dev: 'concurrently -p "[{name}]" "npm:dev:*"' }), 5174);
+});
+
+test("expectedPort: unknown is null — no package.json, no port flag, a non-server line's -p, past 3 levels, a cycle", async () => {
+  const empty = tempDir("sl-port-none-");
+  assert.equal(await expectedPort({ root: empty, command: "pnpm dev", settings: {}, io }), null);
+  assert.equal(await expectedPort({ root: empty, command: null, settings: {}, io }), null);
+  assert.equal(portFromCommand("pnpm dev", { dev: "next dev" }), null);
+  assert.equal(portFromCommand("pnpm dev", { dev: "node server.js -p 3000" }), null);
+  assert.equal(portFromCommand("pnpm dev", { dev: "next dev -p notaport" }), null);
+  assert.equal(portFromCommand("pnpm dev", { dev: "next dev -p 99999" }), null);
+  assert.equal(portFromCommand("pnpm missing", { dev: "next dev -p 3000" }), null);
+  // Three script levels are read; a fourth is not.
+  const deep = { dev: "pnpm a", a: "pnpm b", b: "pnpm c", c: "next dev -p 3000" };
+  assert.equal(portFromCommand("pnpm a", deep), 3000);
+  assert.equal(portFromCommand("pnpm dev", deep), null);
+  assert.equal(portFromCommand("pnpm dev", { dev: "pnpm loop", loop: "pnpm dev" }), null);
+  assert.equal(portFromCommand("pnpm dev", null), null);
 });

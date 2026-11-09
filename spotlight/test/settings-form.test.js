@@ -12,8 +12,18 @@ import {
   enabledChoice,
   isHarnessRoot,
   serializeSettings,
+  scriptSuggestions,
+  commandPlaceholder,
+  NO_START,
+  planSave,
+  isLit,
+  turnOffArgv,
+  TURN_OFF_TIMEOUT_MS,
+  turnOffOutcome,
+  withEnabledOff,
 } from "../mods/spotlight/settings-form.js";
-import { parseSettings, defaultSettings, perSpaceLimit } from "../mods/spotlight/settings.js";
+import { parseSettings, defaultSettings, perSpaceLimit, repoSettings } from "../mods/spotlight/settings.js";
+import { detectServerScripts } from "../mods/spotlight/server-plan.js";
 
 const REG = {
   groups: [
@@ -221,4 +231,170 @@ test("~/.claude is the harness root, with or without a trailing slash", () => {
   assert.equal(isHarnessRoot("/Users/j/.claude", "/Users/j"), true);
   assert.equal(isHarnessRoot("/Users/j/.claude/", "/Users/j/"), true);
   assert.equal(isHarnessRoot("/Users/j/.claude-global", "/Users/j"), false);
+});
+
+// ── T26 (D37): script suggestions, placeholders, and Apagado on a lit repo ──
+
+// A repo folder for detectServerScripts: files by path, folders by path.
+function fakeIo(files, dirs = {}) {
+  return {
+    async readText(p) {
+      return p in files ? files[p] : null;
+    },
+    async kind(p) {
+      if (p in files) return "file";
+      return p in dirs ? "dir" : "none";
+    },
+    async listDirs(p) {
+      return dirs[p] ?? null;
+    },
+  };
+}
+
+test("the ▾ suggestions are detection's scriptCommands", async () => {
+  const pkg = { scripts: { dev: "next dev", "dev:web": "next dev -p 3001", start: "next start", prod: "x", build: "next build", lint: "eslint" } };
+  const detection = await detectServerScripts("/w/app", fakeIo({
+    "/w/app/package.json": JSON.stringify(pkg),
+    "/w/app/pnpm-lock.yaml": "",
+  }));
+  assert.deepEqual(detection.scriptCommands, ["pnpm dev", "pnpm dev:web", "pnpm prod", "pnpm start"]);
+  assert.deepEqual(scriptSuggestions(detection), detection.scriptCommands);
+  // Nothing detected (no package.json, detection not run): no suggestions.
+  assert.deepEqual(scriptSuggestions({ detected: {}, scriptCommands: [] }), []);
+  assert.deepEqual(scriptSuggestions(null), []);
+});
+
+test("a field's placeholder is the command that would run with it empty", () => {
+  const detection = { detected: { dev: "pnpm dev", prod: "pnpm prod" }, scriptCommands: [] };
+  const none = repoSettings(defaultSettings(), "/w/app");
+  // Detected, for the field's own env.
+  assert.equal(commandPlaceholder(none, detection, "dev"), "pnpm dev");
+  assert.equal(commandPlaceholder(none, detection, "prod"), "pnpm prod");
+  // Local falls back to Dev.
+  assert.equal(commandPlaceholder(none, detection, "local"), "pnpm dev");
+  // The other envs' saved commands count: a saved Dev wins over the detected one,
+  // for Dev's own placeholder it doesn't (its own saved value is what the field holds).
+  const savedDev = { ...none, envs: { local: "pnpm local:mine", dev: "pnpm dev:mine", prod: null }, port: 4000 };
+  assert.equal(commandPlaceholder(savedDev, detection, "local"), "pnpm dev:mine");
+  assert.equal(commandPlaceholder(savedDev, detection, "dev"), "pnpm dev");
+  // Detected Local comes before Dev's saved command; no `--port` appended.
+  assert.equal(commandPlaceholder(savedDev, { detected: { local: "pnpm local" } }, "local"), "pnpm local");
+  // Nothing anywhere: "No arranca"; Prod never falls back.
+  assert.equal(NO_START, "No arranca");
+  assert.equal(commandPlaceholder(none, { detected: {} }, "local"), "No arranca");
+  assert.equal(commandPlaceholder(savedDev, { detected: {} }, "prod"), "No arranca");
+  assert.equal(commandPlaceholder(none, null, "dev"), "No arranca");
+  // `{variant}` stays unfilled, as Orca shows it.
+  assert.equal(commandPlaceholder(none, { detected: { dev: "pnpm dev:{variant}" } }, "local"), "pnpm dev:{variant}");
+});
+
+const LIT = (holder) => ({ repos: { "/w/ax-back": { holder, serverState: "listening" } } });
+
+test("a lit repo switched to Apagado: turn it off first, `enabled` unchanged in the first save", () => {
+  const settings = stored({ version: 1, repos: { "/w/ax-back": { enabled: true } } });
+  const form = toForm(settings, { lanes: [], repos: reposOf(REG, settings, []) });
+  form.repos["/w/ax-back"].enabled = false;
+  form.repos["/w/ax-back"].port = "3000";
+  const plan = planSave(settings, form, LIT("/w/ax-back-wt/AX-1"));
+  assert.deepEqual(plan.errors, []);
+  assert.deepEqual(plan.turnOff, [{ root: "/w/ax-back", argv: ["toggle", "--workspace", "/w/ax-back", "--inline"] }]);
+  // Every other field is saved; the switch waits for the turn-off.
+  assert.equal(plan.settings.repos["/w/ax-back"].enabled, true);
+  assert.equal(plan.settings.repos["/w/ax-back"].port, 3000);
+  // A repo with nothing stored (the default) keeps nothing stored.
+  const unset = defaultSettings();
+  const form2 = toForm(unset, { lanes: [], repos: reposOf(REG, unset, []) });
+  form2.repos["/w/ax-back"].enabled = false;
+  const plan2 = planSave(unset, form2, LIT("/w/ax-back-wt/AX-1"));
+  assert.deepEqual(plan2.turnOff.map((t) => t.root), ["/w/ax-back"]);
+  assert.equal("/w/ax-back" in plan2.settings.repos, false);
+});
+
+test("the holder changed since the dialog loaded: the turn-off still names the root", () => {
+  const settings = stored({ version: 1, repos: { "/w/ax-back": { enabled: true } } });
+  const form = toForm(settings, { lanes: [], repos: reposOf(REG, settings, []) });
+  form.repos["/w/ax-back"].enabled = false;
+  const atLoad = planSave(settings, form, LIT("/w/ax-back-wt/AX-1"));
+  const atSave = planSave(settings, form, LIT("/w/ax-back-wt/AX-2"));
+  for (const plan of [atLoad, atSave]) {
+    assert.deepEqual(plan.turnOff[0].argv, ["toggle", "--workspace", "/w/ax-back", "--inline"]);
+  }
+  assert.deepEqual(turnOffArgv("/w/ax-back/"), ["toggle", "--workspace", "/w/ax-back", "--inline"]);
+  assert.equal(TURN_OFF_TIMEOUT_MS, 120000);
+  // The re-read after the first save: still lit only while state.json has its record.
+  assert.equal(isLit(LIT("/w/ax-back-wt/AX-2"), "/w/ax-back/"), true);
+  assert.equal(isLit({ repos: {} }, "/w/ax-back"), false);
+  // state.json unreadable: can't tell, so the CLI is asked (root-is-holder if nothing is lit).
+  assert.equal(isLit(null, "/w/ax-back"), true);
+});
+
+test("an unlit repo switched to Apagado just saves enabled: false", () => {
+  const settings = stored({ version: 1, repos: { "/w/ax-back": { enabled: true } } });
+  const form = toForm(settings, { lanes: [], repos: reposOf(REG, settings, []) });
+  form.repos["/w/ax-back"].enabled = false;
+  for (const state of [{ repos: {} }, { repos: { "/w/ax-admin": { holder: "/w/ax-admin-wt/AX-1" } } }]) {
+    const plan = planSave(settings, form, state);
+    assert.deepEqual(plan.turnOff, []);
+    assert.equal(plan.settings.repos["/w/ax-back"].enabled, false);
+  }
+  // state.json unreadable: the turn-off asks the CLI first.
+  assert.deepEqual(planSave(settings, form, null).turnOff.map((t) => t.root), ["/w/ax-back"]);
+});
+
+test("only a switch to Apagado turns off: a lit repo already Apagado, or switched on, doesn't", () => {
+  const off = stored({ version: 1, repos: { "/w/ax-back": { enabled: false } } });
+  const keep = toForm(off, { lanes: [], repos: reposOf(REG, off, []) });
+  assert.deepEqual(planSave(off, keep, LIT("/w/ax-back-wt/AX-1")).turnOff, []);
+  const on = defaultSettings();
+  const form = toForm(on, { lanes: [], repos: reposOf(REG, on, []) });
+  form.repos["/w/ax-back"].enabled = true;
+  const plan = planSave(on, form, LIT("/w/ax-back-wt/AX-1"));
+  assert.deepEqual(plan.turnOff, []);
+  assert.equal(plan.settings.repos["/w/ax-back"].enabled, true);
+});
+
+test("a refused field refuses the whole save, turn-off included", () => {
+  const settings = stored({ version: 1, repos: { "/w/ax-back": { enabled: true } } });
+  const form = toForm(settings, { lanes: [], repos: reposOf(REG, settings, []) });
+  form.repos["/w/ax-back"].enabled = false;
+  form.repos["/w/ax-back"].port = "70000";
+  const plan = planSave(settings, form, LIT("/w/ax-back-wt/AX-1"));
+  assert.equal(plan.settings, null);
+  assert.deepEqual(plan.turnOff, []);
+  assert.deepEqual(plan.errors.map((e) => e.field), ["/w/ax-back:port"]);
+});
+
+test("the turn-off's answer: exit 0 or root-is-holder saves enabled: false", () => {
+  assert.deepEqual(turnOffOutcome({ code: 0, stdout: "Spotlight off in ax-back: root restored.\n", stderr: "" }), { ok: true, message: "" });
+  // Nothing lit any more (the record went between the re-read and the turn-off).
+  assert.deepEqual(
+    turnOffOutcome({ code: 2, stdout: "", stderr: "root-is-holder: the repository root cannot hold the Spotlight: it is the sync target.\n" }),
+    { ok: true, message: "" },
+  );
+  const first = stored({ version: 1, future: 1, repos: { "/w/ax-back": { enabled: true, port: 3000 }, "/w/ax-admin": { enabled: true } } });
+  const next = withEnabledOff(first, ["/w/ax-back/"]);
+  assert.equal(next.repos["/w/ax-back"].enabled, false);
+  assert.equal(next.repos["/w/ax-back"].port, 3000);
+  assert.equal(next.repos["/w/ax-admin"].enabled, true);
+  assert.equal(next.future, 1);
+  // A repo with no record gets one with just the switch.
+  assert.equal(withEnabledOff(defaultSettings(), ["/w/new"]).repos["/w/new"].enabled, false);
+  // The settings given are left alone.
+  assert.equal(first.repos["/w/ax-back"].enabled, true);
+});
+
+test("a turn-off that fails: enabled stays on, the message is stderr's first line", () => {
+  const out = turnOffOutcome({
+    code: 1,
+    stdout: "",
+    stderr: "\nroot-diverged: El root cambió desde que se proyectó: abre el server para forzar.\nmás detalle\n",
+  });
+  assert.deepEqual(out, { ok: false, message: "root-diverged: El root cambió desde que se proyectó: abre el server para forzar." });
+  // No stderr: stdout's first line, else the exit code; an exec that threw: its message.
+  assert.equal(turnOffOutcome({ code: 1, stdout: "algo\n", stderr: "" }).message, "algo");
+  assert.equal(turnOffOutcome({ code: 137, stdout: "", stderr: "" }).message, "salió con código 137");
+  assert.deepEqual(turnOffOutcome({ error: new Error("timed out after 120000 ms\nstack") }), { ok: false, message: "timed out after 120000 ms" });
+  // The failed repo's switch isn't written.
+  const first = stored({ version: 1, repos: { "/w/ax-back": { enabled: true } } });
+  assert.equal(withEnabledOff(first, []).repos["/w/ax-back"].enabled, true);
 });

@@ -15,7 +15,7 @@ import {
   REFS, RESCUED_PENDING, ORCA_REFS_PREFIX, ERROR_CODES, SpotlightError, toSpotlightError,
   gitContext, runGit, detectConflictOperation,
   activate, sync, assertDeactivatable, deactivate, purgeRefs,
-  inspectRefs, readRefs, createCheckpointCommit,
+  inspectRefs, readRefs, createCheckpointCommit, orcaHoldsRoot, readOrcaHolds,
 } from "../mods/spotlight/sync.js";
 import { GENERATED_FILE_NAMES, isGeneratedFile } from "../mods/spotlight/sync-generated.js";
 
@@ -80,6 +80,35 @@ async function rejectsCode(promise, code, pattern) {
   });
 }
 
+// What another Spotlight leaves in a root it projects onto: HEAD detached on
+// a commit of its own, authored by `author` ("Orca Spotlight" for Orca Pro
+// Max's), holding the root's files plus `files`. The way Orca gets there:
+// checkout --detach, then reset --hard. No refs/orca/spotlight/* here, so
+// only the HEAD tells.
+function detachOnCommitBy(root, author, files = { "a.txt": "orca-version\n" }) {
+  for (const [rel, text] of Object.entries(files)) write(root, rel, text);
+  run(root, "add", "-A");
+  const tree = run(root, "write-tree");
+  const sha = run(
+    root, "-c", `user.name=${author}`, "-c", "user.email=spotlight@elsewhere.local",
+    "commit-tree", tree, "-p", "HEAD", "-m", `${author} snapshot`,
+  );
+  run(root, "checkout", "-q", "--detach");
+  run(root, "reset", "-q", "--hard", sha);
+  return sha;
+}
+
+// Everything a refusal must leave as it was: HEAD, files, index, every ref.
+const fingerprint = (root) => ({
+  head: run(root, "rev-parse", "HEAD"),
+  detached: isDetached(root),
+  status: run(root, "status", "--porcelain", "-uall"),
+  refs: run(root, "for-each-ref", "--format=%(refname) %(objectname)"),
+  a: read(root, "a.txt"),
+});
+
+const ORCA_HOLDS = /^Este root lo tiene el Spotlight de Orca: apágalo allá primero\.$/;
+
 // Neither branch, refs nor root files moved: the refusal touched nothing.
 async function assertRootUntouched(root, ctx) {
   assert.equal(branchOf(root), "main");
@@ -117,10 +146,10 @@ describe("sync engine (D8)", () => {
 
   // ── Contract ─────────────────────────────────────────────────────────────
 
-  test("codes: Orca's SpotlightErrorCode list without unsupported-host, plus orca-active", () => {
+  test("codes: Orca's SpotlightErrorCode list without unsupported-host, plus orca-active and orca-holds", () => {
     assert.deepEqual([...ERROR_CODES].sort(), [
       "bare-root", "branch-missing", "git-failed", "not-active", "not-enabled", "not-on-primary-branch",
-      "operation-in-progress", "orca-active", "repo-not-found", "restore-conflict", "root-diverged",
+      "operation-in-progress", "orca-active", "orca-holds", "repo-not-found", "restore-conflict", "root-diverged",
       "root-is-holder", "unborn-head", "untracked-collision", "worktree-not-found",
     ]);
     assert.throws(() => new SpotlightError("unsupported-host", "x"), TypeError);
@@ -1202,6 +1231,102 @@ describe("sync engine (D8)", () => {
     write(wt, "a.txt", "a-changed-again\n");
     await rejectsCode(sync(ctx, root, wt), "orca-active");
     assert.equal(run(root, "rev-parse", "HEAD"), on.snapshotSha);
+  });
+
+  test("orca-holds: a root whose HEAD Orca's Spotlight detached on its own commit refuses turn-on, sync and turn-off, and stays as Orca left it", async () => {
+    const wt2 = join(base, "wt2");
+    run(root, "worktree", "add", "-q", wt2, "-b", "feature-2");
+    write(wt, "a.txt", "herdr-version\n");
+    write(wt2, "a.txt", "herdr-version-2\n");
+
+    // Turn-on of a root Orca took first (no Herdr refs): orca-holds, not
+    // not-on-primary-branch, even with Orca's refs there too.
+    detachOnCommitBy(root, "Orca Spotlight");
+    assert.equal(await readOrcaHolds(root), true);
+    assert.equal(await orcaHoldsRoot(ctx, root), true);
+    let before = fingerprint(root);
+    await rejectsCode(activate(ctx, root, wt), "orca-holds", ORCA_HOLDS);
+    run(root, "update-ref", "refs/orca/spotlight/snapshot", "HEAD");
+    await rejectsCode(activate(ctx, root, wt), "orca-holds", ORCA_HOLDS);
+    run(root, "update-ref", "-d", "refs/orca/spotlight/snapshot");
+    assert.deepEqual(fingerprint(root), before);
+    assert.equal((await inspectRefs(ctx, root)).active, false);
+
+    // Orca took the root while Herdr held it (the 2026-11-08 incident).
+    run(root, "checkout", "-q", "main");
+    const on = await activate(ctx, root, wt);
+    const orcaSha = detachOnCommitBy(root, "Orca Spotlight");
+    write(wt, "a.txt", "herdr-version-again\n");
+    before = fingerprint(root);
+    await rejectsCode(sync(ctx, root, wt), "orca-holds", ORCA_HOLDS);
+    await rejectsCode(activate(ctx, root, wt2), "orca-holds", ORCA_HOLDS);
+    await rejectsCode(assertDeactivatable(ctx, root), "orca-holds", ORCA_HOLDS);
+    await rejectsCode(deactivate(ctx, root), "orca-holds", ORCA_HOLDS);
+    assert.deepEqual(fingerprint(root), before);
+    assert.equal(run(root, "rev-parse", "HEAD"), orcaSha);
+    assert.equal(read(root, "a.txt"), "orca-version\n");
+    const refs = await inspectRefs(ctx, root);
+    assert.equal(refs.active, true);
+    assert.equal(refs.snapshotSha, on.snapshotSha);
+  });
+
+  test("orca-holds: forcing changes nothing: Forzar sync, Proyectar igual and Apagar igual refuse too", async () => {
+    const wt2 = join(base, "wt2");
+    run(root, "worktree", "add", "-q", wt2, "-b", "feature-2");
+    write(wt, "a.txt", "herdr-version\n");
+
+    detachOnCommitBy(root, "Orca Spotlight");
+    let before = fingerprint(root);
+    await rejectsCode(activate(ctx, root, wt, { force: true }), "orca-holds", ORCA_HOLDS);
+    await rejectsCode(activate(ctx, root, wt, { force: true, requireOnBranch: false }), "orca-holds", ORCA_HOLDS);
+    assert.deepEqual(fingerprint(root), before);
+
+    run(root, "checkout", "-q", "main");
+    await activate(ctx, root, wt);
+    detachOnCommitBy(root, "Orca Spotlight");
+    write(root, "a.txt", "edited-in-orcas-root\n");
+    before = fingerprint(root);
+    await rejectsCode(sync(ctx, root, wt, { force: true }), "orca-holds", ORCA_HOLDS);
+    await rejectsCode(activate(ctx, root, wt2, { force: true }), "orca-holds", ORCA_HOLDS);
+    await rejectsCode(assertDeactivatable(ctx, root, { force: true }), "orca-holds", ORCA_HOLDS);
+    await rejectsCode(deactivate(ctx, root, { force: true }), "orca-holds", ORCA_HOLDS);
+    assert.deepEqual(fingerprint(root), before);
+    assert.equal(read(root, "a.txt"), "edited-in-orcas-root\n");
+  });
+
+  test("orca-holds is only Orca's: a detached HEAD authored \"Herdr Spotlight\" or anyone else, or an \"Orca Spotlight\" commit on a branch, keeps today's behavior", async () => {
+    // Fresh turn-on of a detached root: not-on-primary-branch, as before.
+    for (const author of ["Herdr Spotlight", "Someone Else"]) {
+      detachOnCommitBy(root, author, { "a.txt": `${author}\n` });
+      assert.equal(await readOrcaHolds(root), false, author);
+      await rejectsCode(activate(ctx, root, wt), "not-on-primary-branch");
+      run(root, "checkout", "-q", "main");
+    }
+
+    // A commit authored "Orca Spotlight" on a branch is just a commit.
+    write(root, "a.txt", "on-a-branch\n");
+    run(root, "add", "-A");
+    run(root, "-c", "user.name=Orca Spotlight", "commit", "-qm", "named like Orca");
+    assert.equal(await readOrcaHolds(root), false);
+    write(wt, "a.txt", "herdr-version\n");
+    await activate(ctx, root, wt);
+    assert.equal(read(root, "a.txt"), "herdr-version\n");
+
+    // Herdr's own snapshot is authored "Herdr Spotlight": sync and turn-off go on.
+    assert.equal(run(root, "log", "-1", "--format=%an", "HEAD"), "Herdr Spotlight");
+    assert.equal(await readOrcaHolds(root), false);
+    write(wt, "a.txt", "herdr-version-2\n");
+    assert.equal((await sync(ctx, root, wt)).skipped, false);
+    assert.equal(read(root, "a.txt"), "herdr-version-2\n");
+
+    // Someone else's detached commit at the root: root-diverged, and force overrides.
+    detachOnCommitBy(root, "Someone Else", { "a.txt": "someone-else\n" });
+    write(wt, "a.txt", "herdr-version-3\n");
+    await rejectsCode(sync(ctx, root, wt), "root-diverged");
+    await rejectsCode(deactivate(ctx, root), "root-diverged");
+    await deactivate(ctx, root, { force: true });
+    assert.equal(branchOf(root), "main");
+    assert.equal(read(root, "a.txt"), "on-a-branch\n");
   });
 
   // ── Crash safety and rollback ────────────────────────────────────────────

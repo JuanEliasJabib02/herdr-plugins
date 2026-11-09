@@ -3,7 +3,8 @@
 // lookup. Node-only, like cli.mjs; the mod never imports it.
 //
 // Programs are called by bare name (hc, git, lsof, pgrep, herdr-app), so a
-// fake earlier on PATH stands in for each in tests.
+// fake earlier on PATH stands in for each in tests. Signals go through
+// `serverDeps.kill` only.
 
 import fs from "node:fs";
 import fsp from "node:fs/promises";
@@ -36,7 +37,8 @@ function envMs(name, fallback) {
 // Runs `file args` without a shell: { code, stdout, stderr }. A non-zero exit
 // resolves with its code; a timeout resolves 124. Rejects only when the
 // program can't start (ENOENT): server.js and ports.js read that as "can't
-// tell", never as an answer.
+// tell", never as an answer. It takes no env, as Herdr's exec doesn't: a read
+// that needs one carries it in its argv (ports.js psStatesArgv, H7).
 export function exec(file, args, { timeoutMs = 30_000 } = {}) {
   return new Promise((resolve, reject) => {
     execFile(file, args, { encoding: "utf8", maxBuffer: 32 * 1024 * 1024, timeout: timeoutMs }, (err, stdout, stderr) => {
@@ -326,7 +328,9 @@ export function makeContext() {
     now: Date.now,
     sleep,
     spawn: spawnDetached,
-    serverDeps: { exec, now: Date.now, sleep },
+    // Every signal Spotlight sends (a turn-off's leftovers, D26; Liberar
+    // puerto y arrancar, D24) goes through `kill`, process.kill's shape.
+    serverDeps: { exec, now: Date.now, sleep, kill: (pid, signal) => process.kill(pid, signal) },
     pollMs: envMs("SPOTLIGHT_POLL_MS", 2_500),
     portPollMs: envMs("SPOTLIGHT_PORT_POLL_MS", 2_500),
     graceMs: envMs("SPOTLIGHT_NO_SERVER_GRACE_MS", 15_000),

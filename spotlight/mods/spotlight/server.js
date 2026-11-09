@@ -1,10 +1,15 @@
 // A repo's Spotlight server terminal (D10). Node-only (it writes the log
 // through server-log.js): the CLI uses it, the mod never imports it.
 //
-// One hidden hc terminal per repo, created in the repo root:
-//   hc run --bg --no-parent --keep --name sl-<slug> --label spotlight.repo=<root> --cwd <root> -- /bin/zsh -l
-// No herdr.space label, so no space shows it; "Ver server" peeks at it. The
-// server line is typed into its shell wrapped for the log (D11):
+// One hc terminal per repo, created in the repo root:
+//   hc run --bg --no-parent --keep --name sl-<slug> --label spotlight.repo=<root> [--label herdr.space=<id>] --cwd <root> -- /bin/zsh -l
+// It runs in the root's main terminal, as Orca's (D38): Herdr shows a
+// terminal labelled herdr.space=<id> as a tab of that space, and Spotlight
+// takes the place of the root's active (or first) plain terminal, killing
+// what ran there, in a tab named "Spotlight" that never takes focus.
+// "Ver server" selects that tab (showServer); Herdr's peek is the fallback
+// for a terminal in no tab. The server line is typed into its shell wrapped
+// for the log (D11):
 //   script -F -q -a '<logPath>' /bin/zsh -c '<line>'
 // -F flushes every write; `-c`, not `-lc`, so the outer login shell's PATH
 // (nvm's Node) is the one the server runs on; `script` keeps a pty, so the
@@ -16,19 +21,29 @@
 // killed between typing and recording the pid); the recorded pid is only a
 // cross-check, used when the argv can't be read. Restart = `hc interrupt`,
 // wait for the prompt, type again. Stop (toggle off) interrupts only
-// Spotlight's own server and keeps the terminal for the next start. hc is
+// Spotlight's own server, kills what of it outlives the Ctrl-C (D26), and
+// keeps the terminal for the next start. hc is
 // reached through an injected `exec(file, args) → { code, stdout, stderr }`
 // and the clock through injected `now()` / `sleep(ms)`, so tests run on a
 // fake hc. The probe that pinned hc's shapes is in RECIPE.md "Server
-// terminal probe".
+// terminal probe"; Herdr's side (herdr-app ls, the labels, tab.rename,
+// tab.move) is in RECIPE.md "Where the server shows".
 
+import crypto from "node:crypto";
 import {
-  repoSlug, appendLogHeader, rotateLog, tailLog, stripTerminalSequences, DEFAULT_TAIL_LINES,
+  repoSlug, appendLogHeader, rotateLog, tailLog, stripTerminalSequences, causeWords, DEFAULT_TAIL_LINES,
 } from "./server-log.js";
-import { treePorts, pickPort, portLabel, portUrl } from "./ports.js";
+import {
+  treeListening, pickPort, portLabel, portUrl, serverSnapshot, serverLeftovers, stopLeftovers, requireKill,
+} from "./ports.js";
+import { normRoot } from "./settings.js";
 
 // The label that ties a server terminal to its repo root.
 export const SERVER_LABEL = "spotlight.repo";
+// Herdr shows a terminal with this label as a tab of that space (D38).
+export const SPACE_LABEL = "herdr.space";
+// The server tab's title, as Orca's.
+export const TAB_NAME = "Spotlight";
 // The terminal's program: a login zsh (absolute: `hc run --` takes no shell).
 const SHELL_ARGV = ["/bin/zsh", "-l"];
 
@@ -44,13 +59,35 @@ const SEEN_MS = 3000;
 const PROMPT_MS = 5000;
 // `hc interrupt --timeout`: seconds it watches for an effect.
 const INTERRUPT_WATCH_S = 5;
+// Turn-off (D26): how long after the Ctrl-C the server gets to be gone (the
+// prompt back, no process of it left, its ports free) before what's left of
+// it is killed.
+export const STOP_WAIT_MS = 8000;
+// D38: how long Herdr may take to show a terminal given herdr.space as a
+// tab, and a killed adopted terminal to read finished.
+const TAB_MS = 3000;
+const KILLED_MS = 5000;
 
 // Start decisions that typed nothing leave a line in the log, as Orca's
 // spotlight-server-start-notes.ts does.
 const NOTES = {
   busy: "Server left alone — the Spotlight terminal runs something Spotlight didn't start",
   "already-running": "Server left alone — Spotlight's server already runs there",
+};
+
+// A start or restart that didn't go through (an ok: false of startServer or
+// restartServer) leaves one line in the log by its reason, with hc's own
+// words when it gave some (L2): the CLI's error and toast say why in Spanish
+// only, and `spotlight logs` reads this. An invalid command touched no
+// terminal and leaves none.
+const NOT_STARTED = {
+  "name-taken": "Server not started — the server terminal's name is taken",
+  "terminal-failed": "Server not started — hc could not make the server terminal",
   unreadable: "Server not started — the Spotlight terminal's state could not be read",
+  "terminal-gone": "Server not started — the Spotlight terminal closed",
+  "send-failed": "Server not started — hc could not type into the Spotlight terminal",
+  "interrupt-failed": "Server not restarted — the Ctrl-C could not be sent: the old server still runs",
+  "still-running": "Server not restarted — the old server did not stop on Ctrl-C and still runs",
 };
 
 const SHELL_NAMES = new Set(
@@ -93,10 +130,14 @@ export function wrapServerLine(line, logPath) {
 }
 
 // `hc run …` for a repo's server terminal (D10), with --json for its address.
-export function createTerminalArgv(root) {
+// With `space` (D38), labelled herdr.space=<space>: Herdr shows it in a new
+// tab of that space, or of a new space when it doesn't know the id, and
+// leaves the focus where it is. Without, hidden.
+export function createTerminalArgv(root, { space = null } = {}) {
   return [
     "hc", "run", "--bg", "--no-parent", "--keep", "--name", serverTerminalName(root),
-    "--label", `${SERVER_LABEL}=${root}`, "--cwd", root, "--json", "--", ...SHELL_ARGV,
+    "--label", `${SERVER_LABEL}=${root}`, ...(space ? ["--label", `${SPACE_LABEL}=${space}`] : []),
+    "--cwd", root, "--json", "--", ...SHELL_ARGV,
   ];
 }
 
@@ -104,6 +145,16 @@ export function createTerminalArgv(root) {
 export function peekArgv(terminal) {
   return ["herdr-app", "do", "terminal.peek", "--terminal", terminal];
 }
+
+// `herdr-app do <command> <args as JSON>` (tab.move's index is a number,
+// which `--index` words can't say).
+export function herdrDoArgv(command, args) {
+  return ["herdr-app", "do", command, JSON.stringify(args)];
+}
+
+// A space id Herdr doesn't know yet: it makes the space when a terminal
+// carries it (D38), named after the terminal's folder.
+export const freshSpaceId = () => `sp${crypto.randomBytes(16).toString("hex")}`;
 
 // ── Reading a terminal ─────────────────────────────────────────────────────
 
@@ -229,38 +280,267 @@ async function inspectUntil(args, deps, done, ms) {
 //               Spotlight didn't start runs there without a port
 //   null      — hc couldn't say; keep what was known
 // With the ports, the picked one (`port` = the configured port), its URL and
-// the badge text (":3000+1").
+// the badge text (":3000+1"), and `procs`: who listens under Spotlight's own
+// server, [{ pid, start, port }] (ports.js treeListening; [] unless the
+// server in front is Spotlight's). The CLI keeps those on the repo's record
+// and passes them back to stopServer, which kills a listener outside the
+// tree only when it is one of them (F2).
 export async function readServerState({ root, terminal, logPath, serverPid, port } = {}, deps) {
   const seen = await inspectServer({ root, terminal, logPath, serverPid }, deps);
-  const base = { terminal: seen.terminal ?? null, owner: null, pid: null, ports: [], port: null, url: null, label: "" };
+  const base = { terminal: seen.terminal ?? null, owner: null, pid: null, ports: [], procs: [], port: null, url: null, label: "" };
   if (seen.kind === "gone") return { ...base, state: "gone" };
   if (seen.kind === "unknown") return { ...base, state: null, error: seen.error ?? "no foreground" };
-  const ports = (await treePorts(seen.rootPid, deps)) ?? [];
+  const found = await treeListening(seen.rootPid, seen.kind === "spotlight" ? seen.pid : null, deps);
+  const ports = found?.ports ?? [];
   const picked = pickPort(ports, port);
   const owner = seen.kind === "spotlight" ? "spotlight" : seen.kind === "foreign" ? "foreign" : null;
   const state = ports.length > 0 ? "listening" : owner === "spotlight" ? "starting" : "stopped";
   return {
-    ...base, state, owner, pid: seen.pid ?? null, ports, port: picked, url: portUrl(picked), label: portLabel(ports, port),
+    ...base, state, owner, pid: seen.pid ?? null, ports, procs: found?.procs ?? [], port: picked, url: portUrl(picked),
+    label: portLabel(ports, port),
+  };
+}
+
+// ── Where the server shows (D38) ───────────────────────────────────────────
+
+// An hc call whose answer is only whether it went through (`hc label`, `hc
+// kill`): { ok } or { ok: false, message }.
+async function hcRan(deps, args) {
+  let r;
+  try {
+    r = await deps.exec("hc", args);
+  } catch (e) {
+    return { ok: false, message: String(e?.message ?? e) };
+  }
+  const json = parseJson(r?.stdout) ?? parseJson(r?.stderr);
+  if (r?.code === 0 && !json?.error) return { ok: true };
+  return { ok: false, message: String(json?.error?.message ?? (r?.stderr || r?.stdout || `hc exited ${r?.code}`)).trim() };
+}
+
+// One herdr-app call: { ok: true, value } with its JSON (null when it printed
+// none), or { ok: false, message } (`{ "error": "…" }` and exit 1, or why it
+// couldn't run).
+async function herdrApp(deps, args) {
+  let r;
+  try {
+    r = await deps.exec("herdr-app", args);
+  } catch (e) {
+    return { ok: false, message: String(e?.message ?? e) };
+  }
+  const json = parseJson(r?.stdout);
+  if (r?.code === 0 && !(json && "error" in json)) return { ok: true, value: json };
+  return { ok: false, message: String(json?.error ?? (r?.stderr || r?.stdout || `herdr-app exited ${r?.code}`)).trim() };
+}
+
+const herdrDo = (deps, command, args) => herdrApp(deps, herdrDoArgv(command, args).slice(1));
+
+// `herdr-app ls`'s spaces (each { id, folder, machine, tabs: [{ id, active,
+// terminals: [{ terminal, app, … }] }] }), or null when Herdr can't say.
+async function herdrSpaces(deps) {
+  const r = await herdrApp(deps, ["ls"]);
+  return r.ok && Array.isArray(r.value?.spaces) ? r.value.spaces : null;
+}
+
+const tabsOf = (space) => (Array.isArray(space?.tabs) ? space.tabs.filter((t) => t && typeof t.id === "string") : []);
+const terminalsOf = (tab) => (Array.isArray(tab?.terminals) ? tab.terminals.filter((t) => t && typeof t.terminal === "string") : []);
+
+// Where a space is now, projects-sidebar's rule (lib.js placeOf): its first
+// terminal's live folder (`cwds`: address → cwd, from `hc ls`), else the
+// folder it was made in.
+function placeOfSpace(space, cwds) {
+  for (const tab of tabsOf(space)) {
+    for (const t of terminalsOf(tab)) {
+      if (cwds.get(t.terminal)) return cwds.get(t.terminal);
+    }
+  }
+  return typeof space?.folder === "string" ? space.folder : null;
+}
+
+// The root's space (D38): the first space of this machine in `herdr-app ls`
+// whose place is the root. → { ok: true, space } (null: none there) or
+// { ok: false } when Herdr can't say.
+export async function findRootSpace(root, deps) {
+  const spaces = await herdrSpaces(deps);
+  if (!spaces) return { ok: false };
+  const listed = await hc(deps, ["ls", "--json"]);
+  const cwds = new Map();
+  for (const t of listed.ok && Array.isArray(listed.value.terminals) ? listed.value.terminals : []) {
+    if (typeof t?.address === "string" && typeof t.cwd === "string") cwds.set(t.address, t.cwd);
+  }
+  const want = normRoot(root);
+  const space = spaces.find((s) => s && !s.machine && typeof s.id === "string" && normRoot(placeOfSpace(s, cwds)) === want);
+  return { ok: true, space: space ?? null };
+}
+
+// The tab Herdr shows `terminal` in: { space, tab, index } (index: the tab's
+// place in its space, 1 = first, as tab.move takes it), or null.
+function tabOf(spaces, terminal) {
+  for (const s of spaces ?? []) {
+    const tabs = tabsOf(s);
+    const i = tabs.findIndex((tab) => terminalsOf(tab).some((t) => t.terminal === terminal));
+    if (i >= 0) return { space: s.id, tab: tabs[i].id, index: i + 1 };
+  }
+  return null;
+}
+
+// Asks Herdr until it shows `terminal` in a tab, up to TAB_MS: { at, spaces }.
+async function waitForTab(terminal, deps) {
+  const until = nowOf(deps) + TAB_MS;
+  for (;;) {
+    const spaces = await herdrSpaces(deps);
+    const at = spaces ? tabOf(spaces, terminal) : null;
+    if (at || nowOf(deps) >= until) return { at, spaces };
+    await sleepOf(deps, POLL_MS);
+  }
+}
+
+// The terminal Spotlight replaces in the root's space (D38, Orca's order):
+// the active tab's first plain terminal (`app: null`: a shell, whatever runs
+// in it), else the first plain one in tab order. Never an agent's (`app`
+// set, or not said), nor a Spotlight terminal of any repo (its
+// spotlight.repo label), nor one hc can't show live, nor the terminal this
+// Spotlight runs from (`deps.self`, else $HC_TERMINAL_ID): `spotlight
+// restart` typed in the root's shell would kill itself halfway.
+// → { terminal, index } or null.
+async function adoptable(space, deps) {
+  const tabs = tabsOf(space);
+  const order = [...tabs.filter((t) => t.active === true), ...tabs];
+  const self = deps?.self ?? globalThis.process?.env?.HC_TERMINAL_ID ?? null;
+  const looked = new Set();
+  for (const tab of order) {
+    for (const t of terminalsOf(tab)) {
+      if (t.app !== null || looked.has(t.terminal) || (self && t.terminal === self)) continue;
+      looked.add(t.terminal);
+      const got = await getTerminal(t.terminal, deps);
+      if (got.terminal?.state !== "live" || got.terminal.labels?.[SERVER_LABEL]) continue;
+      return { terminal: t.terminal, index: tabs.indexOf(tab) + 1 };
+    }
+  }
+  return null;
+}
+
+// The adopted terminal goes, whatever ran in it (S23): `hc kill`, then up to
+// KILLED_MS for hc to read it finished, so what ran there is gone before the
+// port check. → { killed: true } or { killed: false, message }.
+async function killAdopted(terminal, deps) {
+  const r = await hcRan(deps, ["kill", terminal, "--json"]);
+  if (!r.ok) return { killed: false, message: r.message };
+  const until = nowOf(deps) + KILLED_MS;
+  for (;;) {
+    const got = await getTerminal(terminal, deps);
+    if (got.missing || (got.terminal && got.terminal.state !== "live") || nowOf(deps) >= until) return { killed: true };
+    await sleepOf(deps, POLL_MS);
+  }
+}
+
+// Names the tab Herdr shows `terminal` in "Spotlight", once it does: { at,
+// spaces } of waitForTab.
+async function nameTab(terminal, deps) {
+  const seen = await waitForTab(terminal, deps);
+  if (seen.at) await herdrDo(deps, "tab.rename", { id: seen.at.tab, name: TAB_NAME });
+  return seen;
+}
+
+// A live terminal of Spotlight's for `root` that Herdr shows nowhere (no
+// herdr.space): lit before T29, or made while Herdr couldn't say.
+const isHidden = (term, root) => term?.state === "live" && term.labels?.[SERVER_LABEL] === root && !term.labels?.[SPACE_LABEL];
+
+// D38 (1): a hidden server terminal joins the root's space (a fresh id when
+// it has none) through `hc label <t> herdr.space=<id>`, and its tab is named
+// "Spotlight". Nothing is restarted, moved or killed. → { shown: true,
+// space, tab } or { shown: false, reason }.
+async function showHidden(term, root, deps) {
+  const found = await findRootSpace(root, deps);
+  if (!found.ok) return { shown: false, reason: "unreadable" };
+  const space = found.space?.id ?? freshSpaceId();
+  const labeled = await hcRan(deps, ["label", term.address, `${SPACE_LABEL}=${space}`]);
+  if (!labeled.ok) return { shown: false, reason: "label-failed", message: labeled.message };
+  const { at } = await nameTab(term.address, deps);
+  return { shown: true, space, tab: at?.tab ?? null };
+}
+
+// Whether the repo's server terminal (`terminal`, else sl-<slug>) is one of
+// Spotlight's that Herdr shows nowhere: the reap's cheap look before it takes
+// the repo's lock to show it (showServerTerminal).
+export async function serverTerminalHidden({ root, terminal } = {}, deps) {
+  const got = await getTerminal(terminal ?? serverTerminalName(root), deps);
+  return isHidden(got.terminal, root);
+}
+
+// D38 (1) for a server terminal Spotlight runs already (the reap): hidden,
+// it becomes the root's "Spotlight" tab as it runs, with no restart and no
+// other terminal touched; otherwise nothing happens. Call under the repo's
+// lock (two looks at once could make two spaces). → showHidden's answer, or
+// { shown: false, reason: "not-hidden" }.
+export async function showServerTerminal({ root, terminal } = {}, deps) {
+  const got = await getTerminal(terminal ?? serverTerminalName(root), deps);
+  if (!isHidden(got.terminal, root)) return { shown: false, reason: "not-hidden" };
+  return showHidden(got.terminal, root, deps);
+}
+
+// D38 (2, 3): a new server terminal for `root`, in the root's space:
+// labelled with its id (a fresh one when the root has no space, so Herdr
+// makes one), its tab named "Spotlight". Over the root's plain terminal
+// (adoptable), the tab is moved to that terminal's tab's place and that
+// terminal is killed, in that order: made before the kill, the space never
+// empties (an emptied space closes), and only that terminal goes (another
+// pane of its tab stays). Nothing asks for focus. When Herdr can't say
+// where the root is, the terminal is made hidden, as before T29: the reap
+// shows it once Herdr answers. A tab Herdr doesn't show within TAB_MS is
+// neither moved nor anything killed. `raced`: the name taken by another CLI
+// a moment ago → theirs.
+async function makeServerTerminal(root, deps, raced) {
+  const found = await findRootSpace(root, deps);
+  const space = found.ok ? found.space?.id ?? freshSpaceId() : null;
+  const adopt = found.space ? await adoptable(found.space, deps) : null;
+  const made = await hc(deps, createTerminalArgv(root, { space }).slice(1));
+  if (!made.ok || typeof made.value.address !== "string") {
+    // Another CLI created it a moment ago: use theirs.
+    const theirs = !made.ok && made.error.kind === "name_taken" ? await raced() : null;
+    return theirs ?? { ok: false, reason: "terminal-failed", message: made.ok ? "hc run printed no address" : made.error.message };
+  }
+  const terminal = made.value.address;
+  if (!space) return { ok: true, terminal, created: true };
+  const { at, spaces } = await nameTab(terminal, deps);
+  let adopted = null;
+  let adoptFailed = null;
+  if (adopt && at) {
+    // Its place now (a tab Herdr put before it would have moved it).
+    const index = tabOf(spaces, adopt.terminal)?.index ?? adopt.index;
+    await herdrDo(deps, "tab.move", { id: at.tab, index });
+    const killed = await killAdopted(adopt.terminal, deps);
+    if (killed.killed) adopted = adopt.terminal;
+    else adoptFailed = killed.message;
+  }
+  return {
+    ok: true, terminal, created: true, space, tab: at?.tab ?? null, adopted, ...(adoptFailed ? { adoptFailed } : {}),
   };
 }
 
 // ── The terminal ───────────────────────────────────────────────────────────
 
-// The repo's live server terminal, created when there's none: `terminal`
+// The repo's live server terminal, made when there's none (D38: in the
+// root's space, over its plain terminal; makeServerTerminal): `terminal`
 // (the recorded address) when it's still live and labeled for this root,
-// else the one named sl-<slug>, else a new one. A finished one is removed
-// first. A live terminal holding the name but labeled for something else is
-// never used: { ok: false, reason: "name-taken" }.
+// else the one named sl-<slug>, else a new one. One found hidden is shown
+// in the root's space first (showHidden). A finished one is removed first. A
+// live terminal holding the name but labeled for something else is never
+// used: { ok: false, reason: "name-taken" }. → { ok: true, terminal,
+// created } (a made one: also space, tab, adopted).
 export async function ensureServerTerminal({ root, terminal } = {}, deps) {
   const name = serverTerminalName(root);
   const mine = (term) => term?.labels?.[SERVER_LABEL] === root;
   const unreadable = (message) => ({ ok: false, reason: "unreadable", message });
+  const reuse = async (term) => {
+    if (isHidden(term, root)) await showHidden(term, root, deps);
+    return { ok: true, terminal: term.address, created: false };
+  };
 
   if (terminal && terminal !== name) {
     const got = await getTerminal(terminal, deps);
     if (got.error) return unreadable(got.error);
     if (got.terminal && mine(got.terminal)) {
-      if (got.terminal.state === "live") return { ok: true, terminal: got.terminal.address, created: false };
+      if (got.terminal.state === "live") return reuse(got.terminal);
       await hc(deps, ["rm", got.terminal.address, "--json"]);
     }
   }
@@ -270,7 +550,7 @@ export async function ensureServerTerminal({ root, terminal } = {}, deps) {
     if (got.missing) return null;
     if (got.terminal.state === "live") {
       return mine(got.terminal)
-        ? { ok: true, terminal: got.terminal.address, created: false }
+        ? reuse(got.terminal)
         : { ok: false, reason: "name-taken", message: `a live terminal named ${name} isn't Spotlight's for ${root}` };
     }
     // Finished: it no longer holds the name. Clear ours out of the list.
@@ -279,17 +559,7 @@ export async function ensureServerTerminal({ root, terminal } = {}, deps) {
   };
   const found = await byName();
   if (found) return found;
-
-  const made = await hc(deps, createTerminalArgv(root).slice(1));
-  if (made.ok && typeof made.value.address === "string") {
-    return { ok: true, terminal: made.value.address, created: true };
-  }
-  // Another CLI created it a moment ago: use theirs.
-  if (!made.ok && made.error.kind === "name_taken") {
-    const raced = await byName();
-    if (raced) return raced;
-  }
-  return { ok: false, reason: "terminal-failed", message: made.ok ? "hc run printed no address" : made.error.message };
+  return makeServerTerminal(root, deps, byName);
 }
 
 // ── Start, restart, stop ───────────────────────────────────────────────────
@@ -298,10 +568,21 @@ function note(logPath, { workspace, branch }, event, deps) {
   appendLogHeader(logPath, { workspace, branch, event, at: nowOf(deps) });
 }
 
+// A start that didn't go through, `r`: its line in the log (NOT_STARTED; a
+// reason this doesn't know yet is named as it came), hc's words after it
+// when it gave some (causeWords), then `r` as it came.
+function notStarted(logPath, head, r, deps) {
+  if (r.reason === "invalid-command") return r;
+  const said = causeWords(r.message);
+  note(logPath, head, `${NOT_STARTED[r.reason] ?? `Server not started (${r.reason ?? "no reason"})`}${said ? ` (${said})` : ""}`, deps);
+  return r;
+}
+
 // Types `wrapped` into `terminal` when its shell owns the foreground, after
 // rotating the log and writing the header; then waits briefly to see the
 // `script` in front and reports its pid (null when it already ended or
-// hasn't forked yet).
+// hasn't forked yet). Its ok: false answers are its caller's to log
+// (notStarted).
 async function typeWhenIdle(a, deps) {
   const { terminal, created, command, wrapped, logPath, serverPid, event } = a;
   const head = { workspace: a.workspace, branch: a.branch };
@@ -312,10 +593,7 @@ async function typeWhenIdle(a, deps) {
     ? await inspectUntil(args, deps, (s) => s.kind !== "unknown" && s.kind !== "foreign", SHELL_MS)
     : await inspectServer(args, deps);
   if (seen.kind === "gone") return { ok: false, reason: "terminal-gone", terminal };
-  if (seen.kind === "unknown") {
-    note(logPath, head, NOTES.unreadable, deps);
-    return { ok: false, reason: "unreadable", terminal, message: seen.error ?? "no foreground" };
-  }
+  if (seen.kind === "unknown") return { ok: false, reason: "unreadable", terminal, message: seen.error ?? "no foreground" };
   if (seen.kind === "spotlight") {
     note(logPath, head, NOTES["already-running"], deps);
     return { ok: true, started: false, reason: "already-running", terminal, created, pid: seen.pid };
@@ -334,12 +612,25 @@ async function typeWhenIdle(a, deps) {
   };
 }
 
-// Interrupts Spotlight's server and waits for the prompt.
+// Interrupts Spotlight's server and waits for the prompt. A server that
+// never let go of it, because hc couldn't send the Ctrl-C or it ignored it,
+// still runs: `oldServerRuns` (L1). hc failing the Ctrl-C may be the terminal
+// closing between the look and it, so the terminal is looked at again first,
+// as stopServer does (M4): only Spotlight's server still in front, or a
+// terminal hc can't read (doubt is never death), is an old server that still
+// runs; a gone terminal, a free prompt or another program runs none of
+// Spotlight's, and the start goes on as any other (typeWhenIdle answers it:
+// terminal-gone, the line typed, busy).
 async function interruptAndWait(terminal, { logPath, serverPid }, deps) {
   const r = await hc(deps, ["interrupt", terminal, "--timeout", String(INTERRUPT_WATCH_S), "--json"]);
-  if (!r.ok) return { ok: false, reason: "interrupt-failed", terminal, message: r.error.message };
+  if (!r.ok) {
+    const after = await inspectServer({ terminal, logPath, serverPid }, deps);
+    if (after.kind !== "spotlight" && after.kind !== "unknown") return { ok: true, seen: after };
+    // hc's words, else its error's kind, as stopServer's interruptError (N5).
+    return { ok: false, reason: "interrupt-failed", terminal, message: r.error.message || r.error.kind, oldServerRuns: true };
+  }
   const seen = await inspectUntil({ terminal, logPath, serverPid }, deps, (s) => s.kind !== "spotlight", PROMPT_MS);
-  if (seen.kind === "spotlight") return { ok: false, reason: "still-running", terminal };
+  if (seen.kind === "spotlight") return { ok: false, reason: "still-running", terminal, oldServerRuns: true };
   return { ok: true, seen };
 }
 
@@ -348,58 +639,279 @@ async function interruptAndWait(terminal, { logPath, serverPid }, deps) {
 //   { ok: true, started: true, terminal, created, pid, command, line }
 //   { ok: true, started: false, reason: "already-running" | "busy", terminal, … }
 //   { ok: false, reason: "invalid-command" | "name-taken" | "terminal-failed"
-//     | "unreadable" | "terminal-gone" | "send-failed", … }
-// `workspace` / `branch` label the log header.
-export async function startServer({ root, terminal, line, logPath, serverPid, workspace, branch } = {}, deps) {
+//     | "unreadable" | "terminal-gone" | "send-failed", message?, … }
+// Every ok: false but invalid-command leaves its line in the log, hc's words
+// (`message`) in it (notStarted, L2). `workspace` / `branch` label the log
+// header. `ensured`: the caller's ensureServerTerminal answer, when it
+// ensured the terminal first (the CLI does, so an adopted terminal dies
+// before its port check, D38); one that failed is answered and logged as
+// this start's own.
+export async function startServer({ root, terminal, line, logPath, serverPid, workspace, branch, ensured: given } = {}, deps) {
   const wrapped = wrapServerLine(line, logPath);
   if (!wrapped) return { ok: false, reason: "invalid-command" };
-  const ensured = await ensureServerTerminal({ root, terminal }, deps);
-  if (!ensured.ok) return ensured;
-  return typeWhenIdle({
+  const head = { workspace, branch };
+  const ensured = given ?? (await ensureServerTerminal({ root, terminal }, deps));
+  if (!ensured.ok) return notStarted(logPath, head, ensured, deps);
+  const r = await typeWhenIdle({
     terminal: ensured.terminal, created: ensured.created, command: normalizeServerLine(line), wrapped,
     logPath, serverPid, workspace, branch, event: "started",
   }, deps);
+  return r.ok ? r : notStarted(logPath, head, r, deps);
 }
 
 // Restart (Reiniciar, `spotlight restart`, a lockfile or command change):
 // interrupt Spotlight's own server, wait for the prompt, type `line`. A gone
 // terminal is recreated and started; a foreign foreground is left alone.
-// `restarted: true` when a running server was interrupted and replaced.
-export async function restartServer({ root, terminal, line, logPath, serverPid, workspace, branch } = {}, deps) {
+// `restarted: true` when a running server was interrupted and replaced. Its
+// answers are startServer's, plus { ok: false, reason: "interrupt-failed" |
+// "still-running", oldServerRuns: true, … }: the old server never let go of
+// the prompt and still runs (L1; after a Ctrl-C hc couldn't send, only while
+// hc still shows it in front or can't read the terminal, M4). An ok: false
+// after the old server was seen leaving the front (the prompt back, the
+// terminal gone, another program there) carries `interrupted: true`: no
+// server of Spotlight's runs there now, whatever the next read said (P3).
+// Each ok: false is logged as startServer's (notStarted). `ensured`: as
+// startServer's.
+export async function restartServer({ root, terminal, line, logPath, serverPid, workspace, branch, ensured: given } = {}, deps) {
   const wrapped = wrapServerLine(line, logPath);
   if (!wrapped) return { ok: false, reason: "invalid-command" };
-  const ensured = await ensureServerTerminal({ root, terminal }, deps);
-  if (!ensured.ok) return ensured;
+  const head = { workspace, branch };
+  const ensured = given ?? (await ensureServerTerminal({ root, terminal }, deps));
+  if (!ensured.ok) return notStarted(logPath, head, ensured, deps);
   const t = ensured.terminal;
   const seen = await inspectServer({ terminal: t, logPath, serverPid }, deps);
   let restarted = false;
+  let interrupted = false;
   if (seen.kind === "spotlight") {
     const stopped = await interruptAndWait(t, { logPath, serverPid }, deps);
-    if (!stopped.ok) return stopped;
+    if (!stopped.ok) return notStarted(logPath, head, stopped, deps);
     restarted = true;
+    // A read hc couldn't make after the Ctrl-C says nothing of the old
+    // server: doubt is never death (N3).
+    interrupted = stopped.seen.kind !== "unknown";
   }
   const r = await typeWhenIdle({
     terminal: t, created: ensured.created, command: normalizeServerLine(line), wrapped,
     logPath, serverPid, workspace, branch, event: "restarted",
   }, deps);
+  if (!r.ok) return notStarted(logPath, head, interrupted ? { ...r, interrupted } : r, deps);
   return r.started ? { ...r, restarted } : r;
 }
 
-// Stop (toggle off): interrupt Spotlight's own server and wait for the
-// prompt; the terminal stays for the next start. Nothing else is touched:
-// a free prompt is `not-running`, a foreign process `busy`, no terminal
-// `terminal-gone` (all ok: there's no Spotlight server running).
-export async function stopServer({ root, terminal, logPath, serverPid, workspace, branch } = {}, deps) {
+// The pre-Ctrl-C server still leads the terminal (its `script`, by pid).
+const oldInFront = (seen, snapshot) => seen.kind === "spotlight" && seen.pid === snapshot.serverPid;
+
+// stopLeftovers through the caller's `deps.kill` (required: never the real
+// process.kill, F8) and the real clock unless `deps` brings its own; the CLI
+// itself is never signalled.
+function killLeftovers(left, rootPid, deps) {
+  requireKill(deps, "killLeftovers");
+  const killDeps = { ...deps, now: deps.now ?? Date.now, sleep: deps.sleep ?? defaultSleep };
+  return stopLeftovers(left, rootPid, killDeps, { protect: [process.pid] });
+}
+
+// What of the server stopLeftovers didn't stop (F4): the processes that
+// lived through the SIGKILL, then those it refused to signal (a tree holding
+// the CLI or the terminal's shell, or past the walk's bound).
+const notStopped = (done) => [...new Set([...done.survivors, ...done.refused])];
+
+// `{ refused }` for a result, only when some leftover was refused.
+const refusedOf = (done) => (done.refused.length > 0 ? { refused: done.refused } : {});
+
+// A Ctrl-C hc couldn't send, as the stop's notes say it (K5): hc's words on
+// one line (causeWords, N6), and none after it when they say nothing.
+function ctrlCFailed(interruptError) {
+  if (!interruptError) return null;
+  const said = causeWords(interruptError);
+  return said ? `the Ctrl-C could not be sent: ${said}` : "the Ctrl-C could not be sent";
+}
+
+// stopServer's ok: false reasons. Each writes its own NOT stopped note
+// (stopNote, notStoppedNote; K4, K5), so the CLI's turn-off adds a line only
+// for an answer outside these (L7).
+export const NOTED_STOP_FAILURES = new Set(["survived", "unreadable", "interrupt-failed", "still-running"]);
+
+// The stop's line in the log: stopped, by the Ctrl-C or after signalling
+// `forced` processes, or NOT stopped when some lived through the SIGKILL or
+// were never signalled (`refused`, counted among the survivors). A Ctrl-C hc
+// couldn't send (`interruptError`) is said in the same line (K5): "server
+// stopped (forced: 3 processes; the Ctrl-C could not be sent: …)", and
+// "nothing left to kill" in place of "interrupt sent" when the server was
+// gone without it.
+function stopNote(logPath, head, { forced, survivors = [], refused = [], interruptError = null }, deps) {
+  const ctrlC = ctrlCFailed(interruptError);
+  let text;
+  if (survivors.length > 0) {
+    const never = refused.length > 0 ? `not signalled: ${refused.join(", ")}` : null;
+    const detail = [`pids ${survivors.join(", ")}`, never, ctrlC].filter(Boolean).join("; ");
+    text = `Spotlight off — server NOT stopped: ${survivors.length} processes survived (${detail})`;
+  } else {
+    const how = forced > 0 ? `forced: ${forced} processes` : ctrlC ? "nothing left to kill" : "interrupt sent";
+    text = `Spotlight off — server stopped (${[how, ctrlC].filter(Boolean).join("; ")})`;
+  }
+  note(logPath, head, text, deps);
+}
+
+// The line of a stop that couldn't say the server stopped for a reason
+// other than survivors (stopNote names those): `reason` and the cause in
+// stopServer's own words (hc's, ps's), plus a Ctrl-C hc couldn't send when
+// `message` doesn't say it already (K4). The CLI's error and toast stay
+// Spanish only; `spotlight logs` reads this.
+function notStoppedNote(logPath, head, { reason, message, interruptError = null }, deps) {
+  const said = [causeWords(message), ctrlCFailed(interruptError)].filter(Boolean).join("; ");
+  note(logPath, head, `Spotlight off — server NOT stopped (${reason})${said ? `: ${said}` : ""}`, deps);
+}
+
+// Nothing runs in the terminal (its prompt is free, or there's no terminal):
+// nothing to interrupt, but a listener Spotlight recorded while its server
+// ran (`procs`: same pid, same start time), still on a recorded port with its
+// folder inside `root` (a server child that escaped an earlier run), is
+// killed at once. Any other listener, a server started by hand there
+// included, is never signalled. `rootPid`: the terminal's shell, when there
+// is one (its tree is never touched). The result carries `reason` when the
+// listeners found were all stopped.
+async function stopEscaped({ root, rootPid, ports, procs, logPath, head, terminal, reason }, deps) {
+  const snapshot = await serverSnapshot({ rootPid, serverPid: null, ports, procs }, deps);
+  const left = await serverLeftovers(snapshot, root, deps);
+  if (left.escaped.length === 0) return { ok: true, stopped: false, reason, terminal, forced: 0, escaped: [] };
+  const done = await killLeftovers({ escaped: left.escaped }, snapshot.rootPid, deps);
+  const forced = done.pids.length;
+  const escaped = left.escaped.filter((e) => !done.refused.includes(e.pid));
+  const survivors = notStopped(done);
+  stopNote(logPath, head, { forced, survivors, refused: done.refused }, deps);
+  if (survivors.length > 0) return { ok: false, reason: "survived", terminal, forced, survivors, ...refusedOf(done), escaped };
+  return { ok: true, stopped: false, reason, terminal, forced, escaped };
+}
+
+// Stop (toggle off), guaranteed (D26): Ctrl-C to Spotlight's own server, as
+// Orca does (spotlight-server-turn-off.ts:48-65), then up to STOP_WAIT_MS for
+// the prompt with none of the server's processes left and its ports free.
+// The server is what ran under its own process (the `script` in front) right
+// before the Ctrl-C, each process known by its pid and start time (ports.js
+// serverSnapshot). What's left of it then is killed (ports.js stopLeftovers:
+// SIGTERM, 3 s, SIGKILL): every one of those processes still alive as the
+// same process, wherever it was reparented (a child that ignores the Ctrl-C
+// and lost its parent to it), and a listener still on one of the server's
+// ports (those it held before the Ctrl-C, plus `ports`, the recorded ones)
+// that runs outside the terminal and inside `root`, when it is a process
+// Spotlight recorded while its server ran: `procs`, the identities
+// readServerState returned ({ pid, start, port }, same pid and same start
+// time). A listener that matches none, such as a server started by hand on
+// that port, is never signalled, on any path: only "Liberar puerto y
+// arrancar" ever kills a process Spotlight didn't start (D24). With no
+// `procs` (an old record), no listener outside the tree is killed. The
+// terminal, its shell and the shell's own helpers (gitstatusd, a job put in
+// the background) are never waited on nor killed; the terminal stays for the
+// next start.
+//
+// Only what ran before the Ctrl-C is ever killed: a server typed into the
+// terminal during the wait (a restart) is new, and stays, and so is a pid
+// another process took since (another start time). The CLI also stops under
+// the repo's lock, which every start and restart takes. A Ctrl-C that hc
+// couldn't send skips the wait: what was read before it is killed at once
+// (F3).
+//
+// The server log gets the stop's one note on every path that found the
+// server, or a leftover of it, and says why when it didn't stop: "server
+// stopped (interrupt sent)" or "(forced: <n> processes)", a Ctrl-C hc
+// couldn't send in the same parentheses; "server NOT stopped: <n> processes
+// survived (pids …)"; "server NOT stopped (<reason>): <message>" for the
+// other ok: false (K4, K5). The CLI writes a stop line of its own only for an
+// answer whose reason isn't one of NOTED_STOP_FAILURES (L7).
+//
+// Results. `ok: false` always means the server may still be up:
+//   { ok: true, stopped: true, terminal, forced } — `forced`: how many
+//     processes were signalled, 0 when the Ctrl-C was enough (the log says
+//     which); `interruptError` too when hc couldn't send the Ctrl-C and the
+//     server was killed instead (or was gone already: "nothing left to kill")
+//   { ok: true, stopped: false, reason: "not-running" | "terminal-gone",
+//     terminal, forced, escaped } — the prompt was free, or there's no
+//     terminal: nothing is interrupted, but a recorded listener (`procs`)
+//     still on a recorded port with its folder inside `root` (a server child
+//     that escaped an earlier run) is killed right away; `escaped` lists
+//     those ({ pid, port, cwd }) and the log says it when there were any
+//   { ok: true, stopped: false, reason: "busy", terminal } — a process
+//     Spotlight didn't start in front: nothing is touched
+//   { ok: false, reason: "survived", terminal, forced, survivors, refused?,
+//     interruptError? } — some process of the server lived through the
+//     SIGKILL (not ours to signal, stuck in the kernel), or was never
+//     signalled because stopLeftovers refused it (its tree holds the CLI or
+//     the terminal's shell: `refused`, also counted in `survivors`): the
+//     server is not stopped, and the log says so with their pids (`escaped`
+//     too when the terminal ran nothing)
+//   { ok: false, reason: "unreadable", terminal, message } — hc couldn't
+//     read the terminal: no server pid to read, so nothing is signalled
+//   { ok: false, reason: "interrupt-failed", terminal, forced: 0, message }
+//     — hc couldn't send the Ctrl-C and, after it, neither hc nor ps showed
+//     anything to kill or proved the server gone
+//   { ok: false, reason: "still-running", terminal, forced, pid, message,
+//     interruptError? } — its processes were killed, but hc still shows
+//     Spotlight's old `script` (`pid`) in front
+// `deps.kill` (process.kill's shape) is required: without it stopServer
+// throws before it reads or sends anything (F8).
+export async function stopServer({ root, terminal, logPath, serverPid, workspace, branch, ports, procs: known } = {}, deps) {
+  requireKill(deps, "stopServer");
   const seen = await inspectServer({ root, terminal, logPath, serverPid }, deps);
   const t = seen.terminal ?? null;
-  if (seen.kind === "gone") return { ok: true, stopped: false, reason: "terminal-gone", terminal: null };
-  if (seen.kind === "unknown") return { ok: false, reason: "unreadable", terminal: t, message: seen.error ?? "no foreground" };
-  if (seen.kind === "shell") return { ok: true, stopped: false, reason: "not-running", terminal: t };
+  const head = { workspace, branch };
+  if (seen.kind === "unknown") {
+    const message = `the Spotlight terminal could not be read (${seen.error ?? "no foreground"}): the server may still be running`;
+    notStoppedNote(logPath, head, { reason: "unreadable", message }, deps);
+    return { ok: false, reason: "unreadable", terminal: t, message };
+  }
   if (seen.kind === "foreign") return { ok: true, stopped: false, reason: "busy", terminal: t };
-  const stopped = await interruptAndWait(t, { logPath, serverPid }, deps);
-  if (!stopped.ok) return stopped;
-  note(logPath, { workspace, branch }, "stopped", deps);
-  return { ok: true, stopped: true, terminal: t };
+  if (seen.kind === "gone") {
+    return stopEscaped({ root, rootPid: null, ports, procs: known, logPath, head, terminal: null, reason: "terminal-gone" }, deps);
+  }
+  if (seen.kind === "shell") {
+    return stopEscaped({ root, rootPid: seen.rootPid, ports, procs: known, logPath, head, terminal: t, reason: "not-running" }, deps);
+  }
+
+  const snapshot = await serverSnapshot({ rootPid: seen.rootPid, serverPid: seen.pid, ports, procs: known }, deps);
+  const r = await hc(deps, ["interrupt", t, "--timeout", String(INTERRUPT_WATCH_S), "--json"]);
+  // No Ctrl-C is no reason to leave the server up (D26): no wait for it, the
+  // server read above is killed at once.
+  const interruptError = r.ok ? null : r.error.message || r.error.kind;
+
+  const look = { terminal: t, logPath, serverPid };
+  const until = nowOf(deps) + (r.ok ? STOP_WAIT_MS : 0);
+  let front;
+  let left;
+  for (;;) {
+    front = await inspectServer(look, deps);
+    left = await serverLeftovers(snapshot, root, deps);
+    const gone = !oldInFront(front, snapshot) && left.procs.length === 0 && left.escaped.length === 0;
+    if (gone || nowOf(deps) >= until) break;
+    await sleepOf(deps, POLL_MS);
+  }
+  const failed = interruptError ? { interruptError } : {};
+
+  // The old `script` in front is a leftover even when ps couldn't read it.
+  const procs = oldInFront(front, snapshot) ? [...new Set([...left.procs, front.pid])] : left.procs;
+  let forced = 0;
+  if (procs.length > 0 || left.escaped.length > 0) {
+    const done = await killLeftovers({ procs, escaped: left.escaped }, snapshot.rootPid, deps);
+    forced = done.pids.length;
+    const survivors = notStopped(done);
+    if (survivors.length > 0) {
+      stopNote(logPath, head, { forced, survivors, refused: done.refused, interruptError }, deps);
+      return { ok: false, reason: "survived", terminal: t, forced, survivors, ...refusedOf(done), ...failed };
+    }
+    const after = await inspectUntil(look, deps, (s) => !oldInFront(s, snapshot), PROMPT_MS);
+    if (oldInFront(after, snapshot)) {
+      const message = `Spotlight's server (pid ${after.pid}) still leads the terminal after it was killed: the server may still be running`;
+      notStoppedNote(logPath, head, { reason: "still-running", message, interruptError }, deps);
+      return { ok: false, reason: "still-running", terminal: t, forced, pid: after.pid, message, ...failed };
+    }
+  } else if (interruptError && front.kind === "unknown") {
+    // No Ctrl-C, no reading of the terminal after it, nothing ps could name:
+    // nothing shows the server gone.
+    const message = `the Ctrl-C could not be sent (${interruptError}) and the terminal can't be read: the server may still be running`;
+    notStoppedNote(logPath, head, { reason: "interrupt-failed", message }, deps);
+    return { ok: false, reason: "interrupt-failed", terminal: t, forced: 0, message };
+  }
+  stopNote(logPath, head, { forced, interruptError }, deps);
+  return { ok: true, stopped: true, terminal: t, forced, ...failed };
 }
 
 // ── Logs and peek ──────────────────────────────────────────────────────────
@@ -423,7 +935,8 @@ export async function serverLogs({ logPath, terminal, lines = DEFAULT_TAIL_LINES
   return { source: "terminal", text: last.length > 0 ? `${last.join("\n")}\n` : "" };
 }
 
-// "Ver server": Herdr's peek over the tab at the server terminal.
+// Herdr's peek over the tab at the server terminal: "Ver server" for a
+// terminal in no tab (showServer).
 export async function peekServer(terminal, deps) {
   const [file, ...args] = peekArgv(terminal);
   try {
@@ -433,4 +946,24 @@ export async function peekServer(terminal, deps) {
   } catch (e) {
     return { ok: false, message: String(e?.message ?? e) };
   }
+}
+
+// "Ver server" (D38): the server terminal's space and tab are shown
+// (`space.select`, then `tab.select`), as in Orca, where the server is a tab;
+// a terminal Herdr shows in no tab (hidden), or a Herdr that can't say,
+// gets the peek over the tab instead (peekServer). `terminal`: an address or
+// the sl-<slug> name. → { ok: true, how: "tab" | "peek" } or { ok: false,
+// message }.
+export async function showServer(terminal, deps) {
+  const got = await getTerminal(terminal, deps);
+  const address = typeof got.terminal?.address === "string" ? got.terminal.address : terminal;
+  const spaces = await herdrSpaces(deps);
+  const at = spaces ? tabOf(spaces, address) : null;
+  if (at) {
+    const space = await herdrDo(deps, "space.select", { id: at.space });
+    const tab = space.ok ? await herdrDo(deps, "tab.select", { id: at.tab }) : space;
+    if (tab.ok) return { ok: true, how: "tab" };
+  }
+  const r = await peekServer(address, deps);
+  return r.ok ? { ok: true, how: "peek" } : r;
 }

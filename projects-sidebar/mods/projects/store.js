@@ -5,11 +5,13 @@
 // registry, or notes value, that didn't read back as itself is copied to its
 // backup key before the first write over it. Never write from render().
 // It also reads, and never writes, other plugins' badge keys (config.js
-// BADGE_KEYS, D38).
+// BADGE_KEYS, D38) and workspace menu keys (config.js MENU_KEYS, Spotlight's
+// D30).
 
 import { shared, setShared } from "herdr";
-import { BADGE_KEYS } from "./config.js";
+import { BADGE_KEYS, MENU_KEYS } from "./config.js";
 import { parseBadges } from "./badges-model.js";
+import { parseMenus } from "./menus-model.js";
 import { parsePrs } from "./pr-model.js";
 import {
   KEYS, changed, normPath,
@@ -158,6 +160,13 @@ export function askPrs() {
 // by badges-model.js; tree.js reads it once per render.
 
 export const badges = () => parseBadges(BADGE_KEYS.map((k) => shared(k)));
+
+// ── menus.*: other plugins' workspace menu items (Spotlight's D30) ────────
+// Read only, like badges.*: each key belongs to the plugin that publishes it.
+// { [workspacePath]: [item] }, validated and capped by menus-model.js;
+// workspace-menu.js reads it when it opens and on every render.
+
+export const menus = () => parseMenus(MENU_KEYS.map((k) => shared(k)));
 
 // ── projects.inicio.v1: Inicio's space (workspace-sleep D6) ─────────────────
 // Written only by the keeper (keeper.js), from a spawned task: the id it

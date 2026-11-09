@@ -19,6 +19,9 @@
 //   refs/herdr-spotlight/rescued-pending, so the next one writes it back; a
 //   fresh activation drops it. A nested git repo in the way refuses the
 //   turn-off unless forced, which discards it.
+// - A root Orca Pro Max's Spotlight holds (its refs, or its HEAD detached on
+//   an "Orca Spotlight" commit) is never touched, not even forced: turning on,
+//   syncing and turning off refuse (orca-active, orca-holds; D27).
 //
 // Node-only: the CLI imports it, the mod never does.
 import { execFile } from "node:child_process";
@@ -44,8 +47,16 @@ export const RESCUED_PENDING = "refs/herdr-spotlight/rescued-pending";
 /** Orca Pro Max's own Spotlight refs: a root holding any is Orca's, not ours. */
 export const ORCA_REFS_PREFIX = "refs/orca/spotlight/";
 
+/** The author of the snapshot commits Orca Pro Max's Spotlight projects onto
+ *  a root ("Orca Spotlight snapshot"); ours are "Herdr Spotlight". */
+export const ORCA_SNAPSHOT_AUTHOR = "Orca Spotlight";
+
+/** orca-holds' message (D27), also what the reap's reconcile records. */
+export const ORCA_HOLDS_MESSAGE = "Este root lo tiene el Spotlight de Orca: apágalo allá primero.";
+
 /** Orca's SpotlightErrorCode (O/src/shared/spotlight.ts:7-31) minus
- *  `unsupported-host` (no remote hosts here), plus `orca-active`. */
+ *  `unsupported-host` (no remote hosts here), plus `orca-active` and
+ *  `orca-holds`. */
 export const ERROR_CODES = Object.freeze([
   /** A merge, rebase or cherry-pick is in progress in the root or the holder. */
   "operation-in-progress",
@@ -72,6 +83,9 @@ export const ERROR_CODES = Object.freeze([
   "git-failed",
   /** Orca's Spotlight is still on in this root (refs/orca/spotlight/*). */
   "orca-active",
+  /** Orca's Spotlight has this root now: its HEAD is detached on an "Orca
+   *  Spotlight" commit (D27). Refused even when forced. */
+  "orca-holds",
 ]);
 
 export class SpotlightError extends Error {
@@ -278,8 +292,41 @@ async function assertTargets(ctx, rootPath, worktreePath) {
   await assertHolder(ctx, root, worktreePath);
 }
 
-/** Orca Pro Max's Spotlight on the same root would fight this one over it. */
+/** Whether Orca Pro Max's Spotlight has the root now (D27): its HEAD is
+ *  detached on a commit authored ORCA_SNAPSHOT_AUTHOR. Never throws: a root
+ *  that can't be read, on a branch, or on anyone else's commit (our own
+ *  "Herdr Spotlight" snapshots included) is not Orca's. The author comes from
+ *  the raw commit (plumbing: no log config, signature or mailmap in the way). */
+export async function orcaHoldsRoot(ctx, rootPath) {
+  const [branch, commit] = await Promise.all([
+    gitTry(ctx, rootPath, ["symbolic-ref", "-q", "HEAD"]),
+    gitTry(ctx, rootPath, ["cat-file", "commit", "HEAD"]),
+  ]);
+  if (branch || !commit) return false;
+  const header = commit.split("\n\n")[0];
+  const author = /^author (.*) <[^>]*> -?\d+ [+-]\d{4}$/m.exec(header)?.[1] ?? null;
+  return author === ORCA_SNAPSHOT_AUTHOR;
+}
+
+/** `orcaHoldsRoot` with the real git, for the reap's reconcile (D27). */
+export function readOrcaHolds(rootPath) {
+  return orcaHoldsRoot(gitContext(), rootPath);
+}
+
+/** Orca's Spotlight projected its own workspace onto the root (D27): turning
+ *  on, syncing or turning off here, forced or not, would undo that, and Orca
+ *  would undo ours. Refused before anything is written. */
+async function assertRootNotHeldByOrca(ctx, rootPath) {
+  if (await orcaHoldsRoot(ctx, rootPath)) {
+    throw new SpotlightError("orca-holds", ORCA_HOLDS_MESSAGE);
+  }
+}
+
+/** Orca Pro Max's Spotlight on the same root would fight this one over it:
+ *  its HEAD on Orca's commit (orca-holds) is checked first, then Orca's refs
+ *  (orca-active). */
 async function assertNoOrcaSpotlight(ctx, rootPath) {
+  await assertRootNotHeldByOrca(ctx, rootPath);
   const ref = await gitTry(ctx, rootPath, ["for-each-ref", "--count=1", "--format=%(refname)", ORCA_REFS_PREFIX]);
   if (ref) {
     throw new SpotlightError(
@@ -503,7 +550,7 @@ async function applySnapshotToRoot(ctx, rootPath, snapshotSha) {
  *  without its anchors); a takeover when it has (keeps the first backup and
  *  any pending rescue). Options:
  *  - force: skip the root guards (root-diverged, untracked-collision), as
- *    Orca's "Activate anyway";
+ *    Orca's "Activate anyway"; never orca-holds nor orca-active;
  *  - reuseIndexForHead: the holder HEAD of the previous checkpoint, when it
  *    was this same holder's (skips re-seeding the temp index);
  *  - requireOnBranch (default true): a fresh activation needs the root on a
@@ -576,7 +623,9 @@ export async function activate(ctx, rootPath, worktreePath, opts = {}) {
 /** Brings the root in step with the holder's current files. A no-op (same
  *  tree, root still on the snapshot) returns `skipped: true` having written
  *  nothing: no commit, no ref, no reset. Options: force, reuseIndexForHead
- *  (as activate). Returns {snapshotSha, checkpointHeadSha, skipped}. */
+ *  (as activate). A root Orca's Spotlight has now refuses, forced or not
+ *  (orca-holds); one still on our snapshot can't be Orca's, so the no-op
+ *  path doesn't look. Returns {snapshotSha, checkpointHeadSha, skipped}. */
 export async function sync(ctx, rootPath, worktreePath, opts = {}) {
   await assertTargets(ctx, rootPath, worktreePath);
   const refs = await inspectRefs(ctx, rootPath);
@@ -607,8 +656,9 @@ export async function sync(ctx, rootPath, worktreePath, opts = {}) {
 }
 
 /** Turn-off's refusals, read-only, run before anything touches the root or
- *  its server: an operation in progress, refs already gone, and (unless
- *  forced) a diverged root or a nested git repo in the way. Returns the refs. */
+ *  its server: an operation in progress, refs already gone, a root Orca's
+ *  Spotlight has now (orca-holds, forced or not: D27), and (unless forced) a
+ *  diverged root or a nested git repo in the way. Returns the refs. */
 export async function assertDeactivatable(ctx, rootPath, opts = {}) {
   return (await checkTurnOff(ctx, rootPath, opts)).refs;
 }
@@ -621,6 +671,10 @@ async function checkTurnOff(ctx, rootPath, opts) {
   await assertNoConflictOperation(ctx, rootPath);
   const refs = await inspectRefs(ctx, rootPath);
   if (!refs.originalHeadSha) throw new SpotlightError("not-active", "Spotlight is not active for this repository.");
+  // After not-active: with no refs of ours there is nothing to restore, and
+  // the turn-off only drops the record. With them, the reset would put our
+  // original back over Orca's projection: Apagar igual included.
+  await assertRootNotHeldByOrca(ctx, rootPath);
   const original = await treeFiles(ctx, rootPath, refs.originalHeadSha);
   const ignoreCase = (await gitTry(ctx, rootPath, ["config", "--bool", "core.ignorecase"])) === "true";
   const inTheWay = await itemsInTheWay(ctx, rootPath, refs, original, ignoreCase);
@@ -639,7 +693,7 @@ async function checkTurnOff(ctx, rootPath, opts) {
  *  changes (staged and unstaged), then deletes the refs. `force` discards a
  *  diverged root (Orca's "Turn off anyway") and a nested git repo in the
  *  way, which is never saved: a gitlink would keep none of its commits or
- *  files. Returns {originalBranch, branchMissing, branchInUse, warning,
+ *  files; never a root Orca's Spotlight has now (orca-holds). Returns {originalBranch, branchMissing, branchInUse, warning,
  *  rescued, discardedRepos}: when the branch can't be re-attached (deleted, or checked out in
  *  another worktree) the root is left detached at its original commit and
  *  `warning` is a `branch-missing` {code, message}. `rescued` is null, or {ref, restored, kept} when untracked

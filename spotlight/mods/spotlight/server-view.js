@@ -11,12 +11,12 @@
 
 import { div, svg } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
-import { theme, closeOverlay, appHome, readTextFile, exec } from "herdr";
+import { theme, closeOverlay, appHome, readTextFile, exec, shared } from "herdr";
 import * as fs from "fs/promises";
 import { detectServerScripts } from "./server-plan.js";
 import { cliPathOf, readState, readSettings } from "./board-model.js";
 import { readFiles, watchState } from "./board.js";
-import { iconPath, errorText } from "./badges-model.js";
+import { iconPath } from "./badges-model.js";
 import { serverViewModel, modIo } from "./server-view-model.js";
 
 const STATE_WORDS = {
@@ -109,6 +109,8 @@ export default class ServerView {
     if (!this.repo) return div().p(10).text_size(12).text_color(t.dim).child("spotlight: falta el repo");
     const m = serverViewModel({
       state: this.state, settings: this.settings, repo: this.repo, workspace: this.workspace, detection: this.detection, bin: this.bin,
+      // D32: an unlit workspace's task, for the env stored for it.
+      registry: shared("projects.v1"), cache: shared("projects.cache.v1"),
     });
     const word = m.holder ? STATE_WORDS[m.serverState] ?? m.serverState ?? "" : "apagado";
     const label = (text) => div().pt(2).text_size(11).text_color(t.dim).child(text);
@@ -190,9 +192,10 @@ export default class ServerView {
         .child(div().font_semibold().flex_none().child(m.name))
         .child(div().flex_1().min_w(0).truncate().text_color(t.dim).child(m.holderName ? `← ${m.holderName}` : ""))
         .child(div().flex_none().text_size(11).text_color(m.serverState === "listening" && m.holder ? t.done : t.dim).child(word)))
-      .when(Boolean(m.error), (el) => el.child(v_flex().gap(2).p(6).rounded(6).border(1).border_color(t.blocked)
-        .child(div().text_color(t.blocked).child(errorText(m.error)))
-        .child(div().text_size(11).text_color(t.dim).truncate().child(m.error?.message ?? ""))))
+      .when(Boolean(m.errorTitle), (el) => el.child(v_flex().gap(2).p(6).rounded(6).border(1).border_color(t.blocked)
+        .child(div().text_color(t.blocked).child(m.errorTitle))
+        // The engine's message, only when the words above don't carry it (T2).
+        .when(Boolean(m.errorDetail), (box) => box.child(div().text_size(11).text_color(t.dim).truncate().child(m.errorDetail)))))
       .when(this.detection === null, (el) => el.child(div().text_size(11).text_color(t.dim).child("Leyendo package.json…")))
       .when(m.envs.length > 0, (el) => el.child(label("Entorno")).children(m.envs.map(envRow)))
       .when(Boolean(m.envNote), (el) => el.child(div().text_size(11).text_color(t.blocked).child(m.envNote)))

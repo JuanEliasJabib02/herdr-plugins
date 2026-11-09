@@ -88,6 +88,9 @@ across repos.
     "Servers". Servers holds each project's main checkout, or "<name> ·
     Loading…" while a project is still listed.
   - Click a lane header to fold it; folds survive a reload.
+  - A ticket or name lane's header shows other plugins' badges for that
+    task, if any, before its count (see Badges from other plugins), folded
+    or not.
   - Right-click a ticket or name lane for its menu: "Add note…" ("Edit
     note…" once it has one), a separator, then "Delete task…" in the
     blocked color, dimmed with "No workspaces" when the lane has none in
@@ -148,7 +151,10 @@ across repos.
     group ▸, Remove from list.
   - The workspace menu is a 220-wide popup: Copy Path, Copy Worktree Name
     and, on a worktree that isn't the main checkout, Rename… and then
-    Delete… after a separator, in `blocked`.
+    Delete… after a separator, in `blocked`. Then, after another separator,
+    the items other plugins publish for that workspace (see Menu items from
+    other plugins). Its height follows its rows: 31 px each, 9 per
+    separator, 50 for the title and padding.
   - The Rename dialog is a 380 × 320 modal:
     - "Rename <label>" and the path with `~`;
     - a "Branch" input, prefilled with the branch and selected;
@@ -346,7 +352,9 @@ across repos.
   saved one, then the latest remote branches.
 - **Right-click a workspace:** opens the workspace menu. Copy Path and Copy
   Worktree Name (the folder's name) go to the clipboard, and a toast says
-  "Copied".
+  "Copied". Another plugin's item runs what that plugin published: its row
+  shows "…" while its program runs, then the menu closes; one with ▸
+  reopens the menu at the pointer on its submenu.
 - **Delete…** (never on the main checkout): the dialog asks git first, on a
   fresh `worktree list`: the lock, `status` with untracked files, and
   submodule checkouts as git counts them. Delete then runs, in this order:
@@ -611,13 +619,15 @@ across repos.
     to check each view.
   - Pure logic is in `lib.js`, `tree-model.js`, `task-model.js`,
     `new-workspace-model.js`, `remove-workspace-model.js`,
-    `rename-workspace-model.js`, `badges-model.js`, `pr-model.js` (the PR
-    colors), `pr-card-model.js` (the PR card) and `inicio-model.js`, tested
-    with `node --test` (Delete's and Rename's against a real git, Inicio's
-    against a fake Herdr whose commands land a moment later). The command
-    loop is tested on the mod's real copies, with `herdr`, `gpui-kit` and
-    `gpui-base` stood in for (`test/inicio-model.test.js`). The card finds
-    its workspace with `lib.js` `checkoutAt`, the rule `matchSpaces` places
+    `rename-workspace-model.js`, `badges-model.js`, `menus-model.js` (other
+    plugins' workspace menu items, with `badges-model.js`'s validators),
+    `pr-model.js` (the PR colors), `pr-card-model.js` (the PR card) and
+    `inicio-model.js`, tested with `node --test` (Delete's and Rename's
+    against a real git, Inicio's against a fake Herdr whose commands land a
+    moment later). The command loop is tested on the mod's real copies, with
+    `herdr`, `gpui-kit` and `gpui-base` stood in for
+    (`test/inicio-model.test.js`). The card finds its workspace with
+    `lib.js` `checkoutAt`, the rule `matchSpaces` places
     spaces by.
   - `store.js` is the only code that touches the shared keys: `projects.v1`
     (groups and projects), `projects.ui.v1` (collapsed projects, folded
@@ -633,10 +643,10 @@ across repos.
     `projects.v1.backup` before the first write over it; a malformed
     `projects.notes.v1` goes to `projects.notes.v1.backup` the same way.
     It also reads the badge keys `badges.spotlight`, `badges.pr` and
-    `badges.hibernate`, read-only: other plugins write them, and this
-    plugin never writes or clears one.
-  - `config.js` holds `MOD`, `WORKTREE_ROOT` (`~/orca/workspaces`) and
-    `BADGE_KEYS`.
+    `badges.hibernate`, and the menu key `menus.spotlight`, read-only:
+    other plugins write them, and this plugin never writes or clears one.
+  - `config.js` holds `MOD`, `WORKTREE_ROOT` (`~/orca/workspaces`),
+    `BADGE_KEYS` and `MENU_KEYS`.
 - **Commands:** `projects.add`, `projects.add-here`, `projects.new-workspace`,
   `projects.group1`..`projects.group3`, `projects.ping`,
   `projects.refresh-prs` (a PR round now, or one more after the one
@@ -709,7 +719,9 @@ across repos.
   - `test -e`, to check whether a folder exists.
   - `open <url>`, the PR card's "Abrir en GitHub".
   - Whatever program another plugin's badge names in its `exec`, when you
-    click that badge; its hover says which ("· runs <program>").
+    click that badge; its hover says which ("· runs <program>"). The same
+    for another plugin's workspace menu item, when you choose it; there its
+    label, the plugin's words, is all the row shows.
 - **Art:** its own Lucide-style icons in `icons/` (folder, folder-plus,
   branch, home, plus, code, copy), plus chevrons, check, x and square-pen
   from Herdr's `workspace-chrome`, agent icons from Herdr's `icons/`, and
@@ -717,10 +729,10 @@ across repos.
 
 **Badges from other plugins**
 
-Other plugins can put small indicators ("badges") on workspace rows, the
-Spotlight plugin first. This plugin knows none of them: it reads, draws and
-runs what they publish. This section is the contract a publisher codes
-against.
+Other plugins can put small indicators ("badges") on workspace rows and on
+Task-mode lane headers, the Spotlight plugin first. This plugin knows none
+of them: it reads, draws and runs what they publish. This section is the
+contract a publisher codes against.
 
 - **Keys:** `badges.spotlight`, `badges.pr` and `badges.hibernate`, read in
   that order (`config.js` `BADGE_KEYS`). A plugin writes only its own key,
@@ -728,16 +740,41 @@ against.
   path at once. Adding a plugin is one line in that list.
   There is no index key listing the plugins: shared state keeps the last
   write, so two plugins adding themselves to one list at start would race.
-- **Value:** `{ [workspacePath]: [badge] }`.
+- **Value:** `{ [workspacePath | laneKey]: [badge] }`.
   - A path is the workspace's folder, absolute, spelled as `git worktree
-    list` prints it (a trailing slash is ignored). Any other key is ignored.
+    list` prints it (a trailing slash is ignored). An absolute key is
+    always a path.
+  - A lane key, `<groupId>/task:<KEY>`, puts its badges on that group's
+    task lane header:
+    - `<groupId>` is the group's `id` in `projects.v1` (`g1`, `g2`…).
+    - `task:<KEY>` is exactly the lane this plugin builds (`task-model.js`
+      `laneKey`): a ticket, found in the branch or else the folder name, as
+      its prefix uppercased, a dash and its digits (`feat/ax_3356-fix` →
+      `task:AX-3356`); without one, the branch's last segment (or the
+      folder name) lowercased (`feat/Login` → `task:login`).
+    - The key is read as written, never respelled: `g1/task:ax-3356` is
+      kept but matches no lane, so nothing draws.
+    - Dropped: a key with no group (`task:AX-3356`), a lane with no name
+      (`g1/task:`), No task's (`g1/task:none`, any case), Servers
+      (`g1/servers`), and a name a task note couldn't have (`__proto__`,
+      `constructor` or `prototype` in any case, over 200 chars; `lib.js`
+      `noteKeyOf`).
+    - Lane headers exist only in a group organized by Task, as Orca's task
+      header exists only under "Group by → Task": a group in Project mode
+      draws none of its lane keys. Only the active group's are drawn, so
+      publish the lanes of every Task-mode group that has the task, each
+      under its own id; the same name in two groups never shares badges.
+  - Any other key is ignored.
   - A value that isn't an object (`null`, a string, a list) is no badges.
-  - A path whose value isn't a list draws nothing there.
-- **A badge:** `{ icon?, text?, tone?, tooltip?, action? }`.
+  - A path or lane whose value isn't a list draws nothing there.
+- **A badge:** `{ icon?, text?, tone?, tooltip?, action?, spin?, reveal?,
+  pill?, dot?, hover? }`.
   - `icon`: an SVG under Herdr's home (`~/.config/herdr-app`),
     `mods/<mod>/…/<name>.svg` at any depth, with no `..`, empty segment or
-    backslash. Drawn 12 px, tinted. Build it from your mod's folder name:
-    an install may have renamed it.
+    backslash. Drawn 12 px (10 px in a pill), tinted: draw it with
+    `stroke="currentColor"` (or `fill`) so it takes the badge's color and
+    its hover's. Build it from your mod's folder name: an install may have
+    renamed it.
   - `text`: at most 16 code points (a longer one is cut), on one line:
     runs of whitespace become one space.
   - `tone`: `accent`, `dim`, `working`, `blocked` or `done`, the theme's
@@ -745,7 +782,37 @@ against.
   - `tooltip`: at most 200 code points (a longer one is cut), on one line
     like `text`: runs of whitespace (newlines too) become one space, so
     what a click runs, shown after it, stays in view.
-  - A badge needs an icon or a text; one with neither is dropped.
+  - `spin`: `true` turns the badge's icon, one turn every 900 ms (a busy
+    mark, e.g. a ring icon while your plugin works). `false` or absent:
+    still. Any other value is dropped alone. A badge with only text
+    doesn't turn.
+  - `reveal`: `"hover"` draws the badge at opacity 0 until its row (the
+    workspace row, or the lane header) is hovered, then fades it in; it
+    keeps its place meanwhile (Orca's idle flashlight, its logs icon and
+    its X). `"grow"` also opens it from width 0 to its own width, and
+    closes it back (Orca's env pill); collapsed it takes no gap either.
+    Both move in 150 ms, ease-in-out. A reveal badge takes a click only
+    when it was pressed while its row was hovered: at opacity 0 a click on
+    it does nothing. Absent: always shown. Any other value is dropped
+    alone.
+  - `pill`: `true` draws an outlined pill, 16 px tall, its text uppercase
+    at 10 px. With the `dim` tone it is Orca's variant tag: the theme's
+    border, no fill, the hover color on hover with its text lifting to the
+    foreground. With any other tone it is Orca's SPOTLIGHT chip: the tone's
+    border at 30 %, a 5 % fill, 15 % on hover, its text in the tone. A pill
+    is never cut: the row's name gives way instead. `false` or absent: no
+    pill. Any other value is dropped alone.
+  - `dot`: `"on"` or `"off"`, a 6 px dot (Orca's server dot): filled in the
+    `done` color, or a hollow `dim` ring. On a badge with an icon it sits
+    at the icon's bottom-right; on a pill, or a badge with no icon, after
+    the text. It takes no clicks. Any other value is dropped alone.
+  - `hover`: a tone (as `tone`) the badge's chip and color take on hover
+    instead of its own (Orca's X: `dim`, amber on hover, so `"tone": "dim",
+    "hover": "working"`). Only a badge with an action has a hover look.
+    Anything but a tone is dropped alone.
+  - A badge needs an icon or a text; one with neither is dropped. A text
+    with no icon is a text badge: just the text in its tone, with no icon
+    slot (Orca's port label, its env pill).
   - A field that breaks a rule is dropped alone: a bad icon or action goes
     and the rest of the badge stays. Unknown fields are ignored.
 - **`action`:** `{ "command": "<mod>.<command>" }` or
@@ -767,7 +834,9 @@ against.
     (`./x`, `bin/x`) drops the action: it would run a file from whatever
     branch the workspace has checked out. Prefer an absolute path.
   - An `exec` click runs `exec(argv[0], argv.slice(1), { cwd: <the
-    workspace's folder> })`: argv only, never a shell. It gets Herdr's
+    workspace's folder> })`, or, on a lane header (which has no folder),
+    with `cwd` your home folder: argv only, never a shell. Put what the
+    program needs to know (the task, the group) in its args. It gets Herdr's
     environment, whose PATH is `~/.local/bin` and then the login shell's
     (`$SHELL -l`, which reads `/etc/paths` and `.zprofile` but not
     `.zshrc`). So a bare name finds `/usr/local/bin`, but not a folder only
@@ -775,21 +844,52 @@ against.
   - A non-zero exit, or a program that can't start, shows a warning toast
     titled with the program's name: stderr's first line, else "exited with
     code N". While a badge's program runs, more clicks on it are ignored.
-- **Limits:** at most 3 badges per plugin on a row, and 4 per row in all,
-  in key order; the rest aren't drawn.
+- **Limits:** at most 4 badges per plugin on a row, and 5 per row in all,
+  in key order; the rest aren't drawn. A lane header is a row of its own,
+  with the same limits. The cap leaves a place; the row's width may run
+  out first (see Drawing).
 - **Drawing:** after the workspace row's label, in Project and Task modes,
-  main checkouts included, never on the narrow rail. The icon, then the
-  text (11.5 px), in the tone's color. The row's badges share 128 px (one
-  badge up to 72 px, four up to 29 px each, 4 px apart), and a long text
-  ends in "…", so the label keeps its room. The hover shows the tooltip,
-  then what a click runs: "· runs <argv[0]>" or "· <command>".
-- **Clicks:** a click runs the action and doesn't open the workspace. A
-  right-click opens the workspace menu, as on the row, and never runs the
-  action. A badge without an action clicks like its row.
+  main checkouts included, never on the narrow rail. On a lane header:
+  after its label and, folded, its status mark (Orca's order: status, then
+  the task's buttons), before its count, folded or not. The icon, then the
+  text (11.5 px), in the tone's color, 4 px apart. Drawn as Orca's sidebar
+  buttons:
+  - A badge with an action is a 16 px tall rounded button (4 px corners;
+    one with text gets 4 px on each side), and the pointer shows over it.
+    On hover a chip shows behind it: the `working` tone at 10 % (Orca's
+    amber), the `blocked` tone at 10 %, else the foreground at 15 % (over
+    the hovered row, so it shows as Orca's gray square); a
+    `dim` badge lifts to the foreground, any other keeps its color (or both
+    take the badge's `hover` tone). Colors change at once: Herdr's
+    transitions move only opacity, width, height, left and top. A badge
+    without an action has no hover look.
+  - Widths: a pill is never cut. An icon-only badge takes 16 px. The text
+    badges share what is left of 128 px after the icon-only badges and the
+    4 px gaps (a text badge up to 72 px; five text badges up to 22 px
+    each), and a long text ends in "…". When the row runs out of width,
+    its name gives way first, then, in Task mode, the project name drawn
+    after the badges (up to 110 px); the badges never shrink. A lit
+    Spotlight root (its pill, port, logs icon and X, about 170 px) leaves
+    the name a few px in Project mode, and the name and the project name
+    about 48 px between them in Task mode.
+  - The hover shows the tooltip, then what a click runs: "· runs
+    <argv[0]>" or "· <command>".
+- **Clicks:** on a workspace row, a click runs the action and doesn't open
+  the workspace; a right-click opens the workspace menu, as on the row, and
+  never runs the action; a badge without an action clicks like its row. On
+  a lane header, a click runs the action and never folds the lane, and a
+  badge without an action swallows the click (it doesn't fold the lane
+  either); a right-click opens the task menu, as on the header, and never
+  runs the action. On either row, a `reveal` badge pressed while it
+  doesn't show (its row not hovered) does nothing on its click.
 - **Lifetime:** the format only grows; a breaking change gets a new key
-  (e.g. `badges.spotlight.v2`). A publisher clears its own paths, and its
-  key (`setShared(key, null)`), when they no longer apply: a stale badge
-  stays until it does.
+  (e.g. `badges.spotlight.v2`). Lane keys, `spin`, `reveal`, `pill`, `dot`
+  and `hover` were added this way: an older projects-sidebar drops a lane
+  key (it isn't absolute), ignores the other fields (a `reveal` badge then
+  always shows, a pill is plain text, no dot) and draws the rest, at most
+  3 per plugin and 4 per row. A publisher clears its own paths and lanes,
+  and its key (`setShared(key, null)`), when they no longer apply: a stale
+  badge stays until it does.
 - **Example:** this `badges.spotlight` value draws a "live" badge in the
   `working` color on one workspace. Its hover reads "Spotlight is on · runs
   /usr/local/bin/spotlight", and a click runs that program with the three
@@ -804,6 +904,170 @@ against.
         "tone": "working",
         "tooltip": "Spotlight is on",
         "action": { "exec": ["/usr/local/bin/spotlight", "toggle", "--workspace", "/Users/you/orca/workspaces/app/login"] }
+      }
+    ]
+  }
+  ```
+
+- **Example, a lane:** in group `g1`, organized by Task and active, this
+  value draws a turning ring on the AX-3653 lane's header (every
+  workspace whose branch or folder has `ax-3653`, `AX_3653`…), then a
+  "Dev" badge. A click on the ring folds nothing and runs nothing (it has
+  no action); a click on "Dev" runs the program in your home folder. In
+  any other group, or with `g1` in Project mode, neither shows:
+
+  ```json
+  {
+    "g1/task:AX-3653": [
+      {
+        "icon": "mods/spotlight/icons/spinner.svg",
+        "tone": "working",
+        "tooltip": "Sincronizando…",
+        "spin": true
+      },
+      {
+        "text": "Dev",
+        "tooltip": "Spotlight env of this task",
+        "action": { "exec": ["/usr/local/bin/spotlight", "env", "--task", "AX-3653", "--group", "g1", "--env", "dev"] }
+      }
+    ]
+  }
+  ```
+
+- **Example, Orca's look:** on a project's main checkout, this value draws
+  an amber "SPOTLIGHT" pill with a filled dot after its text, then
+  ":3000" in the dim color, then an X that shows only while the row is
+  hovered, dim and amber on hover. A click on the X while it is hidden does
+  nothing:
+
+  ```json
+  {
+    "/Users/you/code/app": [
+      {
+        "icon": "mods/spotlight/icons/flashlight.svg",
+        "text": "Spotlight",
+        "tone": "working",
+        "pill": true,
+        "dot": "on",
+        "tooltip": "The root mirrors login.",
+        "action": { "exec": ["/usr/local/bin/spotlight", "peek", "--repo", "/Users/you/code/app"] }
+      },
+      { "text": ":3000", "tone": "dim", "action": { "command": "spotlight.server.app" } },
+      {
+        "icon": "mods/spotlight/icons/x.svg",
+        "tone": "dim",
+        "hover": "working",
+        "reveal": "hover",
+        "tooltip": "Turn off Spotlight and restore the root",
+        "action": { "exec": ["/usr/local/bin/spotlight", "toggle", "--workspace", "/Users/you/code/app"] }
+      }
+    ]
+  }
+  ```
+
+**Menu items from other plugins**
+
+Other plugins can add items to a workspace's right-click menu, the Spotlight
+plugin first (Orca's Spotlight items in its worktree menu). This plugin knows
+none of them: it reads, draws and runs what they publish, after its own
+items. This section is the contract a publisher codes against.
+
+- **Keys:** `menus.spotlight`, read in that order (`config.js`
+  `MENU_KEYS`). As with badges: a plugin writes only its own key, with
+  `setShared(key, value)`, each write replaces the whole value, and adding a
+  plugin is one line in that list.
+- **Value:** `{ [workspacePath]: [item] }`. A path is the workspace's
+  folder, absolute, spelled as `git worktree list` prints it (a trailing
+  slash is ignored; two spellings of one path share its items and their
+  cap). Any other key (a lane key included) is ignored; a value that isn't
+  an object is no items; a path whose value isn't a list has none.
+- **An item:** `{ id, text, icon?, danger?, disabled?, why?, tooltip?,
+  checked?, action?, items? }`.
+  - `id`: 1 to 64 of letters, digits, `.`, `_`, `:` and `-`, starting with
+    a letter or digit. It names the row (the running one shows "…") and a
+    submenu's item. A later item repeating an id in the same list is
+    dropped. Your ids never clash with this plugin's own (`delete` is not
+    Delete…).
+  - `text`: the row's label, at most 40 code points (a longer one is cut),
+    on one line: runs of whitespace become one space.
+  - `icon`: as a badge's (`mods/<mod>/…/<name>.svg`), drawn 14 px at the
+    row's start, tinted. Without one the row keeps the empty slot, so labels
+    line up.
+  - `danger: true`: the row in `blocked`, like Delete… (an action that
+    destroys or forces something).
+  - `disabled: true`: the row dim, never highlighted, a click does nothing;
+    its action stays in the value but never runs.
+  - `why`: on a disabled item only, why it's off (e.g. "Sincronizando…"),
+    shown on hover; at most 200 code points, one line. An enabled item's
+    `why` is dropped.
+  - `tooltip`: on any item, what it does, shown on hover (e.g. agent-sleep's
+    "Close all active panels in this workspace to free up memory and CPU.");
+    at most 200 code points, one line. On a disabled item with a `why`, the
+    `why` is shown instead.
+  - `checked: true`: a radio mark (a dot) at the row's end; publish it on
+    the one picked of a group (e.g. the env in use).
+  - `action`: exactly a badge's (see Badges from other plugins): `{
+    "command": "<mod>.<command>" }`, whose part before the first `.` must be
+    your key's first name after `menus.` (`menus.spotlight` may run
+    `spotlight.*` only), or `{ "exec": [program, ...args] }` with the same
+    argv rules.
+  - `items`: a submenu, one level only: up to 6 items of the same shape,
+    whose own `items` are dropped (the item stays). An item with a submenu
+    shows ▸ at its end, and its `action` and `checked` are dropped: choosing
+    it (or → on it) closes the menu and opens the submenu at the pointer,
+    titled with the item's text, as the project menu's Move to group ▸. A
+    submenu whose items all drop is no submenu.
+  - Required: `id` and `text`; an item without either valid goes whole. Any
+    other field that breaks a rule is dropped alone; `false` or any value
+    but `true` is no flag. Unknown fields are ignored.
+- **Limits:** at most 8 items per plugin on a workspace (6 in a submenu);
+  dropped items don't take a place.
+- **Drawing:** this plugin's own items first (Copy Path, Copy Worktree Name
+  and, off the main checkout, Rename… and Delete…), then a separator and
+  your items in order; with two plugins, each one's items start after a
+  separator of their own. No item published for that workspace: no
+  separator, the menu as before. The popup's height follows the rows. Your
+  list is read again on every render, so a value you publish while the menu
+  is open (a disabled item turning on) shows at once; the height doesn't
+  follow it until the menu opens again.
+- **Choosing:** a click or Enter.
+  - `command`: the menu closes, then `run(command)`, as a badge's (no args,
+    no answer, only the mod's shown copies).
+  - `exec`: the menu stays open while the program runs, the row's label
+    ending in "…" and the other rows waiting; it runs as a badge's exec, in
+    the workspace's folder, argv only, never a shell, with exec's 30 s. Then
+    a non-zero exit (stderr's first line, else "exited with code N"), or a
+    program that can't start, is a warning toast titled with the program's
+    name, and the menu closes. A menu closed meanwhile (Esc, a click beside
+    it) doesn't stop the program, and its failure still toasts.
+  - Neither, or disabled: nothing happens.
+  - So keep an exec short: start long work detached and return (Spotlight's
+    verbs return in under a second), and report its outcome yourself.
+- **Lifetime:** the format only grows; a breaking change gets a new key
+  (e.g. `menus.spotlight.v2`), whose commands are still `spotlight.*`. A
+  publisher clears its own paths, and its key (`setShared(key, null)`),
+  when they no longer apply: a stale item stays until it does.
+- **Example:** this `menus.spotlight` value adds two items to one workspace's
+  menu: "Proyectar este workspace" runs the program there, and "Entorno de
+  Spotlight ▸" opens a submenu with Local picked and Prod off:
+
+  ```json
+  {
+    "/Users/you/orca/workspaces/app/login": [
+      {
+        "id": "toggle",
+        "text": "Proyectar este workspace",
+        "icon": "mods/spotlight/icons/flashlight.svg",
+        "action": { "exec": ["/usr/local/bin/spotlight", "toggle", "--workspace", "/Users/you/orca/workspaces/app/login"] }
+      },
+      {
+        "id": "env",
+        "text": "Entorno de Spotlight",
+        "items": [
+          { "id": "env-local", "text": "Local", "checked": true, "action": { "exec": ["/usr/local/bin/spotlight", "env", "--workspace", "/Users/you/orca/workspaces/app/login", "--env", "local"] } },
+          { "id": "env-dev", "text": "Dev", "action": { "exec": ["/usr/local/bin/spotlight", "env", "--workspace", "/Users/you/orca/workspaces/app/login", "--env", "dev"] } },
+          { "id": "env-prod", "text": "Prod", "disabled": true, "why": "Sin comando para Prod" }
+        ]
       }
     ]
   }

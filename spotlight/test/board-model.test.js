@@ -236,6 +236,40 @@ describe("toasts (D18)", () => {
     const { toasts } = takeToasts([{ at: START + 1, text: "x", toast: true, action: { name: 3 } }], toastMark(START));
     assert.deepEqual(toasts, [{ title: "Spotlight", body: "x", level: "info" }]);
   });
+
+  test("D35: an error note toasts as an error for 60 s, its body naming the popup button its click leads to", () => {
+    const action = { name: "spotlight.server.0123456789ab" };
+    const notes = [
+      { at: START + 1, repo: "/code/app", text: "app: El root se movió del snapshot de Spotlight.", toast: true, level: "error", action, button: "Forzar sync" },
+      // An error the popup can't act on (orca-holds): no action, no button, still 60 s.
+      { at: START + 2, repo: "/code/app", text: "app: Este root lo tiene el Spotlight de Orca: apágalo allá primero.", toast: true, level: "error" },
+      // A button with no action has no popup to name.
+      { at: START + 3, repo: "/code/app", text: "app: sin popup", toast: true, level: "error", button: "Forzar sync" },
+    ];
+    assert.deepEqual(takeToasts(notes, toastMark(START)).toasts, [
+      {
+        title: "Spotlight", body: "app: El root se movió del snapshot de Spotlight. Clic: Forzar sync en el popup", level: "error", timeout: 60_000, action,
+      },
+      { title: "Spotlight", body: "app: Este root lo tiene el Spotlight de Orca: apágalo allá primero.", level: "error", timeout: 60_000 },
+      { title: "Spotlight", body: "app: sin popup", level: "error", timeout: 60_000 },
+    ]);
+  });
+
+  test("D35: any other note keeps Herdr's default timeout; a known level is kept, an unknown one reads as before", () => {
+    const action = { name: "spotlight.server.0123456789ab" };
+    const notes = [
+      { at: START + 1, repo: "/code/app", text: "Spotlight re-sincronizado: el root refleja el workspace otra vez.", toast: true, level: "success" },
+      { at: START + 2, repo: "/code/app", text: "Elige una variante para app", toast: true, level: "info", action },
+      { at: START + 3, repo: "/code/app", text: "odd", toast: true, level: "loud", action },
+      { at: START + 4, repo: "/code/app", text: "plain", toast: true },
+    ];
+    assert.deepEqual(takeToasts(notes, toastMark(START)).toasts, [
+      { title: "Spotlight", body: "Spotlight re-sincronizado: el root refleja el workspace otra vez.", level: "success" },
+      { title: "Spotlight", body: "Elige una variante para app", level: "info", action },
+      { title: "Spotlight", body: "odd", level: "warning", action },
+      { title: "Spotlight", body: "plain", level: "info" },
+    ]);
+  });
 });
 
 describe("the state watch", () => {

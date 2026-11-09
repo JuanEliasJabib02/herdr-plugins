@@ -4,7 +4,7 @@
 // O/src/main/ipc/filesystem/watchers/filesystem-watcher-ignore.ts, plus test
 // output) or lies outside the holder (Orca's
 // shouldRefreshGitStatusForFileChange), debounces 300 ms per repo, then
-// execs `spotlight sync --repo <root> --detach`.
+// execs `spotlight sync --repo <root> --detach --auto`.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
@@ -64,7 +64,8 @@ test("watch targets: one holder per lit repo; the argv of the sync", () => {
     { root: "/Users/u/code/x", holder: "/Users/u/orca/workspaces/x/y" },
   ]);
   assert.deepEqual(watchTargets(null), []);
-  assert.deepEqual(syncArgv("/app/mods/spotlight/bin/spotlight", ROOT), ["/app/mods/spotlight/bin/spotlight", "sync", "--repo", ROOT, "--detach"]);
+  // `--auto`: an automatic sync, which doesn't retry an env that couldn't run (N4).
+  assert.deepEqual(syncArgv("/app/mods/spotlight/bin/spotlight", ROOT), ["/app/mods/spotlight/bin/spotlight", "sync", "--repo", ROOT, "--detach", "--auto"]);
 });
 
 test("debounce: a burst of changes runs one sync per repo, 300 ms after the last one", () => {

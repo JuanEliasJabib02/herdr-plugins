@@ -15,12 +15,17 @@ import {
   createStore, emptyState, emptyRepo, parseState, reconcileRepo, addNote, NOTES_MAX,
   rememberVariant, variantKey, VARIANTS_MAX,
 } from "../mods/spotlight/store.js";
+import * as storeModule from "../mods/spotlight/store.js";
 import { withLock, LockError, OWNER_FILE } from "../mods/spotlight/locks.js";
 import {
   parseSettings, defaultSettings, repoSettings, perSpaceLimit, repoEnabledFrom,
 } from "../mods/spotlight/settings.js";
 
 const STORE_URL = new URL("../mods/spotlight/store.js", import.meta.url).href;
+
+// Destructured, not named in the imports: a helper that's missing fails its
+// own tests, not the whole file's load.
+const { markBusy, clearBusy, setTaskBatch, clearTaskBatch, rememberEnv, ENVS_MAX, serializeState } = storeModule;
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -178,6 +183,24 @@ test("addNote: keeps the newest 200 notes", async () => {
     at: 43, repo: "/code/app", text: "toast", toast: true, action: { name: "spotlight.server.abc" },
   });
   assert.deepEqual(notes.at(-2), { at: 42, repo: "/code/app", text: `n${NOTES_MAX + 4}`, toast: false });
+});
+
+test("D35: addNote keeps a note's level and the popup button its toast names; a note without them has neither, as before", async () => {
+  const dir = tmp();
+  const store = createStore({ stateDir: dir, hasServerCommand: noServer, now: () => 42 });
+  const action = { name: "spotlight.server.abc" };
+  await store.updateState((s) => {
+    addNote(s, { repo: "/code/app", text: "app: diverged", toast: true, action, level: "error", button: "Forzar sync" }, 43);
+    addNote(s, { repo: "/code/app", text: "resynced", toast: true, level: "success" }, 44);
+    addNote(s, { repo: "/code/app", text: "plain", toast: true }, 45);
+  });
+  const notes = store.readState().notes;
+  assert.deepEqual(notes, [
+    { at: 43, repo: "/code/app", text: "app: diverged", toast: true, action, level: "error", button: "Forzar sync" },
+    { at: 44, repo: "/code/app", text: "resynced", toast: true, level: "success" },
+    { at: 45, repo: "/code/app", text: "plain", toast: true },
+  ]);
+  assert.ok(!("level" in notes[2]) && !("button" in notes[2]));
 });
 
 test("variants: the per-task remembered variant, keyed <lane>/<taskKey>::<root>, at most 500, oldest dropped first", async () => {
@@ -368,6 +391,173 @@ test("state.json keeps a repo's envOverride (the server popup's env, J-002): an 
   assert.equal(store.readState().repos["/code/app"].envOverride, "dev");
   const text = JSON.stringify({ version: 1, repos: { "/code/app": { envOverride: "prod" } } });
   assert.equal(parseState(text).state.repos["/code/app"].envOverride, "prod");
+});
+
+// ── D32: the env per task ──────────────────────────────────────────────────
+
+// A state.json as the CLI wrote it before T22: a lit record with the popup's
+// envOverride and no envKey, no `envs`.
+const PRE_T22 = {
+  version: 1,
+  repos: {
+    "/code/app": {
+      ...emptyRepo(), holder: "/code/app-wt", lastSnapshotSha: "a".repeat(40), serverTerminal: "t9", serverCommand: "pnpm dev",
+      serverEnv: "dev", serverState: "listening", ports: [3000], envOverride: "dev",
+    },
+  },
+  queue: { requests: [], lighting: {} },
+  notes: [{ at: 1, repo: "/code/app", text: "Spotlight on", toast: true }],
+  variants: { "g1/AX-1::/code/app": "co" },
+};
+
+test("D32: a state.json from before T22 loads unchanged: its envOverride kept, no envKey and no envs made up, the same text written back", async () => {
+  const text = serializeState(PRE_T22);
+  const { state, valid } = parseState(text);
+  assert.equal(valid, true);
+  assert.deepEqual(state, PRE_T22);
+  assert.equal("envs" in state, false);
+  assert.equal("envKey" in state.repos["/code/app"], false);
+  assert.equal(serializeState(state), text);
+  // A write that changes nothing leaves the file alone.
+  const dir = tmp();
+  fs.writeFileSync(path.join(dir, "state.json"), text);
+  const store = createStore({ stateDir: dir, hasServerCommand: noServer });
+  const r = await store.updateState(() => {});
+  assert.equal(r.changed, false);
+  assert.equal(fs.readFileSync(path.join(dir, "state.json"), "utf8"), text);
+});
+
+test("D32: envs (every pick, keyed <groupId>/<KEY> or ws:<path>) and record.envKey round-trip through a write; bad entries are dropped, the rest of the state stays", async () => {
+  assert.equal(ENVS_MAX, 500);
+  const dir = tmp();
+  const store = createStore({ stateDir: dir, hasServerCommand: noServer });
+  await store.updateState((s) => {
+    rememberEnv(s, "g1/AX-50", "dev");
+    rememberEnv(s, "ws:/code/app-wt2", "local");
+    s.repos["/code/app"] = { ...emptyRepo(), holder: "/code/app-wt", envKey: "g1/AX-50" };
+  });
+  const back = store.readState();
+  assert.deepEqual(back.envs, { "g1/AX-50": "dev", "ws:/code/app-wt2": "local" });
+  assert.equal(back.repos["/code/app"].envKey, "g1/AX-50");
+  const text = fs.readFileSync(path.join(dir, "state.json"), "utf8");
+  assert.equal(serializeState(parseState(text).state), text);
+
+  const read = (value) => parseState(JSON.stringify({ version: 1, ...value })).state;
+  assert.deepEqual(read({ envs: { a: "local", b: "staging", c: 5, d: null, e: "prod" } }).envs, { a: "local", e: "prod" });
+  assert.equal("envs" in read({ envs: ["dev"] }), false, "a value that isn't a map is dropped");
+  assert.equal("envs" in read({ envs: "dev" }), false);
+  for (const bad of [5, "", null, ["g1/AX-1"]]) {
+    const record = read({ repos: { "/code/app": { holder: "/code/app-wt", envKey: bad } } }).repos["/code/app"];
+    assert.equal("envKey" in record, false, JSON.stringify(bad));
+    assert.equal(record.holder, "/code/app-wt", "the rest of the record stays");
+  }
+  assert.equal("envKey" in emptyRepo(), false);
+});
+
+test("D32: envs keeps at most ENVS_MAX picks: a pick again is the newest, and the oldest go first", async () => {
+  const dir = tmp();
+  const store = createStore({ stateDir: dir, hasServerCommand: noServer });
+  await store.updateState((s) => {
+    for (let i = 0; i < ENVS_MAX + 3; i++) rememberEnv(s, `g1/T-${i}`, "dev");
+    // Picking a key again (Local included) makes it the newest.
+    rememberEnv(s, "g1/T-3", "local");
+  });
+  const envs = store.readState().envs;
+  const keys = Object.keys(envs);
+  assert.equal(keys.length, ENVS_MAX);
+  assert.equal(keys[0], "g1/T-4", "T-0..T-2 dropped by the cap, T-3 moved to the end");
+  assert.equal(keys.at(-1), "g1/T-3");
+  assert.equal(envs["g1/T-3"], "local");
+  // Any writer's map is capped the same way, oldest first.
+  await store.updateState((s) => {
+    s.envs["g1/extra"] = "prod";
+  });
+  assert.equal(Object.keys(store.readState().envs).length, ENVS_MAX);
+  assert.equal(Object.keys(store.readState().envs)[0], "g1/T-5");
+});
+
+// ── D33: the busy mark; D31: the task batch marker ─────────────────────────
+
+const MARK = { op: "light", since: 10, pid: 4242, workspace: "/code/app-wt" };
+
+test("busy (D33): a record's { op, since, pid, workspace } mark is an additive v1 field, kept through a write; a malformed one is dropped", async () => {
+  const read = (busy) =>
+    parseState(JSON.stringify({ version: 1, repos: { "/code/app": { holder: "/code/app-wt", busy } } })).state.repos["/code/app"];
+  assert.deepEqual(read(MARK).busy, MARK);
+  // A fresh light's target, or a turn-off of refs with no holder.
+  assert.deepEqual(read({ ...MARK, workspace: null }).busy, { ...MARK, workspace: null });
+  for (const bad of [null, "light", [MARK], { ...MARK, pid: 0 }, { ...MARK, pid: "4242" }, { ...MARK, pid: 1.5 }, { ...MARK, since: "10" },
+    { ...MARK, since: null }, { ...MARK, op: "" }, { ...MARK, op: 3 }, { ...MARK, workspace: "code/app-wt" }, { ...MARK, workspace: 5 }]) {
+    const record = read(bad);
+    assert.equal("busy" in record, false, JSON.stringify(bad));
+    assert.equal(record.holder, "/code/app-wt", "the rest of the record stays");
+  }
+  // Not one of emptyRepo's fields: a record that isn't busy has none.
+  assert.equal("busy" in emptyRepo(), false);
+  const dir = tmp();
+  const store = createStore({ stateDir: dir, hasServerCommand: noServer });
+  await store.updateState((s) => {
+    s.repos["/code/app"] = { ...emptyRepo(), holder: "/code/app-wt", busy: MARK };
+  });
+  assert.deepEqual(store.readState().repos["/code/app"].busy, MARK);
+});
+
+test("markBusy / clearBusy (D33): one mark per repo, set by whoever holds its lock, cleared only by the same (pid, since); a record made only for the mark goes with it", () => {
+  const s = emptyState();
+  const root = "/code/app";
+  assert.equal(markBusy(s, root, MARK), false, "no record, and not asked to make one");
+  assert.equal(s.repos[root], undefined);
+  // A fresh light: its record is made for the mark, so its target's row can spin.
+  assert.equal(markBusy(s, root, MARK, { create: true }), true);
+  assert.deepEqual(s.repos[root], { ...emptyRepo(), busy: MARK });
+  // The same process marking again (a nested call) leaves the outer call's mark.
+  assert.equal(markBusy(s, root, { ...MARK, op: "restart", since: 11 }), false);
+  assert.deepEqual(s.repos[root].busy, MARK);
+  // Another process's mark under the repo lock is a dead one's: replaced.
+  const next = { op: "off", since: 12, pid: 4343, workspace: "/code/app-wt" };
+  assert.equal(markBusy(s, root, next), true);
+  assert.deepEqual(s.repos[root].busy, next);
+  // Only the mark that is there is cleared.
+  assert.equal(clearBusy(s, root, MARK), false);
+  assert.equal(clearBusy(s, root, { ...next, since: 13 }), false);
+  assert.deepEqual(s.repos[root].busy, next);
+  // Cleared, the record holds nothing but emptyRepo's values: it goes.
+  assert.equal(clearBusy(s, root, next), true);
+  assert.equal(s.repos[root], undefined);
+  assert.equal(clearBusy(s, root, next), false, "nothing to clear");
+  // A record with anything of its own stays, without the mark.
+  for (const own of [{ holder: "/code/app-wt" }, { envOverride: "dev" }, { lastError: { code: "git-failed", message: "x", at: 1 } }]) {
+    s.repos[root] = { ...emptyRepo(), ...own };
+    assert.equal(markBusy(s, root, MARK), true);
+    assert.equal(clearBusy(s, root, MARK), true);
+    assert.deepEqual(s.repos[root], { ...emptyRepo(), ...own }, JSON.stringify(own));
+  }
+});
+
+test("queue.taskBatch (D31): { op, since, pid } per <groupId>/<KEY> while a batch runs; set and cleared by the same rule; malformed entries dropped, absent stays absent", () => {
+  const batch = { op: "on", since: 10, pid: 4242 };
+  const s = emptyState();
+  setTaskBatch(s, "g1/AX-50", batch);
+  assert.deepEqual(s.queue.taskBatch, { "g1/AX-50": batch });
+  assert.equal(clearTaskBatch(s, "g1/AX-50", { ...batch, since: 11 }), false);
+  assert.equal(clearTaskBatch(s, "g1/AX-50", { ...batch, pid: 4343 }), false);
+  assert.deepEqual(s.queue.taskBatch, { "g1/AX-50": batch });
+  setTaskBatch(s, "g2/AX-50", { ...batch, op: "off" });
+  assert.equal(clearTaskBatch(s, "g1/AX-50", batch), true);
+  assert.deepEqual(s.queue.taskBatch, { "g2/AX-50": { ...batch, op: "off" } });
+  assert.equal(clearTaskBatch(s, "g2/AX-50", { ...batch, op: "off" }), true);
+  assert.equal("taskBatch" in s.queue, false, "the last one cleared leaves the queue as it was");
+  assert.equal(clearTaskBatch(s, "g2/AX-50", batch), false);
+
+  const queueOf = (taskBatch) =>
+    parseState(JSON.stringify({ version: 1, queue: { requests: [], lighting: {}, ...(taskBatch === undefined ? {} : { taskBatch }) } })).state.queue;
+  assert.deepEqual(
+    queueOf({ "g1/AX-1": batch, "g1/AX-2": { op: "on" }, "g1/AX-3": 5, "g1/AX-4": { ...batch, pid: -1 }, "g1/AX-5": { ...batch, op: "" } }).taskBatch,
+    { "g1/AX-1": batch },
+  );
+  assert.equal("taskBatch" in queueOf([batch]), false);
+  assert.equal("taskBatch" in queueOf(undefined), false, "a state from before the field reads as it was");
+  assert.deepEqual(emptyState().queue, { requests: [], lighting: {} });
 });
 
 // ── reconcile ──────────────────────────────────────────────────────────────

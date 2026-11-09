@@ -362,7 +362,12 @@ test("working mark: Claude Code's glyphs change in place with frames(), never sp
   assert.match(tree, /\.frames\(WORKING_FRAMES, 120\)\.child\(WORKING_FRAMES\[0\]\)/, "native frames, starting on the first glyph");
   assert.match(tree, /const CLAUDE_ORANGE = "#D97757"/, "Claude's orange, the fill of Herdr's icons/claude.svg (S37)");
   assert.match(tree, /\.text_color\(CLAUDE_ORANGE\)\s*\.frames\(WORKING_FRAMES/, "the glyphs are drawn in it");
-  assert.doesNotMatch(tree, /\.spin\(/, "no spin(): Herdr turns it at about 30 fps, which stutters");
+  const statusMark = tree.slice(tree.indexOf("function statusMark("), tree.indexOf("function programIcon("));
+  assert.ok(statusMark.length > 0, "statusMark is found");
+  assert.doesNotMatch(statusMark, /\.spin\(/, "no spin() on the working mark: Herdr turns it at about 30 fps, which stutters");
+  // The only spin() in the file turns a plugin badge's icon while it asks for it (spotlight D29: a short busy mark).
+  assert.equal(tree.match(/\.spin\(/g)?.length, 1, "spin() appears once");
+  assert.match(tree, /function badgeIcon\([^)]*\) \{[^}]*\.spin\(BADGE_SPIN\)/, "and it is badgeIcon's");
 });
 
 test("the agents list is projects-agents, a copy of Herdr's agents mod with only the working mark changed (S38)", () => {

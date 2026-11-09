@@ -17,7 +17,8 @@
 //                            the popup: header, sections and rows
 //   footerView(board)        the flask: { count, quiet, tooltip }
 //   toastMark(startedAt), takeToasts(notes, mark)
-//                            notes with `toast: true` newer than the mark
+//                            notes with `toast: true` newer than the mark,
+//                            as notify() takes them (an error for 60 s, D35)
 //   isStateBatch(dir, paths) whether a watchFolder batch touched state.json
 //   reapTargets(state), reapFingerprint(terminals, targets),
 //   reapClock(), reapTick(clock, { now, print }), reapDone(clock)
@@ -271,13 +272,29 @@ function actionOf(action) {
   return isObject(action.args) ? { name: action.name, args: action.args } : { name: action.name };
 }
 
-// notify()'s argument for one note. A note with an action is a refusal the
-// server popup can force (root diverged, untracked collision): a warning.
+// notify()'s levels; a note's own one wins (D35).
+const LEVELS = new Set(["info", "success", "warning", "error"]);
+// An error toast stays up this long (Orca's ERROR_TOAST_DURATION, D35); the
+// rest keep Herdr's default.
+const ERROR_TOAST_MS = 60_000;
+
+// notify()'s argument for one note. Its level is the note's own (D35); a
+// note without one (or with one notify doesn't know) is a warning when it
+// has an action (a toast that opens the server popup), else info. An error
+// lasts ERROR_TOAST_MS. Herdr's notify has one action and no labeled button,
+// so a toast that opens the popup names the button waiting there in its
+// body ("Clic: Forzar sync en el popup"), from the note's `button`.
 function toastOf(note) {
   const action = actionOf(note.action);
-  return action
-    ? { title: "Spotlight", body: note.text, level: "warning", action }
-    : { title: "Spotlight", body: note.text, level: "info" };
+  const level = LEVELS.has(note.level) ? note.level : action ? "warning" : "info";
+  const hint = action && isText(note.button) ? ` Clic: ${note.button} en el popup` : "";
+  return {
+    title: "Spotlight",
+    body: `${note.text}${hint}`,
+    level,
+    ...(level === "error" ? { timeout: ERROR_TOAST_MS } : {}),
+    ...(action ? { action } : {}),
+  };
 }
 
 /**

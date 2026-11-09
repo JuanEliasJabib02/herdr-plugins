@@ -3,7 +3,9 @@
 // numbers clamped into their ranges, a server command of more than one line or
 // a port outside 1..65535 refused, unknown keys kept, and whether a `queue.*`
 // value changed, so the dialog execs `spotlight reap` (Orca's capChanged
-// regrant). Pure, no Herdr import, so node tests it.
+// regrant). T26 (D37): each command field's "▾" suggestions and placeholder,
+// and a save that turns a lit repo off before it stores `enabled: false`.
+// Pure, no Herdr import, so node tests it.
 
 import {
   ENVS,
@@ -17,6 +19,7 @@ import {
   repoSettings,
   perSpaceLimit,
 } from "./settings.js";
+import { commandTemplate } from "./server-plan.js";
 
 const isObject = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
 const folderName = (root) => root.split("/").filter(Boolean).pop() ?? root;
@@ -184,4 +187,100 @@ export function enabledChoice(repo, facts) {
       ? "no es un repo git"
       : "sin comando de server";
   return { value, effective, label: `Por defecto: apagado (${why})` };
+}
+
+// ── Command fields: "▾" suggestions and placeholders (D37) ─────────────────
+
+// What a command field shows when nothing would start for its env.
+export const NO_START = "No arranca";
+
+// A command field's "▾" list: every dev/local/prod/start script of the repo's
+// package.json as a command (detectServerScripts' scriptCommands, Orca's
+// datalist). `detection`: detectServerScripts' answer, or null.
+export function scriptSuggestions(detection) {
+  const list = detection?.scriptCommands;
+  return Array.isArray(list) ? list.filter((c) => typeof c === "string" && c) : [];
+}
+
+// A command field's placeholder: the command that runs for `env` while the
+// field is empty (Orca's commandsExcluding): the other envs' saved commands,
+// then the detected ones; Local falls back to Dev; `{variant}` left unfilled
+// and no `--port` (the port has its own field). NO_START when none.
+// `stored`: the repo's settings entry (repoSettings), as saved.
+export function commandPlaceholder(stored, detection, env) {
+  const envs = {};
+  for (const other of ENVS) {
+    if (other !== env && stored?.envs?.[other]) envs[other] = stored.envs[other];
+  }
+  return commandTemplate({ settings: { envs }, detected: detection?.detected ?? {}, env }) ?? NO_START;
+}
+
+// ── Apagado on a lit repo (D37, Orca's RepositorySpotlightSection) ─────────
+
+// The turn-off waits this long: a turn-off stops the server (up to 8 s for
+// the prompt, 3 s more to kill) and restores the root (git work).
+export const TURN_OFF_TIMEOUT_MS = 120000;
+
+// Whether state.json (board-model readState's shape) has the repo lit: its
+// record exists from the turn-on to the turn-off. `state` null (the file
+// couldn't be read) can't tell, so it counts as lit: the turn-off then asks
+// the CLI, whose `root-is-holder` says nothing was lit.
+export function isLit(state, root) {
+  if (state == null) return true;
+  const key = normRoot(root);
+  return Object.keys(state?.repos ?? {}).some((r) => normRoot(r) === key);
+}
+
+// The CLI argv that turns the repo off: always the root, which only ever
+// turns off (never lights), whoever holds it now.
+export const turnOffArgv = (root) => ["toggle", "--workspace", normRoot(root), "--inline"];
+
+// The save in two steps when a lit repo is switched to Apagado: applyForm's
+// answer, plus `turnOff` [{ root, argv }], the repos switched to Apagado
+// (stored value not already false) that `state` (state.json) has lit. Their
+// `enabled` keeps its stored value in `settings`, the first write; the dialog
+// turns each off, then writes `enabled: false` (withEnabledOff) for the ones
+// that went off. Nothing to turn off when a field is refused.
+export function planSave(settings, form, state) {
+  const out = applyForm(settings, form);
+  if (!out.settings) return { ...out, turnOff: [] };
+  const turnOff = [];
+  const repos = { ...out.settings.repos };
+  for (const [root, f] of Object.entries(form.repos ?? {})) {
+    const before = settings.repos[root];
+    if (f.enabled !== false || before?.enabled === false || !isLit(state, root)) continue;
+    turnOff.push({ root, argv: turnOffArgv(root) });
+    if (before) repos[root] = { ...repos[root], enabled: before.enabled ?? null };
+    else if (repos[root] && repoIsDefault({ ...repos[root], enabled: null })) delete repos[root];
+    else if (repos[root]) repos[root] = { ...repos[root], enabled: null };
+  }
+  return { ...out, settings: { ...out.settings, repos }, turnOff };
+}
+
+// Settings with `enabled: false` for `roots` (the repos whose turn-off went
+// through); every other value kept. A new object: `settings` is left alone.
+export function withEnabledOff(settings, roots) {
+  const repos = { ...settings.repos };
+  for (const raw of roots) {
+    const root = normRoot(raw);
+    repos[root] = { ...(repos[root] ?? {}), enabled: false };
+  }
+  return { ...settings, repos };
+}
+
+const firstLine = (s) => String(s ?? "").split("\n").map((l) => l.trim()).find(Boolean) ?? "";
+
+// The turn-off's exec answer ({ code, stdout, stderr }, or { error } when the
+// exec threw) as { ok, message }. Exit 0 went off; `root-is-holder` means
+// nothing is lit any more (the record went since the re-read), so the switch
+// can be written too. Otherwise the switch stays on and `message` is stderr's
+// first line (else stdout's, else the exit code).
+export function turnOffOutcome(result) {
+  if (result?.error !== undefined) {
+    return { ok: false, message: firstLine(result.error?.message ?? result.error) || "no se pudo apagar" };
+  }
+  if (result?.code === 0) return { ok: true, message: "" };
+  const line = firstLine(result?.stderr);
+  if (line.startsWith("root-is-holder")) return { ok: true, message: "" };
+  return { ok: false, message: line || firstLine(result?.stdout) || `salió con código ${result?.code}` };
 }

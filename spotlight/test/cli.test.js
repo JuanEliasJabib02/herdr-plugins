@@ -8,21 +8,29 @@
 //                   `pgrep` answering from that file, a `herdr-app` that
 //                   records its argv, and a `git` wrapper that sleeps before
 //                   chosen subcommands (to hold a repo lock mid-work)
+//   NODE_OPTIONS    a preloaded process.kill that never really signals a
+//                   pid the fake hc handed out (FAKE_KILL, R5)
 // and real git repos with real worktrees. Detached work (`light`, `sync
 // --detach`, `classify`) runs as real detached processes; tests wait on
 // state.json for it. Nothing here touches a real Herdr terminal.
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
-import { execFile, execFileSync, spawnSync } from "node:child_process";
+import { execFile, execFileSync, spawn, spawnSync } from "node:child_process";
 import {
-  mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, realpathSync, rmSync, chmodSync, symlinkSync,
+  mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, realpathSync, rmSync, chmodSync, symlinkSync, appendFileSync,
 } from "node:fs";
+import fsp from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, dirname, basename } from "node:path";
 import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
-import { acquire, unlock } from "../mods/spotlight/locks.js";
-import { rescuedNotes } from "../mods/spotlight/cli-work.mjs";
+import { acquire, unlock, LockError } from "../mods/spotlight/locks.js";
+import {
+  rescuedNotes, describeServer, recordServers, waitForTurnServers, ensureServer, portBusyError, errorNote,
+} from "../mods/spotlight/cli-work.mjs";
+import { readSettings } from "../mods/spotlight/board-model.js";
+import { nodeIo } from "../mods/spotlight/server-plan.js";
+import { appendLogHeader } from "../mods/spotlight/server-log.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const MOD = join(HERE, "..", "mods", "spotlight");
@@ -112,7 +120,8 @@ try {
   const t = rest[0] ? find(rest[0]) : null;
   const missing = () => out(3, undefined, { kind: "not_found", message: "no terminal " + rest[0] });
   switch (verb) {
-    case "get": t ? out(0, view(t)) : missing(); break;
+    // A terminal whose \`getFails\` is set: hc can't read it (not "no such terminal").
+    case "get": t?.getFails ? out(1, undefined, { kind: "io", message: t.getFails }) : t ? out(0, view(t)) : missing(); break;
     case "ls": out(0, { terminals: all.filter((x) => x.state === "live").map(view), hidden_finished: 0, machines: [] }); break;
     case "run": {
       const opt = (k) => args[args.indexOf(k) + 1];
@@ -138,6 +147,14 @@ try {
         try { fs.appendFileSync(argv[4], "fake server: " + argv[7] + "\\r\\n"); } catch {}
         if (s.listen[t.cwd]) t.serverPorts = s.listen[t.cwd];
         else delete t.serverPorts;
+        // A server that dies at start: what it printed lands in the log, and
+        // the shell leads again after one look at the running \`script\`.
+        const crash = (s.crash ?? {})[t.cwd];
+        if (crash) {
+          try { fs.appendFileSync(argv[4], crash); } catch {}
+          delete t.serverPorts;
+          t.pendingShell = 1;
+        }
       }
       out(0, { started: null, status: null, turn: 0 });
       break;
@@ -170,34 +187,53 @@ try {
 }
 `;
 
-// lsof -F pcn of the fake servers: a `script` foreground with listen ports.
+// lsof -F pcn of the fake servers: a `script` foreground with listen ports,
+// plus `foreign` listeners (real pids, listed while they live) outside every
+// terminal. `lsof -a -p <pid> -d cwd -F n` answers a foreign pid's cwd.
 const FAKE_LSOF = `#!${NODE}
 ${FAKE_LIB}
 const s = load();
-const lines = [];
-for (const t of Object.values(s.terminals)) {
-  if (t.state !== "live" || !t.foreground || t.foreground.name !== "script" || !t.serverPorts) continue;
-  lines.push("p" + t.foreground.pid, "cnode");
-  for (const p of t.serverPorts) lines.push("f20", "n*:" + p);
+const args = process.argv.slice(2);
+const alive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+const foreign = (s.foreign ?? []).filter((f) => alive(f.pid));
+if (args.includes("-d")) {
+  const pid = Number(args[args.indexOf("-p") + 1]);
+  const f = foreign.find((x) => x.pid === pid && x.cwd);
+  if (f) process.stdout.write("p" + pid + "\\nfcwd\\nn" + f.cwd + "\\n");
+  process.exitCode = f ? 0 : 1;
+} else {
+  const lines = [];
+  for (const t of Object.values(s.terminals)) {
+    if (t.state !== "live" || !t.foreground || t.foreground.name !== "script" || !t.serverPorts) continue;
+    lines.push("p" + t.foreground.pid, "cnode");
+    for (const p of t.serverPorts) lines.push("f20", "n*:" + p);
+  }
+  for (const f of foreign) lines.push("p" + f.pid, "cnode", "f21", "n*:" + f.port);
+  process.stdout.write(lines.length ? lines.join("\\n") + "\\n" : "");
+  process.exitCode = lines.length ? 0 : 1;
 }
-process.stdout.write(lines.length ? lines.join("\\n") + "\\n" : "");
-process.exitCode = lines.length ? 0 : 1;
 `;
 
-// pgrep -P <pid>: a fake terminal's foreground is its shell's child.
+// pgrep -P <pid>: a fake terminal's foreground is its shell's child; `children`
+// maps other pids (a foreign listener's tree) to theirs.
 const FAKE_PGREP = `#!${NODE}
 ${FAKE_LIB}
 const pid = Number(process.argv[3]);
 const s = load();
 const kids = Object.values(s.terminals)
   .filter((t) => t.state === "live" && t.pid === pid && t.foreground && t.foreground.pid !== pid)
-  .map((t) => t.foreground.pid);
+  .map((t) => t.foreground.pid)
+  .concat((s.children ?? {})[pid] ?? []);
 process.stdout.write(kids.map((k) => k + "\\n").join(""));
 process.exitCode = kids.length ? 0 : 1;
 `;
 
+// It records its argv; `herdr-app ls` prints $FAKE_HC_STATE.herdr-ls when a
+// test wrote one (Herdr's spaces, tabs and terminals, D38), else nothing: a
+// Herdr that can't say, so a server terminal is made hidden, as before T29.
 const FAKE_HERDR_APP = `#!/bin/sh
 printf '%s\\n' "$*" >> "$FAKE_HC_STATE.herdr-app"
+if [ "$1" = ls ] && [ -f "$FAKE_HC_STATE.herdr-ls" ]; then cat "$FAKE_HC_STATE.herdr-ls"; fi
 `;
 
 // git, slowed down before the subcommand named in $FAKE_GIT_SLOW ("reset 2").
@@ -229,6 +265,73 @@ fi
 exit 2
 `;
 
+// The world's process.kill (R5), preloaded into every node process the world
+// runs (NODE_OPTIONS --require: the CLI, its detached copies, the fakes).
+// The fake hc hands out pids from 50000 up, inside the range macOS gives
+// real processes: a pid of the fake world is never signalled for real, even
+// when a real process has that number. A signal to one lands in hc.json's
+// `kills`, and SIGTERM, SIGKILL, SIGINT or SIGHUP end it there (a terminal's
+// foreground goes back to its shell; the shell itself only records it),
+// unless its terminal is `unkillable` (a process stuck past SIGKILL). Once
+// signalled, a fake pid's signal 0 is answered from the fake too. Real pids
+// (the processes a test spawns: `foreign` and their `children`) get real
+// signals, and so does every other signal 0, which sends nothing.
+const FAKE_KILL = `
+${FAKE_LIB}
+const realKill = process.kill.bind(process);
+const ENDS = new Set(["SIGTERM", "SIGKILL", "SIGINT", "SIGHUP"]);
+const holding = (s, pid) => Object.values(s.terminals ?? {}).filter((t) => t.state === "live" && (t.pid === pid || (t.foreground && t.foreground.pid === pid)));
+const gone = () => Object.assign(new Error("kill ESRCH"), { code: "ESRCH", errno: -3, syscall: "kill" });
+function isFake(s, pid) {
+  if ((s.fakePids ?? []).includes(pid)) return true;
+  const real = new Set((s.foreign ?? []).map((f) => f.pid));
+  for (const [p, kids] of Object.entries(s.children ?? {})) {
+    real.add(Number(p));
+    for (const k of kids) real.add(k);
+  }
+  if (real.has(pid)) return false;
+  const known = Object.values(s.terminals ?? {}).some((t) => t.pid === pid || (t.foreground && t.foreground.pid === pid));
+  return known || (pid >= 50000 && pid < (s.nextPid ?? 50000));
+}
+function deliver(s, pid, signal) {
+  const at = holding(s, pid);
+  if (at.length === 0) return gone();
+  (s.fakePids ??= []).includes(pid) || s.fakePids.push(pid);
+  (s.kills ??= []).push({ pid, signal });
+  if (ENDS.has(signal)) {
+    for (const t of at) {
+      if (t.pid === pid || t.unkillable) continue;
+      t.foreground = { pid: t.pid, name: "zsh", argv: ["/bin/zsh", "-l"], cwd: t.cwd };
+      delete t.serverPorts;
+      delete t.pendingShell;
+    }
+  }
+  save(s);
+  return true;
+}
+process.kill = function kill(pid, signal = "SIGTERM") {
+  if (!STATE) return realKill(pid, signal);
+  const n = Number(pid);
+  if (signal === 0 || signal === "0") {
+    const s = load();
+    if (!(s.fakePids ?? []).includes(n)) return realKill(pid, signal);
+    if (holding(s, n).length === 0) throw gone();
+    return true;
+  }
+  let answer = null;
+  lock();
+  try {
+    const s = load();
+    if (isFake(s, n)) answer = deliver(s, n, String(signal));
+  } finally {
+    unlock();
+  }
+  if (answer === null) return realKill(pid, signal);
+  if (answer instanceof Error) throw answer;
+  return true;
+};
+`;
+
 function writeExec(file, text) {
   writeFileSync(file, text);
   chmodSync(file, 0o755);
@@ -247,6 +350,8 @@ function makeWorld() {
   writeExec(join(bin, "pgrep"), FAKE_PGREP);
   writeExec(join(bin, "herdr-app"), FAKE_HERDR_APP);
   writeExec(join(bin, "git"), FAKE_GIT);
+  const fakeKill = join(bin, "fake-kill.cjs");
+  writeFileSync(fakeKill, FAKE_KILL);
   const gitconfig = join(dir, "gitconfig");
   writeFileSync(
     gitconfig,
@@ -265,6 +370,8 @@ function makeWorld() {
     GIT_CONFIG_NOSYSTEM: "1",
     SPOTLIGHT_POLL_MS: "100",
     SPOTLIGHT_PORT_POLL_MS: "100",
+    // R5: every node process of the world signals through the fake kill.
+    NODE_OPTIONS: [process.env.NODE_OPTIONS, `--require "${fakeKill}"`].filter(Boolean).join(" "),
   });
   const statePath = join(app, "spotlight", "state.json");
   const w = {
@@ -321,6 +428,22 @@ function makeWorld() {
     listen(root, ports) {
       w.hcUpdate((s) => {
         s.listen[root] = ports;
+      });
+    },
+    // The next server lines typed in `root`'s terminal die at start, printing
+    // `text` (null: they run again).
+    crash(root, text) {
+      w.hcUpdate((s) => {
+        s.crash ??= {};
+        if (text == null) delete s.crash[root];
+        else s.crash[root] = text;
+      });
+    },
+    // Listeners outside every terminal: [{ pid, port, cwd }] (real pids).
+    foreign(list, children = {}) {
+      w.hcUpdate((s) => {
+        s.foreign = list;
+        s.children = children;
       });
     },
     serverTerminal(root) {
@@ -940,6 +1063,75 @@ test("usage errors exit 2; continue and classify with nothing to act on", async 
   assert.match(classify.stdout, /Nothing to classify/);
 });
 
+test("D28: logs --repo <name> after the turn-off: a repo known only to settings, then one known only by its log file", async () => {
+  const w = makeWorld();
+  const lab = makeRepo(w, "lab", { pkg: DEV, tasks: ["AX-90"] });
+  w.settings({ repos: { [lab.root]: { enabled: true } } });
+  const ws = lab.ws["AX-90"];
+  assert.equal((await w.cli(["toggle", "--workspace", ws])).code, 0);
+  await w.until((s) => s.queue.lighting[`direct/${lab.root}`]?.phase === "done", { what: "lit" });
+  const logPath = w.state().repos[lab.root].logPath;
+  assert.equal((await w.cli(["toggle", "--workspace", ws])).code, 0);
+  await w.until((s) => !s.repos[lab.root], { what: "off" });
+
+  const byName = await w.cli(["logs", "--repo", "lab"]);
+  assert.equal(byName.code, 0, byName.stderr);
+  assert.match(byName.stdout, /fake server: npm run dev --/);
+  const path = await w.cli(["logs", "--path", "--repo", "lab"]);
+  assert.equal(path.stdout.trim(), logPath);
+
+  // Not in projects.v1, settings or state any more: the log file alone still answers.
+  w.settings({ repos: {} });
+  const fromFile = await w.cli(["logs", "--repo", "lab"]);
+  assert.equal(fromFile.code, 0, fromFile.stderr);
+  assert.match(fromFile.stdout, /fake server: npm run dev --/);
+  const unknown = await w.cli(["logs", "--repo", "nope"]);
+  assert.equal(unknown.code, 2);
+});
+
+test("D27: turning off a root Orca's Spotlight took refuses, records orca-holds at once, and leaves the root alone", async () => {
+  const w = makeWorld();
+  const app = makeRepo(w, "orcaheld", { pkg: DEV, tasks: ["AX-91"] });
+  w.register([{ id: "g1", repos: [app] }]);
+  const ws = app.ws["AX-91"];
+  assert.equal((await w.cli(["toggle", "--workspace", ws])).code, 0);
+  await w.until((s) => s.queue.lighting[`direct/${app.root}`]?.phase === "done", { what: "lit" });
+  // Orca's Spotlight takes the root: detached on a commit authored "Orca Spotlight".
+  const git = (...args) => execFileSync("git", args, { cwd: app.root, encoding: "utf8" }).trim();
+  const tree = git("write-tree");
+  const orca = git("-c", "user.name=Orca Spotlight", "-c", "user.email=o@x", "commit-tree", tree, "-p", "HEAD", "-m", "Orca Spotlight snapshot");
+  git("reset", "-q", "--hard", orca);
+
+  // R8: a server error the record had when Orca took the root (a busy port).
+  const busy = { code: "port-busy", port: 3008, pid: null, command: null, cwd: null, message: "El puerto 3008 estaba ocupado al arrancar el server.", at: 1 };
+  const before = w.state();
+  Object.assign(before.repos[app.root], { lastError: busy, serverState: "stopped" });
+  w.writeState(before);
+
+  const message = "Este root lo tiene el Spotlight de Orca: apágalo allá primero.";
+  const off = await w.cli(["toggle", "--workspace", ws, "--force"]);
+  assert.notEqual(off.code, 0);
+  assert.ok((off.stdout + off.stderr).includes(message), off.stdout + off.stderr);
+  assert.equal(w.state().repos[app.root].lastError?.code, "orca-holds");
+  assert.equal(git("rev-parse", "HEAD"), orca);
+
+  // T1: the refused click answers with a toast, with no popup action (no
+  // force path takes a root from Orca, D27), as orca-active's does.
+  const toasts = () => w.state().notes.filter((n) => n.repo === app.root && n.toast && n.text === `orcaheld: ${message}`);
+  assert.equal(toasts().length, 1, JSON.stringify(w.state().notes));
+  assert.equal(toasts()[0].action, undefined);
+  // The badge's click (no --force) is refused the same way, and answered again.
+  const click = await w.cli(["toggle", "--workspace", ws]);
+  assert.equal(click.code, 1, click.stderr);
+  assert.equal(toasts().length, 2);
+
+  // R8: the busy port still applies once Orca lets go: the reap gives it back.
+  assert.deepEqual(w.state().repos[app.root].lastError.serverError, busy);
+  git("reset", "-q", "--hard", "refs/herdr-spotlight/snapshot");
+  assert.equal((await w.cli(["reap"])).code, 0);
+  assert.deepEqual(w.state().repos[app.root].lastError, busy);
+});
+
 test("logs --path, logs after the notes, peek, and env --variant checked before it is stored", async () => {
   const w = makeWorld();
   const app = makeRepo(w, "app", { pkg: DEV, tasks: ["AX-31"] });
@@ -960,10 +1152,22 @@ test("logs --path, logs after the notes, peek, and env --variant checked before 
   const fromCwd = await w.cli(["logs", "--path"], { cwd: ws });
   assert.equal(fromCwd.stdout.trim(), logPath);
 
+  // A server terminal in no tab: Herdr's peek, as before T29.
   const peek = await w.cli(["peek", "--workspace", ws]);
   assert.equal(peek.code, 0, peek.stderr);
   const server = w.serverTerminal(app.root);
-  assert.equal(readFileSync(`${w.hcPath}.herdr-app`, "utf8").trim(), `do terminal.peek --terminal ${server.address}`);
+  const herdrDone = () => readFileSync(`${w.hcPath}.herdr-app`, "utf8").split("\n").filter((l) => l.startsWith("do "));
+  assert.deepEqual(herdrDone(), [`do terminal.peek --terminal ${server.address}`]);
+  // D38: in its Spotlight tab, Ver server shows that space and tab instead.
+  const tab = (id, name, terminal) => ({
+    id, name, active: id === "tb1", settled: false, terminals: [{ terminal, pane: `p-${terminal}`, status: null, app: null, name: null, sub_agents: [] }],
+  });
+  writeFileSync(`${w.hcPath}.herdr-ls`, JSON.stringify({
+    spaces: [{ id: "spApp", name: "app", folder: app.root, machine: null, active: false, tabs: [tab("tb1", "1", "t900"), tab("tbS", "Spotlight", server.address)] }],
+  }));
+  const shown = await w.cli(["peek", "--repo", app.root]);
+  assert.equal(shown.code, 0, shown.stderr);
+  assert.deepEqual(herdrDone().slice(1), ['do space.select {"id":"spApp"}', 'do tab.select {"id":"tbS"}']);
 
   const bad = await w.cli(["env", "--workspace", ws, "--variant", "co;rm -rf x"]);
   assert.equal(bad.code, 2);
@@ -1127,7 +1331,7 @@ test("J-001: past its deadline `on` never waits on the repo lock a `light` holds
   assert.equal(readFileSync(join(app.root, "later.txt"), "utf8"), "from the holder\n");
 });
 
-test("J-002: the settings' env is the default and a change restarts the server on the next `on` or reap; the popup's override wins until toggle off", async () => {
+test("J-002: the settings' env is the default and a change restarts the server on the next `on` or reap; the popup's pick wins and, stored for the task (D32), survives the turn-off", async () => {
   const w = makeWorld();
   const pkg = { scripts: { local: "vite", dev: "vite --mode dev", prod: "vite --mode prod" } };
   const app = makeRepo(w, "app", { pkg, tasks: ["AX-16"] });
@@ -1156,27 +1360,31 @@ test("J-002: the settings' env is the default and a change restarts the server o
   await w.until((s) => s.repos[app.root]?.serverEnv === "prod", { what: "the server in prod after the reap" });
   assert.match(typed().at(-1), runs("prod"));
 
-  // The popup picks Dev: an override on the state record, over the settings' Prod.
+  // The popup picks Dev: stored for the task (D32), over the settings' Prod.
   const pick = await w.cli(["env", "--workspace", ws, "--env", "dev"]);
   assert.equal(pick.code, 0, pick.stderr + pick.stdout);
-  assert.equal(record().envOverride, "dev");
+  assert.equal(w.state().envs["g1/AX-16"], "dev");
+  assert.equal(record().envKey, "g1/AX-16");
   assert.equal(record().serverEnv, "dev");
   assert.match(typed().at(-1), runs("dev"));
   const sent = typed().length;
   assert.equal((await w.cli(["reap"])).code, 0);
   assert.equal((await w.cli(["on"], { terminal: t, cwd: ws })).code, 0);
   await sleep(1500);
-  assert.equal(typed().length, sent, "the override holds: neither the reap nor `on` went back to the settings' env");
+  assert.equal(typed().length, sent, "the pick holds: neither the reap nor `on` went back to the settings' env");
   assert.equal(record().serverEnv, "dev");
 
-  // Toggle off clears the override: the next lighting runs the settings' env.
+  // D32: the pick survives the turn-off: the next lighting runs it, not the settings' env.
   assert.equal((await w.cli(["toggle", "--workspace", ws])).code, 0);
   await w.until((s) => !s.repos[app.root], { what: "turned off" });
+  assert.equal(w.state().envs["g1/AX-16"], "dev");
+  const offAt = typed().length;
   const back = await w.cli(["on"], { terminal: t, cwd: ws });
   assert.equal(back.code, 0, back.stderr + back.stdout);
-  assert.match(typed().at(-1), runs("prod"));
-  assert.equal(record().serverEnv, "prod");
-  assert.equal(record().envOverride ?? null, null);
+  assert.ok(typed().length > offAt, "the light started the server again");
+  assert.match(typed().at(-1), runs("dev"));
+  assert.equal(record().serverEnv, "dev");
+  assert.equal(record().envKey, "g1/AX-16");
 });
 
 test("J-008: a foreign process in the server terminal leaves the recorded env alone: nothing ran in the new one", async () => {
@@ -1198,7 +1406,7 @@ test("J-008: a foreign process in the server terminal leaves the recorded env al
   const sent = w.hc().sent.length;
   await w.cli(["env", "--workspace", ws, "--env", "dev"]);
   assert.equal(w.hc().sent.length, sent, "nothing typed over the foreign process");
-  assert.equal(record().envOverride, "dev");
+  assert.equal(w.state().envs["g1/AX-17"], "dev");
   assert.equal(record().serverEnv, "local", "serverEnv says what ran");
 });
 
@@ -1244,26 +1452,53 @@ test("J-009: env drift the reap can't resolve isn't retried: a foreign process i
   await sleep(1500);
   assert.equal(interrupts(), 1, "the reap didn't interrupt it again");
 
-  // A sync tries it again and says so when it didn't take.
-  const retried = await w.cli(["sync", "--repo", app.root]);
+  // An automatic sync (auto-sync, `on`, the reap's) doesn't try it again
+  // either (M1): no Ctrl-C, nothing said of a restart. `--auto` is how the
+  // reap's sync and auto-sync's detached copy say they are one (N4).
+  const retried = await w.cli(["sync", "--repo", app.root, "--auto"]);
   assert.equal(retried.code, 0, retried.stderr + retried.stdout);
-  assert.match(retried.stdout, /^Nothing to sync: .* The server did not restart \(still-running\)\.$/m);
+  assert.match(retried.stdout, /^Nothing to sync: /m);
+  assert.doesNotMatch(retried.stdout, /did not restart/);
+  assert.equal(interrupts(), 1, "a sync doesn't interrupt it again");
+  // Auto-sync's own line (watch-filter.js syncArgv), over a saved file: its
+  // detached copy syncs and leaves the server alone.
+  const syncedAt = record().lastSyncAt;
+  writeFileSync(join(ws, "saved.txt"), "a save\n");
+  assert.equal((await w.cli(["sync", "--repo", app.root, "--detach", "--auto"])).code, 0);
+  await w.until((s) => s.repos[app.root]?.lastSyncAt > syncedAt, { what: "auto-sync's detached sync" });
+  await sleep(1500);
+  assert.equal(interrupts(), 1, "auto-sync doesn't interrupt it again");
 
   // J-011: back to Local, then Dev saved again: a save after the failure is a
   // new ask, so the reap tries it once more (and only once).
-  assert.equal(interrupts(), 2, "the sync's own try");
   w.settings({ repos: { [app.root]: { env: "local" } } });
   assert.equal((await w.cli(["reap"])).code, 0);
   await sleep(1500);
-  assert.equal(interrupts(), 2, "Local runs already: the reap left it");
+  assert.equal(interrupts(), 1, "Local runs already: the reap left it");
   const savedAt = Date.now();
   w.settings({ repos: { [app.root]: { env: "dev" } } });
   assert.equal((await w.cli(["reap"])).code, 0);
   await w.until((s) => s.repos[app.root]?.envFailedAt >= savedAt, { what: "the reap's retry after the save" });
-  assert.equal(interrupts(), 3);
+  assert.equal(interrupts(), 2);
   assert.equal((await w.cli(["reap"])).code, 0);
   await sleep(1500);
-  assert.equal(interrupts(), 3, "no second retry without another save");
+  assert.equal(interrupts(), 2, "no second retry without another save");
+
+  // Reiniciar and a picked env always try it; each says the old server still
+  // runs, never that a start failed (M3).
+  const stuck = await w.cli(["restart", "--repo", app.root]);
+  assert.equal(stuck.code, 1, stuck.stderr + stuck.stdout);
+  assert.match(stuck.stderr, /app: the server did not restart: the old one still runs \(still-running\)\./);
+  const picked = await w.cli(["env", "--workspace", ws, "--env", "dev"]);
+  assert.equal(picked.code, 1, picked.stderr + picked.stdout);
+  assert.match(picked.stderr, /app: env dev saved; the server did not restart: the old one still runs \(still-running\)\./);
+  assert.doesNotMatch(picked.stderr, /did not start/);
+  assert.equal(interrupts(), 4);
+  // A hand-typed `spotlight sync` is a new ask too (N4): it tries it, and says so.
+  const typed = await w.cli(["sync", "--repo", app.root]);
+  assert.equal(typed.code, 0, typed.stderr + typed.stdout);
+  assert.match(typed.stdout, /The server did not restart \(still-running\)\./);
+  assert.equal(interrupts(), 5);
 
   // Ctrl-C works again: Reiniciar runs the env asked for, and the mark goes.
   w.hcUpdate((s) => {
@@ -1438,4 +1673,1136 @@ test("J-004, J-005: the pure rules (requestFgPid, classifyStep)", async () => {
   assert.deepEqual(classifyStep(req({ classifyPid: null, classifyAt: now - 10_000 }), 1, { now, pidAlive: dead }), { action: "spawn", spawns: 2 });
   assert.deepEqual(classifyStep(req({ classifySpawns: 1 + CLASSIFY_RESPAWNS }), 1, { now, pidAlive: dead }), { action: "fallback" });
   assert.deepEqual(classifyStep(req({ classifySpawns: 1 + CLASSIFY_RESPAWNS }), 1, { now, pidAlive: alive }), { action: "wait" });
+});
+
+// ── T13: a busy port before start, and Liberar puerto y arrancar (D23, D24) ─
+
+// speaking-english's scripts (S14): `pnpm dev` runs both halves in parallel,
+// and Next's half wants 3008.
+const SE_PKG = {
+  scripts: { dev: "npm-run-all --parallel dev:next dev:convex", "dev:next": "next dev -p 3008", "dev:convex": "convex dev" },
+};
+
+// Real processes stand in for whatever holds a port: `ps` reads their
+// command and `kill` reaches them. Every one is killed when the file ends.
+const procs = [];
+after(() => {
+  for (const p of procs) {
+    try {
+      process.kill(p.pid, "SIGKILL");
+    } catch {
+      // Already gone.
+    }
+  }
+});
+function spawnProc(file, args) {
+  const child = spawn(file, args, { stdio: "ignore" });
+  child.exited = new Promise((resolve) => child.on("exit", (code, signal) => resolve({ code, signal })));
+  procs.push(child);
+  return child;
+}
+const alive = (pid) => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+};
+const scriptLines = (w) => w.hc().sent.filter((x) => x.text.startsWith("script "));
+const serverNoteAction = (workspace) => ({ name: `spotlight.server.${sha1(workspace).slice(0, 12)}` });
+
+test("a listener outside the server terminal's tree on the expected port: port-busy with pid, command and cwd, no line typed, a toast that opens the popup; nothing is killed without --free-port", async () => {
+  const w = makeWorld();
+  const app = makeRepo(w, "speaking", { pkg: SE_PKG, tasks: ["AX-7"] });
+  w.register([{ id: "g1", repos: [app] }]);
+  const holder = spawnProc("sleep", ["300"]);
+  w.foreign([{ pid: holder.pid, port: 3008, cwd: "/Users/u/old/speaking-english" }]);
+  const ws = app.ws["AX-7"];
+  const t = w.agent(ws);
+
+  const on = await w.cli(["on", "--timeout-ms", "20000"], { terminal: t, cwd: ws });
+  assert.equal(on.code, 0, on.stderr + on.stdout);
+  const message = `El puerto 3008 lo tiene sleep 300 (pid ${holder.pid}, en /Users/u/old/speaking-english).`;
+  // Agents get the message (D24), at once: nothing will open that port.
+  assert.ok(on.stdout.includes(message), on.stdout);
+  assert.ok(on.ms < 12_000, `waited ${on.ms} ms for a server that never starts`);
+  const rec = w.state().repos[app.root];
+  const { at, ...error } = rec.lastError;
+  assert.deepEqual(error, { code: "port-busy", port: 3008, pid: holder.pid, command: "sleep 300", cwd: "/Users/u/old/speaking-english", message });
+  assert.ok(Number.isFinite(at));
+  assert.deepEqual(scriptLines(w), [], "no server line is typed over a busy port");
+  const toast = w.state().notes.find((n) => n.toast && n.text.includes(message));
+  assert.ok(toast, JSON.stringify(w.state().notes));
+  assert.deepEqual(toast.action, serverNoteAction(ws));
+
+  // Reiniciar alone checks again and kills nothing.
+  const again = await w.cli(["restart", "--repo", app.root]);
+  assert.equal(again.code, 1, again.stdout);
+  assert.ok(again.stderr.includes(`port-busy: ${message}`), again.stderr);
+  assert.equal(alive(holder.pid), true);
+  assert.deepEqual(scriptLines(w), []);
+
+  // An auto-sync of the holder keeps the error: the server is still not running.
+  write(ws, "page.txt", "edit\n");
+  const sync = await w.cli(["sync", "--repo", app.root]);
+  assert.equal(sync.code, 0, sync.stderr);
+  assert.equal(w.state().repos[app.root].lastError?.code, "port-busy");
+
+  // Another process took the port since the popup showed the first one:
+  // --free-port kills neither and shows the new holder instead.
+  const other = spawnProc("sleep", ["301"]);
+  w.foreign([{ pid: other.pid, port: 3008, cwd: "/tmp/other" }]);
+  const stale = await w.cli(["restart", "--repo", app.root, "--free-port"]);
+  assert.equal(stale.code, 1, stale.stdout);
+  assert.ok(stale.stderr.includes(`pid ${other.pid}`), stale.stderr);
+  assert.equal(alive(holder.pid), true);
+  assert.equal(alive(other.pid), true);
+  assert.equal(w.state().repos[app.root].lastError.pid, other.pid);
+  assert.deepEqual(scriptLines(w), []);
+});
+
+test("a listener inside the server terminal's tree on the expected port is Spotlight's own: the restart goes ahead", async () => {
+  const w = makeWorld();
+  const app = makeRepo(w, "own", { pkg: { scripts: { dev: "next dev -p 3008" } }, tasks: ["AX-8"] });
+  w.register([{ id: "g1", repos: [app] }]);
+  w.listen(app.root, [3008]);
+  const t = w.agent(app.ws["AX-8"]);
+  const on = await w.cli(["on"], { terminal: t, cwd: app.ws["AX-8"] });
+  assert.equal(on.code, 0, on.stderr + on.stdout);
+  assert.match(on.stdout, /own {2}http:\/\/localhost:3008 {2}listening/);
+  const r = await w.cli(["restart", "--repo", app.root]);
+  assert.equal(r.code, 0, r.stderr + r.stdout);
+  assert.match(r.stdout, /^Restarted own's server: npm run dev --$/m);
+  assert.equal(scriptLines(w).length, 2);
+  assert.equal(w.state().repos[app.root].lastError, null);
+});
+
+// Holds a port and ignores SIGTERM; its child (`sleep`) doesn't. Writes the
+// child's pid, then how the child ended, to the file in argv[1].
+const HOLDER_JS = `
+const fs = require("fs");
+process.on("SIGTERM", () => {});
+const c = require("child_process").spawn("sleep", ["300"], { stdio: "ignore" });
+c.on("exit", (code, sig) => fs.appendFileSync(process.argv[1], "child exited " + sig + "\\n"));
+fs.appendFileSync(process.argv[1], "child " + c.pid + "\\n");
+setInterval(() => {}, 1000);
+`;
+
+test("restart --free-port: TERM to the port's holder and its descendants, KILL after 5 s, nobody else; then the server starts", async () => {
+  const w = makeWorld();
+  const app = makeRepo(w, "freed", { pkg: SE_PKG, tasks: ["AX-9"] });
+  w.register([{ id: "g1", repos: [app] }]);
+  const report = join(w.dir, "holder.txt");
+  const holder = spawnProc(NODE, ["-e", HOLDER_JS, report]);
+  let childPid = null;
+  for (let i = 0; i < 100 && !childPid; i += 1) {
+    await sleep(50);
+    childPid = Number(/^child (\d+)$/m.exec(existsSync(report) ? readFileSync(report, "utf8") : "")?.[1]) || null;
+  }
+  assert.ok(childPid, "the holder's child started");
+  procs.push({ pid: childPid });
+  const bystander = spawnProc("sleep", ["302"]);
+  w.foreign([{ pid: holder.pid, port: 3008, cwd: "/Users/u/old" }], { [holder.pid]: [childPid] });
+  const ws = app.ws["AX-9"];
+  const t = w.agent(ws);
+  const on = await w.cli(["on", "--timeout-ms", "20000"], { terminal: t, cwd: ws });
+  assert.equal(on.code, 0, on.stderr + on.stdout);
+  assert.equal(w.state().repos[app.root].lastError?.pid, holder.pid);
+
+  // Once started, the server listens on the port it was after.
+  w.listen(app.root, [3008]);
+  const freed = await w.cli(["restart", "--repo", app.root, "--free-port"]);
+  assert.equal(freed.code, 0, freed.stderr + freed.stdout);
+  assert.match(freed.stdout, /^Restarted freed's server: npm run dev --$/m);
+  assert.ok(freed.ms >= 5_000, `KILL came before the 5 s grace (${freed.ms} ms)`);
+  assert.equal((await holder.exited).signal, "SIGKILL");
+  assert.match(readFileSync(report, "utf8"), /^child exited SIGTERM$/m);
+  assert.equal(alive(childPid), false);
+  assert.equal(alive(bystander.pid), true, "a process outside the holder's tree is never signalled");
+  assert.equal(scriptLines(w).length, 1);
+  const rec = w.state().repos[app.root];
+  assert.equal(rec.lastError, null);
+  assert.ok(w.state().notes.some((n) => n.repo === app.root && n.text.includes(`Puerto 3008 liberado`)), JSON.stringify(w.state().notes));
+});
+
+// ── T14: a server that dies at start leaves an error (D25) ─────────────────
+
+const ESC = "\u001b";
+
+// What spotlight-1's last start printed in the speaking-english log of the
+// incident (S14, L15), byte for byte: Next's half died on EADDRINUSE :3008.
+const SE_CRASH =
+  "\r\n" +
+  "> speaking-english@1.0.0 dev /Users/juan/Desktop/Software/Sideprojects/speaking-english\r\n" +
+  "> npm-run-all --parallel dev:next dev:convex\r\n" +
+  "\r\n" +
+  "\r\n" +
+  "> speaking-english@1.0.0 dev:next /Users/juan/Desktop/Software/Sideprojects/speaking-english\r\n" +
+  "> next dev -p 3008\r\n" +
+  "\r\n" +
+  "\r\n" +
+  "> speaking-english@1.0.0 dev:convex /Users/juan/Desktop/Software/Sideprojects/speaking-english\r\n" +
+  "> convex dev\r\n" +
+  "\r\n" +
+  "\u001b[31m\u001b[1m⨯\u001b[22m\u001b[39m Failed to start server\r\n" +
+  "Error: listen EADDRINUSE: address already in use :::3008\r\n" +
+  "    at <unknown> (Error: listen EADDRINUSE: address already in use :::3008)\r\n" +
+  "    at new Promise (<anonymous>) {\r\n" +
+  "  code: \u001b[32m'EADDRINUSE'\u001b[39m,\r\n" +
+  "  errno: \u001b[33m-48\u001b[39m,\r\n" +
+  "  syscall: \u001b[32m'listen'\u001b[39m,\r\n" +
+  "  address: \u001b[32m'::'\u001b[39m,\r\n" +
+  "  port: \u001b[33m3008\u001b[39m\r\n" +
+  "}\r\n" +
+  "\u001b[?25h\r\n" +
+  "\u001b[41m\u001b[30m ELIFECYCLE \u001b[39m\u001b[49m \u001b[31mCommand failed with exit code 1.\u001b[39m\r\n" +
+  "\u001b[41m\u001b[30m ELIFECYCLE \u001b[39m\u001b[49m \u001b[31mCommand failed.\u001b[39m\r\n" +
+  "ERROR: \"dev:next\" exited with 1.\r\n" +
+  "\u001b[41m\u001b[30m ELIFECYCLE \u001b[39m\u001b[49m \u001b[31mCommand failed with exit code 1.\u001b[39m\r\n";
+
+// A Node server with a syntax error, colored as pnpm prints it.
+const SYNTAX_CRASH =
+  "\r\n> crashy@1.0.0 dev /Users/u/code/crashy\r\n> node server.js\r\n\r\n" +
+  "/Users/u/code/crashy/server.js:3\r\n" +
+  "const port = ;\r\n" +
+  "             ^\r\n\r\n" +
+  `${ESC}[31mSyntaxError: Unexpected token ';'${ESC}[39m\r\n` +
+  "    at wrapSafe (node:internal/modules/cjs/loader:1469:18)\r\n\r\n" +
+  "Node.js v24.11.0\r\n";
+
+// The server terminal shows Spotlight's own server listening on `ports`:
+// `script` writing this repo's log in front.
+function listenNow(w, root, ports) {
+  const logPath = w.state().repos[root].logPath;
+  w.hcUpdate((s) => {
+    const t = Object.values(s.terminals).find((x) => x.labels?.["spotlight.repo"] === root);
+    t.foreground = { pid: s.nextPid++, name: "script", argv: ["script", "-F", "-q", "-a", logPath, "/bin/zsh", "-c", "pnpm dev"], cwd: t.cwd };
+    t.serverPorts = ports;
+  });
+}
+
+const toastsOf = (w, root, text) => w.state().notes.filter((n) => n.repo === root && n.toast && n.text.includes(text));
+
+test("the speaking-english death: the reap reads EADDRINUSE :3008 in the log since the last start → port-busy port 3008 (its holder while one listens), one toast that opens the popup; never while a start holds the repo lock; a later listen clears it", async () => {
+  const w = makeWorld();
+  const app = makeRepo(w, "speaking", { pkg: SE_PKG, tasks: ["AX-30"] });
+  w.register([{ id: "g1", repos: [app] }]);
+  w.crash(app.root, SE_CRASH);
+  const ws = app.ws["AX-30"];
+  assert.equal((await w.cli(["toggle", "--workspace", ws])).code, 0);
+  await w.until((s) => s.queue.lighting[`direct/${app.root}`]?.phase === "done", { what: "lit" });
+  assert.equal(w.state().repos[app.root].serverState, "starting");
+  assert.equal(scriptLines(w).length, 1);
+
+  // A start or restart in flight holds the repo lock: the reap decides nothing.
+  const lock = lockDirOf(w, app.root);
+  const owner = await acquire(lock);
+  try {
+    assert.equal((await w.cli(["reap"])).code, 0);
+    assert.equal(w.state().repos[app.root].serverState, "starting");
+    assert.equal(w.state().repos[app.root].lastError, null);
+  } finally {
+    unlock(lock, owner);
+  }
+
+  // Nobody listens on 3008 any more: port-busy with the port alone.
+  assert.equal((await w.cli(["reap"])).code, 0);
+  let rec = w.state().repos[app.root];
+  assert.equal(rec.serverState, "stopped");
+  {
+    const { at, ...error } = rec.lastError;
+    assert.deepEqual(error, {
+      code: "port-busy", port: 3008, pid: null, command: null, cwd: null, message: "El puerto 3008 estaba ocupado al arrancar el server.",
+    });
+    assert.ok(Number.isFinite(at));
+  }
+  const first = toastsOf(w, app.root, "El puerto 3008 estaba ocupado");
+  assert.equal(first.length, 1, JSON.stringify(w.state().notes));
+  assert.deepEqual(first[0].action, serverNoteAction(ws));
+  assert.equal((await w.cli(["reap"])).code, 0);
+  assert.equal(toastsOf(w, app.root, "El puerto 3008 estaba ocupado").length, 1, "one toast per error");
+
+  // Reintentar starts it again (the pre-start check finds 3008 free); this
+  // time the port's holder still listens when it dies: it is named.
+  const retry = await w.cli(["restart", "--repo", app.root]);
+  assert.equal(retry.code, 0, retry.stderr + retry.stdout);
+  assert.equal(scriptLines(w).length, 2);
+  assert.equal(w.state().repos[app.root].lastError, null, "a start that goes through clears it");
+  const holder = spawnProc("sleep", ["303"]);
+  w.foreign([{ pid: holder.pid, port: 3008, cwd: "/Users/u/old/speaking-english" }]);
+  assert.equal((await w.cli(["reap"])).code, 0);
+  rec = w.state().repos[app.root];
+  const message = `El puerto 3008 lo tiene sleep 303 (pid ${holder.pid}, en /Users/u/old/speaking-english).`;
+  {
+    const { at, ...error } = rec.lastError;
+    assert.deepEqual(error, { code: "port-busy", port: 3008, pid: holder.pid, command: "sleep 303", cwd: "/Users/u/old/speaking-english", message });
+  }
+  assert.equal(toastsOf(w, app.root, message).length, 1);
+  assert.equal(alive(holder.pid), true, "the reap kills nothing");
+
+  // The port is free and the server comes up after all: the error goes.
+  holder.kill("SIGKILL");
+  await holder.exited;
+  listenNow(w, app.root, [3008]);
+  assert.equal((await w.cli(["reap"])).code, 0);
+  rec = w.state().repos[app.root];
+  assert.equal(rec.serverState, "listening");
+  assert.deepEqual(rec.ports, [3008]);
+  assert.equal(rec.lastError, null);
+});
+
+test("a server that dies at start with any other error: `on` says 'El server se cayó al arrancar: <first error line>' at once and leaves server-exited with a toast; Reintentar clears it", async () => {
+  const w = makeWorld();
+  const app = makeRepo(w, "crashy", { pkg: { scripts: { dev: "node server.js" } }, tasks: ["AX-31"] });
+  w.register([{ id: "g1", repos: [app] }]);
+  w.crash(app.root, SYNTAX_CRASH);
+  const ws = app.ws["AX-31"];
+  const t = w.agent(ws);
+
+  const on = await w.cli(["on", "--timeout-ms", "30000"], { terminal: t, cwd: ws });
+  assert.equal(on.code, 0, on.stderr + on.stdout);
+  const message = "El server se cayó al arrancar: SyntaxError: Unexpected token ';'";
+  assert.ok(on.stdout.includes(`\n  ${" ".repeat("crashy".length)}  ${message}\n`), on.stdout);
+  assert.match(on.stdout, /crashy {2}- {2}no server running/);
+  assert.ok(on.ms < 12_000, `waited ${on.ms} ms for a server that already died`);
+  const rec = w.state().repos[app.root];
+  assert.equal(rec.serverState, "stopped");
+  const { at, ...error } = rec.lastError;
+  assert.deepEqual(error, { code: "server-exited", message });
+  const toast = toastsOf(w, app.root, message);
+  assert.equal(toast.length, 1, JSON.stringify(w.state().notes));
+  assert.deepEqual(toast[0].action, serverNoteAction(ws));
+
+  // `status` shows it; a sync of the holder keeps it (the server still isn't up).
+  const status = await w.cli(["status"]);
+  assert.ok(status.stdout.includes(`server-exited: ${message}`), status.stdout);
+  write(ws, "page.txt", "edit\n");
+  assert.equal((await w.cli(["sync", "--repo", app.root])).code, 0);
+  assert.equal(w.state().repos[app.root].lastError?.code, "server-exited");
+
+  // Reintentar, with the bug fixed: the start goes through and clears it.
+  w.crash(app.root, null);
+  const retry = await w.cli(["restart", "--repo", app.root]);
+  assert.equal(retry.code, 0, retry.stderr + retry.stdout);
+  assert.equal(w.state().repos[app.root].lastError, null);
+  assert.equal(w.state().repos[app.root].serverState, "starting");
+});
+
+// ── R5: signals reach only the processes they are meant for ────────────────
+
+// The fake hc hands out pids from 50000 up, inside the range macOS gives real
+// processes: a pid of the fake world may be a real process of the user's.
+test("R5: a fake pid is never really signalled: a turn-off whose fake server ignores Ctrl-C stops it in the fake world only, though a real process has its pid", async () => {
+  const w = makeWorld();
+  const app = makeRepo(w, "app", { pkg: DEV, tasks: ["AX-40"] });
+  w.register([{ id: "g1", repos: [app] }]);
+  const ws = app.ws["AX-40"];
+  assert.equal((await w.cli(["toggle", "--workspace", ws])).code, 0);
+  await w.until((s) => s.queue.lighting[`direct/${app.root}`]?.phase === "done", { what: "lit" });
+  const logPath = w.state().repos[app.root].logPath;
+  // A real process holds the number the fake server goes by, and the fake
+  // server ignores Ctrl-C, so the turn-off has to kill it (D26).
+  const real = spawnProc("sleep", ["300"]);
+  w.hcUpdate((s) => {
+    const t = Object.values(s.terminals).find((x) => x.labels?.["spotlight.repo"] === app.root);
+    t.foreground = { ...t.foreground, pid: real.pid };
+    t.ignoresInterrupt = true;
+  });
+
+  const off = await w.cli(["toggle", "--workspace", ws]);
+  assert.equal(off.code, 0, off.stderr + off.stdout);
+  await w.until((s) => !s.repos[app.root], { what: "turned off", ms: 60_000 });
+  assert.equal(alive(real.pid), true, "the real process with the fake server's pid was never signalled");
+  assert.deepEqual(w.hc().kills, [{ pid: real.pid, signal: "SIGTERM" }]);
+  // In the fake world the server died of it: the turn-off says it was forced.
+  assert.match(readFileSync(logPath, "utf8"), /Spotlight off — server stopped \(forced: 1 process/);
+  assert.equal(w.serverTerminal(app.root).foreground.name, "zsh", "the fake server is gone, its shell leads");
+});
+
+// A process that lives through SIGKILL (stuck in the kernel, or not ours to
+// signal): stopServer says "survived" (ports.js stopProcessTree, D26).
+test("a turn-off whose server lives through SIGKILL is an error that names it, never 'root restored' alone; the root is restored all the same", async () => {
+  const w = makeWorld();
+  const app = makeRepo(w, "app", { pkg: DEV, tasks: ["AX-41"] });
+  w.register([{ id: "g1", repos: [app] }]);
+  const ws = app.ws["AX-41"];
+  assert.equal((await w.cli(["toggle", "--workspace", ws])).code, 0);
+  await w.until((s) => s.queue.lighting[`direct/${app.root}`]?.phase === "done", { what: "lit" });
+  const logPath = w.state().repos[app.root].logPath;
+  let stuck;
+  w.hcUpdate((s) => {
+    const t = Object.values(s.terminals).find((x) => x.labels?.["spotlight.repo"] === app.root);
+    Object.assign(t, { ignoresInterrupt: true, unkillable: true });
+    stuck = t.foreground.pid;
+  });
+
+  // `toggle` hands this to a detached `--inline` copy; run that one here.
+  const off = await w.cli(["toggle", "--workspace", ws, "--inline"]);
+  assert.equal(off.code, 1, off.stdout + off.stderr);
+  const message = `El server no paró al apagar Spotlight: el proceso ${stuck} siguió vivo después de SIGKILL (el root sí se restauró).`;
+  assert.equal(off.stderr.trim(), `server-survived: ${message}`);
+  assert.doesNotMatch(off.stdout, /root restored/);
+  const notes = w.state().notes.filter((n) => n.repo === app.root);
+  assert.ok(notes.some((n) => n.toast && n.text === `app: ${message}`), JSON.stringify(notes));
+  // D35: an error toast, 60 s.
+  assert.equal(notes.find((n) => n.text === `app: ${message}`).level, "error");
+  assert.ok(!notes.some((n) => n.text === "Spotlight off — root restaurado"), JSON.stringify(notes));
+  assert.deepEqual(w.hc().kills, [{ pid: stuck, signal: "SIGTERM" }, { pid: stuck, signal: "SIGKILL" }]);
+  assert.match(readFileSync(logPath, "utf8"), /server NOT stopped/);
+  // The root is back on its branch and Spotlight's record is gone.
+  assert.equal(git(app.root, "symbolic-ref", "--short", "HEAD"), "main");
+  assert.equal(w.state().repos[app.root], undefined);
+});
+
+test("why Liberar puerto y arrancar left the port taken: a protected holder, or one that lived through SIGKILL", async () => {
+  const { portBusyLine } = await import("../mods/spotlight/cli.mjs");
+  const error = { code: "port-busy", message: "El puerto 3008 lo tiene next-server (pid 900, en /Users/u/old)." };
+  assert.equal(portBusyLine({ error }), `port-busy: ${error.message}`);
+  assert.equal(
+    portBusyLine({ error, freed: { ok: false, reason: "protected", pids: [900] } }),
+    `port-busy: ${error.message} Spotlight no lo paró: de ese proceso dependen Herdr o el server.`,
+  );
+  assert.equal(
+    portBusyLine({ error, freed: { ok: false, reason: "survived", pids: [900], killed: [900], survivors: [900] } }),
+    `port-busy: ${error.message} El proceso 900 siguió vivo después de SIGKILL: Spotlight no pudo liberar el puerto.`,
+  );
+  assert.equal(
+    portBusyLine({ error, freed: { ok: false, reason: "survived", pids: [900, 901], killed: [900, 901], survivors: [900, 901] } }),
+    `port-busy: ${error.message} Los procesos 900, 901 siguieron vivos después de SIGKILL: Spotlight no pudo liberar el puerto.`,
+  );
+});
+
+// cli-work.mjs over an in-memory store and a fake exec/kill: the paths a
+// subprocess world can't time (R5, R6, R10).
+function memoryCx({ state, exec, kill, busy = () => false }) {
+  let clock = 0;
+  return {
+    store: {
+      readState: () => structuredClone(state),
+      updateState: async (fn) => ({ result: fn(state) }),
+      // `busy`: a start or restart in flight holds the repo's lock.
+      withRepoLock: async (_root, fn) => {
+        if (busy()) throw new LockError("lock-timeout", "the repo lock is held");
+        return fn();
+      },
+    },
+    settings: readSettings(JSON.stringify({ version: 1 })),
+    io: nodeIo(fsp),
+    planGit: async () => {
+      throw new Error("no git in this test");
+    },
+    now: Date.now,
+    sleep,
+    nameOf: (root) => basename(root),
+    portPollMs: 50,
+    graceMs: 60_000,
+    // A clock of its own: a 5 s grace passes at once.
+    serverDeps: { exec, kill, now: () => clock, sleep: async (ms) => { clock += Math.max(0, ms); } },
+  };
+}
+
+const ok = (stdout) => ({ code: 0, stdout, stderr: "" });
+const none = { code: 1, stdout: "", stderr: "" };
+
+// What hc, pgrep, lsof and ps say of a server terminal whose shell (pid 100)
+// leads, with no port open in its tree: a start that died, or one whose line
+// isn't typed yet. `holders`: who listens on the port asked about, one entry
+// per lookup (null: nobody).
+function shellExec({ holders = [] } = {}) {
+  const calls = [];
+  const exec = async (file, args) => {
+    calls.push([file, ...args]);
+    if (file === "hc" && args[0] === "get") {
+      return ok(JSON.stringify({ address: args[1], pid: 100, state: "live", foreground: { pid: 100, name: "zsh", argv: ["/bin/zsh", "-l"] } }));
+    }
+    if (file === "pgrep") return none;
+    if (file === "lsof" && args.includes("-d")) return ok(`p${args[args.indexOf("-p") + 1]}\nfcwd\nn/Users/u/old\n`);
+    if (file === "lsof") {
+      const one = args.find((a) => a.startsWith("-iTCP:"));
+      if (!one) return none;
+      const pid = holders.length > 0 ? holders.shift() : null;
+      return pid ? ok(`p${pid}\ncnode\nf21\nn*:${one.slice("-iTCP:".length)}\n`) : none;
+    }
+    if (file === "ps") return ok("next-server (v16.0.1)\n");
+    return { code: 1, stdout: "", stderr: `no fake ${file}` };
+  };
+  return { exec, calls };
+}
+
+test("R5: Liberar puerto y arrancar signals only through cx.serverDeps.kill", async () => {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), "sl-r5-")));
+  worlds.push({ dir });
+  const root = join(dir, "freed");
+  mkdirSync(root);
+  write(root, "package.json", JSON.stringify({ scripts: { dev: "next dev -p 3008" } }));
+  // No OS hands out this pid: a signal that skipped the injected kill reaches nobody.
+  const FAKE = 9_000_000;
+  const kills = [];
+  const kill = (pid, signal) => {
+    kills.push([pid, signal]);
+    return true; // it never goes, and lsof keeps showing it
+  };
+  const { exec } = shellExec({ holders: [FAKE, FAKE, FAKE] });
+  const busy = portBusyError({ port: 3008, pid: FAKE, command: "next-server (v16.0.1)", cwd: "/Users/u/old" });
+  const state = {
+    version: 1,
+    repos: {
+      [root]: {
+        holder: "/Users/u/ws/freed/ax-9", lastSnapshotSha: "a".repeat(40), lastSyncAt: 1, lastError: { ...busy, at: 1 }, serverTerminal: "t1",
+        serverPid: null, serverStartedAt: null, serverCommand: null, serverEnv: null, serverVariant: null, serverState: "stopped",
+        pendingInstalls: [], ports: [], logPath: join(dir, "freed.log"),
+      },
+    },
+    queue: { requests: [], lighting: {} },
+    notes: [],
+    variants: {},
+  };
+  const cx = memoryCx({ state, exec, kill });
+  const r = await ensureServer(cx, root, { workspace: "/Users/u/ws/freed/ax-9", restart: true, freePort: true });
+  assert.equal(r.state, "port-busy", JSON.stringify(r));
+  assert.deepEqual(kills.filter(([, signal]) => signal !== 0), [[FAKE, "SIGTERM"], [FAKE, "SIGKILL"]]);
+});
+
+// ── R6, R10: a dead start is decided once, under the repo lock ─────────────
+
+const DS_ROOT = "/Users/u/code/speaking";
+const DS_WS = "/Users/u/ws/speaking/ax-30";
+const DS_KEY = "g1/AX-30";
+const DS_MEMBER = { root: DS_ROOT, name: "speaking", workspace: DS_WS, workspaces: [DS_WS] };
+
+// spotlight-1's start of the incident: Spotlight typed it (`starting`), and
+// its log says EADDRINUSE :3008 since the start marker.
+function deadStartState() {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), "sl-dead-")));
+  worlds.push({ dir });
+  const logPath = join(dir, "speaking.log");
+  appendLogHeader(logPath, { workspace: "ax-30", branch: "AX-30", event: "started: pnpm dev", at: Date.now() });
+  appendFileSync(logPath, SE_CRASH);
+  return {
+    version: 1,
+    repos: {
+      [DS_ROOT]: {
+        holder: DS_WS, lastSnapshotSha: "a".repeat(40), lastSyncAt: 1, lastError: null, serverTerminal: "t1", serverPid: 200,
+        serverStartedAt: 5, serverCommand: "pnpm dev", serverEnv: "local", serverVariant: null, serverState: "starting",
+        pendingInstalls: [], ports: [], logPath,
+      },
+    },
+    queue: { requests: [], lighting: {} },
+    notes: [],
+    variants: {},
+  };
+}
+
+test("R6: a start in flight holds the repo lock: `on` reads no death there and keeps waiting; once it is free, the death settled under the lock is what `on` says", async () => {
+  let held = true;
+  const state = deadStartState();
+  const cx = memoryCx({ state, exec: shellExec().exec, busy: () => held });
+  const seen = await describeServer(cx, cx.store.readState(), DS_MEMBER, DS_KEY);
+  assert.equal(seen.serverError, undefined, JSON.stringify(seen));
+  assert.equal(seen.error, undefined);
+  await recordServers(cx, [seen]);
+  assert.equal(state.repos[DS_ROOT].serverState, "starting", "left for whoever holds the lock");
+  assert.equal(state.repos[DS_ROOT].lastError, null);
+  assert.deepEqual(state.notes, []);
+  // Nothing ends the wait before its deadline (the grace for a repo with no
+  // server is long here).
+  const from = Date.now();
+  const waited = await waitForTurnServers(cx, { members: [DS_MEMBER], key: DS_KEY, deadline: from + 400, syncErrors: {} });
+  assert.ok(Date.now() - from >= 350, `the wait ended after ${Date.now() - from} ms`);
+  assert.equal(waited.ready, false);
+  assert.equal(waited.servers[0].serverError, undefined);
+
+  held = false;
+  const settled = await describeServer(cx, cx.store.readState(), DS_MEMBER, DS_KEY);
+  assert.equal(settled.serverError, true);
+  assert.equal(settled.error, "El puerto 3008 estaba ocupado al arrancar el server.");
+  assert.equal(state.repos[DS_ROOT].lastError.message, settled.error);
+  assert.equal(state.repos[DS_ROOT].serverState, "stopped");
+});
+
+test("R10: a dead start's error is computed once: what `on` prints is what is recorded and toasted", async () => {
+  // 900 listens on 3008 at the first look only: a second look would name nobody.
+  const { exec, calls } = shellExec({ holders: [900] });
+  const state = deadStartState();
+  const cx = memoryCx({ state, exec });
+  const seen = await describeServer(cx, cx.store.readState(), DS_MEMBER, DS_KEY);
+  await recordServers(cx, [seen]);
+  const message = "El puerto 3008 lo tiene next-server (v16.0.1) (pid 900, en /Users/u/old).";
+  assert.equal(seen.error, message);
+  assert.equal(state.repos[DS_ROOT].lastError.message, message);
+  assert.deepEqual(state.notes.filter((n) => n.toast).map((n) => n.text), [`speaking: ${message}`]);
+  assert.equal(calls.filter((c) => c[0] === "lsof" && c.includes("-iTCP:3008")).length, 1, "the port's holder is looked up once");
+  assert.equal(state.repos[DS_ROOT].serverState, "stopped");
+});
+
+// ── F7: a server error written under a root error ──────────────────────────
+
+const ORCA_HOLDS = { code: "orca-holds", message: "Este root lo tiene el Spotlight de Orca: apágalo allá primero.", at: 1 };
+const ROOT_DIVERGED = { code: "root-diverged", message: "El root se movió del snapshot de Spotlight.", at: 1 };
+
+test("F7: a start that died under a root error goes under it: the root error stays on top, one toast, opening the popup only when the popup can act on the top error", async () => {
+  const busy = "El puerto 3008 estaba ocupado al arrancar el server.";
+  for (const [rootError, action] of [[ORCA_HOLDS, undefined], [ROOT_DIVERGED, serverNoteAction(DS_WS)]]) {
+    const state = deadStartState();
+    state.repos[DS_ROOT].lastError = rootError;
+    const cx = memoryCx({ state, exec: shellExec().exec });
+    const seen = await describeServer(cx, cx.store.readState(), DS_MEMBER, DS_KEY);
+    await recordServers(cx, [seen]);
+    // `on` says why the server is down.
+    assert.equal(seen.serverError, true, rootError.code);
+    assert.equal(seen.error, busy);
+    const { serverError, ...top } = state.repos[DS_ROOT].lastError;
+    assert.deepEqual(top, rootError, "the root error stays on top");
+    assert.equal(serverError?.code, "port-busy", rootError.code);
+    assert.equal(serverError.message, busy);
+    assert.equal(state.repos[DS_ROOT].serverState, "stopped");
+    const toasts = () => state.notes.filter((n) => n.toast);
+    // G10: the toast says the root error goes first.
+    assert.deepEqual(toasts().map((n) => n.text), [`speaking: ${busy} Antes resuelve el root: ${rootError.message}`], rootError.code);
+    assert.deepEqual(toasts()[0].action, action, rootError.code);
+    // A later `on` still reads it as why, and nothing toasts again.
+    const again = await describeServer(cx, cx.store.readState(), DS_MEMBER, DS_KEY);
+    assert.equal(again.serverError, true);
+    assert.equal(again.error, busy);
+    assert.equal(toasts().length, 1);
+    assert.deepEqual(state.repos[DS_ROOT].lastError.code, rootError.code);
+  }
+});
+
+test("F7: a start a busy port refuses under a root error: port-busy goes under it and toasts once; the root error stays on top", async () => {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), "sl-f7-")));
+  worlds.push({ dir });
+  const root = join(dir, "busy");
+  mkdirSync(root);
+  write(root, "package.json", JSON.stringify({ scripts: { dev: "next dev -p 3008" } }));
+  const holder = 9_000_001; // no OS hands out this pid
+  const { exec } = shellExec({ holders: [holder, holder] });
+  const state = {
+    version: 1,
+    repos: {
+      [root]: {
+        holder: "/Users/u/ws/busy/ax-9", lastSnapshotSha: "a".repeat(40), lastSyncAt: 1, lastError: ROOT_DIVERGED, serverTerminal: "t1",
+        serverPid: null, serverStartedAt: null, serverCommand: null, serverEnv: null, serverVariant: null, serverState: "stopped",
+        pendingInstalls: [], ports: [], logPath: join(dir, "busy.log"),
+      },
+    },
+    queue: { requests: [], lighting: {} },
+    notes: [],
+    variants: {},
+  };
+  const cx = memoryCx({ state, exec, kill: () => true });
+  const message = `El puerto 3008 lo tiene next-server (v16.0.1) (pid ${holder}, en /Users/u/old).`;
+  for (let i = 0; i < 2; i += 1) {
+    const r = await ensureServer(cx, root, { workspace: "/Users/u/ws/busy/ax-9", restart: true });
+    assert.equal(r.state, "port-busy", JSON.stringify(r));
+  }
+  const { serverError, ...top } = state.repos[root].lastError;
+  assert.deepEqual(top, ROOT_DIVERGED);
+  assert.equal(serverError?.code, "port-busy");
+  assert.equal(serverError.pid, holder);
+  assert.equal(serverError.message, message);
+  assert.deepEqual(state.notes.filter((n) => n.toast).map((n) => n.text), [`busy: ${message} Antes resuelve el root: ${ROOT_DIVERGED.message}`]);
+});
+
+// ── F1: a restart keeps the processes of the run before ────────────────────
+// An old child that escaped holding 3000 while the restarted server moved to
+// 3001 must still die at the turn-off, so the identities outlive a restart.
+// A dead one can never match again (a reused pid has another start time),
+// and the list is capped (SERVER_PROCS_MAX).
+
+test("F1: a restart typed keeps the server processes the record remembered of the run before", async () => {
+  const w = makeWorld();
+  const app = makeRepo(w, "app", { pkg: DEV, tasks: ["AX-50"] });
+  w.register([{ id: "g1", repos: [app] }]);
+  const ws = app.ws["AX-50"];
+  assert.equal((await w.cli(["toggle", "--workspace", ws])).code, 0);
+  await w.until((s) => s.queue.lighting[`direct/${app.root}`]?.phase === "done", { what: "lit" });
+  const s = w.state();
+  s.repos[app.root].serverProcs = [{ pid: 50990, start: "Sat Nov  8 10:00:00 2026", port: 3000 }];
+  w.writeState(s);
+  const r = await w.cli(["restart", "--repo", app.root]);
+  assert.equal(r.code, 0, r.stderr + r.stdout);
+  assert.equal(scriptLines(w).length, 2);
+  assert.deepEqual(w.state().repos[app.root].serverProcs, [{ pid: 50990, start: "Sat Nov  8 10:00:00 2026", port: 3000 }]);
+});
+
+// ── F3: every turn-off whose server didn't stop is an error ────────────────
+
+test("F3: a turn-off whose server terminal hc can't read restores the root, exits 1 with server-not-stopped, and never says 'root restaurado'", async () => {
+  const w = makeWorld();
+  const app = makeRepo(w, "app", { pkg: DEV, tasks: ["AX-51"] });
+  w.register([{ id: "g1", repos: [app] }]);
+  const ws = app.ws["AX-51"];
+  assert.equal((await w.cli(["toggle", "--workspace", ws])).code, 0);
+  await w.until((s) => s.queue.lighting[`direct/${app.root}`]?.phase === "done", { what: "lit" });
+  w.hcUpdate((s) => {
+    Object.values(s.terminals).find((x) => x.labels?.["spotlight.repo"] === app.root).getFails = "socket closed";
+  });
+
+  const off = await w.cli(["toggle", "--workspace", ws, "--inline"]);
+  assert.equal(off.code, 1, off.stdout + off.stderr);
+  const line = off.stderr.trim();
+  const prefix = "server-not-stopped: El server no paró al apagar Spotlight: ";
+  assert.ok(line.startsWith(prefix) && line.endsWith(" (el root sí se restauró)."), line);
+  assert.doesNotMatch(off.stdout, /root restored/);
+  const message = line.slice("server-not-stopped: ".length);
+  const notes = w.state().notes.filter((n) => n.repo === app.root);
+  assert.ok(notes.some((n) => n.toast && n.text === `app: ${message}`), JSON.stringify(notes));
+  assert.ok(!notes.some((n) => n.text === "Spotlight off — root restaurado"), JSON.stringify(notes));
+  assert.equal(git(app.root, "symbolic-ref", "--short", "HEAD"), "main");
+  assert.equal(w.state().repos[app.root], undefined);
+  // H5: hc's own words stay out of the Spanish error, and `spotlight logs` shows them.
+  assert.doesNotMatch(line, /socket closed/);
+  const logs = await w.cli(["logs", "--repo", "app"]);
+  assert.equal(logs.code, 0, logs.stderr);
+  assert.match(logs.stdout, /Spotlight off — server NOT stopped \(unreadable\): the Spotlight terminal could not be read \(socket closed\)/);
+});
+
+// ── F9: one phrasing of the survivors ──────────────────────────────────────
+
+test("F9: the survivors are phrased once (survivorsPhrase), for the turn-off's error and for Liberar puerto y arrancar's line", async () => {
+  const { survivorsPhrase, survivedError } = await import("../mods/spotlight/cli-work.mjs");
+  assert.equal(survivorsPhrase([900]), "el proceso 900 siguió vivo");
+  assert.equal(survivorsPhrase([900, 901]), "los procesos 900, 901 siguieron vivos");
+  assert.equal(
+    survivedError([900, 901]).message,
+    "El server no paró al apagar Spotlight: los procesos 900, 901 siguieron vivos después de SIGKILL (el root sí se restauró).",
+  );
+  // A refused pid (counted among the survivors) was never signalled: no SIGKILL in its words.
+  assert.equal(
+    survivedError([900, 901], [900, 901]).message,
+    "El server no paró al apagar Spotlight: los procesos 900, 901 no se pudieron señalar (el root sí se restauró).",
+  );
+  assert.equal(
+    survivedError([900, 901, 902], [902]).message,
+    "El server no paró al apagar Spotlight: los procesos 900, 901 siguieron vivos después de SIGKILL y el proceso 902 no se pudo señalar (el root sí se restauró).",
+  );
+  const src = readFileSync(CLI, "utf8");
+  assert.doesNotMatch(src, /siguió vivo|siguieron vivos/, "cli.mjs spells the survivors itself");
+  assert.match(src, /survivorsPhrase/);
+});
+
+// ── D33: the busy mark, across processes ───────────────────────────────────
+
+test("D33: a light, a human's toggle or an agent's turn, marks its repo busy with the target workspace and the detached light's pid while it runs, and clears it after", async () => {
+  const w = makeWorld();
+  const app = makeRepo(w, "app", { pkg: DEV, tasks: ["AX-60", "AX-61"] });
+  w.register([{ id: "g1", repos: [app] }]);
+  w.listen(app.root, [3000]);
+  const [ws1, ws2] = [app.ws["AX-60"], app.ws["AX-61"]];
+  write(ws2, "ax61.txt", "from AX-61\n");
+  w.slowGit("reset", 1.5);
+
+  // A fresh light from the flashlight: the record is made for the mark, so
+  // the target's row spins before it holds.
+  const direct = `direct/${app.root}`;
+  assert.equal((await w.cli(["toggle", "--workspace", ws1])).code, 0);
+  const lighting = await w.until((s) => (s.repos[app.root]?.busy ? s : null), { what: "the toggle's busy mark" });
+  const busy = lighting.repos[app.root].busy;
+  assert.deepEqual({ op: busy.op, workspace: busy.workspace }, { op: "light", workspace: ws1 });
+  assert.equal(lighting.repos[app.root].holder, null);
+  assert.equal(busy.pid, lighting.queue.lighting[direct].pid, "the detached light marks it");
+  await w.until((s) => s.queue.lighting[direct]?.phase === "done", { what: "lit" });
+  assert.equal(w.state().repos[app.root].holder, ws1);
+  assert.equal("busy" in w.state().repos[app.root], false);
+
+  // An agent's turn takes the root over: its light marks too.
+  const t = w.agent(ws2);
+  const pending = w.cli(["on", "--timeout-ms", "30000"], { terminal: t, cwd: ws2 });
+  const taking = await w.until((s) => (s.repos[app.root]?.busy?.workspace === ws2 ? s : null), { what: "the turn's busy mark" });
+  assert.equal(taking.repos[app.root].busy.op, "light");
+  assert.equal(taking.repos[app.root].busy.pid, taking.queue.lighting["g1/AX-61"].pid);
+  w.slowGit(null);
+  const r = await pending;
+  assert.equal(r.code, 0, r.stderr + r.stdout);
+  assert.equal(w.state().repos[app.root].holder, ws2);
+  assert.equal("busy" in w.state().repos[app.root], false);
+});
+
+// ── T21 (D31): the whole-task toggle, through the CLI ──────────────────────
+
+test("D31: `toggle --task AX-70 --group g1` hands the batch to a detached copy: every member lit, one summary note; `--inline` again turns them all off; usage errors exit 2, no member exits 1", async () => {
+  const w = makeWorld();
+  const front = makeRepo(w, "front", { pkg: DEV, tasks: ["AX-70"] });
+  const back = makeRepo(w, "back", { pkg: DEV, tasks: ["AX-70"] });
+  const docs = makeRepo(w, "docs", { tasks: ["AX-71"] });
+  w.register([{ id: "g1", repos: [front, back, docs] }]);
+  w.listen(front.root, [3000]);
+  w.listen(back.root, [3001]);
+
+  const on = await w.cli(["toggle", "--task", "AX-70", "--group", "g1"]);
+  assert.equal(on.code, 0, on.stderr + on.stdout);
+  assert.match(on.stdout, /^Toggling Spotlight for AX-70 in g1\./m);
+  const lit = await w.until((s) => (s.notes.some((n) => n.text === "Spotlight on · AX-70") && !s.queue.taskBatch ? s : null), { what: "the batch's summary" });
+  assert.equal(lit.repos[front.root].holder, front.ws["AX-70"]);
+  assert.equal(lit.repos[back.root].holder, back.ws["AX-70"]);
+  assert.deepEqual(lit.notes.filter((n) => n.toast).map((n) => n.text), ["Spotlight on · AX-70"]);
+  assert.ok(refsOf(front.root).length > 0 && refsOf(back.root).length > 0);
+
+  const off = await w.cli(["toggle", "--task", "AX-70", "--group", "g1", "--inline"]);
+  assert.equal(off.code, 0, off.stderr + off.stdout);
+  assert.match(off.stdout, /^Spotlight off · AX-70$/m);
+  assert.deepEqual(Object.keys(w.state().repos), []);
+  assert.deepEqual(refsOf(front.root), []);
+  assert.deepEqual(refsOf(back.root), []);
+
+  for (const args of [["toggle", "--task", "AX-70"], ["toggle", "--group", "g1"], ["toggle", "--task", "AX-70", "--group", "nope"], ["toggle", "--task", "none", "--group", "g1"]]) {
+    const r = await w.cli(args);
+    assert.equal(r.code, 2, `${args.join(" ")}: ${r.stderr}${r.stdout}`);
+  }
+  // docs has no server command and no `enabled`: Spotlight is off there, so AX-71 has no member.
+  const none = await w.cli(["toggle", "--task", "AX-71", "--group", "g1", "--inline"]);
+  assert.equal(none.code, 1, none.stderr + none.stdout);
+  assert.match(none.stderr, /^no-members: .*docs/m);
+});
+
+// ── T22 (D32): the env per task, through the CLI ───────────────────────────
+
+const ENV_PKG = { scripts: { local: "vite", dev: "vite --mode dev", prod: "vite --mode prod" } };
+const runsEnv = (env) => new RegExp(`/bin/zsh -c 'npm run ${env} --'$`);
+
+test("D32: `env --task AX-50 --group g1 --env dev` stores envs[\"g1/AX-50\"] and restarts only the lit repos AX-50 holds whose command changes; detached it stores, answers at once and restarts after", async () => {
+  const w = makeWorld();
+  const front = makeRepo(w, "front", { pkg: ENV_PKG, tasks: ["AX-50"] });
+  // No Dev command: its server is left running.
+  const api = makeRepo(w, "api", { pkg: { scripts: { local: "node api.js" } }, tasks: ["AX-50"] });
+  // Only a dev script: Local runs Dev's command, so Dev changes nothing that runs.
+  const web = makeRepo(w, "web", { pkg: DEV, tasks: ["AX-50"] });
+  const admin = makeRepo(w, "admin", { pkg: ENV_PKG, tasks: ["AX-51"] });
+  w.register([{ id: "g1", repos: [front, api, web, admin] }]);
+  [front, api, web, admin].forEach((r, i) => w.listen(r.root, [3000 + i]));
+  const lit = await w.cli(["toggle", "--task", "AX-50", "--group", "g1", "--inline"]);
+  assert.equal(lit.code, 0, lit.stderr + lit.stdout);
+  const other = await w.cli(["toggle", "--workspace", admin.ws["AX-51"], "--inline"]);
+  assert.equal(other.code, 0, other.stderr + other.stdout);
+  const typedIn = (r) => w.hc().sent.filter((x) => x.terminal === w.serverTerminal(r.root).address).map((x) => x.text);
+  const counts = () => [front, api, web, admin].map((r) => typedIn(r).length);
+  assert.deepEqual(counts(), [1, 1, 1, 1]);
+  assert.deepEqual([front, api, web, admin].map((r) => w.state().repos[r.root].envKey), ["g1/AX-50", "g1/AX-50", "g1/AX-50", "g1/AX-51"]);
+
+  const r = await w.cli(["env", "--task", "AX-50", "--group", "g1", "--env", "dev", "--inline"]);
+  assert.equal(r.code, 0, r.stderr + r.stdout);
+  assert.match(r.stdout, /^front: env dev; the server restarted: npm run dev --$/m);
+  const s = w.state();
+  assert.deepEqual(s.envs, { "g1/AX-50": "dev" });
+  // front restarted into Dev; api and web typed nothing; admin is AX-51's.
+  assert.deepEqual(counts(), [2, 1, 1, 1]);
+  assert.match(typedIn(front).at(-1), runsEnv("dev"));
+  assert.deepEqual([front, api, web, admin].map((x) => s.repos[x.root].serverEnv), ["dev", "local", "dev", "local"]);
+  assert.equal(s.repos[admin.root].envKey, "g1/AX-51");
+  // Nothing left for the reap to restart.
+  assert.equal((await w.cli(["reap"])).code, 0);
+  await sleep(1500);
+  assert.deepEqual(counts(), [2, 1, 1, 1]);
+
+  // Detached (the pill's popup): the pick is stored before it answers, the restarts land after.
+  const d = await w.cli(["env", "--task", "ax_50", "--group", "g1", "--env", "local"]);
+  assert.equal(d.code, 0, d.stderr + d.stdout);
+  assert.match(d.stdout, /AX-50/);
+  assert.equal(w.state().envs["g1/AX-50"], "local");
+  await w.until((x) => x.repos[front.root]?.serverEnv === "local" && x.repos[web.root]?.serverEnv === "local" && !x.repos[front.root].busy, {
+    what: "AX-50's servers back in Local",
+  });
+  assert.match(typedIn(front).at(-1), runsEnv("local"));
+  assert.deepEqual(counts(), [3, 1, 1, 1]);
+
+  for (const args of [
+    ["env", "--task", "AX-50", "--env", "dev"],
+    ["env", "--group", "g1", "--env", "dev"],
+    ["env", "--task", "AX-50", "--group", "nope", "--env", "dev"],
+    ["env", "--task", "none", "--group", "g1", "--env", "dev"],
+    ["env", "--task", "AX-50", "--group", "g1"],
+    ["env", "--task", "AX-50", "--group", "g1", "--env", "staging"],
+    ["env", "--task", "AX-50", "--group", "g1", "--env", "dev", "--workspace", front.ws["AX-50"]],
+    ["env", "--task", "AX-50", "--group", "g1", "--variant", "co"],
+  ]) {
+    const u = await w.cli(args);
+    assert.equal(u.code, 2, `${args.join(" ")}: ${u.stderr}${u.stdout}`);
+  }
+  assert.deepEqual(w.state().envs, { "g1/AX-50": "local" });
+});
+
+test("D32: repo settings env Dev, then Local picked on the pill: Local is stored and runs; the pick survives a turn-off and the next light starts with it", async () => {
+  const w = makeWorld();
+  const app = makeRepo(w, "app", { pkg: ENV_PKG, tasks: ["AX-60"] });
+  w.register([{ id: "g1", repos: [app] }]);
+  w.settings({ repos: { [app.root]: { env: "dev" } } });
+  w.listen(app.root, [3000]);
+  const ws = app.ws["AX-60"];
+  const typed = () => w.hc().sent.map((x) => x.text);
+  assert.equal((await w.cli(["toggle", "--workspace", ws, "--inline"])).code, 0);
+  assert.match(typed().at(-1), runsEnv("dev"));
+  assert.equal(w.state().repos[app.root].envKey, "g1/AX-60");
+
+  const pick = await w.cli(["env", "--task", "AX-60", "--group", "g1", "--env", "local"]);
+  assert.equal(pick.code, 0, pick.stderr + pick.stdout);
+  assert.equal(w.state().envs["g1/AX-60"], "local", "Local is stored too");
+  await w.until((s) => s.repos[app.root]?.serverEnv === "local" && !s.repos[app.root].busy, { what: "the server in Local" });
+  assert.match(typed().at(-1), runsEnv("local"));
+
+  // Off, then on again: the pick is still there and the light runs it, not the settings' Dev.
+  const off = await w.cli(["toggle", "--workspace", ws, "--inline"]);
+  assert.equal(off.code, 0, off.stderr + off.stdout);
+  assert.equal(w.state().repos[app.root], undefined);
+  assert.deepEqual(w.state().envs, { "g1/AX-60": "local" });
+  const n = typed().length;
+  assert.equal((await w.cli(["toggle", "--workspace", ws, "--inline"])).code, 0);
+  assert.equal(typed().length, n + 1);
+  assert.match(typed().at(-1), runsEnv("local"));
+  assert.equal(w.state().repos[app.root].serverEnv, "local");
+});
+
+test("D32: `env --workspace` writes its workspace's key: a task workspace's is the task's; one that doesn't hold the root only stores it; a task-less one's is ws:<path>, which another workspace doesn't inherit", async () => {
+  const w = makeWorld();
+  const app = makeRepo(w, "app", { pkg: ENV_PKG, tasks: ["AX-80", "AX-81"] });
+  w.register([{ id: "g1", repos: [app] }]);
+  w.listen(app.root, [3000]);
+  const [ws80, ws81] = [app.ws["AX-80"], app.ws["AX-81"]];
+  // Branch and folder that can't name a task: task.js taskOf gives none.
+  const bareA = join(w.dir, "ws", "app", "a", "none");
+  const bareB = join(w.dir, "ws", "app", "b", "none");
+  git(app.root, "worktree", "add", "-q", "-b", "a/none", bareA);
+  git(app.root, "worktree", "add", "-q", "-b", "b/none", bareB);
+  const typed = () => w.hc().sent.map((x) => x.text);
+  const record = () => w.state().repos[app.root];
+
+  assert.equal((await w.cli(["toggle", "--workspace", ws80, "--inline"])).code, 0);
+  const pick = await w.cli(["env", "--workspace", ws80, "--env", "prod"]);
+  assert.equal(pick.code, 0, pick.stderr + pick.stdout);
+  assert.deepEqual(w.state().envs, { "g1/AX-80": "prod" });
+  assert.match(typed().at(-1), runsEnv("prod"));
+
+  // AX-81 doesn't hold the root: its pick is stored, nothing restarts.
+  const n = typed().length;
+  const stored = await w.cli(["env", "--workspace", ws81, "--env", "dev"]);
+  assert.equal(stored.code, 0, stored.stderr + stored.stdout);
+  assert.match(stored.stdout, /^app: env dev saved\.$/m);
+  assert.equal(w.state().envs["g1/AX-81"], "dev");
+  assert.equal(typed().length, n);
+  assert.deepEqual({ envKey: record().envKey, serverEnv: record().serverEnv }, { envKey: "g1/AX-80", serverEnv: "prod" });
+  // Its light runs it.
+  assert.equal((await w.cli(["toggle", "--workspace", ws81, "--inline"])).code, 0);
+  assert.equal(record().envKey, "g1/AX-81");
+  assert.match(typed().at(-1), runsEnv("dev"));
+
+  // Task-less workspaces are keyed by their path.
+  assert.equal((await w.cli(["toggle", "--workspace", bareA, "--inline"])).code, 0);
+  assert.equal(record().envKey, `ws:${bareA}`);
+  assert.match(typed().at(-1), runsEnv("local"));
+  assert.equal((await w.cli(["env", "--workspace", bareA, "--env", "dev"])).code, 0);
+  assert.equal(w.state().envs[`ws:${bareA}`], "dev");
+  assert.match(typed().at(-1), runsEnv("dev"));
+  assert.equal((await w.cli(["toggle", "--workspace", bareB, "--inline"])).code, 0);
+  assert.equal(record().envKey, `ws:${bareB}`);
+  assert.match(typed().at(-1), runsEnv("local"), "bareB doesn't inherit bareA's pick");
+  assert.deepEqual(Object.keys(w.state().envs).sort(), ["g1/AX-80", "g1/AX-81", `ws:${bareA}`].sort());
+});
+
+test("D32: a record lit before T22 (envOverride, no envKey) keeps its env and restarts nothing; picked through `env --task` it gets envKey, restarts once, and the next reap leaves it alone", async () => {
+  const w = makeWorld();
+  const app = makeRepo(w, "app", { pkg: ENV_PKG, tasks: ["AX-90"] });
+  w.register([{ id: "g1", repos: [app] }]);
+  w.listen(app.root, [3000]);
+  const ws = app.ws["AX-90"];
+  const t = w.agent(ws);
+  const typed = () => w.hc().sent.map((x) => x.text);
+  assert.equal((await w.cli(["on"], { terminal: t, cwd: ws })).code, 0);
+  assert.match(typed().at(-1), runsEnv("local"));
+
+  // As the CLI left it before T22: the popup's Local on the record, no
+  // envKey. The settings now say Prod, which an envKey'd record would run.
+  const before = w.state();
+  delete before.repos[app.root].envKey;
+  before.repos[app.root].envOverride = "local";
+  w.writeState(before);
+  w.settings({ repos: { [app.root]: { env: "prod" } } });
+  const n = typed().length;
+  assert.equal((await w.cli(["reap"])).code, 0);
+  assert.equal((await w.cli(["on"], { terminal: t, cwd: ws })).code, 0);
+  assert.equal((await w.cli(["sync", "--repo", app.root])).code, 0);
+  await sleep(1500);
+  assert.equal(typed().length, n, "neither the reap, `on` nor a sync restarted it");
+  assert.equal(w.state().repos[app.root].envOverride, "local");
+  assert.equal("envKey" in w.state().repos[app.root], false);
+
+  const pick = await w.cli(["env", "--task", "AX-90", "--group", "g1", "--env", "dev", "--inline"]);
+  assert.equal(pick.code, 0, pick.stderr + pick.stdout);
+  const rec = w.state().repos[app.root];
+  assert.equal(rec.envKey, "g1/AX-90");
+  assert.equal("envOverride" in rec, false);
+  assert.equal(typed().length, n + 1);
+  assert.match(typed().at(-1), runsEnv("dev"));
+  assert.equal((await w.cli(["reap"])).code, 0);
+  await sleep(1500);
+  assert.equal(typed().length, n + 1, "the next reap leaves it alone");
+  assert.equal(w.state().repos[app.root].serverEnv, "dev");
+});
+
+// ── D35: error toasts that name their popup button; D36: the variant ──────
+
+test("D35: errorNote: every error note is level error; one whose click opens the popup names the button there: Proyectar igual for a light, Forzar sync for a sync, Apagar igual for a turn-off, the server error's own; none where the popup can't act", () => {
+  const ROOT = "/Users/u/code/app";
+  const WS = "/Users/u/ws/app/ax-1";
+  const DIVERGED = { code: "root-diverged", message: "El root se movió del snapshot de Spotlight." };
+  const COLLISION = { code: "untracked-collision", message: "Hay archivos sin seguimiento en el root." };
+  const BUSY = portBusyError({ port: 3000, pid: 900, command: "node", cwd: "/x" });
+  const EXITED = { code: "server-exited", message: "El server se cayó al arrancar: boom" };
+  const FAILED = { code: "server-start-failed", message: "El server no arrancó: hc no pudo leer su terminal" };
+  const ORCA = { code: "orca-holds", message: "Este root lo tiene el Spotlight de Orca: apágalo allá primero." };
+  const GIT = { code: "git-failed", message: "fatal: bad object HEAD" };
+  // The note errorNote leaves, the record as its caller wrote it first.
+  const noteOf = (args, record = {}) => {
+    const s = { version: 1, repos: { [ROOT]: { serverState: "stopped", lastError: null, ...record } }, queue: { requests: [], lighting: {} }, notes: [], variants: {} };
+    errorNote(s, { root: ROOT, name: "app", workspace: WS, now: 5, ...args });
+    assert.equal(s.notes.length, 1);
+    return s.notes[0];
+  };
+  const action = serverNoteAction(WS);
+  const cases = [
+    ["a refused light", { error: DIVERGED, op: "light" }, {}, "Proyectar igual"],
+    ["a light refused on untracked files", { error: COLLISION, op: "light" }, {}, "Proyectar igual"],
+    ["a refused sync", { error: DIVERGED, op: "sync" }, {}, "Forzar sync"],
+    ["a sync refused on untracked files", { error: COLLISION, op: "sync" }, {}, "Forzar sync"],
+    ["a refused turn-off", { error: DIVERGED, op: "off" }, {}, "Apagar igual"],
+    ["a turn-off refused on untracked files", { error: COLLISION, op: "off" }, {}, "Apagar igual"],
+    ["a busy port", { error: BUSY, top: BUSY }, { lastError: BUSY }, "Liberar puerto y arrancar"],
+    ["a dead start", { error: EXITED, top: EXITED }, { lastError: EXITED }, "Reintentar"],
+    ["a failed start over a server that may still run", { error: FAILED, top: FAILED }, { lastError: FAILED, serverState: "listening" }, "Reiniciar"],
+    ["a busy port under a diverged root", { error: BUSY, top: { ...DIVERGED, serverError: BUSY } }, { lastError: { ...DIVERGED, serverError: BUSY } }, "Forzar sync"],
+  ];
+  for (const [what, args, record, button] of cases) {
+    const note = noteOf(args, record);
+    assert.equal(note.level, "error", what);
+    assert.equal(note.toast, true, what);
+    assert.deepEqual(note.action, action, what);
+    assert.equal(note.button, button, what);
+  }
+  // The text stays the error's: the button goes in the toast's body only (board-model.js).
+  assert.equal(noteOf({ error: DIVERGED, op: "sync" }).text, `app: ${DIVERGED.message}`);
+  for (const [what, args] of [
+    ["orca-holds", { error: ORCA, op: "off" }],
+    ["git-failed", { error: GIT, op: "sync" }],
+    ["no workspace to open the popup from", { error: DIVERGED, op: "sync", workspace: null }],
+  ]) {
+    const note = noteOf(args);
+    assert.equal(note.level, "error", what);
+    assert.equal(note.action, undefined, what);
+    assert.equal(note.button, undefined, what);
+  }
+});
+
+test("D35: refused on a diverged root, a sync, a turn-off and a takeover each toast as errors naming their popup button; a `sync --force` that goes through toasts 'Spotlight re-sincronizado…', a plain one doesn't", async () => {
+  const w = makeWorld();
+  const app = makeRepo(w, "app", { pkg: DEV, tasks: ["AX-8", "AX-9"] });
+  w.register([{ id: "g1", repos: [app] }]);
+  const [ws, other] = [app.ws["AX-8"], app.ws["AX-9"]];
+  assert.equal((await w.cli(["toggle", "--workspace", ws])).code, 0);
+  await w.until((s) => s.queue.lighting[`direct/${app.root}`]?.phase === "done", { what: "lit" });
+  git(app.root, "commit", "-q", "--allow-empty", "-m", "made in the root");
+  const errorsOf = (button) => w.state().notes.filter((n) => n.toast && n.level === "error" && n.button === button);
+
+  const sync = await w.cli(["sync", "--repo", app.root]);
+  assert.equal(sync.code, 1, sync.stdout + sync.stderr);
+  assert.match(sync.stderr, /root-diverged/);
+  assert.equal(errorsOf("Forzar sync").length, 1, JSON.stringify(w.state().notes));
+  assert.deepEqual(errorsOf("Forzar sync")[0].action, serverNoteAction(ws));
+
+  const off = await w.cli(["toggle", "--workspace", ws, "--inline"]);
+  assert.equal(off.code, 1, off.stdout + off.stderr);
+  assert.equal(errorsOf("Apagar igual").length, 1, JSON.stringify(w.state().notes));
+  assert.deepEqual(errorsOf("Apagar igual")[0].action, serverNoteAction(ws));
+
+  const take = await w.cli(["toggle", "--workspace", other, "--inline"]);
+  assert.equal(take.code, 1, take.stdout + take.stderr);
+  assert.equal(errorsOf("Proyectar igual").length, 1, JSON.stringify(w.state().notes));
+  assert.deepEqual(errorsOf("Proyectar igual")[0].action, serverNoteAction(other));
+  assert.equal(w.state().repos[app.root].holder, ws);
+
+  const RESYNCED = "Spotlight re-sincronizado: el root refleja el workspace otra vez.";
+  const resynced = () => w.state().notes.filter((n) => n.toast && n.text === RESYNCED);
+  const forced = await w.cli(["sync", "--repo", app.root, "--force"]);
+  assert.equal(forced.code, 0, forced.stdout + forced.stderr);
+  assert.equal(resynced().length, 1, JSON.stringify(w.state().notes));
+  assert.equal(resynced()[0].repo, app.root);
+  assert.equal(resynced()[0].level, "success");
+  assert.equal(w.state().repos[app.root].lastError, null);
+  // A sync nobody forced says nothing when it goes through.
+  assert.equal((await w.cli(["sync", "--repo", app.root])).code, 0);
+  assert.equal(resynced().length, 1);
+});
+
+const VARIANT_PKG = { packageManager: "pnpm@9.0.0", scripts: { "dev:co": "vite", "dev:mx": "vite" } };
+const VARIANT_APPS = { "apps/co/index.html": "co\n", "apps/mx/index.html": "mx\n" };
+const ASK = (repo) => `Elige una variante para ${repo}`;
+
+test("D36: a start that needs a variant toasts once, opening the popup; an automatic sync that finds it still waiting doesn't toast again, Reiniciar does", async () => {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), "sl-nv-")));
+  worlds.push({ dir });
+  const root = join(dir, "multi");
+  for (const [rel, text] of Object.entries({ "package.json": JSON.stringify(VARIANT_PKG), ...VARIANT_APPS })) write(root, rel, text);
+  const ws = "/Users/u/ws/multi/ax-1";
+  const state = {
+    version: 1,
+    repos: {
+      [root]: {
+        holder: ws, lastSnapshotSha: "a".repeat(40), lastSyncAt: 1, lastError: null, serverTerminal: null, serverPid: null, serverStartedAt: null,
+        serverCommand: null, serverEnv: null, serverVariant: null, serverState: "stopped", pendingInstalls: [], ports: [], logPath: join(dir, "multi.log"),
+      },
+    },
+    queue: { requests: [], lighting: {} },
+    notes: [],
+    variants: {},
+  };
+  const cx = memoryCx({ state, exec: shellExec().exec });
+  const asks = () => state.notes.filter((n) => n.toast && n.text === ASK("multi"));
+  assert.equal((await ensureServer(cx, root, { workspace: ws })).state, "needs-variant");
+  assert.equal(asks().length, 1, JSON.stringify(state.notes));
+  assert.deepEqual(asks()[0].action, serverNoteAction(ws));
+  assert.equal(asks()[0].level, "info");
+  // A sync's server work (a lockfile install) finds it still waiting.
+  assert.equal((await ensureServer(cx, root, { workspace: ws, keepVariant: true, ifRunning: true, syncing: true })).state, "needs-variant");
+  assert.equal(asks().length, 1);
+  // Reiniciar is a new start: it asks again.
+  assert.equal((await ensureServer(cx, root, { workspace: ws, keepVariant: true, restart: true })).state, "needs-variant");
+  assert.equal(asks().length, 2);
+});
+
+test("D36: each light that needs a variant asks for it; `env --variant` picked for a workspace that lost the root exits 1 with 'ya no tiene el root' and starts nothing (the pick stays for its task); the holder's pick starts it", async () => {
+  const w = makeWorld();
+  const app = makeRepo(w, "multi", { pkg: VARIANT_PKG, files: VARIANT_APPS, tasks: ["AX-1", "AX-2"] });
+  w.register([{ id: "g1", repos: [app] }]);
+  const [ws1, ws2] = [app.ws["AX-1"], app.ws["AX-2"]];
+  const asks = () => w.state().notes.filter((n) => n.toast && n.text === ASK("multi"));
+  assert.equal((await w.cli(["toggle", "--workspace", ws1])).code, 0);
+  await w.until((s) => s.queue.lighting[`direct/${app.root}`]?.phase === "done", { what: "lit" });
+  assert.equal(w.state().repos[app.root].serverState, "needs-variant");
+  assert.equal(asks().length, 1, JSON.stringify(w.state().notes));
+  assert.deepEqual(asks()[0].action, serverNoteAction(ws1));
+
+  // AX-2 takes the root: its start asks too.
+  const take = await w.cli(["toggle", "--workspace", ws2, "--inline"]);
+  assert.equal(take.code, 0, take.stdout + take.stderr);
+  assert.equal(w.state().repos[app.root].holder, ws2);
+  assert.equal(asks().length, 2);
+  assert.deepEqual(asks()[1].action, serverNoteAction(ws2));
+
+  // The popup opened on AX-1 before the takeover: its chip is too late.
+  const sent = w.hc().sent.length;
+  const late = await w.cli(["env", "--workspace", ws1, "--variant", "co"]);
+  assert.equal(late.code, 1, late.stdout + late.stderr);
+  assert.match(late.stderr, /ya no tiene el root/);
+  const rec = w.state().repos[app.root];
+  assert.equal(rec.serverState, "needs-variant");
+  assert.equal(rec.serverCommand, null);
+  assert.equal(rec.serverVariant, null);
+  assert.equal(w.hc().sent.length, sent, "nothing typed");
+  assert.equal(w.state().variants[`g1/AX-1::${app.root}`], "co");
+
+  const mine = await w.cli(["env", "--workspace", ws2, "--variant", "mx"]);
+  assert.equal(mine.code, 0, mine.stdout + mine.stderr);
+  const lit = w.state().repos[app.root];
+  assert.equal(lit.serverVariant, "mx");
+  assert.match(lit.serverCommand, /dev:mx/);
+  assert.equal(lit.serverState, "starting");
 });
