@@ -1710,6 +1710,59 @@ test("restartServer (M4): a Ctrl-C hc couldn't send is an old server still runni
   rmSync(dir, { recursive: true, force: true });
 });
 
+// ── Review r8: N5, N6 ──────────────────────────────────────────────────────
+
+test("restartServer (N5): a Ctrl-C hc couldn't send, with no message, carries hc's error kind, as stopServer's interruptError does, and its log line names it", async () => {
+  const dir = tmp();
+  const logPath = join(dir, "app.log");
+  const up = fakeHc();
+  const deps = { exec: up.exec, ...fakeClock() };
+  const s = await startServer({ root: ROOT, line: "pnpm dev", logPath, ...HEAD }, deps);
+  const r = await restartServer(
+    { root: ROOT, terminal: s.terminal, line: "pnpm dev", logPath, serverPid: s.pid, ...HEAD },
+    { ...deps, exec: failing(up, "interrupt", 1, "io", "") },
+  );
+  assert.deepEqual({ reason: r.reason, message: r.message, oldServerRuns: r.oldServerRuns }, { reason: "interrupt-failed", message: "io", oldServerRuns: true });
+  assert.match(lastLine(logPath), /· Server not restarted — the Ctrl-C could not be sent: the old server still runs \(io\) · \d\d:\d\d:\d\d ──$/);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("stopServer (N6): a Ctrl-C hc couldn't send whose words are only control bytes says so with no empty words after it, in the forced line and the nothing-left-to-kill one", async () => {
+  const dir = tmp();
+  const mute = async (file, args, hc) =>
+    file === "hc" && args[0] === "interrupt"
+      ? { code: 1, stdout: "", stderr: JSON.stringify({ error: { kind: "failed", message: "\u0007\r\n" } }) }
+      : hc.exec(file, args);
+
+  // Its tree is killed (forced).
+  const logPath = join(dir, "forced.log");
+  const hc = fakeHc({ procs: { 7001: { cwd: ROOT } } });
+  const sd = stopDeps(hc);
+  const s = await startServer({ root: ROOT, line: "pnpm dev", logPath, ...HEAD }, sd.deps);
+  hc.children[s.pid] = [7001];
+  const r = await stopServer({ root: ROOT, terminal: s.terminal, logPath, serverPid: s.pid, ...HEAD }, { ...sd.deps, exec: (f, a) => mute(f, a, hc) });
+  assert.equal(r.ok, true);
+  assert.match(readFileSync(logPath, "utf8"), stopNote("forced: 2 processes; the Ctrl-C could not be sent"));
+
+  // The server exits on its own as the Ctrl-C fails: nothing left to kill.
+  const goneLog = join(dir, "gone.log");
+  const quick = fakeHc();
+  const qd = stopDeps(quick);
+  const s2 = await startServer({ root: ROOT, line: "pnpm dev", logPath: goneLog, ...HEAD }, qd.deps);
+  const exits = async (file, args) => {
+    if (file === "hc" && args[0] === "interrupt") {
+      const term = quick.terms.get(s2.terminal);
+      quick.dead.add(term.foreground.pid);
+      term.foreground = { argv: ["/bin/zsh", "-l"], cwd: ROOT, name: "zsh", pid: term.pid };
+    }
+    return mute(file, args, quick);
+  };
+  const r2 = await stopServer({ root: ROOT, terminal: s2.terminal, logPath: goneLog, serverPid: s2.pid, ...HEAD }, { ...qd.deps, exec: exits });
+  assert.equal(r2.ok, true);
+  assert.match(lastLine(goneLog), /· Spotlight off — server stopped \(nothing left to kill; the Ctrl-C could not be sent\) · \d\d:\d\d:\d\d ──$/);
+  rmSync(dir, { recursive: true, force: true });
+});
+
 // ── Logs and peek ────────────────────────────────────────────────────────
 
 test("serverLogs: the log file's plain tail; hc read is the fallback when the file is missing", async () => {

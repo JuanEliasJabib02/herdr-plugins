@@ -3,8 +3,10 @@
 // useSpotlightAutoSync). One watch per holder folder (watchFolder); a batch
 // of nothing but Git internals, build or test output, or paths outside the
 // holder, is dropped (watch-filter.js shouldSync); the rest is debounced
-// 300 ms per repo, then `spotlight sync --repo <root> --detach` runs and
-// returns at once (D18). The engine skips a sync whose tree didn't change.
+// 300 ms per repo, then `spotlight sync --repo <root> --detach --auto` runs
+// and returns at once (D18); `--auto`: an automatic sync, which doesn't
+// retry an env that couldn't run (N4). The engine skips a sync whose tree
+// didn't change.
 // A sync the root refuses (diverged, an operation in progress) lands in
 // state.json as the repo's error, once per new error (cli-work syncRepo).
 //

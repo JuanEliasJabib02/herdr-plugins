@@ -11,7 +11,9 @@
 // K1–K3 (the server error a lighting leaves), K4/K5 (the turn-off leaves the
 // stop's cause to stopServer), K6 (`on`'s merge follows its snapshot).
 // Review r7: M1, M3, M5–M7 (a stuck restart, the merge rule, the lockfiles'
-// base), M9 (the turn-off's fallback line).
+// base), M9 (the turn-off's fallback line). Review r8: N1–N4, N7 (what a
+// stuck restart repeats, a given-up env under installs and asked syncs, a
+// failed start over a server that may still run, a diverged root's base).
 import { test, beforeEach, afterEach, after } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
@@ -1274,6 +1276,204 @@ test("M7: a light compares the lockfiles from what the refs it found say the roo
   assert.deepEqual((await lightTask(fullCx({ planGit: spyGit }), key)).errors, {});
   assert.equal(state.repos[root].holder, wt);
   assert.deepEqual(froms, [projected]);
+});
+
+// ── Review r8: N1–N4, N7 ───────────────────────────────────────────────────
+
+// Two envs with two commands: Local runs `vite`, Dev `vite --mode dev`.
+const PKG2 = JSON.stringify({ packageManager: "pnpm@9.0.0", scripts: { local: "vite", dev: "vite --mode dev", prod: "vite preview" } });
+
+// The command `pkg` plans in `env` once it is on the root, with the default
+// settings (plannedFor's, in any env).
+async function plannedIn(pkg, env) {
+  const pkgDir = join(base, "pkg");
+  write(pkgDir, "package.json", pkg);
+  const plan = await planServer({
+    root: pkgDir, workspace: pkgDir, settings: repoSettings(readSettings(JSON.stringify({ version: 1 })), root), env, io: nodeIo(fsp), git: planGit,
+  });
+  assert.equal(plan.kind, "command", JSON.stringify(plan));
+  return plan;
+}
+
+test("N1, N8: a sync repeats a stuck restart's toast only for the same cause, env and planned command: a settings save that changes the command, or a new env, is a new ask and toasts again; the record keeps no `at`", async () => {
+  const local = await plannedIn(PKG2, "local");
+  const dev = await plannedIn(PKG2, "dev");
+  write(wt, "package.json", PKG2);
+  const logPath = join(base, "root.log");
+  const world = stuckWorld(logPath, dev.command);
+  let savedAt = 0;
+  let settings = readSettings(JSON.stringify({ version: 1 }));
+  const ox = () => fullCx({ settings, serverDeps: { exec: world.exec, ...fakeClock() }, store: { ...cx.store, settingsSavedAt: () => savedAt } });
+  // Spotlight's server runs Dev; Local is the effective env (J-002).
+  Object.assign(state.repos[root], {
+    serverTerminal: "t1", serverPid: 101, serverState: "listening", serverCommand: dev.command, serverEnv: "dev", ports: [3000], logPath,
+  });
+  const seen = () => ({ interrupts: world.interrupts, toasts: toastTexts().length });
+
+  assert.equal((await syncRepo(ox(), root)).restartFailed, "still-running");
+  assert.deepEqual(seen(), { interrupts: 1, toasts: 1 });
+  assert.deepEqual(state.repos[root].restartStuck, { reason: "still-running", env: "local", command: local.command });
+
+  // A save that changes nothing it plans: tried again, the same cause stays quiet (M1).
+  savedAt = Number.MAX_SAFE_INTEGER;
+  assert.equal((await syncRepo(ox(), root)).restartFailed, "still-running");
+  assert.deepEqual(seen(), { interrupts: 2, toasts: 1 });
+
+  // A save that changes Local's command: a new ask, it toasts.
+  settings = readSettings(JSON.stringify({ version: 1, repos: { [root]: { envs: { local: "pnpm exec vite --host" } } } }));
+  assert.equal((await syncRepo(ox(), root)).restartFailed, "still-running");
+  assert.deepEqual(seen(), { interrupts: 3, toasts: 2 });
+  assert.deepEqual(state.repos[root].restartStuck, { reason: "still-running", env: "local", command: "pnpm exec vite --host" });
+
+  // A new env (Prod saved as the repo's env): a new ask, it toasts; its repeat doesn't.
+  settings = readSettings(JSON.stringify({ version: 1, repos: { [root]: { env: "prod", envs: { local: "pnpm exec vite --host" } } } }));
+  assert.equal((await syncRepo(ox(), root)).restartFailed, "still-running");
+  assert.deepEqual(seen(), { interrupts: 4, toasts: 3 });
+  assert.equal(state.repos[root].restartStuck.env, "prod");
+  assert.equal((await syncRepo(ox(), root)).restartFailed, "still-running");
+  assert.deepEqual(seen(), { interrupts: 5, toasts: 3 });
+  assert.equal("at" in state.repos[root].restartStuck, false, "N8: no field nobody reads");
+});
+
+// Spotlight's server (`command`, writing `logPath`) in front of t1, which
+// lets go of the prompt on a Ctrl-C; `hc send` types its line (kept in
+// `lines`) and that line's `script` leads the terminal again.
+function restartsWorld(logPath, command) {
+  const ps = psExec(new Map());
+  const world = { front: command, lines: [], interrupts: 0 };
+  world.exec = async (file, args, opts) => {
+    if (file === "hc" && args[0] === "get") {
+      const fg = world.front === null
+        ? { pid: 100, name: "zsh", argv: ["/bin/zsh", "-l"] }
+        : { pid: 101, name: "script", argv: ["script", "-F", "-q", "-a", logPath, "/bin/zsh", "-c", world.front] };
+      return { code: 0, stdout: JSON.stringify({ address: "t1", pid: 100, state: "live", labels: { "spotlight.repo": root }, foreground: fg }), stderr: "" };
+    }
+    if (file === "hc" && args[0] === "interrupt") {
+      world.interrupts += 1;
+      world.front = null;
+      return { code: 0, stdout: JSON.stringify({ key: "ctrl+c", outcome: "stopped" }), stderr: "" };
+    }
+    if (file === "hc" && args[0] === "send") {
+      world.lines.push(args[2]);
+      world.front = args[2];
+      return { code: 0, stdout: "{}", stderr: "" };
+    }
+    return ps.exec(file, args, opts);
+  };
+  return world;
+}
+
+test("N2: while the effective env is given up, a sync's lockfile install restarts the env that runs now (serverEnv), never the given-up one, which stays envFailed", async () => {
+  const local = await plannedIn(PKG2, "local");
+  const dev = await plannedIn(PKG2, "dev");
+  assert.notEqual(local.command, dev.command);
+  write(wt, "package.json", PKG2);
+  write(wt, "pnpm-lock.yaml", "lockfileVersion: '9.0'\n");
+  const logPath = join(base, "root.log");
+  const world = restartsWorld(logPath, dev.command);
+  // Dev runs; Local, the effective env, couldn't run, and settings weren't saved since.
+  Object.assign(state.repos[root], {
+    serverTerminal: "t1", serverPid: 101, serverState: "listening", serverCommand: dev.command, serverEnv: "dev", ports: [3000], logPath,
+    envFailed: "local", envFailedAt: 5,
+  });
+  const r = await syncRepo(fullCx({ serverDeps: { exec: world.exec, ...fakeClock() } }), root);
+  assert.deepEqual({ ok: r.ok, installs: r.installs, restarted: r.restarted }, { ok: true, installs: ["pnpm"], restarted: true }, JSON.stringify(r));
+  assert.equal(world.lines.length, 1);
+  const rec = state.repos[root];
+  assert.deepEqual(
+    { serverEnv: rec.serverEnv, serverCommand: rec.serverCommand, envFailed: rec.envFailed, pendingInstalls: rec.pendingInstalls },
+    { serverEnv: "dev", serverCommand: dev.command, envFailed: "local", pendingInstalls: [] },
+  );
+});
+
+test("N3: a start that fails while Spotlight's old server may still be in front (hc couldn't read it, before or during the start) keeps the record's state and restartStuck; one that found the prompt free drops them", async () => {
+  write(wt, "package.json", PKG);
+  write(root, "package.json", PKG);
+  const logPath = join(base, "root.log");
+  const STUCK = { reason: "still-running", env: "local", command: "pnpm old" };
+  const running = { serverTerminal: "t1", serverPid: 101, serverState: "listening", serverCommand: "pnpm old", serverEnv: "local", ports: [3000], logPath };
+  // Spotlight's server in front for the first `hc get`, then hc can't read the terminal.
+  let gets = 0;
+  const own = ownServerExec(logPath, "pnpm old");
+  const darkens = async (file, args, opts) =>
+    file === "hc" && args[0] === "get" && ++gets > 1
+      ? { code: 1, stdout: "", stderr: JSON.stringify({ error: { kind: "io", message: "hc: no route to core" } }) }
+      : own(file, args, opts);
+  for (const [name, exec] of [["spotlight, then unreadable", darkens], ["unreadable", unreadableExec]]) {
+    gets = 0;
+    Object.assign(state.repos[root], running, { restartStuck: { ...STUCK }, lastError: null });
+    const r = await ensureServer(fullCx({ serverDeps: { exec, ...fakeClock() } }), root, { workspace: wt, keepVariant: true, restart: true });
+    assert.equal(r.state, "failed", name);
+    const rec = state.repos[root];
+    assert.deepEqual({ serverState: rec.serverState, restartStuck: rec.restartStuck }, { serverState: "listening", restartStuck: STUCK }, name);
+    assert.equal(rec.lastError?.code, "server-start-failed", name);
+  }
+
+  // The prompt was free (no old server in front): the start fails as before.
+  const world = sendFailsWorld(logPath, "pnpm old");
+  world.front = "shell";
+  Object.assign(state.repos[root], running, { restartStuck: { ...STUCK }, lastError: null });
+  const r = await ensureServer(fullCx({ serverDeps: { exec: world.exec, ...fakeClock() } }), root, { workspace: wt, keepVariant: true, restart: true });
+  assert.equal(r.result?.reason, "send-failed");
+  assert.equal(state.repos[root].serverState, "stopped");
+  assert.equal("restartStuck" in state.repos[root], false);
+});
+
+test("N4: Forzar sync and a hand-typed `spotlight sync` (asked) are a new ask: they retry a given-up env and toast its stuck restart every time, as Reiniciar; auto-sync and `on` stay silenced", async () => {
+  const plan = await plannedFor(PKG);
+  write(wt, "package.json", PKG);
+  const logPath = join(base, "root.log");
+  const world = stuckWorld(logPath, plan.command);
+  const ox = () => fullCx({ serverDeps: { exec: world.exec, ...fakeClock() } });
+  Object.assign(state.repos[root], {
+    serverTerminal: "t1", serverPid: 101, serverState: "listening", serverCommand: plan.command, serverEnv: "dev", ports: [3000], logPath,
+  });
+  const seen = () => ({ interrupts: world.interrupts, toasts: toastTexts() });
+  assert.equal((await syncRepo(ox(), root)).restartFailed, "still-running");
+  assert.deepEqual(seen(), { interrupts: 1, toasts: [STILL] });
+  // An automatic sync: given up, nothing sent.
+  assert.equal((await syncRepo(ox(), root)).restartFailed, null);
+  assert.deepEqual(seen(), { interrupts: 1, toasts: [STILL] });
+
+  assert.equal((await syncRepo(ox(), root, { force: true })).restartFailed, "still-running");
+  assert.deepEqual(seen(), { interrupts: 2, toasts: [STILL, STILL] });
+  for (let i = 0; i < 2; i += 1) assert.equal((await syncRepo(ox(), root, { asked: true })).restartFailed, "still-running");
+  assert.deepEqual(seen(), { interrupts: 4, toasts: [STILL, STILL, STILL, STILL] });
+
+  // Automatic again: still given up.
+  assert.equal((await syncRepo(ox(), root)).restartFailed, null);
+  assert.deepEqual(seen(), { interrupts: 4, toasts: [STILL, STILL, STILL, STILL] });
+});
+
+test("N4: the reap's sync for a drifted env is an automatic one (`sync --repo <root> --auto`)", async () => {
+  write(root, "package.json", PKG);
+  const plan = await plannedFor(PKG);
+  Object.assign(state.repos[root], {
+    serverTerminal: "t1", serverPid: 101, serverState: "listening", serverStartedAt: 5, serverCommand: plan.command, serverEnv: "dev", ports: [3000], serverProcs: [],
+  });
+  const look = async () => ({ terminal: "t1", owner: "spotlight", pid: 101, state: "listening", ports: [3000], procs: [], port: 3000, url: null, label: "" });
+  const spawned = [];
+  await reap(fullCx({ server: { readServerState: look }, spawn: (argv) => (spawned.push(argv), 1) }));
+  assert.deepEqual(spawned, [["sync", "--repo", root, "--auto"]]);
+});
+
+test("N7: a forced takeover of a diverged root compares the lockfiles from the root's own HEAD, not the snapshot it moved away from", async () => {
+  write(root, "c.txt", "a commit made in the root\n");
+  run(root, "add", "-A");
+  run(root, "commit", "-qm", "moved");
+  const moved = run(root, "rev-parse", "HEAD");
+  assert.notEqual(moved, snapshot);
+  const froms = [];
+  const spyGit = async (cwd, args) => {
+    if (args[0] === "diff-tree") froms.push(args[2]);
+    return planGit(cwd, args);
+  };
+  const wt2 = worktree("wt2");
+  const key = `direct/${root}`;
+  state.queue.lighting[key] = { ...markerFor(wt2), force: true };
+  assert.deepEqual((await lightTask(fullCx({ planGit: spyGit }), key)).errors, {});
+  assert.equal(state.repos[root].holder, wt2);
+  assert.deepEqual(froms, [moved]);
 });
 
 // ── G3: the identities the reap and `on` keep are the live ones ────────────

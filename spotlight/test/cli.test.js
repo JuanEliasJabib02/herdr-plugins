@@ -1452,13 +1452,22 @@ test("J-009: env drift the reap can't resolve isn't retried: a foreign process i
   await sleep(1500);
   assert.equal(interrupts(), 1, "the reap didn't interrupt it again");
 
-  // A sync (auto-sync, `on`) doesn't try it again either (M1): no Ctrl-C,
-  // nothing said of a restart.
-  const retried = await w.cli(["sync", "--repo", app.root]);
+  // An automatic sync (auto-sync, `on`, the reap's) doesn't try it again
+  // either (M1): no Ctrl-C, nothing said of a restart. `--auto` is how the
+  // reap's sync and auto-sync's detached copy say they are one (N4).
+  const retried = await w.cli(["sync", "--repo", app.root, "--auto"]);
   assert.equal(retried.code, 0, retried.stderr + retried.stdout);
   assert.match(retried.stdout, /^Nothing to sync: /m);
   assert.doesNotMatch(retried.stdout, /did not restart/);
   assert.equal(interrupts(), 1, "a sync doesn't interrupt it again");
+  // Auto-sync's own line (watch-filter.js syncArgv), over a saved file: its
+  // detached copy syncs and leaves the server alone.
+  const syncedAt = record().lastSyncAt;
+  writeFileSync(join(ws, "saved.txt"), "a save\n");
+  assert.equal((await w.cli(["sync", "--repo", app.root, "--detach", "--auto"])).code, 0);
+  await w.until((s) => s.repos[app.root]?.lastSyncAt > syncedAt, { what: "auto-sync's detached sync" });
+  await sleep(1500);
+  assert.equal(interrupts(), 1, "auto-sync doesn't interrupt it again");
 
   // J-011: back to Local, then Dev saved again: a save after the failure is a
   // new ask, so the reap tries it once more (and only once).
@@ -1485,6 +1494,11 @@ test("J-009: env drift the reap can't resolve isn't retried: a foreign process i
   assert.match(picked.stderr, /app: env dev saved; the server did not restart: the old one still runs \(still-running\)\./);
   assert.doesNotMatch(picked.stderr, /did not start/);
   assert.equal(interrupts(), 4);
+  // A hand-typed `spotlight sync` is a new ask too (N4): it tries it, and says so.
+  const typed = await w.cli(["sync", "--repo", app.root]);
+  assert.equal(typed.code, 0, typed.stderr + typed.stdout);
+  assert.match(typed.stdout, /The server did not restart \(still-running\)\./);
+  assert.equal(interrupts(), 5);
 
   // Ctrl-C works again: Reiniciar runs the env asked for, and the mark goes.
   w.hcUpdate((s) => {

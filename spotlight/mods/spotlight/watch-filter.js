@@ -72,8 +72,11 @@ export function watchTargets(state) {
     .map(([root, r]) => ({ root, holder: normPath(r.holder) }));
 }
 
-// The sync auto-sync runs: detached, so the CLI answers at once (D18).
-export const syncArgv = (bin, root) => [bin, "sync", "--repo", root, "--detach"];
+// The sync auto-sync runs: detached, so the CLI answers at once (D18), and
+// automatic (`--auto`): it doesn't retry an env that couldn't run until
+// settings are saved, as a sync someone asked for does (cli-work.mjs
+// syncRepo, N4).
+export const syncArgv = (bin, root) => [bin, "sync", "--repo", root, "--detach", "--auto"];
 
 // A debounce per key over an injected one-shot timer, `after(ms, fn)` →
 // { cancel() } (the mod passes cx.timer.after). Each call cancels the key's

@@ -13,7 +13,9 @@
 //   env --task KEY --group id --env e    the task's env, from its lane's pill (D32)
 //   continue [--terminal t] [--account id]  Continuar on a paused or idle agent (T11)
 //   internal: light --task k [--force], classify --terminal t,
-//             continue --inline [--auto], env --task k --group id --inline
+//             continue --inline [--auto], env --task k --group id --inline,
+//             sync --repo r --auto (auto-sync's and the reap's: an
+//             automatic sync, which leaves an env that couldn't run, N4)
 //
 // `restart --free-port` is the server popup's "Liberar puerto y arrancar"
 // (D24): it stops the process the recorded port-busy error names, then
@@ -450,15 +452,19 @@ async function verbStatus(cx, opts) {
 
 // ── sync, restart, logs, peek, env ─────────────────────────────────────────
 
+// `spotlight sync`. Typed by hand, or Forzar sync, it is a new ask: it
+// tries an env that couldn't run again, as Reiniciar (N4); `--auto` marks
+// auto-sync's (watch-filter.js syncArgv, carried to its detached copy) and
+// the reap's, which leave it until settings are saved (M1).
 async function verbSync(cx, opts) {
   const root = await resolveRepo(cx, opts.repo);
   if (!root) return usage(`spotlight sync: --repo <path or name> is required${opts.repo ? ` (no repo "${opts.repo}")` : ""}.`);
   if (opts.detach) {
-    cx.spawn(["sync", "--repo", root, ...(opts.force ? ["--force"] : [])]);
+    cx.spawn(["sync", "--repo", root, ...(opts.force ? ["--force"] : []), ...(opts.auto ? ["--auto"] : [])]);
     out(`Syncing ${cx.nameOf(root)}.`);
     return 0;
   }
-  const r = await syncRepo(cx, root, { force: Boolean(opts.force) });
+  const r = await syncRepo(cx, root, { force: Boolean(opts.force), asked: !opts.auto });
   if (!r.ok) {
     err(`${r.code}: ${r.message}`);
     return 1;

@@ -25,11 +25,14 @@
 //              envFailed? and envFailedAt? (the env a start or restart
 //              couldn't run, and when: the reap doesn't try it again until
 //              settings.json is saved after that, nor a sync, J-009,
-//              J-011, M1; a started server clears both), restartStuck?
-//              { reason, at } (the last restart left the old server running:
-//              it ignored the Ctrl-C, or never got it; a sync repeating that
-//              reason doesn't toast again, M1; a start, or one that failed,
-//              drops it) and busy? { op, since, pid, workspace }
+//              J-011, M1; a started server clears both, unless it kept the
+//              env that ran instead, N2), restartStuck? { reason, env,
+//              command } (the last restart left the old server running: it
+//              ignored the Ctrl-C, or never got it; an automatic sync
+//              repeating that reason, env and planned command doesn't toast
+//              again, M1, N1; a start drops it, and so does one that failed
+//              unless the old server may still lead its terminal, N3) and
+//              busy? { op, since, pid, workspace }
 //              (D33: a light, turn-off, Forzar sync or restart works on
 //              the repo right now; set and cleared under its repo lock by
 //              the process `pid` since `since` (ms), `workspace` the

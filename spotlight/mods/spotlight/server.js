@@ -626,7 +626,8 @@ async function interruptAndWait(terminal, { logPath, serverPid }, deps) {
   if (!r.ok) {
     const after = await inspectServer({ terminal, logPath, serverPid }, deps);
     if (after.kind !== "spotlight" && after.kind !== "unknown") return { ok: true, seen: after };
-    return { ok: false, reason: "interrupt-failed", terminal, message: r.error.message, oldServerRuns: true };
+    // hc's words, else its error's kind, as stopServer's interruptError (N5).
+    return { ok: false, reason: "interrupt-failed", terminal, message: r.error.message || r.error.kind, oldServerRuns: true };
   }
   const seen = await inspectUntil({ terminal, logPath, serverPid }, deps, (s) => s.kind !== "spotlight", PROMPT_MS);
   if (seen.kind === "spotlight") return { ok: false, reason: "still-running", terminal, oldServerRuns: true };
@@ -709,8 +710,13 @@ const notStopped = (done) => [...new Set([...done.survivors, ...done.refused])];
 // `{ refused }` for a result, only when some leftover was refused.
 const refusedOf = (done) => (done.refused.length > 0 ? { refused: done.refused } : {});
 
-// A Ctrl-C hc couldn't send, as the stop's notes say it (K5).
-const ctrlCFailed = (interruptError) => (interruptError ? `the Ctrl-C could not be sent: ${interruptError}` : null);
+// A Ctrl-C hc couldn't send, as the stop's notes say it (K5): hc's words on
+// one line (causeWords, N6), and none after it when they say nothing.
+function ctrlCFailed(interruptError) {
+  if (!interruptError) return null;
+  const said = causeWords(interruptError);
+  return said ? `the Ctrl-C could not be sent: ${said}` : "the Ctrl-C could not be sent";
+}
 
 // stopServer's ok: false reasons. Each writes its own NOT stopped note
 // (stopNote, notStoppedNote; K4, K5), so the CLI's turn-off adds a line only
