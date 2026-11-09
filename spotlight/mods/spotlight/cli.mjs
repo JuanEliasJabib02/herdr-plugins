@@ -10,9 +10,10 @@
 //   sync --repo r [--force] [--detach]   restart --repo r [--free-port]
 //   logs [--repo r] [--lines N] [--path] peek --workspace p | --repo r
 //   env --workspace p [--env e] [--variant v]   reap
+//   env --task KEY --group id --env e    the task's env, from its lane's pill (D32)
 //   continue [--terminal t] [--account id]  Continuar on a paused or idle agent (T11)
 //   internal: light --task k [--force], classify --terminal t,
-//             continue --inline [--auto]
+//             continue --inline [--auto], env --task k --group id --inline
 //
 // `restart --free-port` is the server popup's "Liberar puerto y arrancar"
 // (D24): it stops the process the recorded port-busy error names, then
@@ -28,7 +29,8 @@ import path from "node:path";
 import { resolveTask, taskKeyFrom, hasGroup } from "./task.js";
 import { request, release, positionOf } from "./queue.js";
 import { readRefs, assertDeactivatable, toSpotlightError } from "./sync.js";
-import { emptyRepo, rememberVariant } from "./store.js";
+import { rememberVariant } from "./store.js";
+import { envKeyOf } from "./task-env.js";
 import { pidAlive, LockError } from "./locks.js";
 import { normRoot } from "./settings.js";
 import { isSafeVariant, isServerEnv, SERVER_ENVS } from "./server-plan.js";
@@ -44,7 +46,7 @@ import {
 } from "./cli-format.mjs";
 import {
   markGranted, spawnLights, dropStaleMarkers, lightTask, syncRepo, deactivateRepo, ensureServer, waitForTurnServers,
-  recordServers, reap, rescuedNotes, errorNote, survivorsPhrase,
+  recordServers, reap, rescuedNotes, errorNote, survivorsPhrase, writeEnv, applyEnv,
 } from "./cli-work.mjs";
 import { setRootError } from "./server-errors.js";
 import { settleResumes, autoResume, continueTask, classifyTerminal } from "./cli-resume.mjs";
@@ -72,6 +74,8 @@ People and the mod
   spotlight sync --repo r [--force] [--detach]   bring the root in step with its holder
   spotlight peek --workspace p | --repo r        show the server's Spotlight tab (or peek at its terminal)
   spotlight env --workspace p [--env local|dev|prod] [--variant v]
+  spotlight env --task KEY --group id --env local|dev|prod
+                                                 the env of a whole task in that space (kept after the turn-off)
   spotlight reap                                 turn ends, gone servers, idle times, grants
   spotlight continue [--terminal t] [--account id]
                                                  Continuar: resume a paused agent on the account with
@@ -556,7 +560,15 @@ async function verbPeek(cx, opts) {
   return 0;
 }
 
+// `env --workspace p` (the server popup, D32): the pick is stored under the
+// workspace's key (its task's `<lane>/<KEY>`, else ws:<path>), for every repo
+// of that task there, and survives the turn-off. It reaches a running server
+// only when this repo's holder has that key (record.envKey: the workspace
+// holds it, or another workspace of its task does); a workspace that doesn't
+// hold the root just stores it. A variant applies to the holder, as before.
 async function verbEnv(cx, opts) {
+  if (opts.task !== undefined || opts.group !== undefined) return verbEnvTask(cx, opts);
+  if (opts.inline) return usage("spotlight env: --inline goes with --task and --group.");
   if (opts.variant !== undefined && !isSafeVariant(opts.variant)) {
     return usage(`spotlight env: invalid variant "${opts.variant}": only letters, digits, "_" and "-" (at most 64).`);
   }
@@ -567,26 +579,37 @@ async function verbEnv(cx, opts) {
   const { workspace, root } = await workspaceRoot(opts);
   if (!root) return usage(`spotlight env: ${opts.workspace} is not in a git repository.`);
   const taskKey = await taskKeyOfWorkspace(workspace, root, cx.shared);
+  const key = envKeyOf(taskKey, workspace);
   const r = await cx.store.withRepoLock(root, async () => {
-    await cx.store.updateState((s) => {
-      if (opts.variant && taskKey) rememberVariant(s, `${taskKey}::${normRoot(root)}`, opts.variant);
-      // J-002: the popup's pick overrides settings' env until `toggle` off
-      // drops the record; serverEnv stays what runs.
-      if (opts.env) s.repos[root] = { ...emptyRepo(), ...(s.repos[root] ?? {}), envOverride: opts.env };
-    });
+    if (opts.variant && taskKey) {
+      await cx.store.updateState((s) => {
+        rememberVariant(s, `${taskKey}::${normRoot(root)}`, opts.variant);
+      });
+    }
+    if (opts.env) await writeEnv(cx, key, opts.env);
     const record = cx.store.readState().repos[root];
     if (!record?.holder) return { state: "stored" };
-    // Changing env or variant restarts only a server whose command or env changes (D22).
+    // The pick is this holder's only when it holds W's key (D32).
+    const envHere = opts.env !== undefined && record.envKey === key;
+    if (!envHere && opts.variant === undefined) return { state: "stored" };
+    // An env restarts only a server whose command changes; a variant, one
+    // whose command or env changes (D22).
     return ensureServer(cx, root, {
       workspace: record.holder,
       branch: await branchOf(record.holder),
       taskKey: record.holder === workspace ? taskKey : await taskKeyOfWorkspace(record.holder, root, cx.shared),
-      envName: opts.env,
+      envName: envHere ? opts.env : undefined,
       chosenVariant: opts.variant,
       keepVariant: opts.variant === undefined,
     });
   });
   const what = [opts.env && `env ${opts.env}`, opts.variant && `variant ${opts.variant}`].filter(Boolean).join(", ");
+  return reportEnv(cx, root, what, r);
+}
+
+// An env or variant pick's line for one repo (ensureServer's answer, or
+// { state: "stored" }): 0, or 1 when its server didn't start.
+function reportEnv(cx, root, what, r) {
   if (r.state === "started") out(`${cx.nameOf(root)}: ${what}; the server restarted: ${r.plan.command}`);
   else if (r.state === "port-busy") {
     err(`${cx.nameOf(root)}: ${what} saved; the server did not start. ${portBusyLine(r)}`);
@@ -601,6 +624,43 @@ async function verbEnv(cx, opts) {
     return 1;
   } else out(`${cx.nameOf(root)}: ${what} saved.`);
   return 0;
+}
+
+// `env --task <KEY> --group <id> --env <e>` (D32): the lane's env pill. The
+// pick is stored under `<id>/<KEY>` before it answers (writeEnv); the lit
+// repos the task holds there run it after, in a detached `--inline` copy
+// (D18), which restarts only the servers whose command changes (applyEnv).
+// That copy gets no --env: it runs what is stored when it gets there, so
+// two picks in a row end in the last one. The detached call checks only
+// what needs no git, so it answers at once.
+async function verbEnvTask(cx, opts) {
+  if (!opts.task || !opts.group) return usage("spotlight env: --task <KEY> and --group <id> go together (the lane and its space).");
+  if (opts.workspace !== undefined || opts.variant !== undefined) return usage("spotlight env: --task takes no --workspace or --variant.");
+  if (opts.env !== undefined && !isServerEnv(opts.env)) return usage(`spotlight env: --env is one of ${SERVER_ENVS.join(", ")}.`);
+  if (opts.env === undefined && !opts.inline) return usage("spotlight env: --task needs --env <env>.");
+  const task = taskKeyFrom(opts.task);
+  if (!task) return usage(`spotlight env: "${opts.task}" can't name a task.`);
+  if (!hasGroup(cx.shared["projects.v1"], opts.group)) return usage(`spotlight env: no group "${opts.group}" in projects-sidebar's spaces.`);
+  const key = `${opts.group}/${task}`;
+  if (opts.env !== undefined) await writeEnv(cx, key, opts.env);
+  if (!opts.inline) {
+    cx.spawn(["env", "--task", task, "--group", opts.group, "--inline"]);
+    out(`Env ${opts.env} saved for ${task} in ${opts.group}; its lit repos switch in the background. \`spotlight status\` shows when it is done.`);
+    return 0;
+  }
+  const results = await applyEnv(cx, key);
+  if (Object.keys(results).length === 0) {
+    out(`${task}: env ${cx.store.readState().envs?.[key] ?? "of each repo's settings"} saved; none of its repos is lit.`);
+    return 0;
+  }
+  let code = 0;
+  for (const [root, r] of Object.entries(results)) {
+    if (r.error) {
+      err(`${cx.nameOf(root)}: ${r.error.code}: ${r.error.message}`);
+      code = 1;
+    } else if (reportEnv(cx, root, `env ${r.env}`, r.server) !== 0) code = 1;
+  }
+  return code;
 }
 
 // ── reap, light, continue, classify ────────────────────────────────────────

@@ -1331,7 +1331,7 @@ test("J-001: past its deadline `on` never waits on the repo lock a `light` holds
   assert.equal(readFileSync(join(app.root, "later.txt"), "utf8"), "from the holder\n");
 });
 
-test("J-002: the settings' env is the default and a change restarts the server on the next `on` or reap; the popup's override wins until toggle off", async () => {
+test("J-002: the settings' env is the default and a change restarts the server on the next `on` or reap; the popup's pick wins and, stored for the task (D32), survives the turn-off", async () => {
   const w = makeWorld();
   const pkg = { scripts: { local: "vite", dev: "vite --mode dev", prod: "vite --mode prod" } };
   const app = makeRepo(w, "app", { pkg, tasks: ["AX-16"] });
@@ -1360,27 +1360,31 @@ test("J-002: the settings' env is the default and a change restarts the server o
   await w.until((s) => s.repos[app.root]?.serverEnv === "prod", { what: "the server in prod after the reap" });
   assert.match(typed().at(-1), runs("prod"));
 
-  // The popup picks Dev: an override on the state record, over the settings' Prod.
+  // The popup picks Dev: stored for the task (D32), over the settings' Prod.
   const pick = await w.cli(["env", "--workspace", ws, "--env", "dev"]);
   assert.equal(pick.code, 0, pick.stderr + pick.stdout);
-  assert.equal(record().envOverride, "dev");
+  assert.equal(w.state().envs["g1/AX-16"], "dev");
+  assert.equal(record().envKey, "g1/AX-16");
   assert.equal(record().serverEnv, "dev");
   assert.match(typed().at(-1), runs("dev"));
   const sent = typed().length;
   assert.equal((await w.cli(["reap"])).code, 0);
   assert.equal((await w.cli(["on"], { terminal: t, cwd: ws })).code, 0);
   await sleep(1500);
-  assert.equal(typed().length, sent, "the override holds: neither the reap nor `on` went back to the settings' env");
+  assert.equal(typed().length, sent, "the pick holds: neither the reap nor `on` went back to the settings' env");
   assert.equal(record().serverEnv, "dev");
 
-  // Toggle off clears the override: the next lighting runs the settings' env.
+  // D32: the pick survives the turn-off: the next lighting runs it, not the settings' env.
   assert.equal((await w.cli(["toggle", "--workspace", ws])).code, 0);
   await w.until((s) => !s.repos[app.root], { what: "turned off" });
+  assert.equal(w.state().envs["g1/AX-16"], "dev");
+  const offAt = typed().length;
   const back = await w.cli(["on"], { terminal: t, cwd: ws });
   assert.equal(back.code, 0, back.stderr + back.stdout);
-  assert.match(typed().at(-1), runs("prod"));
-  assert.equal(record().serverEnv, "prod");
-  assert.equal(record().envOverride ?? null, null);
+  assert.ok(typed().length > offAt, "the light started the server again");
+  assert.match(typed().at(-1), runs("dev"));
+  assert.equal(record().serverEnv, "dev");
+  assert.equal(record().envKey, "g1/AX-16");
 });
 
 test("J-008: a foreign process in the server terminal leaves the recorded env alone: nothing ran in the new one", async () => {
@@ -1402,7 +1406,7 @@ test("J-008: a foreign process in the server terminal leaves the recorded env al
   const sent = w.hc().sent.length;
   await w.cli(["env", "--workspace", ws, "--env", "dev"]);
   assert.equal(w.hc().sent.length, sent, "nothing typed over the foreign process");
-  assert.equal(record().envOverride, "dev");
+  assert.equal(w.state().envs["g1/AX-17"], "dev");
   assert.equal(record().serverEnv, "local", "serverEnv says what ran");
 });
 
@@ -2435,4 +2439,186 @@ test("D31: `toggle --task AX-70 --group g1` hands the batch to a detached copy: 
   const none = await w.cli(["toggle", "--task", "AX-71", "--group", "g1", "--inline"]);
   assert.equal(none.code, 1, none.stderr + none.stdout);
   assert.match(none.stderr, /^no-members: .*docs/m);
+});
+
+// ── T22 (D32): the env per task, through the CLI ───────────────────────────
+
+const ENV_PKG = { scripts: { local: "vite", dev: "vite --mode dev", prod: "vite --mode prod" } };
+const runsEnv = (env) => new RegExp(`/bin/zsh -c 'npm run ${env} --'$`);
+
+test("D32: `env --task AX-50 --group g1 --env dev` stores envs[\"g1/AX-50\"] and restarts only the lit repos AX-50 holds whose command changes; detached it stores, answers at once and restarts after", async () => {
+  const w = makeWorld();
+  const front = makeRepo(w, "front", { pkg: ENV_PKG, tasks: ["AX-50"] });
+  // No Dev command: its server is left running.
+  const api = makeRepo(w, "api", { pkg: { scripts: { local: "node api.js" } }, tasks: ["AX-50"] });
+  // Only a dev script: Local runs Dev's command, so Dev changes nothing that runs.
+  const web = makeRepo(w, "web", { pkg: DEV, tasks: ["AX-50"] });
+  const admin = makeRepo(w, "admin", { pkg: ENV_PKG, tasks: ["AX-51"] });
+  w.register([{ id: "g1", repos: [front, api, web, admin] }]);
+  [front, api, web, admin].forEach((r, i) => w.listen(r.root, [3000 + i]));
+  const lit = await w.cli(["toggle", "--task", "AX-50", "--group", "g1", "--inline"]);
+  assert.equal(lit.code, 0, lit.stderr + lit.stdout);
+  const other = await w.cli(["toggle", "--workspace", admin.ws["AX-51"], "--inline"]);
+  assert.equal(other.code, 0, other.stderr + other.stdout);
+  const typedIn = (r) => w.hc().sent.filter((x) => x.terminal === w.serverTerminal(r.root).address).map((x) => x.text);
+  const counts = () => [front, api, web, admin].map((r) => typedIn(r).length);
+  assert.deepEqual(counts(), [1, 1, 1, 1]);
+  assert.deepEqual([front, api, web, admin].map((r) => w.state().repos[r.root].envKey), ["g1/AX-50", "g1/AX-50", "g1/AX-50", "g1/AX-51"]);
+
+  const r = await w.cli(["env", "--task", "AX-50", "--group", "g1", "--env", "dev", "--inline"]);
+  assert.equal(r.code, 0, r.stderr + r.stdout);
+  assert.match(r.stdout, /^front: env dev; the server restarted: npm run dev --$/m);
+  const s = w.state();
+  assert.deepEqual(s.envs, { "g1/AX-50": "dev" });
+  // front restarted into Dev; api and web typed nothing; admin is AX-51's.
+  assert.deepEqual(counts(), [2, 1, 1, 1]);
+  assert.match(typedIn(front).at(-1), runsEnv("dev"));
+  assert.deepEqual([front, api, web, admin].map((x) => s.repos[x.root].serverEnv), ["dev", "local", "dev", "local"]);
+  assert.equal(s.repos[admin.root].envKey, "g1/AX-51");
+  // Nothing left for the reap to restart.
+  assert.equal((await w.cli(["reap"])).code, 0);
+  await sleep(1500);
+  assert.deepEqual(counts(), [2, 1, 1, 1]);
+
+  // Detached (the pill's popup): the pick is stored before it answers, the restarts land after.
+  const d = await w.cli(["env", "--task", "ax_50", "--group", "g1", "--env", "local"]);
+  assert.equal(d.code, 0, d.stderr + d.stdout);
+  assert.match(d.stdout, /AX-50/);
+  assert.equal(w.state().envs["g1/AX-50"], "local");
+  await w.until((x) => x.repos[front.root]?.serverEnv === "local" && x.repos[web.root]?.serverEnv === "local" && !x.repos[front.root].busy, {
+    what: "AX-50's servers back in Local",
+  });
+  assert.match(typedIn(front).at(-1), runsEnv("local"));
+  assert.deepEqual(counts(), [3, 1, 1, 1]);
+
+  for (const args of [
+    ["env", "--task", "AX-50", "--env", "dev"],
+    ["env", "--group", "g1", "--env", "dev"],
+    ["env", "--task", "AX-50", "--group", "nope", "--env", "dev"],
+    ["env", "--task", "none", "--group", "g1", "--env", "dev"],
+    ["env", "--task", "AX-50", "--group", "g1"],
+    ["env", "--task", "AX-50", "--group", "g1", "--env", "staging"],
+    ["env", "--task", "AX-50", "--group", "g1", "--env", "dev", "--workspace", front.ws["AX-50"]],
+    ["env", "--task", "AX-50", "--group", "g1", "--variant", "co"],
+  ]) {
+    const u = await w.cli(args);
+    assert.equal(u.code, 2, `${args.join(" ")}: ${u.stderr}${u.stdout}`);
+  }
+  assert.deepEqual(w.state().envs, { "g1/AX-50": "local" });
+});
+
+test("D32: repo settings env Dev, then Local picked on the pill: Local is stored and runs; the pick survives a turn-off and the next light starts with it", async () => {
+  const w = makeWorld();
+  const app = makeRepo(w, "app", { pkg: ENV_PKG, tasks: ["AX-60"] });
+  w.register([{ id: "g1", repos: [app] }]);
+  w.settings({ repos: { [app.root]: { env: "dev" } } });
+  w.listen(app.root, [3000]);
+  const ws = app.ws["AX-60"];
+  const typed = () => w.hc().sent.map((x) => x.text);
+  assert.equal((await w.cli(["toggle", "--workspace", ws, "--inline"])).code, 0);
+  assert.match(typed().at(-1), runsEnv("dev"));
+  assert.equal(w.state().repos[app.root].envKey, "g1/AX-60");
+
+  const pick = await w.cli(["env", "--task", "AX-60", "--group", "g1", "--env", "local"]);
+  assert.equal(pick.code, 0, pick.stderr + pick.stdout);
+  assert.equal(w.state().envs["g1/AX-60"], "local", "Local is stored too");
+  await w.until((s) => s.repos[app.root]?.serverEnv === "local" && !s.repos[app.root].busy, { what: "the server in Local" });
+  assert.match(typed().at(-1), runsEnv("local"));
+
+  // Off, then on again: the pick is still there and the light runs it, not the settings' Dev.
+  const off = await w.cli(["toggle", "--workspace", ws, "--inline"]);
+  assert.equal(off.code, 0, off.stderr + off.stdout);
+  assert.equal(w.state().repos[app.root], undefined);
+  assert.deepEqual(w.state().envs, { "g1/AX-60": "local" });
+  const n = typed().length;
+  assert.equal((await w.cli(["toggle", "--workspace", ws, "--inline"])).code, 0);
+  assert.equal(typed().length, n + 1);
+  assert.match(typed().at(-1), runsEnv("local"));
+  assert.equal(w.state().repos[app.root].serverEnv, "local");
+});
+
+test("D32: `env --workspace` writes its workspace's key: a task workspace's is the task's; one that doesn't hold the root only stores it; a task-less one's is ws:<path>, which another workspace doesn't inherit", async () => {
+  const w = makeWorld();
+  const app = makeRepo(w, "app", { pkg: ENV_PKG, tasks: ["AX-80", "AX-81"] });
+  w.register([{ id: "g1", repos: [app] }]);
+  w.listen(app.root, [3000]);
+  const [ws80, ws81] = [app.ws["AX-80"], app.ws["AX-81"]];
+  // Branch and folder that can't name a task: task.js taskOf gives none.
+  const bareA = join(w.dir, "ws", "app", "a", "none");
+  const bareB = join(w.dir, "ws", "app", "b", "none");
+  git(app.root, "worktree", "add", "-q", "-b", "a/none", bareA);
+  git(app.root, "worktree", "add", "-q", "-b", "b/none", bareB);
+  const typed = () => w.hc().sent.map((x) => x.text);
+  const record = () => w.state().repos[app.root];
+
+  assert.equal((await w.cli(["toggle", "--workspace", ws80, "--inline"])).code, 0);
+  const pick = await w.cli(["env", "--workspace", ws80, "--env", "prod"]);
+  assert.equal(pick.code, 0, pick.stderr + pick.stdout);
+  assert.deepEqual(w.state().envs, { "g1/AX-80": "prod" });
+  assert.match(typed().at(-1), runsEnv("prod"));
+
+  // AX-81 doesn't hold the root: its pick is stored, nothing restarts.
+  const n = typed().length;
+  const stored = await w.cli(["env", "--workspace", ws81, "--env", "dev"]);
+  assert.equal(stored.code, 0, stored.stderr + stored.stdout);
+  assert.match(stored.stdout, /^app: env dev saved\.$/m);
+  assert.equal(w.state().envs["g1/AX-81"], "dev");
+  assert.equal(typed().length, n);
+  assert.deepEqual({ envKey: record().envKey, serverEnv: record().serverEnv }, { envKey: "g1/AX-80", serverEnv: "prod" });
+  // Its light runs it.
+  assert.equal((await w.cli(["toggle", "--workspace", ws81, "--inline"])).code, 0);
+  assert.equal(record().envKey, "g1/AX-81");
+  assert.match(typed().at(-1), runsEnv("dev"));
+
+  // Task-less workspaces are keyed by their path.
+  assert.equal((await w.cli(["toggle", "--workspace", bareA, "--inline"])).code, 0);
+  assert.equal(record().envKey, `ws:${bareA}`);
+  assert.match(typed().at(-1), runsEnv("local"));
+  assert.equal((await w.cli(["env", "--workspace", bareA, "--env", "dev"])).code, 0);
+  assert.equal(w.state().envs[`ws:${bareA}`], "dev");
+  assert.match(typed().at(-1), runsEnv("dev"));
+  assert.equal((await w.cli(["toggle", "--workspace", bareB, "--inline"])).code, 0);
+  assert.equal(record().envKey, `ws:${bareB}`);
+  assert.match(typed().at(-1), runsEnv("local"), "bareB doesn't inherit bareA's pick");
+  assert.deepEqual(Object.keys(w.state().envs).sort(), ["g1/AX-80", "g1/AX-81", `ws:${bareA}`].sort());
+});
+
+test("D32: a record lit before T22 (envOverride, no envKey) keeps its env and restarts nothing; picked through `env --task` it gets envKey, restarts once, and the next reap leaves it alone", async () => {
+  const w = makeWorld();
+  const app = makeRepo(w, "app", { pkg: ENV_PKG, tasks: ["AX-90"] });
+  w.register([{ id: "g1", repos: [app] }]);
+  w.listen(app.root, [3000]);
+  const ws = app.ws["AX-90"];
+  const t = w.agent(ws);
+  const typed = () => w.hc().sent.map((x) => x.text);
+  assert.equal((await w.cli(["on"], { terminal: t, cwd: ws })).code, 0);
+  assert.match(typed().at(-1), runsEnv("local"));
+
+  // As the CLI left it before T22: the popup's Local on the record, no
+  // envKey. The settings now say Prod, which an envKey'd record would run.
+  const before = w.state();
+  delete before.repos[app.root].envKey;
+  before.repos[app.root].envOverride = "local";
+  w.writeState(before);
+  w.settings({ repos: { [app.root]: { env: "prod" } } });
+  const n = typed().length;
+  assert.equal((await w.cli(["reap"])).code, 0);
+  assert.equal((await w.cli(["on"], { terminal: t, cwd: ws })).code, 0);
+  assert.equal((await w.cli(["sync", "--repo", app.root])).code, 0);
+  await sleep(1500);
+  assert.equal(typed().length, n, "neither the reap, `on` nor a sync restarted it");
+  assert.equal(w.state().repos[app.root].envOverride, "local");
+  assert.equal("envKey" in w.state().repos[app.root], false);
+
+  const pick = await w.cli(["env", "--task", "AX-90", "--group", "g1", "--env", "dev", "--inline"]);
+  assert.equal(pick.code, 0, pick.stderr + pick.stdout);
+  const rec = w.state().repos[app.root];
+  assert.equal(rec.envKey, "g1/AX-90");
+  assert.equal("envOverride" in rec, false);
+  assert.equal(typed().length, n + 1);
+  assert.match(typed().at(-1), runsEnv("dev"));
+  assert.equal((await w.cli(["reap"])).code, 0);
+  await sleep(1500);
+  assert.equal(typed().length, n + 1, "the next reap leaves it alone");
+  assert.equal(w.state().repos[app.root].serverEnv, "dev");
 });

@@ -1860,3 +1860,90 @@ test("D38: a port held outside the adopted terminal is still D24's port-busy, an
   assert.equal(w.first("hc send"), -1, "nothing typed");
   assert.deepEqual(w.space.tabs.map((x) => x.name), ["Spotlight"]);
 });
+
+// ── T22 (D32): the env per task ────────────────────────────────────────────
+// A light writes the holder's env key on its record (record.envKey), so the
+// env in force needs no git: envs[record.envKey], else the settings' env. A
+// record lit before T22 (envOverride, no envKey) keeps reading its
+// envOverride while the same workspace holds it.
+
+test("D32: a light keys its record with the holder's env key: the task's (the marker's), else ws:<path>; the same holder lit again keeps a record lit before T22 as it was; a takeover keys it and drops envOverride", async () => {
+  const key = `direct/${root}`;
+  // The same holder lit again (a relight of its turn), record from before T22.
+  Object.assign(state.repos[root], { envOverride: "dev" });
+  state.queue.lighting[key] = markerFor(wt, "g1/AX-1");
+  assert.deepEqual((await lightTask(fullCx(), key)).errors, {});
+  assert.equal(state.repos[root].envOverride, "dev");
+  assert.equal("envKey" in state.repos[root], false);
+  // A record with no envOverride gets the key.
+  delete state.repos[root].envOverride;
+  state.queue.lighting[key] = markerFor(wt, "g1/AX-1");
+  assert.deepEqual((await lightTask(fullCx(), key)).errors, {});
+  assert.equal(state.repos[root].envKey, "g1/AX-1");
+  // A takeover by a workspace with no task: keyed by its path; envOverride goes.
+  state.repos[root].envOverride = "prod";
+  const wt2 = await lightOnto({ "b.txt": "two\n" });
+  assert.equal(state.repos[root].envKey, `ws:${wt2}`);
+  assert.equal("envOverride" in state.repos[root], false);
+});
+
+test("D32: the env in force: envs[record.envKey], else the settings' env; a record with no envKey reads its envOverride", () => {
+  const ex = fullCx({ settings: readSettings(JSON.stringify({ version: 1, repos: { [root]: { env: "dev" } } })) });
+  const env = (record, envs) => work.effectiveEnv(ex, root, record, envs);
+  assert.equal(env({ envKey: "g1/AX-1" }, { "g1/AX-1": "prod" }), "prod");
+  assert.equal(env({ envKey: "g1/AX-1" }, { "g1/AX-2": "prod" }), "dev");
+  assert.equal(env({ envKey: "g1/AX-1", envOverride: "local" }, undefined), "dev");
+  assert.equal(env({ envOverride: "local" }, { "g1/AX-1": "prod" }), "local");
+  assert.equal(env(null, {}), "dev");
+});
+
+test("D32: an env picked now restarts only when its command changes: Spotlight's server already running that command stays and now runs the pick's env; a sync over a changed env still restarts it (J-002)", async () => {
+  const pkg = JSON.stringify({ packageManager: "pnpm@9.0.0", scripts: { dev: "vite", prod: "vite preview" } });
+  write(root, "package.json", pkg);
+  const plan = async (env) =>
+    (await planServer({ root, workspace: wt, settings: repoSettings(readSettings(JSON.stringify({ version: 1 })), root), env, io: nodeIo(fsp), git: planGit })).command;
+  // Local has no script: it runs Dev's command.
+  const local = await plan("local");
+  assert.equal(local, await plan("dev"));
+  const logPath = join(base, "root.log");
+  const running = (env) => ({ serverTerminal: "t1", serverPid: 101, serverState: "listening", serverCommand: local, serverEnv: env, ports: [3000], logPath });
+  const world = stuckWorld(logPath, local);
+  const ox = (over = {}) => fullCx({ serverDeps: { exec: world.exec, ...fakeClock() }, ...over });
+
+  Object.assign(state.repos[root], running("local"), { envFailed: "dev", envFailedAt: 5 });
+  const same = await ensureServer(ox(), root, { workspace: wt, envName: "dev", keepVariant: true });
+  assert.equal(same.state, "running");
+  assert.equal(world.interrupts, 0, "no Ctrl-C: the command is the same");
+  assert.equal(state.repos[root].serverEnv, "dev");
+  assert.equal("envFailed" in state.repos[root], false, "the env asked for runs now");
+
+  // Another command: the pick tries it (an explicit request, as Reiniciar).
+  assert.equal((await ensureServer(ox(), root, { workspace: wt, envName: "prod", keepVariant: true })).state, "still-running");
+  assert.equal(world.interrupts, 1);
+
+  // A sync over a changed env keeps J-002's rule: another env restarts, the same command too.
+  Object.assign(state.repos[root], running("dev"));
+  delete state.repos[root].envFailed;
+  delete state.repos[root].restartStuck;
+  assert.equal((await syncRepo(ox(), root)).restartFailed, "still-running");
+  assert.equal(world.interrupts, 2);
+});
+
+test("D32: an env write adopts each lit record with no envKey whose holder's key it is (its envOverride dropped, in the same write); a keyed record, or another key's, stays", async () => {
+  // shared has no projects.v1: wt's lane is spaceless, its task the branch "feature".
+  const other = join(base, "other-root");
+  Object.assign(state.repos[root], { envOverride: "prod" });
+  state.repos[other] = { ...emptyRepo(), holder: wt, envKey: "spaceless/feature" };
+  const ex = fullCx();
+  const writes = traceWrites(ex);
+  await work.writeEnv(ex, "g1/AX-9", "dev");
+  assert.deepEqual(state.envs, { "g1/AX-9": "dev" });
+  assert.equal(state.repos[root].envOverride, "prod", "another key: not adopted");
+  assert.equal(writes.length, 1);
+  await work.writeEnv(ex, "spaceless/feature", "local");
+  assert.deepEqual(state.envs, { "g1/AX-9": "dev", "spaceless/feature": "local" });
+  assert.equal(state.repos[root].envKey, "spaceless/feature");
+  assert.equal("envOverride" in state.repos[root], false);
+  assert.equal(writes.length, 2, "one write: the pick and the adoption together");
+  assert.equal(state.repos[other].envKey, "spaceless/feature");
+});

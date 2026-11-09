@@ -2,9 +2,14 @@
 // repo, and the CLI argv each control runs. Pure, so `node --test` loads it.
 //   envs      the env radio: Local / Dev / Prod, only those that start
 //             something (T5a's serverEnvsWithCommand over the saved and the
-//             detected commands); the effective one selected: the env picked
-//             here before (the record's envOverride), else the settings' env;
-//             `running` on the env the server still runs when that differs
+//             detected commands); the effective one selected (D32,
+//             task-env.js): for a lit root, the env stored for its
+//             holder's key (record.envKey; a record lit before T22, its
+//             envOverride), else the settings' env; for a root nobody
+//             holds, the env stored for the workspace it was opened from
+//             (its task's `<lane>/<KEY>`, else ws:<path>, read from
+//             projects-sidebar's lists), else the settings' env; `running`
+//             on the env the server still runs when that differs
 //   envNote   the selected env couldn't start (the record's envFailed): what
 //             runs instead and how to try again; else null
 //   variants  the variant chips: the plan's candidates while it asks, else
@@ -33,8 +38,9 @@
 // server error under a root error (lastError.serverError, server-errors.js)
 // changes none of them, so orca-holds never shows Ver log, Reintentar nor
 // Liberar puerto y arrancar (D27).
-// Changing env or variant runs `spotlight env`, which restarts only a server
-// whose command or env changes. The popup's props, D22's shape shared with T8's
+// Changing env runs `spotlight env`, which stores the pick for the
+// workspace's task (D32) and restarts only a server whose command changes; a
+// variant, one whose command or env changes. The popup's props, D22's shape shared with T8's
 // board row and the toasts' action: { view: "server", repo, workspace }
 // (board.js openServer opens it).
 
@@ -42,10 +48,9 @@ import { normRoot, repoSettings } from "./settings.js";
 import { serverEnvsWithCommand, commandTemplate, isSafeVariant, formatVariant, inferredVariantNote } from "./server-plan.js";
 import { pickPort, portUrl } from "./ports.js";
 import { serverDown, PORT_BUSY } from "./server-errors.js";
-import { errorText } from "./badges-model.js";
+import { errorText, parseCache } from "./badges-model.js";
 import { oneLine } from "./text.js";
-
-const ENV_LABELS = { local: "Local", dev: "Dev", prod: "Prod" };
+import { ENV_LABELS, recordEnv, storedEnv, checkoutEnvKey } from "./task-env.js";
 // Never orca-holds nor orca-active: forcing can't take a root from Orca (D27).
 const FORCE_CODES = new Set(["root-diverged", "untracked-collision"]);
 // A server that's up (state.json's serverState).
@@ -87,8 +92,10 @@ function inferredVariant(state, root, record, variants) {
 // The popup's model. `state` and `settings`: board-model.js readState and
 // readSettings of the files; `repo`: the root; `workspace`: the row it was
 // opened from; `detection`: T5a's detectServerScripts(root, io), null while
-// it runs; `bin`: board-model.js cliPathOf(appHome()).
-export function serverViewModel({ state, settings, repo, workspace, detection, bin }) {
+// it runs; `bin`: board-model.js cliPathOf(appHome()); `registry`, `cache`:
+// shared projects.v1 and projects.cache.v1 as Herdr returns them, which name
+// an unlit workspace's task (D32).
+export function serverViewModel({ state, settings, repo, workspace, detection, bin, registry = null, cache = null }) {
   const root = normRoot(repo);
   const record = state?.repos?.[root] ?? null;
   const repoSet = repoSettings(settings, root);
@@ -97,7 +104,10 @@ export function serverViewModel({ state, settings, repo, workspace, detection, b
   const detected = detection?.detected ?? {};
 
   // J-002: what the server runs next, not only what it runs now (serverEnv).
-  const selectedEnv = record?.envOverride ?? repoSet.env;
+  // D32: the holder's env; nobody holding, the one stored for the workspace
+  // the popup is for, which its light would start.
+  const unlitKey = holder ? null : checkoutEnvKey({ registry, cache: parseCache(cache), root, workspace: target });
+  const selectedEnv = (unlitKey && storedEnv(state?.envs, unlitKey)) ?? recordEnv(record, state?.envs, repoSet.env);
   const up = RUNNING.has(record?.serverState) && record?.serverEnv && record.serverEnv !== selectedEnv;
   const runningEnv = up ? record.serverEnv : null;
   const envName = (env) => ENV_LABELS[env] ?? env;

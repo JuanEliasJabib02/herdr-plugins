@@ -11,7 +11,9 @@
 // RECIPE.md): handleCommand maps the id to its workspace and opens the
 // server popup at the pointer, still on the badge. With no shown footer copy
 // Herdr refuses the command, so the click does nothing until the footer is
-// in the layout (D20).
+// in the layout (D20). `spotlight.env.<id>` (a task lane's env pill, D32)
+// reaches it the same way, as "env.<id>": the id maps to its lane, and the
+// env popup (env-view.js) opens there.
 
 import { shared, setShared, appHome, home, readTextFile, notify } from "herdr";
 import * as fs from "fs/promises";
@@ -20,6 +22,7 @@ import { hasServerCommand } from "./server-plan.js";
 import { cliPathOf } from "./board-model.js";
 import { readFiles, watchState, openServer } from "./board.js";
 import { buildBadges, nextPublish, parseProjects, parseCache, attempt, taskModeGroups } from "./badges-model.js";
+import { openEnvPopup } from "./env-view.js";
 import { modIo } from "./server-view-model.js";
 import { followHolders } from "./autosync.js";
 
@@ -29,9 +32,11 @@ const REFRESH_MS = 15_000;
 // How long a repo's "has a server command" fact (its package.json) is kept.
 const FACTS_TTL_MS = 60_000;
 
-// The last readings, and the server popup's id map of the last build.
+// The last readings, and the server popup's and the env popup's id maps of
+// the last build.
 let files = null;
 let servers = {};
+let lanes = {};
 // root → { at, envs, gitRepo, hasCommand }: D7's facts for a repo with no
 // `enabled` value.
 const facts = new Map();
@@ -93,12 +98,15 @@ async function refresh() {
   const enabled = await enabledRoots(projects, settings);
   const built = buildBadges({ state, settings, projects, cache, enabled, bin: cliPathOf(appHome()), taskGroups: taskModeGroups(registry) });
   servers = built.servers;
+  lanes = built.lanes;
   const out = nextPublish(shared(KEY), built.value);
   if (out.write) setShared(KEY, out.value);
 }
 
 /** Runs a command meant for Spotlight; false when the name isn't one. */
 export async function handleCommand(name, { cx }) {
+  const lane = /^env\.([0-9a-f]{12})$/.exec(String(name));
+  if (lane) return openLaneEnv(lane[1]);
   const m = /^server\.([0-9a-f]{12})$/.exec(String(name));
   if (!m) return false;
   let target = servers[m[1]];
@@ -113,5 +121,22 @@ export async function handleCommand(name, { cx }) {
     return true;
   }
   openServer({ view: "server", repo: target.root, workspace: target.workspace });
+  return true;
+}
+
+// A lane's env pill (D32): the env popup for the lane its id names.
+async function openLaneEnv(id) {
+  let lane = lanes[id];
+  if (!lane) {
+    // A lane new since the last build: read again once.
+    files = await readFiles();
+    await refresh();
+    lane = lanes[id];
+  }
+  if (!lane) {
+    notify({ title: "Spotlight", body: "Esa tarea ya no tiene Spotlight.", level: "warning", timeout: 4000 });
+    return true;
+  }
+  openEnvPopup({ view: "env", group: lane.group, task: lane.task, members: lane.members });
   return true;
 }

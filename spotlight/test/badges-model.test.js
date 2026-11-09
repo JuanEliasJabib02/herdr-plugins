@@ -11,12 +11,18 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import * as badgesModel from "../mods/spotlight/badges-model.js";
 import {
   sha1Hex, serverIdOf, parseProjects, parseCache, buildBadges, nextPublish, canonicalJson,
   attempt, taskModeGroups,
 } from "../mods/spotlight/badges-model.js";
+import { serverViewModel } from "../mods/spotlight/server-view-model.js";
 import { cliPathOf, readState, readSettings } from "../mods/spotlight/board-model.js";
 import { serverId } from "../mods/spotlight/cli-work.mjs";
+
+// Destructured, not named in the imports: a helper that's missing fails its
+// own tests, not the whole file's load.
+const { laneEnv, laneEnvChoices } = badgesModel;
 
 const MOD_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "mods", "spotlight");
 const APP = "/Users/u/.config/herdr-app";
@@ -534,7 +540,8 @@ test("taskModeGroups: the ids of projects.v1's groups organized by Task; anythin
 test("D31: a Task-mode group's lanes get the task's flashlight, keyed and acting with the group; dim until every member is held, then working; skipped repos named", () => {
   const { value } = buildLanes();
   // AX-3447: back held by B1, front not lit, other skipped (Spotlight off).
-  const [light, flask] = value[laneKey("AX-3447")];
+  // Its env pill (D32, T22) sits between the flashlight and the flask.
+  const [light, , flask] = value[laneKey("AX-3447")];
   assert.deepEqual(light, {
     icon: "mods/spotlight/icons/flashlight.svg", tone: "dim", tooltip: `${NOT_LIT} Saltado, Spotlight apagado en: other`, action: laneToggle("AX-3447"),
   });
@@ -601,7 +608,8 @@ test("D31: the task's queue badge on its lane, as on its rows: testing, queued #
     terminal: "t3", taskKey: "ax/login", label: "login", lane: "ax", state: "waiting", requestedAt: 4, members: [member(FRONT, "front", F2)], workspace: F2, root: FRONT,
   });
   const { value } = buildLanes(s);
-  assert.deepEqual(icons(value[laneKey("AX-3447")]), ["flashlight", "flask"]);
+  // AX-3447 holds back: its env pill (D32) comes before the queue badge.
+  assert.deepEqual(icons(value[laneKey("AX-3447")]), ["flashlight", "server", "flask"]);
   assert.deepEqual(icons(value[laneKey("AX-3500")]), ["flashlight", "clock"]);
   const second = value[laneKey("login")][1];
   assert.deepEqual(icons([second]), ["clock"]);
@@ -613,7 +621,7 @@ test("D31: the task's queue badge on its lane, as on its rows: testing, queued #
   Object.assign(s.queue.requests[1], { state: "paused", pauseReason: "limit", pausedAt: 9 });
   assert.equal(buildLanes(s).value[laneKey("AX-3500")][1].tooltip, "Pausado · sin límite");
   const off = buildLanes(s, { settings: settingsOf({ version: 1, queue: { enabled: false } }) }).value;
-  assert.deepEqual(icons(off[laneKey("AX-3447")]), ["flashlight"]);
+  assert.deepEqual(icons(off[laneKey("AX-3447")]), ["flashlight", "server"]);
 });
 
 test("D29: a group not in Task mode gets no lane keys", () => {
@@ -624,4 +632,113 @@ test("D29: a group not in Task mode gets no lane keys", () => {
     assert.deepEqual(value, build().value);
   }
   assert.deepEqual(Object.keys(build().value).filter((k) => !k.startsWith("/")), []);
+});
+
+// ── T22 (D32): the env pill on the task lane ───────────────────────────────
+// After the lane's flashlight, before its queue badge: the env of the task's
+// servers, drawn with today's contract (the server icon and the text; T31
+// makes it D39's text badge). Shown as Orca shows it: always while a member
+// holds its root or the stored env isn't Local, otherwise not.
+
+const envIdOf = (key) => sha1Hex(`ax/${key}`).slice(0, 12);
+const envCommand = (key) => ({ command: `spotlight.env.${envIdOf(key)}` });
+const ENV_TIP = (label) => `Entorno de Spotlight de esta tarea: ${label}. Clic para cambiarlo.`;
+const pill = (key, text, tooltip = ENV_TIP(text)) => ({ icon: "mods/spotlight/icons/server.svg", text, tone: "dim", tooltip, action: envCommand(key) });
+
+test("D32: the env pill shows while a member holds: with nothing stored, the held repo's env; it opens the lane's env popup, which the id map names", () => {
+  const built = buildLanes();
+  const { value } = built;
+  // AX-3447: back held by B1, nothing stored, back's settings env (Local).
+  assert.deepEqual(icons(value[laneKey("AX-3447")]), ["flashlight", "server", "flask"]);
+  assert.deepEqual(value[laneKey("AX-3447")][1], pill("AX-3447", "Local"));
+  // AX-3500's only member is held by another task's workspace; login's isn't lit.
+  assert.deepEqual(icons(value[laneKey("AX-3500")]), ["flashlight", "clock"]);
+  assert.deepEqual(icons(value[laneKey("login")]), ["flashlight"]);
+  assertContract(value);
+  // The id map: the command's id → the lane, with its members for the popup.
+  assert.deepEqual(built.lanes[envIdOf("AX-3447")], {
+    group: "ax", task: "AX-3447",
+    members: [{ root: BACK, name: "back", workspaces: [B1] }, { root: FRONT, name: "front", workspaces: [F1] }],
+  });
+  assert.equal(built.lanes[envIdOf("login")]?.task, "login", "every lane with a flashlight is named, shown pill or not");
+  // The settings' env of the held repo, or a pick stored for the task (Local included), wins.
+  const dev = buildLanes(baseState(), { settings: settingsOf({ version: 1, repos: { [BACK]: { env: "dev" } } }) }).value;
+  assert.deepEqual(dev[laneKey("AX-3447")][1], pill("AX-3447", "Dev"));
+  const stored = buildLanes(baseState({ envs: { "ax/AX-3447": "prod" } })).value;
+  assert.deepEqual(stored[laneKey("AX-3447")][1], pill("AX-3447", "Prod"));
+  const local = buildLanes(baseState({ envs: { "ax/AX-3447": "local" } }), { settings: settingsOf({ version: 1, repos: { [BACK]: { env: "dev" } } }) }).value;
+  assert.deepEqual(local[laneKey("AX-3447")][1], pill("AX-3447", "Local"));
+  // The ring while the batch runs keeps the pill beside it.
+  const batch = baseState();
+  batch.queue.taskBatch = { "ax/AX-3447": { op: "on", since: 5, pid: 4242 } };
+  assert.deepEqual(icons(buildLanes(batch).value[laneKey("AX-3447")]), ["spinner", "server", "flask"]);
+});
+
+test("D32: with nobody holding, the pill shows only for a stored env that isn't Local; the same task in another space is another key", () => {
+  const s = baseState({ envs: { "ax/AX-3500": "dev", "ax/login": "local", "ag/AX-3447": "prod" } });
+  const { value } = buildLanes(s);
+  assert.deepEqual(value[laneKey("AX-3500")][1], pill("AX-3500", "Dev"));
+  assert.deepEqual(icons(value[laneKey("login")]), ["flashlight"], "Local stored, nothing held: no pill");
+  assert.deepEqual(value[laneKey("AX-3447")][1], pill("AX-3447", "Local"), "another space's pick for AX-3447 isn't this one's");
+  // No flashlight (no member with Spotlight on), no pill: there is no server to run.
+  const laneCache = { ...cache, [OTHER]: [...cache[OTHER], { path: `${WS}/other/ax-9`, branch: "juan/AX-9", main: false }] };
+  assert.equal(buildLanes(baseState({ envs: { "ax/AX-9": "dev" } }), { laneCache }).value[laneKey("AX-9")], undefined);
+  assertContract(value);
+});
+
+test("D32: nothing stored, two repos held: their env when they agree, else Mixto (dim) with each repo's env in the tooltip", () => {
+  const both = (fields = {}) => {
+    const s = baseState();
+    s.repos[FRONT] = repo({ holder: F1, serverState: "listening", ports: [5173], ...fields });
+    return s;
+  };
+  const agree = settingsOf({ version: 1, repos: { [BACK]: { env: "dev" }, [FRONT]: { env: "dev" } } });
+  assert.deepEqual(buildLanes(both(), { settings: agree }).value[laneKey("AX-3447")][1], pill("AX-3447", "Dev"));
+  const differ = settingsOf({ version: 1, repos: { [FRONT]: { env: "dev" } } });
+  const mixed = buildLanes(both(), { settings: differ }).value[laneKey("AX-3447")][1];
+  assert.deepEqual(mixed, pill("AX-3447", "Mixto", "Entorno de Spotlight de esta tarea: mixto (back Local · front Dev). Clic para elegir uno."));
+  // A held record lit before T22 counts with its envOverride; a keyed one with what is stored for its key.
+  const legacy = buildLanes(both({ envOverride: "local" }), { settings: differ }).value[laneKey("AX-3447")][1];
+  assert.equal(legacy.text, "Local");
+  const keyed = buildLanes(both({ envKey: "ax/AX-3447" }), { settings: differ }).value[laneKey("AX-3447")][1];
+  assert.equal(keyed.text, "Mixto", "nothing stored for the key: the settings' env");
+  assertContract(buildLanes(both(), { settings: differ }).value);
+});
+
+test("D32: laneEnv, the pill's value: the stored env, else the held repos' env when they agree, else null (Mixto); with nobody holding, every member's would-be env, and not shown", () => {
+  const members = [{ root: BACK, name: "back", workspaces: [B1] }, { root: FRONT, name: "front", workspaces: [F1] }];
+  const at = (state, settings = settingsOf()) => laneEnv({ group: "ax", key: "AX-3447", members, state, settings });
+  assert.deepEqual(at(baseState()), { value: "local", shown: true, repos: [{ name: "back", env: "local" }] });
+  const idle = baseState();
+  delete idle.repos[BACK];
+  assert.deepEqual(at(idle), { value: "local", shown: false, repos: [{ name: "back", env: "local" }, { name: "front", env: "local" }] });
+  assert.deepEqual(at(idle, settingsOf({ version: 1, repos: { [FRONT]: { env: "prod" } } })).value, null);
+  assert.deepEqual(at({ ...idle, envs: { "ax/AX-3447": "prod" } }), { value: "prod", shown: true, repos: [{ name: "back", env: "local" }, { name: "front", env: "local" }] });
+  assert.equal(laneEnv({ group: "ax", key: "AX-3447", members: [], state: baseState(), settings: settingsOf() }).shown, false);
+});
+
+test("D32: the env popup's radio: Local, Dev, Prod, the lane's value checked (none for Mixto), each running `env --task <KEY> --group <id> --env <e>`", () => {
+  const argv = (env) => [BIN, "env", "--task", "AX-3447", "--group", "ax", "--env", env];
+  assert.deepEqual(laneEnvChoices({ group: "ax", key: "AX-3447", value: "dev", bin: BIN }), [
+    { env: "local", label: "Local", selected: false, argv: argv("local") },
+    { env: "dev", label: "Dev", selected: true, argv: argv("dev") },
+    { env: "prod", label: "Prod", selected: false, argv: argv("prod") },
+  ]);
+  assert.deepEqual(laneEnvChoices({ group: "ax", key: "AX-3447", value: null, bin: BIN }).map((c) => c.selected), [false, false, false]);
+});
+
+test("D32: the server popup's selected env equals the pill's when they agree", () => {
+  const detection = { detected: { local: "pnpm local", dev: "pnpm dev", prod: "pnpm start" }, scriptCommands: [] };
+  const popupEnv = (state, settings) =>
+    serverViewModel({ state, settings, repo: BACK, workspace: B1, detection, bin: BIN }).envs.find((e) => e.selected)?.env;
+  const cases = [
+    [baseState(), settingsOf()],
+    [baseState(), settingsOf({ version: 1, repos: { [BACK]: { env: "prod" } } })],
+    [baseState({ envs: { "ax/AX-3447": "dev" } }), settingsOf()],
+  ];
+  cases[2][0].repos[BACK].envKey = "ax/AX-3447";
+  for (const [state, settings] of cases) {
+    const shown = buildLanes(state, { settings }).value[laneKey("AX-3447")][1].text;
+    assert.equal(shown, { local: "Local", dev: "Dev", prod: "Prod" }[popupEnv(state, settings)], JSON.stringify(state.envs ?? null));
+  }
 });

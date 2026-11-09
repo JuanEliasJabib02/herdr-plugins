@@ -11,7 +11,7 @@
 
 import { div, svg } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
-import { theme, closeOverlay, appHome, readTextFile, exec } from "herdr";
+import { theme, closeOverlay, appHome, readTextFile, exec, shared } from "herdr";
 import * as fs from "fs/promises";
 import { detectServerScripts } from "./server-plan.js";
 import { cliPathOf, readState, readSettings } from "./board-model.js";
@@ -109,6 +109,8 @@ export default class ServerView {
     if (!this.repo) return div().p(10).text_size(12).text_color(t.dim).child("spotlight: falta el repo");
     const m = serverViewModel({
       state: this.state, settings: this.settings, repo: this.repo, workspace: this.workspace, detection: this.detection, bin: this.bin,
+      // D32: an unlit workspace's task, for the env stored for it.
+      registry: shared("projects.v1"), cache: shared("projects.cache.v1"),
     });
     const word = m.holder ? STATE_WORDS[m.serverState] ?? m.serverState ?? "" : "apagado";
     const label = (text) => div().pt(2).text_size(11).text_color(t.dim).child(text);

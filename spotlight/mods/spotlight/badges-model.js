@@ -44,16 +44,26 @@
 //                  (queue.taskBatch) or a member's repo is busy, the ring,
 //                  with no action. None when no repo with Spotlight on has
 //                  a workspace of the task.
-//   2. queue       the task's queue badge, the one its rows show, so a
+//   2. env         the env of the task's servers (D32, Orca's
+//                  TaskSpotlightEnvPill; T31 makes it D39's text badge): the
+//                  server icon, dim, and the env's name, "Mixto" when the
+//                  held repos run different ones (each named in the
+//                  tooltip). Shown while a member holds its root, or when
+//                  the env stored for the task isn't Local; with no
+//                  flashlight, none. A click opens the env popup
+//                  (env-view.js): the command `spotlight.env.<id>`, the id
+//                  sha1 of `<groupId>/<KEY>`, and `lanes[id]` names the lane.
+//   3. queue       the task's queue badge, the one its rows show, so a
 //                  folded lane still says it (Orca's TaskTestTurnBadge).
 
-import { normRoot, repoSettings } from "./settings.js";
+import { normRoot, repoSettings, ENVS } from "./settings.js";
 import { taskOf, taskLit } from "./task.js";
 import { portLabel, pickPort, portUrl } from "./ports.js";
 import { positionOf } from "./queue.js";
 import { MOD } from "./board-model.js";
 import { serverDown } from "./server-errors.js";
 import { oneLine } from "./text.js";
+import { ENV_LABELS, recordEnv, storedEnv } from "./task-env.js";
 
 export const iconPath = (name) => `mods/${MOD}/icons/${name}.svg`;
 
@@ -322,7 +332,7 @@ function queueBadges(state, qctx) {
 // The task lanes of each Task-mode group, from projects.cache.v1 as
 // projects-sidebar builds them (task.js taskOf: a ticket, or a name
 // lowercased; main checkouts and No task have none): [{ group, key,
-// members: [{ root, workspaces }], skipped: [name] }], members the repos with
+// members: [{ root, name, workspaces }], skipped: [name] }], members the repos with
 // a worktree of the task and Spotlight on (`enabled`), skipped the others,
 // both in the group's order. The CLI's `toggle --task` resolves the same
 // members (task.js resolveGroupTask).
@@ -339,7 +349,7 @@ function taskLanes({ projects, cache, enabled, taskGroups }) {
       }
       for (const [key, workspaces] of mine) {
         const lane = byKey.get(key) ?? { group, key, members: [], skipped: [] };
-        if (enabled[root] === true) lane.members.push({ root, workspaces });
+        if (enabled[root] === true) lane.members.push({ root, name, workspaces });
         else lane.skipped.push(name);
         byKey.set(key, lane);
       }
@@ -367,6 +377,59 @@ function laneFlashlight({ group, key, members, skipped }, { state, bin }) {
   });
 }
 
+// The env of a task's servers (D32), what its pill says and its popup
+// checks. `group`, `key`: the lane (its env key `<group>/<key>`); `members`:
+// taskLanes'; `state`, `settings`: board-model.js's. The basis is the
+// members held by a workspace of the task, each with the env its server
+// runs for it (task-env.js recordEnv: what is stored for its record's key,
+// else its settings env; a record lit before T22, its envOverride); with
+// none held, every member with its settings env, the env a light would
+// start. → { value, shown, repos: [{ name, env }] }: value the env stored
+// for the task, else the basis' env when it agrees, else null (Mixto);
+// shown as Orca shows its pill, while a member holds or the stored env
+// isn't Local.
+export function laneEnv({ group, key, members, state, settings }) {
+  const repos = isObject(state?.repos) ? state.repos : {};
+  const list = Array.isArray(members) ? members : [];
+  const stored = storedEnv(state?.envs, `${group}/${key}`);
+  const held = list.filter((m) => taskLit([m], repos));
+  const basis = (held.length > 0 ? held : list).map((m) => {
+    const fallback = repoSettings(settings, m.root).env;
+    return { name: m.name ?? baseName(m.root), env: held.length > 0 ? recordEnv(repos[m.root], state?.envs, fallback) : fallback };
+  });
+  const agreed = basis.length > 0 && basis.every((b) => b.env === basis[0].env) ? basis[0].env : null;
+  return {
+    value: stored ?? agreed,
+    shown: list.length > 0 && (held.length > 0 || (stored !== null && stored !== ENVS[0])),
+    repos: basis,
+  };
+}
+
+// The env popup's choices for a lane (env-view.js): Local, Dev, Prod, the
+// lane's `value` (laneEnv's) selected, none for Mixto; each runs `spotlight
+// env --task <KEY> --group <id> --env <e>` through `bin`.
+export function laneEnvChoices({ group, key, value, bin }) {
+  return ENVS.map((env) => ({
+    env, label: ENV_LABELS[env], selected: env === value, argv: [bin, "env", "--task", key, "--group", group, "--env", env],
+  }));
+}
+
+// The id of a lane's env popup: sha1 of `<groupId>/<KEY>`, first 12 hex.
+export const laneEnvIdOf = (group, key) => sha1Hex(`${group}/${key}`).slice(0, 12);
+
+// 2. A task lane's env pill, or null when it isn't shown (laneEnv).
+function lanePill({ group, key, members }, { state, settings }) {
+  const env = laneEnv({ group, key, members, state, settings });
+  if (!env.shown) return null;
+  const action = { command: `${MOD}.env.${laneEnvIdOf(group, key)}` };
+  if (env.value) {
+    const label = ENV_LABELS[env.value];
+    return badge({ icon: "server", text: label, tone: "dim", tooltip: `Entorno de Spotlight de esta tarea: ${label}. Clic para cambiarlo.`, action });
+  }
+  const each = env.repos.map((r) => `${r.name} ${ENV_LABELS[r.env] ?? r.env}`).join(" · ");
+  return badge({ icon: "server", text: "Mixto", tone: "dim", tooltip: `Entorno de Spotlight de esta tarea: mixto (${each}). Clic para elegir uno.`, action });
+}
+
 // Every badge of the moment, and the server popup's id map:
 //   state     board-model.js readState(state.json's text)
 //   settings  board-model.js readSettings(settings.json's text)
@@ -377,10 +440,13 @@ function laneFlashlight({ group, key, members, skipped }, { state, bin }) {
 //   bin       board-model.js cliPathOf(appHome())
 //   taskGroups  taskModeGroups(shared("projects.v1")): the groups whose
 //             task lanes get badges (D29); none by default
-// → { value: { [path | laneKey]: [badge] } | null, servers: { [id]: { workspace, root } } }
+// → { value: { [path | laneKey]: [badge] } | null, servers: { [id]: { workspace, root } },
+//     lanes: { [id]: { group, task, members: [{ root, name, workspaces }] } } }
 // `servers` names every workspace Spotlight knows (lit rows, the enabled
 // repos' worktrees, the queue's members, the lightings'), so a toast's
-// `spotlight.server.<id>` (cli-work.mjs errorNote) resolves too.
+// `spotlight.server.<id>` (cli-work.mjs errorNote) resolves too. `lanes`
+// names every task lane with a flashlight, its pill shown or not, for the
+// env popup's `spotlight.env.<id>` (laneEnvIdOf).
 export function buildBadges({ state, settings, projects = [], cache = {}, enabled = {}, bin, taskGroups = [] }) {
   const rows = new Map(); // path → [badge, …] in D17's order
   const add = (at, b) => {
@@ -447,11 +513,17 @@ export function buildBadges({ state, settings, projects = [], cache = {}, enable
   }
 
   // The task lanes: `<groupId>/task:<KEY>`, as projects-sidebar keys them
-  // (D29); a lane's queue key is `<groupId>/<KEY>` (D12).
+  // (D29); a lane's queue key, and its env key (D32), is `<groupId>/<KEY>` (D12).
+  const lanes = {};
   for (const lane of taskLanes({ projects, cache, enabled, taskGroups: Array.isArray(taskGroups) ? taskGroups : [] })) {
     const at = `${lane.group}/task:${lane.key}`;
     const light = laneFlashlight(lane, { state, bin });
-    if (light) add(at, light);
+    if (light) {
+      add(at, light);
+      lanes[laneEnvIdOf(lane.group, lane.key)] = { group: lane.group, task: lane.key, members: lane.members };
+      const pill = lanePill(lane, { state, settings });
+      if (pill) add(at, pill);
+    }
     const asked = queued.get(`${lane.group}/${lane.key}`);
     if (asked) add(at, asked.badge);
   }
@@ -460,7 +532,7 @@ export function buildBadges({ state, settings, projects = [], cache = {}, enable
   for (const at of [...rows.keys()].sort()) {
     value[at] = rows.get(at).slice(0, PER_ROW);
   }
-  return { value: Object.keys(value).length > 0 ? value : null, servers };
+  return { value: Object.keys(value).length > 0 ? value : null, servers, lanes };
 }
 
 // ── Publishing only on change ──────────────────────────────────────────────

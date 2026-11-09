@@ -1,6 +1,7 @@
-// The CLI's work on repos and the queue (D7, D8, D10–D13, D18, D19, D33,
-// D34): lighting a task's repos, syncing a holder, turning a root off, the
-// server (start, restart on a lockfile or command change, its end by hand),
+// The CLI's work on repos and the queue (D7, D8, D10–D13, D18, D19, D32,
+// D33, D34): lighting a task's repos, syncing a holder, turning a root off,
+// the server (start, restart on a lockfile or command change, its end by
+// hand), the env per task (its picks and the restarts they ask for),
 // waiting for the servers to listen (port of Orca's waitForTurnServers), and
 // the reap. Node-only.
 //
@@ -17,7 +18,7 @@ import {
   activate, sync, deactivate, assertDeactivatable, readRefs, readOrcaHolds, toSpotlightError, ORCA_HOLDS_MESSAGE,
 } from "./sync.js";
 import {
-  emptyRepo, addNote, reconcileRepo, rememberVariant, markBusy, clearBusy, setTaskBatch, clearTaskBatch,
+  emptyRepo, addNote, reconcileRepo, rememberVariant, rememberEnv, markBusy, clearBusy, setTaskBatch, clearTaskBatch,
 } from "./store.js";
 import { pidAlive, isStale, LockError } from "./locks.js";
 import { repoSettings, normRoot } from "./settings.js";
@@ -34,7 +35,8 @@ import { release, pause, regrant, snapshot } from "./queue.js";
 import {
   decideTurnEnd, activityUpdate, lightingMarker, lightAlive, needsLight, memberLit, classifyStep,
 } from "./cli-turns.mjs";
-import { branchOf, hcGet, hcReadText, registeredRoots, sleep } from "./cli-env.mjs";
+import { branchOf, hcGet, hcReadText, registeredRoots, sleep, taskKeyOfWorkspace } from "./cli-env.mjs";
+import { recordEnv, envKeyOf } from "./task-env.js";
 import {
   SERVER_ERRORS, PORT_BUSY, SERVER_EXITED, SERVER_START_FAILED, SERVER_SURVIVED, SERVER_NOT_STOPPED, isServerError, serverErrorOf,
   setRootError, setServerError, clearRootError, clearServerError,
@@ -262,9 +264,12 @@ const SERVER_WORDS = {
 // One repo of a lighting: activate (fresh or takeover), or sync when the
 // workspace already holds it; then the server. The repo is busy all along,
 // its target `workspace` (D33); a fresh light's record is made for the mark,
-// and reads as no record until the light writes one.
+// and reads as no record until the light writes one. The record keeps the
+// holder's env key (D32: `taskKey`, the marker's `<lane>/<KEY>`, else
+// ws:<path>), so the server below runs the env picked for it.
 async function lightMember(cx, member, { force, taskKey, quiet = false }) {
   const { root, workspace } = member;
+  const envKey = envKeyOf(taskKey, workspace);
   const name = member.name ?? cx.nameOf(root);
   return withBusyRepo(cx, root, { op: "light", workspace, create: true }, async () => {
     const before = cx.store.readState().repos[root] ?? null;
@@ -312,6 +317,13 @@ async function lightMember(cx, member, { force, taskKey, quiet = false }) {
         r.lastSyncAt = now;
       }
       r.pendingInstalls = installsFor(r.pendingInstalls, changed, missing);
+      // D32: a record lit before T22 (an envOverride, no envKey) keeps
+      // reading its envOverride while the same workspace holds it, so
+      // installing T22 restarts no server; any other light keys it.
+      if (switched || r.envKey || r.envOverride == null) {
+        r.envKey = envKey;
+        delete r.envOverride;
+      }
       s.repos[root] = r;
     });
     // The server error is ensureServer's to decide (H3). On a takeover (a
@@ -368,11 +380,12 @@ export function startFailedError(r) {
 const stillRunningText = (r) =>
   `el server sigue corriendo: ${r.reason === "interrupt-failed" ? "hc no pudo mandarle Ctrl-C" : "no paró con Ctrl-C"} y no se reinició`;
 
-// The env a repo's server should run (J-002): the one picked in the server
-// popup (`spotlight env --env`, the record's envOverride, kept until `toggle`
-// off), else the settings' env, the repo's default. The record's serverEnv
-// only says what runs now.
-export const effectiveEnv = (cx, root, record) => record?.envOverride ?? repoSettings(cx.settings, root).env;
+// The env a repo's server should run (J-002, D32): the pick stored for its
+// holder's key (`envs`: state.json's; the record's envKey, task-env.js
+// recordEnv), else the settings' env, the repo's default; a record lit
+// before T22 reads its envOverride instead. The record's serverEnv only says
+// what runs now.
+export const effectiveEnv = (cx, root, record, envs) => recordEnv(record, envs, repoSettings(cx.settings, root).env);
 
 const RUNNING = new Set(["starting", "listening"]);
 // What the server terminal holds (server.js inspectServer) when a start or
@@ -382,9 +395,10 @@ const TYPES_INTO = new Set(["shell", "gone", "spotlight"]);
 // Spotlight's server runs in another env than the effective one, and that
 // env starts something: it restarts, as on a command change (D10, J-002).
 // An env with no command leaves the server alone, so nobody retries it.
-export async function envDrift(cx, root, record) {
+// `envs`: state.json's (D32).
+export async function envDrift(cx, root, record, envs) {
   if (!record?.holder || !record.serverCommand || !RUNNING.has(record.serverState)) return false;
-  const env = effectiveEnv(cx, root, record);
+  const env = effectiveEnv(cx, root, record, envs);
   if (record.serverEnv === env) return false;
   const { detected } = await detectServerScripts(root, cx.io);
   return commandTemplate({ settings: repoSettings(cx.settings, root), detected, env }) !== null;
@@ -396,9 +410,9 @@ export async function envDrift(cx, root, record) {
 // settingsSavedAt, J-011). Neither the reap (J-009) nor a sync (auto-sync,
 // `on`, M1) tries it again until then, so a server that ignores Ctrl-C isn't
 // sent another one after every save; Reiniciar, a picked env and a light
-// always do.
-const envGaveUp = (cx, root, record, savedAt) =>
-  record?.envFailed === effectiveEnv(cx, root, record) && !(savedAt > (record.envFailedAt ?? 0));
+// always do. `envs`: state.json's (D32).
+const envGaveUp = (cx, root, record, savedAt, envs) =>
+  record?.envFailed === effectiveEnv(cx, root, record, envs) && !(savedAt > (record.envFailedAt ?? 0));
 
 // Which busy mark a server call makes (D33): a restart (`spotlight
 // restart`, Liberar puerto y arrancar), an env or a variant picked now
@@ -418,7 +432,10 @@ function serverBusyOp({ restart = false, envName, chosenVariant }) {
 // `chosenVariant`, the repo is busy while it works (serverBusyOp, D33), its
 // target `workspace`; a repo with no record is never marked. Options:
 //   taskKey      `<lane>/<taskKey>` whose remembered variant applies
-//   envName      the env to run (else effectiveEnv's)
+//   envName      the env to run (else effectiveEnv's): an env picked now
+//                (`spotlight env`, D32), which restarts Spotlight's server
+//                only when its command changes (Orca's restartIfDifferent):
+//                one already running that command now runs that env
 //   chosenVariant  a variant picked now (`spotlight env --variant`)
 //   keepVariant  reuse the running server's variant (a restart, a sync)
 //   restart      restart even when nothing changed (`spotlight restart`)
@@ -479,7 +496,7 @@ async function planAndStart(cx, root, opts) {
   const record = state.repos[root];
   if (!record) return { state: "none" };
   const repoSet = repoSettings(cx.settings, root);
-  const env = envName ?? effectiveEnv(cx, root, record);
+  const env = envName ?? effectiveEnv(cx, root, record, state.envs);
   const chosenVariant = opts.chosenVariant ?? (opts.keepVariant ? record.serverVariant ?? undefined : undefined);
   const plan = await planServer({
     root, workspace, settings: repoSet, env, taskKey, remembered: state.variants, chosenVariant, io: cx.io, git: cx.planGit,
@@ -516,7 +533,9 @@ async function planAndStart(cx, root, opts) {
   if (ifRunning && seen.kind !== "spotlight") return { state: "pending" };
   let r;
   let freed = null;
-  const same = record.serverCommand === plan.command && record.serverEnv === plan.env;
+  // An env picked now changes nothing that runs when its command is the
+  // one running (D32); otherwise another env is a restart (J-002).
+  const same = record.serverCommand === plan.command && (record.serverEnv === plan.env || envName != null);
   if (seen.kind === "spotlight" && !restart && same && pending.length === 0) {
     r = { ok: true, started: false, reason: "already-running", terminal: seen.terminal, pid: seen.pid };
   } else {
@@ -579,6 +598,14 @@ async function planAndStart(cx, root, opts) {
       if (r.pid) rec.serverPid = r.pid;
       rec.variantCandidates = [];
       if (takeover) clearServerError(rec);
+      // D32: an env picked over the same command: that env runs now.
+      if (rec.serverEnv !== plan.env) {
+        rec.serverEnv = plan.env;
+        if (rec.envFailed === plan.env) {
+          delete rec.envFailed;
+          delete rec.envFailedAt;
+        }
+      }
     } else if (!failure) {
       // The old server ignored the Ctrl-C, or never got it, and still runs,
       // in the state it had: no start failed (K3, L1). As over a server
@@ -610,6 +637,72 @@ async function planAndStart(cx, root, opts) {
   // An old server still running is its own state, never a failed start (M3).
   const word = ran ? (r.started ? "started" : "running") : failure ? "failed" : "still-running";
   return { state: word, result: r, plan, freed, ...(failure ? { error: failure } : {}) };
+}
+
+// ── The env per task (D32) ─────────────────────────────────────────────────
+
+// Stores an env pick (`spotlight env`: the lane's pill, the server popup)
+// under `key` (task-env.js: `<groupId>/<KEY>` or ws:<path>) in state.json's
+// `envs`, which keeps the newest ENVS_MAX and survives the turn-off. In the
+// same write it adopts each lit record with no envKey (lit before T22) whose
+// holder's key this is: the record takes the key and drops its envOverride,
+// so the pick governs it from now on (applyEnv restarts it, the reap's drift
+// keeps it). The holders' keys are read before the write: git never runs
+// under the state lock (D7). → { adopted: [root] }
+export async function writeEnv(cx, key, env) {
+  const unkeyed = Object.entries(cx.store.readState().repos).filter(([, r]) => r?.holder && !r.envKey);
+  const keys = [];
+  for (const [root, r] of unkeyed) {
+    keys.push({ root, holder: r.holder, key: envKeyOf(await taskKeyOfWorkspace(r.holder, root, cx.shared), r.holder) });
+  }
+  const adopted = [];
+  await cx.store.updateState((s) => {
+    rememberEnv(s, key, env);
+    for (const k of keys) {
+      const r = s.repos[k.root];
+      if (k.key !== key || !r || r.holder !== k.holder || r.envKey) continue;
+      r.envKey = key;
+      delete r.envOverride;
+      adopted.push(k.root);
+    }
+  });
+  return { adopted };
+}
+
+// Runs the env stored for `key` on every lit repo whose holder has that key
+// (record.envKey), one after another, each under its repo lock and busy
+// while it works (D33, op "env"). An explicit request, as Reiniciar: a
+// failed start or an old server still running toasts. Spotlight's server
+// restarts only when its command changes (ensureServer's envName); an env
+// with no command leaves it as it was. The env is read under the lock, so
+// two picks in a row end in the last one. → { [root]: { env, server } |
+// { error } }, without the repos that stopped holding that key meanwhile.
+export async function applyEnv(cx, key) {
+  const roots = Object.entries(cx.store.readState().repos).filter(([, r]) => r?.holder && r.envKey === key).map(([root]) => root);
+  const results = {};
+  for (const root of roots) {
+    try {
+      const r = await cx.store.withRepoLock(root, async () => {
+        const state = cx.store.readState();
+        const record = state.repos[root];
+        if (!record?.holder || record.envKey !== key) return null;
+        const env = effectiveEnv(cx, root, record, state.envs);
+        const server = await ensureServer(cx, root, {
+          workspace: record.holder,
+          branch: await branchOf(record.holder),
+          // A task's key names its remembered variants; ws:<path> names none.
+          taskKey: key.startsWith("ws:") ? null : key,
+          envName: env,
+          keepVariant: true,
+        });
+        return { env, server };
+      });
+      if (r) results[root] = r;
+    } catch (e) {
+      results[root] = { error: toSpotlightError(e) };
+    }
+  }
+  return results;
 }
 
 // ── A busy port (D23, D24) ─────────────────────────────────────────────────
@@ -965,8 +1058,9 @@ export async function syncRepo(cx, root, { force = false, onlyIf, lockTimeoutMs 
       ensureServer(cx, root, { workspace: holder, branch: await branchOf(holder), keepVariant: true, ifRunning: true, syncing: true });
     // An env to restart into, unless it already couldn't run and settings
     // weren't saved since (M1): every save would send another Ctrl-C.
+    const envs = cx.store.readState().envs;
     const drifted = async () =>
-      !envGaveUp(cx, root, record, cx.store.settingsSavedAt?.() ?? 0) && (await envDrift(cx, root, record));
+      !envGaveUp(cx, root, record, cx.store.settingsSavedAt?.() ?? 0, envs) && (await envDrift(cx, root, record, envs));
     if (result.skipped) {
       if (record.lastError && !isServerError(record.lastError)) {
         await cx.store.updateState((s) => {
@@ -1493,10 +1587,10 @@ export async function reap(cx, { full = true, skip = null } = {}) {
     // that couldn't run isn't tried again from here (J-009) nor by a sync
     // (M1) until settings are saved after that (J-011); Reiniciar, a picked
     // env and a light always do.
-    const gaveUp = envGaveUp(cx, root, rec, savedAt);
+    const gaveUp = envGaveUp(cx, root, rec, savedAt, state.envs);
     if (
       live.owner === "spotlight" && !rec.lastError && !gaveUp &&
-      (await envDrift(cx, root, { ...rec, serverState: live.state }))
+      (await envDrift(cx, root, { ...rec, serverState: live.state }, state.envs))
     ) envSyncs.push(root);
   }
   // G3: the remembered identities that died, read before the synchronous write.

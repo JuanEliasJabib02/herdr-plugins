@@ -16,9 +16,12 @@
 //
 // state.json, schema v1:
 //   { version: 1,
-//     repos: { <root>: emptyRepo() fields, plus envOverride? (the env picked
-//              in the server popup, `spotlight env --env`; it wins over
-//              settings' env until `toggle` off drops the record, J-002),
+//     repos: { <root>: emptyRepo() fields, plus envKey? (D32: the holder's
+//              key in `envs`, written by the light: the env in force is
+//              envs[envKey], else settings' env; task-env.js recordEnv),
+//              envOverride? (retired by D32: the server popup's env before
+//              T22, still read on a record with no envKey until `toggle`
+//              off drops it, never written again),
 //              envFailed? and envFailedAt? (the env a start or restart
 //              couldn't run, and when: the reap doesn't try it again until
 //              settings.json is saved after that, nor a sync, J-009,
@@ -39,7 +42,11 @@
 //                          whole-task toggle running; setTaskBatch,
 //                          clearTaskBatch; absent when none runs) },
 //     notes: [≤ 200 { at, repo, text, toast, action? }],
-//     variants: { <lane>/<taskKey>::<root>: <variant> } }   ≤ 500, oldest dropped first
+//     variants: { <lane>/<taskKey>::<root>: <variant> },   ≤ 500, oldest dropped first
+//     envs?: { <groupId>/<KEY> | ws:<path>: local|dev|prod } }
+//                  D32: every env pick, surviving the turn-off; ≤ 500, the
+//                  oldest dropped first (rememberEnv); absent until the first
+//                  pick, so a state from before it reads and writes as it was
 // A task is keyed `<lane>/<taskKey>` in the queue and lighting (D12).
 // Reading is tolerant: a file that isn't JSON or isn't v1 reads as the empty
 // state and is copied to state.json.corrupt-<ms> before the first write over
@@ -55,10 +62,12 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { withLock, heldLocks, LockError } from "./locks.js";
 import { parseSettings, repoSettings, repoEnabledFrom, normRoot } from "./settings.js";
+import { isEnv } from "./task-env.js";
 
 export const STATE_VERSION = 1;
 export const NOTES_MAX = 200;
 export const VARIANTS_MAX = 500;
+export const ENVS_MAX = 500;
 
 const isObject = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
 
@@ -104,15 +113,19 @@ const isBatchMark = (m) =>
 // workspace, an absolute path or null.
 const isBusyMark = (m) => isBatchMark(m) && (m.workspace === null || (typeof m.workspace === "string" && m.workspace.startsWith("/")));
 
+// A record's env key (D32): a non-empty string.
+const isEnvKey = (k) => typeof k === "string" && k !== "";
+
 // A stored value as a v1 state, or null when it isn't one. Shapes are
 // enforced (repos and lighting entries are objects, requests and notes
 // arrays of objects, at most NOTES_MAX notes, the newest kept; variants a
 // map of non-empty strings, at most VARIANTS_MAX, the last inserted kept;
 // a missing field reads as empty); repo records get emptyRepo()'s missing
-// fields, and lose a busy mark that isn't one; repo keys are normalized
-// (normRoot), a relative one dropped, a root listed twice kept the first
-// time. queue.taskBatch keeps its well-formed entries, and stays absent
-// when the state has none.
+// fields, and lose a busy mark or an envKey that isn't one; repo keys are
+// normalized (normRoot), a relative one dropped, a root listed twice kept
+// the first time. queue.taskBatch keeps its well-formed entries, and stays
+// absent when the state has none; so does envs (D32), a map of envs, at
+// most ENVS_MAX, the last inserted kept.
 export function normalizeState(value) {
   if (!isObject(value) || value.version !== STATE_VERSION) return null;
   const repos = {};
@@ -121,6 +134,7 @@ export function normalizeState(value) {
     if (!key.startsWith("/") || !isObject(record) || key in repos) continue;
     repos[key] = { ...emptyRepo(), ...record };
     if ("busy" in record && !isBusyMark(record.busy)) delete repos[key].busy;
+    if ("envKey" in record && !isEnvKey(record.envKey)) delete repos[key].envKey;
   }
   const q = isObject(value.queue) ? value.queue : {};
   const lighting = {};
@@ -135,7 +149,12 @@ export function normalizeState(value) {
   const notes = (Array.isArray(value.notes) ? value.notes.filter(isObject) : []).slice(-NOTES_MAX);
   const kept = Object.entries(isObject(value.variants) ? value.variants : {}).filter(([, v]) => typeof v === "string" && v !== "");
   const variants = Object.fromEntries(kept.slice(-VARIANTS_MAX));
-  return { ...value, version: STATE_VERSION, repos, queue, notes, variants };
+  const state = { ...value, version: STATE_VERSION, repos, queue, notes, variants };
+  if ("envs" in value) {
+    if (isObject(value.envs)) state.envs = Object.fromEntries(Object.entries(value.envs).filter(([, e]) => isEnv(e)).slice(-ENVS_MAX));
+    else delete state.envs;
+  }
+  return state;
 }
 
 // state.json's text read as { state, valid }: no file (null) is the empty
@@ -173,6 +192,19 @@ export function rememberVariant(state, key, variant) {
   state.variants[key] = variant;
   const keys = Object.keys(state.variants);
   for (const k of keys.slice(0, Math.max(0, keys.length - VARIANTS_MAX))) delete state.variants[k];
+  return state;
+}
+
+// Stores an env pick (D32) under `key` (`<groupId>/<KEY>` or ws:<path>,
+// task-env.js) as the newest entry, Local included: an existing key moves
+// to the end, and the oldest past ENVS_MAX are dropped. Mutates and returns
+// `state`.
+export function rememberEnv(state, key, env) {
+  state.envs ??= {};
+  delete state.envs[key];
+  state.envs[key] = env;
+  const keys = Object.keys(state.envs);
+  for (const k of keys.slice(0, Math.max(0, keys.length - ENVS_MAX))) delete state.envs[k];
   return state;
 }
 

@@ -6,6 +6,7 @@
 //   board             the "Cola de pruebas" popup
 //   settings          the settings dialog
 //   server            a repo's server popup (env, variant, URLs, actions)
+//   env               a task lane's env popup (D32: its env pill)
 // Every view and loop lives in its own file, so tasks never share this one.
 // The engine is the `spotlight` CLI (cli.mjs, never imported here): copies
 // read its state.json and act by exec-ing it.
@@ -16,6 +17,7 @@ import Footer from "./footer.js";
 import Board from "./board.js";
 import SettingsView from "./settings-view.js";
 import ServerView from "./server-view.js";
+import EnvView from "./env-view.js";
 import { startReaper } from "./reaper.js";
 import { startBadges, handleCommand } from "./badges.js";
 import { startAutosync } from "./autosync.js";
@@ -25,6 +27,7 @@ const VIEWS = {
   board: Board,
   settings: SettingsView,
   server: ServerView,
+  env: EnvView,
 };
 
 export default class Spotlight extends View {
