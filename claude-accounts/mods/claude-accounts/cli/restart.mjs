@@ -830,94 +830,89 @@ async function runItem(home, id, t) {
   let found;
   let item;
   let line;
-  // How Claude's last turn ended, when that's what let a switch go.
-  let turn = null;
   // The Claude this loop last saw in the terminal: when it quits on its
   // own, its own session is the one to resume (a /resume or /clear while
   // the item waited changes it).
   let seenClaude = null;
   // 1. Wait for idle, with no cap.
-  waiting: for (;;) {
-    for (;;) {
-      turn = null;
-      const own = await ownItem(home, id);
-      if (!own) return;
-      item = own.item;
-      if (blockedBy(own.doc, item, t)) {
+  for (;;) {
+    const own = await ownItem(home, id);
+    if (!own) return;
+    item = own.item;
+    if (blockedBy(own.doc, item, t)) {
+      await sleep(t.poll);
+      continue;
+    }
+    known = await knownAccounts(home);
+    if (targetDir(known, item.to) === null) {
+      await finish(home, id, "failed", withLine(`account "${item.to}" is gone`, manualLine(item, known)));
+      return;
+    }
+    found = await inspectTerminal(item.terminal, known);
+    if (found.kind === "claude") seenClaude = { account: found.account, sessionId: found.sessionId, configDir: found.configDir, args: keptArgs(found.argv) };
+    if (found.kind === "missing" || found.kind === "notClaude") {
+      if (item.kind === "switch") {
+        // Orca's pending restart: Claude quit on its own (a /exit by hand)
+        // and the shell is back, so the line goes in now, with no stop.
+        // The session's folder, else the target's (projects/ is shared):
+        // the line Claude refuses fails with its own words at step 5.
+        const quit = found.kind === "notClaude" && atShell(found) ? (seenClaude ?? { account: item.from, sessionId: item.sessionId, configDir: configDirOf(known, item.from), args: item.args ?? [] }) : null;
+        if (quit?.sessionId && (await hasTranscript(quit.configDir ?? configDirOf(known, item.to), quit.sessionId))) {
+          line = resumeLine(targetDir(known, item.to), quit.args, quit.sessionId);
+          const stopping = await toStopping(home, id, item, { from: quit.account, sessionId: quit.sessionId, args: quit.args });
+          if (stopping === null) return;
+          if (stopping !== "skip") {
+            item = stopping;
+            break;
+          }
+          continue;
+        }
+        if ((await drop(home, id, item)) === "skip") continue;
+      } else {
+        const why = found.kind === "missing" ? `terminal ${item.terminal} is gone` : `Claude is no longer running in ${item.terminal}`;
+        await finish(home, id, "failed", withLine(why, manualLine(item, known)));
+      }
+      return;
+    }
+    if (found.kind === "claude" && found.account === item.to) {
+      if (item.kind !== "switch") await deliver(home, id, item);
+      else if ((await drop(home, id, item)) === "skip") continue;
+      return;
+    }
+    if (found.ownProgram) {
+      await finish(home, id, "failed", `Claude is terminal ${item.terminal}'s own program: there's no shell to restart it in`);
+      return;
+    }
+    // A switch goes once Claude's own turn is over, as Orca's does: its
+    // background subagents keep it busy, and they're stopped with it (then
+    // named in a message after the resume). Not while blocked on a question.
+    const turn = found.kind === "claude" && item.kind === "switch" && !isIdle(found) && found.state !== "blocked" ? await lastTurn(found.configDir, found.sessionId) : null;
+    if (found.kind === "claude" && (isIdle(found) || turn)) {
+      // Nothing to resume (a /clear nobody has written to yet): Claude stays.
+      if (!(await hasTranscript(found.configDir, found.sessionId))) {
+        await finish(home, id, "failed", noConversation(item.terminal, found.sessionId));
+        return;
+      }
+      const args = keptArgs(found.argv);
+      line = resumeLine(targetDir(known, item.to), args, found.sessionId);
+      const told = item.kind === "switch" ? relaunchMessage(labelOf(known, item.to), found.agents, turn?.backgroundAgents ?? 0) : null;
+      // A new turn may have begun since (a background agent reporting
+      // back): read it once more right before the step that can't be
+      // undone, and keep waiting if so.
+      if (turn && !(await lastTurn(found.configDir, found.sessionId))) {
         await sleep(t.poll);
         continue;
       }
-      known = await knownAccounts(home);
-      if (targetDir(known, item.to) === null) {
-        await finish(home, id, "failed", withLine(`account "${item.to}" is gone`, manualLine(item, known)));
-        return;
+      const stopping = await toStopping(home, id, item, { from: found.account, sessionId: found.sessionId, args, ...(told ? { message: told } : {}) });
+      if (stopping === null) return;
+      if (stopping !== "skip") {
+        item = stopping;
+        break;
       }
-      found = await inspectTerminal(item.terminal, known);
-      if (found.kind === "claude") seenClaude = { sessionId: found.sessionId, configDir: found.configDir, args: keptArgs(found.argv) };
-      if (found.kind === "missing" || found.kind === "notClaude") {
-        if (item.kind === "switch") {
-          // Orca's pending restart: Claude quit on its own (a /exit by hand)
-          // and the shell is back, so the line goes in now, with no stop.
-          const quit = found.kind === "notClaude" && atShell(found) ? (seenClaude ?? { sessionId: item.sessionId, configDir: configDirOf(known, item.from), args: item.args ?? [] }) : null;
-          if (quit?.sessionId && (await hasTranscript(quit.configDir, quit.sessionId))) {
-            line = resumeLine(targetDir(known, item.to), quit.args, quit.sessionId);
-            const stopping = await toStopping(home, id, item, { sessionId: quit.sessionId, args: quit.args });
-            if (stopping === null) return;
-            if (stopping !== "skip") {
-              item = stopping;
-              break;
-            }
-            continue;
-          }
-          if ((await drop(home, id, item)) === "skip") continue;
-        } else {
-          const why = found.kind === "missing" ? `terminal ${item.terminal} is gone` : `Claude is no longer running in ${item.terminal}`;
-          await finish(home, id, "failed", withLine(why, manualLine(item, known)));
-        }
-        return;
-      }
-      if (found.kind === "claude" && found.account === item.to) {
-        if (item.kind !== "switch") await deliver(home, id, item);
-        else if ((await drop(home, id, item)) === "skip") continue;
-        return;
-      }
-      if (found.ownProgram) {
-        await finish(home, id, "failed", `Claude is terminal ${item.terminal}'s own program: there's no shell to restart it in`);
-        return;
-      }
-      // A switch goes once Claude's own turn is over, as Orca's does: its
-      // background subagents keep it busy, and they're stopped with it (then
-      // named in a message after the resume). Not while blocked on a question.
-      if (found.kind === "claude" && item.kind === "switch" && !isIdle(found) && found.state !== "blocked") turn = await lastTurn(found.configDir, found.sessionId);
-      if (found.kind === "claude" && (isIdle(found) || turn)) {
-        // Nothing to resume (a /clear nobody has written to yet): Claude stays.
-        if (!(await hasTranscript(found.configDir, found.sessionId))) {
-          await finish(home, id, "failed", noConversation(item.terminal, found.sessionId));
-          return;
-        }
-        const args = keptArgs(found.argv);
-        line = resumeLine(targetDir(known, item.to), args, found.sessionId);
-        const told = item.kind === "switch" ? relaunchMessage(labelOf(known, item.to), found.agents, turn?.backgroundAgents ?? 0) : null;
-        const stopping = await toStopping(home, id, item, { from: found.account, sessionId: found.sessionId, args, ...(told ? { message: told } : {}) });
-        if (stopping === null) return;
-        if (stopping !== "skip") {
-          item = stopping;
-          break;
-        }
-        continue;
-      }
-      if (item.state !== "waitingIdle" && !(await setState(home, id, "waitingIdle"))) return;
-      await sleep(t.poll);
+      continue;
     }
-    // A new turn may have begun since the last one read as over (a
-    // background agent reporting back): read it once more right before
-    // stopping Claude, and wait again if so.
-    if (turn && !(await lastTurn(found.configDir, found.sessionId))) {
-      if (!(await setState(home, id, "waitingIdle", { message: null }))) return;
-      await sleep(t.poll);
-      continue waiting;
-    }
-    break;
+    if (item.state !== "waitingIdle" && !(await setState(home, id, "waitingIdle"))) return;
+    await sleep(t.poll);
   }
 
   // 2. Stop Claude: SIGTERM to the foreground (probe b4).
