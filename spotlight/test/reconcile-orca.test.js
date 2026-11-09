@@ -749,7 +749,8 @@ test("K3, H2: a takeover whose start fails records its own server error, replaci
   assert.ok(toasts.includes(`root: ${UNREADABLE_START.message}`), JSON.stringify(toasts));
   assert.ok(toasts.includes("Spotlight on · root ← wt2 · el server no arrancó"), JSON.stringify(toasts));
   // Its toast opens the popup, which offers Reintentar (as server-exited);
-  // the server badge is red with its message (server-errors.js serverDown).
+  // the holder's line 2 reads "no arrancó" in red, with its message (D42;
+  // server-errors.js serverDown).
   const toast = state.notes.find((n) => n.text === `root: ${UNREADABLE_START.message}`);
   assert.equal(toast.action?.name, `spotlight.server.${serverId(rec.holder)}`);
   const bin = cliPathOf("/app");
@@ -757,8 +758,8 @@ test("K3, H2: a takeover whose start fails records its own server error, replaci
   const popup = serverViewModel({ state, settings, repo: root, workspace: rec.holder, detection: null, bin });
   assert.deepEqual(popup.actions.map((a) => a.label), ["Ver log", "Reintentar", "Apagar"]);
   const { value } = buildBadges({ state, settings, bin });
-  const server = value[rec.holder].find((b) => b.icon.endsWith("/server.svg"));
-  assert.deepEqual({ tone: server.tone, tooltip: server.tooltip }, { tone: "blocked", tooltip: UNREADABLE_START.message });
+  const down = value[rec.holder].find((b) => b.line === 2);
+  assert.deepEqual({ text: down.text, tone: down.tone, tooltip: down.tooltip }, { text: "no arrancó", tone: "blocked", tooltip: UNREADABLE_START.message });
 });
 
 test("K3, H2, L3: the same holder lit again whose start fails records its own server error over the one it had, under a root error too; a light toasts it every time", async () => {

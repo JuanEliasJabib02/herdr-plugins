@@ -4,7 +4,11 @@
 // runs it (main.js): startBadges keeps the value in step with state.json
 // (board.js watchState, whose readings also feed auto-sync's holders),
 // settings.json and projects-sidebar's lists, and writes it only when it
-// changes (setShared re-renders every mod). badges-model.js builds it.
+// changes (setShared re-renders every mod). badges-model.js builds it,
+// told the time (D42: the holder's "Sincronizado hace <n> min", so a lit
+// repo's value changes, and is written, once a minute) and each lit root's
+// variants (D42: the holder's variant tag), detected from its package.json
+// as the server popup does (server-view.js) and kept as D7's facts are.
 // From the same readings it publishes `menus.spotlight` (D30): Spotlight's
 // items in projects-sidebar's workspace menu (Proyectar este workspace /
 // Apagar Spotlight, Forzar sync, Entorno de Spotlight ▸), built by
@@ -23,7 +27,7 @@
 import { shared, setShared, appHome, home, readTextFile, notify } from "herdr";
 import * as fs from "fs/promises";
 import { repoSettings, repoEnabledFrom, normRoot } from "./settings.js";
-import { hasServerCommand } from "./server-plan.js";
+import { hasServerCommand, detectServerScripts } from "./server-plan.js";
 import { cliPathOf } from "./board-model.js";
 import { readFiles, watchState, openServer } from "./board.js";
 import { buildBadges, nextPublish, parseProjects, parseCache, attempt, taskModeGroups } from "./badges-model.js";
@@ -47,6 +51,9 @@ let lanes = {};
 // root → { at, envs, gitRepo, hasCommand }: D7's facts for a repo with no
 // `enabled` value.
 const facts = new Map();
+// root → { at, variants }: a lit root's dev:<v> apps (D42), kept FACTS_TTL_MS
+// like D7's facts, so a refresh doesn't read package.json each time.
+const variantFacts = new Map();
 
 export function startBadges(cx) {
   watchState(cx, {
@@ -93,6 +100,27 @@ async function enabledRoots(projects, settings) {
   return out;
 }
 
+// The variants of each root state.json has lit (a record with a holder),
+// whatever its `enabled` setting: { [root]: [variant] }, a repo with none
+// left out. Detected in the root, which holds the holder's tree, as the
+// server popup does (server-view.js detect); unreadable is none.
+async function litVariants(state) {
+  const io = modIo({ readTextFile, readdir: fs.readdir });
+  const now = Date.now();
+  const out = {};
+  for (const [root, record] of Object.entries(state?.repos ?? {})) {
+    if (typeof record?.holder !== "string" || !record.holder.startsWith("/")) continue;
+    let f = variantFacts.get(root);
+    if (!f || now - f.at > FACTS_TTL_MS) {
+      const detection = await attempt(() => detectServerScripts(root, io), null);
+      f = { at: now, variants: Array.isArray(detection?.variants) ? detection.variants : [] };
+      variantFacts.set(root, f);
+    }
+    if (f.variants.length > 0) out[root] = f.variants;
+  }
+  return out;
+}
+
 // Builds the badges and the workspace menu items from the last readings and
 // publishes each if it changed. The task lanes of every group organized by
 // Task get theirs too (D29, D31), whichever group projects-sidebar shows: a
@@ -105,7 +133,8 @@ async function refresh() {
   const cache = parseCache(shared("projects.cache.v1"));
   const enabled = await enabledRoots(projects, settings);
   const bin = cliPathOf(appHome());
-  const built = buildBadges({ state, settings, projects, cache, enabled, bin, taskGroups: taskModeGroups(registry) });
+  const variants = await litVariants(state);
+  const built = buildBadges({ state, settings, projects, cache, enabled, bin, taskGroups: taskModeGroups(registry), now: Date.now(), variants });
   servers = built.servers;
   lanes = built.lanes;
   const out = nextPublish(shared(KEY), built.value);
