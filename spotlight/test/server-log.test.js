@@ -374,6 +374,30 @@ test("startFailure: other address-in-use wordings and where their port is; npm's
   assert.ok(long.length <= 160 && long.endsWith("…"), long);
 });
 
+test("startFailure (R2): Next's and Vite's \"Port N is in use, trying …\" warnings are no busy-port death; the real error line wins", () => {
+  // Next before 15 moved to 3001, then died of something else.
+  assert.deepEqual(
+    startFailure(" ⚠ Port 3000 is in use, trying 3001 instead.\n ▲ Next.js 14.2.3\nError: Cannot find module 'left-pad'\n"),
+    { kind: "exited", line: "Error: Cannot find module 'left-pad'" },
+  );
+  // Next 16's wording (next/dist/server/lib/start-server.js), both forms.
+  assert.deepEqual(
+    startFailure(" ⚠ Port 3000 is in use by process 4242, using available port 3001 instead.\nSyntaxError: Unexpected token ';'\n"),
+    { kind: "exited", line: "SyntaxError: Unexpected token ';'" },
+  );
+  assert.deepEqual(
+    startFailure(" ⚠ Port 3000 is in use by an unknown process, using available port 3001 instead.\nError: boom\n"),
+    { kind: "exited", line: "Error: boom" },
+  );
+  // Vite moved on and the next port was taken for real: that line decides, with its port.
+  assert.deepEqual(
+    startFailure("Port 5173 is in use, trying another one...\nError: listen EADDRINUSE: address already in use :::5174\n"),
+    { kind: "addr-in-use", port: 5174, line: "Error: listen EADDRINUSE: address already in use :::5174" },
+  );
+  // Vite's strictPort error still is one.
+  assert.equal(startFailure("Port 5173 is in use, trying another one...\nError: Port 5174 is already in use\n").port, 5174);
+});
+
 test("logSinceLastStart: a marker far back in a big log is still found; a log with no marker, or no log, is null", () => {
   const filler = Array.from({ length: 6000 },(_, i) => `${ESC}[2mcompiling module ${i}${ESC}[22m\r\n`).join("");
   const big = logFile(`${"old output\r\n".repeat(10)}${marker()}${filler}Error: Cannot find module 'left-pad'\r\n`);

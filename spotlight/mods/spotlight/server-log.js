@@ -16,6 +16,7 @@ import {
 import { homedir } from "node:os";
 import { join, dirname, basename } from "node:path";
 import { createHash } from "node:crypto";
+import { validPort } from "./ports.js";
 
 // Orca's mirror bounds: once the log passes MAX, keep its last KEEP bytes.
 export const MAX_LOG_BYTES = 4 * 1024 * 1024;
@@ -247,6 +248,11 @@ const ECHO_RE = /^> /;
 // A port someone else holds: Node's EADDRINUSE, the OS's words (uvicorn,
 // Rails), Vite's strictPort.
 const ADDR_IN_USE_RE = /EADDRINUSE|address already in use|\bport \d+ is (?:already )?in use/i;
+// A server that found its port taken and moved on to another: Next's "Port
+// 3000 is in use, trying 3001 instead." (16: "… is in use by process 4242,
+// using available port 3001 instead."), Vite's "Port 5173 is in use, trying
+// another one...". A warning, not why it died.
+const PORT_MOVED_RE = /\bport \d+ is in use\b.*\b(?:trying|using)\b/i;
 // A line that says what went wrong.
 const ERROR_LINE_RE =
   /\b[A-Za-z]*Error\b|\bERR!|\bERR_[A-Z]|\bfatal\b|\bfailed\b|\bexception\b|\bpanic\b|\bTraceback\b|\bcannot\b|\bcan't\b|command not found|no such file or directory/i;
@@ -305,9 +311,10 @@ export function logSinceLastStart(logPath) {
 
 const shown = (line) => (line.length <= MAX_LINE_SHOWN ? line : `${line.slice(0, MAX_LINE_SHOWN - 1)}…`);
 
-const validPort = (text) => {
+// The port in `text` (digits), or null when it isn't one (ports.js validPort).
+const portNumber = (text) => {
   const n = Number(text);
-  return Number.isInteger(n) && n > 0 && n <= 65535 ? n : null;
+  return validPort(n) ? n : null;
 };
 
 // The port an address-in-use line names ("port 5173", ":::3008",
@@ -316,11 +323,11 @@ const validPort = (text) => {
 // neither says.
 function portOf(line, rest) {
   const word = /\bport\s+(\d{1,5})\b/i.exec(line);
-  if (word) return validPort(word[1]);
+  if (word) return portNumber(word[1]);
   const colon = [...line.matchAll(/:(\d{1,5})(?!\d)/g)].at(-1);
-  if (colon) return validPort(colon[1]);
+  if (colon) return portNumber(colon[1]);
   const field = /\bport:?\s+(\d{1,5})\b/i.exec(rest);
-  return field ? validPort(field[1]) : null;
+  return field ? portNumber(field[1]) : null;
 }
 
 // Why a start died, from the plain text it printed (textSinceLastStart):
@@ -328,13 +335,14 @@ function portOf(line, rest) {
 //                                        when the text doesn't say which)
 //   { kind: "exited", line }             anything else: its first error
 //                                        line, else its last line, else null
-// The CLI's headers and npm's "> " echoes are never the line.
+// The CLI's headers and npm's "> " echoes are never the line, and a server
+// that moved to another port (PORT_MOVED_RE) didn't die of a busy one.
 export function startFailure(text) {
   const lines = String(text ?? "")
     .split("\n")
     .map((l) => l.trim())
     .filter((l) => l && !HEADER_RE.test(l) && !ECHO_RE.test(l));
-  const busy = lines.findIndex((l) => ADDR_IN_USE_RE.test(l));
+  const busy = lines.findIndex((l) => ADDR_IN_USE_RE.test(l) && !PORT_MOVED_RE.test(l));
   if (busy !== -1) {
     return { kind: "addr-in-use", port: portOf(lines[busy], lines.slice(busy + 1).join("\n")), line: shown(lines[busy]) };
   }

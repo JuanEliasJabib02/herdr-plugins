@@ -83,6 +83,7 @@ Orca leaves such a server "stopped" with nothing said; here it is an error.
 - When the server state is `starting` and the terminal's shell is back at its prompt with no port, the server died at start. The reap and `spotlight on` decide it under the repo lock (a busy lock leaves it for the next reap, so a restart in flight is never taken for a death).
 - `server-log.js` reads the log after the last `── Spotlight: … · started: … ──` marker, ANSI stripped:
   - `EADDRINUSE`, "address already in use" or Vite's "Port N is already in use" → `port-busy` (the shape above), naming the process that still listens there, or "El puerto 3008 estaba ocupado al arrancar el server." when none does.
+  - A server that found its port taken and moved to another didn't die of it: Next's "Port 3000 is in use, trying 3001 instead." (Next 16: "… is in use by process 4242, using available port 3001 instead.") and Vite's "Port 5173 is in use, trying another one..." are warnings, never `port-busy`. The error line after them decides, an `EADDRINUSE` on the next port included.
   - Anything else → `lastError {code: "server-exited", message: "El server se cayó al arrancar: <first error line>"}` (npm's `> ` echo lines skipped, the last line when no line looks like an error, cut at 160 characters).
 - One toast per error, opening the server popup; the popup's first buttons read Ver log (the server terminal) and Reintentar (`restart`); the server badge is red with the message as tooltip. `spotlight on` stops waiting and prints the line.
 - Only a change into `listening` clears it; a sync keeps it.
@@ -91,18 +92,24 @@ Orca leaves such a server "stopped" with nothing said; here it is an error.
 
 Turn-off (`toggle` off, Apagar, Apagar igual) always leaves the server dead (D26). Orca stops at the Ctrl-C (`spotlight-server-turn-off.ts:48-65`). Here the Ctrl-C comes first too, and is usually all it takes: live on 2026-11-08, a Next server (script → sh pnpm → pnpm → next → next-server) died whole on it. The rest is a safety net for a child that ignores SIGINT, or one that leaves the tree when the Ctrl-C takes its parent.
 
-- Before the Ctrl-C, `server.js` `stopServer` reads the server: the process tree under the terminal's shell, the ports that tree listens on, and every listener on those ports.
-- After it, the stop waits up to 8 s for the prompt to come back and these leftovers to be gone:
-  - The shell's children read before the Ctrl-C, each with everything under it.
-  - A listener read before the Ctrl-C, still on one of those ports, now outside the tree, running inside the root (`lsof -a -p <pid> -d cwd`): a child that escaped the tree. One running outside the root is never a leftover, and neither is one in a folder that only shares the root's name as a prefix.
-- Leftovers still there after the 8 s are killed: SIGTERM, up to 3 s, then SIGKILL.
+- Before the Ctrl-C, `server.js` `stopServer` reads the server:
+  - Every process under the server's own process (the `script` Spotlight typed, which leads the terminal), each with its start time and command (`ps -o pid=,ppid=,stat=,lstart=`, `ps -o pid=,command=`). The start time is compared as `ps` prints it, never parsed: its words follow the locale. The `script` must be the shell's child and every process below it its parent's child, as `ps` reads them; a pid that changed hands between the reads is left out.
+  - The ports those processes listen on, plus the ports recorded for the server.
+  - Who else listens on those ports from outside the terminal, each with its start time.
+- The terminal's shell is no part of the server, and neither are its own helpers (powerlevel10k's gitstatusd, a zsh-async worker, a job put in the background): they are never waited on and never signalled.
+- After the Ctrl-C, the stop waits up to 8 s for the prompt to come back and these leftovers to be gone:
+  - A process of the server that still runs as the same process (same pid, same start time, not a zombie), wherever it went. One the Ctrl-C reparented to launchd counts, even if it listens on nothing: spotlight-lab's `rama-terca` runs `(trap '' INT TERM HUP; exec sleep 900) &` next to `next dev`, and that `sleep` is killed. A pid another process took since (another start time) is never a leftover.
+  - A listener read before the Ctrl-C, outside the terminal, still on one of those ports and running inside the root (`lsof -a -p <pid> -d cwd`): a server child that escaped an earlier run. One running outside the root is never a leftover, and neither is one in a folder that only shares the root's name as a prefix.
+- Leftovers still there after the 8 s are killed together with whatever runs under them now: SIGTERM, up to 3 s, then SIGKILL. A zombie counts as gone.
 - The server log says which: "Spotlight off — server stopped (interrupt sent)" or "Spotlight off — server stopped (forced: 2 processes)".
+- A process still alive after the SIGKILL (not ours to signal, or stuck in the kernel) means the server did not die (S17): the stop fails with `reason: "survived"` and the survivors' pids, and the log says "Spotlight off — server NOT stopped: 1 processes survived (pids 4242)".
+- With the prompt already free (the server had stopped on its own), or no server terminal at all, nothing is interrupted, but a listener on a recorded port running inside the root is still killed, at once. The result lists it under `escaped` and the log says "(forced: 1 processes)".
 - Never killed:
-  - The terminal and its shell. The terminal stays for the next start, as in Orca.
+  - The terminal, its shell and the shell's helpers. The terminal stays for the next start, as in Orca.
   - The CLI itself: a leftover whose tree holds it is left alone.
   - Anything that started after the Ctrl-C, such as a restart typed into the terminal during the wait or a server started by hand in the root. Only processes read before the Ctrl-C are ever leftovers. Spotlight's own starts and restarts can't land in the wait anyway: the stop runs under the repo's lock, which every start takes.
-- A free prompt, a process Spotlight didn't start, or no terminal: nothing is sent or killed.
-- The pieces are `ports.js` (`serverSnapshot`, `serverLeftovers`, `stopLeftovers` over T13's `stopProcessTree`) and `server.js` (`stopServer`).
+- A process Spotlight didn't start in front of the terminal: nothing is sent or killed.
+- The pieces are `ports.js` (`serverSnapshot`, `serverLeftovers`, `stopLeftovers`, which share T13's TERM-then-KILL with `stopProcessTree`) and `server.js` (`stopServer`).
 
 ## A root Orca's Spotlight holds
 
