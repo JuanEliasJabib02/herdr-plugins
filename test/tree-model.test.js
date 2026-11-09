@@ -92,6 +92,23 @@ test("open: two spaces on one workspace, the shown one is the one a click select
   assert.equal(ws(tree({ spaces: [spaces[0], { ...spaces[1], active: false }] }), "develop").space, "s1");
 });
 
+test("asleep (workspace-sleep D3): no space, or every space with all its tabs settled; one awake tab or space wakes it", () => {
+  const settled = (id, folder, extra = {}) => space(id, folder, { tabs: [tab(`${id}-t1`, { settled: true }), tab(`${id}-t2`, { settled: true, active: false })], ...extra });
+  assert.equal(ws(tree(), "develop").asleep, true, "never opened: asleep, as Orca infers it");
+  assert.equal(ws(tree({ spaces: [space("s1", "/code/api")] }), "develop").asleep, false, "a space with a live tab");
+  assert.equal(ws(tree({ spaces: [settled("s1", "/code/api")] }), "develop").asleep, true, "every tab put away");
+  const half = space("s1", "/code/api", { tabs: [tab("s1-t1", { settled: true }), tab("s1-t2", { settled: false, active: false })] });
+  assert.equal(ws(tree({ spaces: [half] }), "develop").asleep, false, "one tab still out");
+  assert.equal(ws(tree({ spaces: [settled("s1", "/code/api"), space("s2", "/code/api/src")] }), "develop").asleep, false, "another space on it is awake");
+  assert.equal(ws(tree({ spaces: [space("s1", "/code/api", { tabs: [] })] }), "develop").asleep, false, "a space with no tabs listed isn't taken as asleep");
+});
+
+test("asleep (workspace-sleep D3): the main checkout sleeps too, and an agent needing attention keeps its status", () => {
+  const settled = space("s1", "/code/app", { status: "done", tabs: [tab("s1-t1", { settled: true })] });
+  const main = ws(tree({ spaces: [settled] }), "main");
+  assert.deepEqual([main.asleep, main.main, main.status, main.open], [true, true, "done", true]);
+});
+
 test("click (D8): an open workspace selects its space, a closed one opens a space named by its label", () => {
   const t = tree({ spaces: [space("s1", "/code/app", { active: true })] });
   assert.deepEqual(openAction(ws(t, "main")), { name: "space.select", args: { id: "s1" } });

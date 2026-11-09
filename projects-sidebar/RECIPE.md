@@ -25,15 +25,22 @@ across repos.
     workspace) that brightens on hover.
   - Workspace rows: 28 px, indented 26 px.
     - Leading icon: the agent's status mark while one of its spaces is
-      working, blocked or done; otherwise a home icon on the main checkout and
-      a branch icon on the others.
+      working, blocked or done; otherwise a moon when the workspace is
+      asleep, a home icon on the main checkout and a branch icon on the
+      others.
+    - Asleep (Orca's moon): no space shows the workspace, or every space on
+      it has all its tabs put away (`tab.settle`, `settled` on each tab).
+      The tree doesn't care who put them away. The moon's tooltip says
+      "Sleeping", the label and icons are `dim`, there's no dot, and the
+      main checkout keeps its home icon after the label.
     - Label: the branch on the main checkout. On the others, the branch's
       last segment (`user/feat-x` → `feat-x`), or the folder name when
-      detached. It is bright when the workspace has a space.
+      detached. It is bright when the workspace has a space, `muted` with
+      none, and `dim` while asleep.
     - After the label, other plugins' badges, if any (see Badges from
       other plugins).
-    - A dot on the right when a space is open there: `accent` while shown,
-      `muted` otherwise.
+    - A dot on the right when a space is open there and it isn't asleep:
+      `accent` while shown, `muted` otherwise.
     - The shown workspace has a `selected` background.
   - Agent rows: 24 px, under their workspace. Each shows the program's icon,
     the agent's title, and the time since its tab changed ("2m").

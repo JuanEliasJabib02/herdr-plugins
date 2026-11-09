@@ -70,9 +70,18 @@ export function ago(ms) {
 
 // ── The tree ───────────────────────────────────────────────────────────────
 
+// A space nobody can see: every tab of it put away (`tab.settle`). A space
+// with no tabs listed isn't taken as one.
+function putAway(s) {
+  const tabs = s.tabs ?? [];
+  return tabs.length > 0 && tabs.every((t) => t.settled === true);
+}
+
 // A project's workspaces, from its worktree list (projects.cache.v1) and the
 // spaces matchSpaces() put on each. `space` is the one a click selects: the
-// shown one, else the first.
+// shown one, else the first. `asleep` (Orca's moon, workspace-sleep D3): no
+// space shows it, or every space on it is put away; nothing here knows who
+// put it away.
 export function workspacesOf(list, { matches, spaces, agents, tabs, now }) {
   return (list ?? []).map((c) => {
     const path = normPath(c.path);
@@ -86,6 +95,7 @@ export function workspacesOf(list, { matches, spaces, agents, tabs, now }) {
       label: workspaceLabel({ ...c, path }),
       space: shown?.id ?? null,
       open: on.length > 0,
+      asleep: on.every(putAway),
       selected: on.some((s) => s.active),
       status: mostUrgent(on.map((s) => s.status)),
       agents: (agents ?? []).filter((a) => ids.has(a.space)).map((a) => {

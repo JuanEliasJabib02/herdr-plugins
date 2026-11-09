@@ -345,11 +345,16 @@ function projectRow(p, t) {
 
 // A workspace: home (main checkout) or branch icon, or its agent's status in
 // that place; other plugins' badges after the label (D38); the open dot when
-// it has a space; highlighted when shown.
+// it has a space; highlighted when shown. Asleep (workspace-sleep D3, Orca's
+// moon): a moon in that place unless an agent needs attention, the label and
+// icons dimmed, no dot, and the main checkout's home after the label.
 function workspaceRow(w, t, badges) {
   const width = badgeMaxWidth(badges.length);
   const busy = Boolean(w.status) && w.status !== "idle";
-  const lead = busy ? statusMark(w.status, t) : svg(icon(w.main ? "home" : "branch")).size(13).flex_none().text_color(t.dim);
+  const moon = w.asleep && !busy;
+  const lead = busy ? statusMark(w.status, t)
+    : moon ? div().id(`m:${w.path}`).flex_none().tooltip("Sleeping").child(svg(icon("moon")).size(13).text_color(t.dim))
+    : svg(icon(w.main ? "home" : "branch")).size(13).flex_none().text_color(t.dim);
   return h_flex().id(`w:${w.path}`).h(28).flex_none().pl(26).pr(8).gap(8).items_center().rounded(8)
     .cursor_pointer()
     .when(w.selected, (el) => el.bg(t.selected))
@@ -362,12 +367,13 @@ function workspaceRow(w, t, badges) {
       openWorkspaceMenu(w.project, w.path);
     })
     .child(h_flex().w(14).flex_none().items_center().justify_center().child(lead))
-    .child(div().flex_1().min_w(0).truncate().text_color(w.open ? t.foreground : t.muted).child(w.label))
+    .child(div().flex_1().min_w(0).truncate().text_color(w.asleep ? t.dim : w.open ? t.foreground : t.muted).child(w.label))
+    .when(moon && w.main, (el) => el.child(svg(icon("home")).size(12).flex_none().text_color(t.dim)))
     .when(badges.length > 0, (el) => el.child(h_flex().flex_none().gap(BADGE_GAP).items_center()
       .children(badges.map((b) => badge(w, b, width, t)))))
     // Task mode: no project row above names it (Orca's project label).
     .when(Boolean(w.projectName), (el) => el.child(div().flex_none().max_w(110).truncate().text_size(11.5).text_color(t.dim).child(w.projectName)))
-    .when(w.open, (el) => el.child(div().size(6).flex_none().rounded(3).bg(w.selected ? t.accent : t.muted)));
+    .when(w.open && !w.asleep, (el) => el.child(div().size(6).flex_none().rounded(3).bg(w.selected ? t.accent : t.muted)));
 }
 
 // Another plugin's badge on a workspace row (D38): its icon and/or text in
