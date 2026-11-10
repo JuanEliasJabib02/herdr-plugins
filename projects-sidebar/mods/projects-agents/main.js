@@ -2,8 +2,9 @@
 // LICENSE in this folder), made the way `mod.clone` makes one: its sort menu
 // opens this mod's own overlay. Changed from Herdr's version: only the
 // working mark, which draws the projects tree's Claude glyphs in Claude's
-// orange (status() below) instead of Herdr's spinner. Herdr never updates
-// this copy.
+// orange (status() below) instead of Herdr's spinner; and a last "Sleeping"
+// section with the Claudes agent-sleep put to sleep (sleeping-model.js).
+// Herdr never updates this copy.
 
 // Agents in grouped or priority views; parents take their most urgent sub-agent's place.
 // A viewed done agent stays in Done until left.
@@ -11,6 +12,7 @@
 import { View, div, image, svg } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
 import { agents, terminals, panes, focused, spaces, run, theme, shared, setShared, setAgentOrder, openOverlay, closeOverlay, props, window, layout } from "herdr";
+import { ASLEEP_KEY, clean, sleepingRows } from "./sleeping-model.js";
 
 // The same marks as mods/projects/tree.js: Claude's own working glyphs, run
 // natively by frames() (spin() stutters), in the fill of Herdr's claude.svg.
@@ -37,8 +39,6 @@ function toggleSidebar() {
   setShared("sidebar.collapsed", !narrow());
   run("layout.resize", { id: "sidebar", px: narrow() ? (shared("sidebar.width") ?? 268) : window()?.platform === "macos" ? 76 : 44 });
 }
-
-const clean = (s) => (s ?? "").replace(/^[^\p{L}\p{N}]+/u, "").trim();
 
 function leadPanes(all) {
   const leads = new Map();
@@ -294,8 +294,12 @@ export default class Agents extends View {
     // agent's own title, never an automatic tab number unless two rows would
     // otherwise read the same.
     // Read the pane snapshot once: every host read copies the whole list into JS.
-    const leads = leadPanes(panes());
-    const tabLabels = new Map(spaces().flatMap(s => s.tabs).map(tab => [tab.id, title(tab, leads.get(tab.id))]));
+    const paneList = panes();
+    const spaceList = spaces();
+    const leads = leadPanes(paneList);
+    const tabLabels = new Map(spaceList.flatMap(s => s.tabs).map(tab => [tab.id, title(tab, leads.get(tab.id))]));
+    // The Claudes agent-sleep put to sleep, for the last section (not in the rail).
+    const sleeping = collapsed ? [] : sleepingRows({ value: shared(ASLEEP_KEY), terminals: all, panes: paneList, spaces: spaceList, agents: this.listed, tabLabels });
     const labels = new Map(list.map(a => [a.address, tabLabels.get(a.tab) ?? (a.title || a.program?.name || "")]));
     const label = (a) => labels.get(a.address);
     const detail = new Map(list.map(a => [a.address, /^\d+$/.test(label(a)) ? null : label(a)]));
@@ -380,8 +384,32 @@ export default class Agents extends View {
         .child(this.status(t, a, byPriority && !isPinned));
     };
 
+    // A sleeping Claude's row, as an agent's in Priority: "space · title", how
+    // long it has slept, the moon where the agent's icon goes. Opening its tab
+    // is what wakes it (agent-sleep), its whole workspace if it slept with it.
+    const sleepRow = (s) => h_flex()
+      .id(`zz-${s.address}`)
+      .px(8)
+      .h(30)
+      .flex_none()
+      .rounded(8)
+      .items_center()
+      .gap(9)
+      .cursor_pointer()
+      .hover((st) => st.bg(t.hover))
+      .tooltip("Asleep · opening it wakes Claude")
+      .on_click(() => run("pane.focus", { pane: s.pane }))
+      .when(Boolean(s.icon), (el) => el.child(svg(s.icon).size(16).flex_none().text_color(t.dim)))
+      .child(h_flex().flex_1().min_w(0).gap(5).items_center()
+        .child(div().min_w(0).max_w(s.space && s.detail ? 120 : 200).truncate().text_color(t.muted).child(s.space || s.detail || s.address))
+        .when(Boolean(s.space && s.detail), (el) => el.child(div().flex_1().min_w(0).truncate().text_color(t.dim).child(`· ${s.detail}`))))
+      .child(div().flex_none().text_size(11).text_color(t.dim).child(duration(now - s.since)))
+      // Where the agents' status mark goes, so the times line up.
+      .child(div().size(7).mx(3).flex_none());
+
     // Groups in list order: spaces (grouped) or priority sections. Agents of a
     // space are next to each other in agents(), so neighbours make a group.
+    // Sleeping goes last in both, and always says how many.
     const groups = pinned.length ? [{ id: "pinned", label: "Pinned", status: null, members: pinned }] : [];
     for (const a of rest) {
       const r = rankOf(a) || RANK.idle;
@@ -389,6 +417,7 @@ export default class Agents extends View {
       if (groups.at(-1)?.id === id) groups.at(-1).members.push(a);
       else groups.push({ id, label: byPriority ? SECTION[r] : a.space_name || "", status: byPriority ? SECTION_STATUS[r] : null, members: [a] });
     }
+    if (sleeping.length) groups.push({ id: "sleeping", label: "Sleeping", status: null, members: sleeping, sleeping: true });
 
     // A group's header; it folds the group. Folded, it says how many and the most urgent state.
     const header = (g) => {
@@ -411,7 +440,7 @@ export default class Agents extends View {
           cx.notify();
         })
         .child(div().truncate().text_color(t[g.status] ?? t.dim).child(g.label))
-        .when(byPriority || !open, (el) => el.child(div().text_color(t.dim).child(String(g.members.length))))
+        .when(byPriority || !open || g.sleeping === true, (el) => el.child(div().text_color(t.dim).child(String(g.members.length))))
         .child(div().flex_1())
         .when(!open, (el) => el
           .when(!byPriority && top && top !== "idle", (el) => el.child(this.status(t, { status: top }, true)))
@@ -419,7 +448,7 @@ export default class Agents extends View {
     };
     const rows = collapsed
       ? list.flatMap(withKids)
-      : groups.flatMap((g) => [header(g), ...(this.folded.has(g.id) ? [] : g.members.flatMap(withKids))]);
+      : groups.flatMap((g) => [header(g), ...(this.folded.has(g.id) ? [] : g.sleeping ? g.members.map(sleepRow) : g.members.flatMap(withKids))]);
 
     return v_flex()
       .size_full()
@@ -451,7 +480,7 @@ export default class Agents extends View {
             ),
         ),
       )
-      .when(list.length === 0 && !collapsed, (el) =>
+      .when(list.length === 0 && sleeping.length === 0 && !collapsed, (el) =>
         el.child(div().px(12).text_size(12).text_color(t.dim).child("No agent status yet. Agents show up here when they report their status. Older versions and agents inside tmux may not.")),
       )
       .child(v_flex().id("ag-list").flex_1().min_h(0).px(collapsed ? 0 : 8).overflow_y_scrollbar().mode("always").children(rows))

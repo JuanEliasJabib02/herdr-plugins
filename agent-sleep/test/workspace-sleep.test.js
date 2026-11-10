@@ -274,12 +274,14 @@ test("a workspace already going to sleep isn't slept again", async () => {
 
 test("Claudes: an idle one gets `hc send --if idle … /exit` and ends with an asleep record by: manual; the entry ends asleep", async () => {
   const { w, co } = await ready();
+  w.core.t1.title = "Lector de md";
   await sleepShown(co, w);
   assert.equal(exits(w).length, 0, "nothing stops in the pulse that settles");
   await step(co, w);
   assert.deepEqual(exits(w).map((s) => [s.address, s.opts]), [["t1", ["--if", "idle"]]]);
   assert.equal(records(w).t1.state, "stopping");
   assert.equal(records(w).t1.by, "manual");
+  assert.equal(records(w).t1.title, "Lector de md", "the Sleeping row's title");
   assert.equal(Object.hasOwn(records(w).t1, "wake"), false, "it wasn't working");
   exitClaude(w, "t1");
   await steps(co, w, 5);

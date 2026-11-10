@@ -593,10 +593,22 @@ across repos.
 - **Mod `mods/projects-agents/`:** a copy of Herdr 0.1.13's shipped
   `agents` mod, made the way `mod.clone` makes one (`mod.json` records
   `cloned_from: { name: "agents", version: "0.1.13" }`, and the sort menu
-  opens `projects-agents`'s own overlay). The only change: a working agent's
-  mark is the projects tree's glyphs in Claude's orange instead of Herdr's
-  spinner. Herdr never updates this copy, so a newer Herdr's changes to its
-  agents list don't reach it. Herdr's Apache 2.0 license is in the folder.
+  opens `projects-agents`'s own overlay). Two changes:
+  - a working agent's mark is the projects tree's glyphs in Claude's orange
+    instead of Herdr's spinner;
+  - a last section, **Sleeping**, lists the Claudes agent-sleep put to sleep
+    and will resume, newest first, in both sorts and never in the rail. A
+    terminal with no sleeping Claude never shows there. A row reads "space ·
+    title" (the title Claude had when it went to sleep, else its named tab),
+    with the moon where the agent's icon goes and how long it has slept. A
+    click opens its tab, which wakes it, and its whole workspace if it slept
+    with it. The list comes from agent-sleep's `agent-sleep.asleep` shared
+    key (`sleeping-model.js`); a row whose terminal is gone, has no pane or
+    runs an agent again is left out. Without agent-sleep the section never
+    shows.
+
+  Herdr never updates this copy, so a newer Herdr's changes to its agents
+  list don't reach it. Herdr's Apache 2.0 license is in the folder.
 - **Mod `mods/projects/`** (`mod.json` `{ "place": "none" }`), one mod in
   views picked by `props.view`:
   - none = `tree.js` (the tree);

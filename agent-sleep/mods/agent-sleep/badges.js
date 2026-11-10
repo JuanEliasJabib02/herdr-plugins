@@ -93,6 +93,25 @@ export function badgeValue({ records, modFolder, formatTime = clock, slept = nul
   return value;
 }
 
+// projects-agents' "Sleeping" section: every Claude this mod stopped and
+// will resume ("asleep" records; a workspace put to sleep as a whole has its
+// Claudes here too), newest first. `title` is the one Claude gave its
+// terminal when it went to sleep (the shell that came back sets its own), or
+// null. Under ASLEEP_KEY, published like the moon: only when it changes.
+export const ASLEEP_KEY = "agent-sleep.asleep";
+
+export function asleepValue({ records, modFolder }) {
+  const claudes = [];
+  for (const [address, r] of Object.entries(records ?? {})) {
+    if (!r || r.state !== "asleep" || !Number.isFinite(r.at)) continue;
+    const title = typeof r.title === "string" && r.title.trim() !== "" ? r.title.trim() : null;
+    claudes.push({ address, title, since: r.at });
+  }
+  claudes.sort((a, b) => b.since - a.since || (a.address < b.address ? -1 : a.address > b.address ? 1 : 0));
+  const icon = iconPath(modFolder);
+  return { ...(icon ? { icon } : {}), claudes };
+}
+
 // Values are built with sorted keys and fixed field order, so text equality
 // is value equality.
 export function sameValue(a, b) {
