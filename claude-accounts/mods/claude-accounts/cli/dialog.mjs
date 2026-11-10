@@ -25,9 +25,11 @@
 // dialog Claude quit from: the caller reads only a terminal whose
 // foreground isn't its shell.
 //
-// dialogQuestion(screen): the first non-empty line under the screen's last
-// border, trimmed, when below that border there is a dialog cursor and an
-// "Enter to confirm" line under it; null otherwise.
+// dialogQuestion(screen): when below the screen's last border there is a
+// dialog cursor and an "Enter to confirm" line under it, the dialog's
+// question: the sentence ending in the first `?` of its text (the trust
+// dialog's is inside a paragraph, under its "Accessing workspace:" label),
+// else its first non-empty line, trimmed; null when there's no dialog.
 
 // A row of `─` wide enough to be a border (agent-sleep's prompt.js BORDER).
 const BORDER = /^─{10,}$/;
@@ -51,6 +53,18 @@ export function dialogQuestion(screen) {
   if (confirm < 0) return null;
   const body = below.slice(0, confirm);
   if (!body.some((l) => DIALOG_CURSOR.test(l))) return null;
+  const asked = body.find((l) => !DIALOG_CURSOR.test(l) && l.includes("?"));
+  if (asked !== undefined) return askedSentence(asked);
   const question = body.find((l) => l.trim() !== "");
   return question ? question.trim() : null;
+}
+
+// The sentence that ends in a line's first `?`: "Quick safety check: Is this
+// … trust? (Like …" → "Is this … trust?". A sentence starts after `. `, `: `
+// or `! ` (so "CLAUDE.md" doesn't split one).
+function askedSentence(line) {
+  const upTo = line.slice(0, line.indexOf("?") + 1);
+  const starts = [...upTo.matchAll(/[.:!]\s+/g)];
+  const from = starts.length > 0 ? starts[starts.length - 1].index + starts[starts.length - 1][0].length : 0;
+  return upTo.slice(from).trim();
 }

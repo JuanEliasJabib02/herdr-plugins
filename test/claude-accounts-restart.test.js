@@ -1754,7 +1754,9 @@ const screenOf = (name) => readFileSync(new URL(`fixtures/claude-screens/${name}
 const IMPORTS_DIALOG = screenOf("external-imports-dialog.txt");
 const TRUST_DIALOG = screenOf("trust-dialog.txt");
 const IMPORTS_QUESTION = "Allow external CLAUDE.md file imports?";
-const TRUST_QUESTION = "Accessing workspace:";
+// The trust dialog's question is a sentence inside its text, not its
+// "Accessing workspace:" label (strict review r1 J-001).
+const TRUST_QUESTION = "Is this a project you created or one you trust?";
 const screenLines = (text) => text.replace(/\n$/, "").split("\n");
 // Claude's input box, as a running Claude draws it at the bottom.
 const INPUT_BOX = ["─".repeat(80), "❯ ", "─".repeat(80), "  ? for shortcuts"];
