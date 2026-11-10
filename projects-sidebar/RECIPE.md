@@ -593,7 +593,7 @@ across repos.
 - **Mod `mods/projects-agents/`:** a copy of Herdr 0.1.13's shipped
   `agents` mod, made the way `mod.clone` makes one (`mod.json` records
   `cloned_from: { name: "agents", version: "0.1.13" }`, and the sort menu
-  opens `projects-agents`'s own overlay). Two changes:
+  opens `projects-agents`'s own overlay). The changes:
   - a working agent's mark is the projects tree's glyphs in Claude's orange
     instead of Herdr's spinner;
   - a last section, **Sleeping**, lists the Claudes agent-sleep put to sleep
@@ -606,6 +606,18 @@ across repos.
     key (`sleeping-model.js`); a row whose terminal is gone, has no pane or
     runs an agent again is left out. Without agent-sleep the section never
     shows.
+  - a row in Priority (and a pinned one, and a Sleeping one) reads "space ·
+    project", the project as the sidebar names it ("main · expenses-logs",
+    "AX-3704 · backend-action"), with the agent's title in its tooltip. When
+    the space reads the same as its project, or it is in none, the row keeps
+    the title. Grouped by space keeps the title: the header names the space;
+  - a right-click on a row (an agent's or a Sleeping one) opens its
+    workspace's menu, the sidebar's own: Copy Path, Copy Worktree Name,
+    Rename…, Delete… and the plugins' items. A mod can't import another
+    mod's files, so the row opens the projects mod's `workspace-menu-at`
+    view, a 1 px popup at the pointer that opens the real menu and closes
+    itself; the space's workspace comes from `workspace-model.js`, a copy of
+    `matchSpaces` that the root suite holds to it.
 
   Herdr never updates this copy, so a newer Herdr's changes to its agents
   list don't reach it. Herdr's Apache 2.0 license is in the folder.

@@ -7,6 +7,8 @@
 //   base-menu         a project's Default branch… (its saved base, D37)
 //   workspace-menu    a workspace's right-click menu, other plugins' items
 //                     after its own, or one of their submenus (props.sub)
+//   workspace-menu-at the same menu opened from another mod (projects-agents'
+//                     rows): opens workspace-menu at the pointer, then closes
 //   delete-workspace  the Delete dialog (a worktree, its spaces, its branch)
 //   rename-workspace  the Rename dialog (a worktree's branch and folder)
 //   group-menu        a group's right-click menu
@@ -35,7 +37,7 @@ import { props } from "herdr";
 import Tree, { commands as treeCommands } from "./tree.js";
 import ProjectMenu from "./project-menu.js";
 import BaseMenu from "./base-menu.js";
-import WorkspaceMenu from "./workspace-menu.js";
+import WorkspaceMenu, { WorkspaceMenuAt } from "./workspace-menu.js";
 import DeleteWorkspace from "./delete-workspace.js";
 import RenameWorkspace from "./rename-workspace.js";
 import Groups, { commands as groupsCommands } from "./groups.js";
@@ -65,6 +67,7 @@ const VIEWS = {
   "project-menu": ProjectMenu,
   "base-menu": BaseMenu,
   "workspace-menu": WorkspaceMenu,
+  "workspace-menu-at": WorkspaceMenuAt,
   "delete-workspace": DeleteWorkspace,
   "rename-workspace": RenameWorkspace,
   "group-menu": GroupMenu,

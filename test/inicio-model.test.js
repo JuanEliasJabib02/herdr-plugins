@@ -14,7 +14,8 @@ import { readFileSync, readdirSync } from "node:fs";
 import { registerHooks } from "node:module";
 import { matchSpaces } from "../projects-sidebar/mods/projects/lib.js";
 import { spacesToClose } from "../projects-sidebar/mods/projects/remove-workspace-model.js";
-import { spaceRenames } from "../projects-sidebar/mods/projects/tree-model.js";
+import { spaceRenames, workspaceMenuItems } from "../projects-sidebar/mods/projects/tree-model.js";
+import { menuHeight } from "../projects-sidebar/mods/projects/menus-model.js";
 import {
   INICIO_NAME, parseInicio, inicioValue, validInicio, inicioState, spaceNewArgs, ensureInicio,
   look, shouldSelect, targetIndex, newGuard, canMove, moved, observe, reordered,
@@ -622,7 +623,7 @@ const REG2 = {
 function world({ spaces: sp, panes: ps, shown = "b" } = {}) {
   const w = {
     shared: { "projects.v1": REG2, "projects.cache.v1": CACHE, "projects.inicio.v1": { space: "ini" } },
-    runs: [], toasts: [], overlays: [], picks: [], listens: 0, waiting: [], queued: [], timers: [],
+    runs: [], toasts: [], overlays: [], closed: [], picks: [], listens: 0, waiting: [], queued: [], timers: [],
   };
   const all = sp ?? ordered(["a", "b", "ini", "c"], shown);
   const panesNow = ps ?? [term("a-t1", "/code/a"), term("b-t1", WT), view("ini-m"), term("c-t1", "/code/c")];
@@ -656,6 +657,10 @@ function world({ spaces: sp, panes: ps, shown = "b" } = {}) {
       w.overlays.push(spec);
       return "o1";
     },
+    closeOverlay: (id) => {
+      w.closed.push(id);
+      return null;
+    },
     pickFolder: async (o) => {
       w.picks.push(o);
       return null;
@@ -677,8 +682,8 @@ const settle = async () => {
 
 // A copy of the mod as Herdr starts one: props() set, then init with a cx
 // whose tasks run and whose timers fire only when a test says (fire).
-async function copyOf(w, view) {
-  w.props = view ? { view } : null;
+async function copyOf(w, view, extra = {}) {
+  w.props = view ? { view, ...extra } : null;
   const cx = {
     spawn: (fn) => fn(cx)?.catch?.(() => {}),
     timer: { every: (_ms, fn) => w.timers.push(() => fn(cx)) },
@@ -808,4 +813,25 @@ test("every projects.* key in keys.json has a command in the keeper", async (t) 
   await copyOf(w, "keeper");
   for (const a of actions) await send(w, a.slice("projects.".length));
   assert.deepEqual(log.mock.calls.map((c) => c.arguments[0]).filter((l) => /no command|failed/.test(l)), []);
+});
+
+// ── The workspace menu opened from another mod (projects-agents' rows) ────
+
+test("workspace-menu-at opens the workspace's own menu at the pointer, as tall as its items, then closes itself", async () => {
+  const w = world();
+  await copyOf(w, "workspace-menu-at", { project: "/code/app", path: WT, overlay: "o9" });
+  assert.deepEqual(w.overlays, [{
+    mod: "projects", kind: "popup", width: 220, height: menuHeight(workspaceMenuItems({ path: WT, main: false })),
+    props: { view: "workspace-menu", project: "/code/app", path: WT, sub: null },
+  }]);
+  assert.deepEqual(w.closed, ["o9"]);
+});
+
+test("workspace-menu-at with no workspace closes itself and opens nothing; not an overlay (herdr-app check), it does nothing", async () => {
+  const none = world();
+  await copyOf(none, "workspace-menu-at", { project: "/code/app", path: null, overlay: "o9" });
+  assert.deepEqual([none.overlays, none.closed], [[], ["o9"]]);
+  const check = world();
+  await copyOf(check, "workspace-menu-at", { project: "/code/app", path: WT });
+  assert.deepEqual([check.overlays, check.closed], [[], []]);
 });

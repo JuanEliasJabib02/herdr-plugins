@@ -187,3 +187,29 @@ export default class WorkspaceMenu {
         .when(Boolean(it.items), (el) => el.child(svg("mods/workspace-chrome/chevron-right.svg").size(11).flex_none().text_color(t.dim))));
   }
 }
+
+// The menu opened from another mod (projects-agents' rows): a mod can't
+// import another's files, so that one opens this view, a 1 px frameless
+// popup at the pointer (props { project, path }), and this opens the real
+// menu from here, at the same pointer, with its items and the height they
+// take, then closes itself. With no workspace it only closes; not an
+// overlay (herdr-app check) it does nothing.
+export class WorkspaceMenuAt {
+  init(p, cx) {
+    const overlay = props()?.overlay ?? p?.overlay ?? null;
+    const project = p?.project ?? null;
+    const path = typeof p?.path === "string" && p.path ? p.path : null;
+    cx.spawn(async () => {
+      if (overlay === null) return;
+      try {
+        if (path) openWorkspaceMenu(project, path);
+      } finally {
+        closeOverlay(overlay);
+      }
+    });
+  }
+
+  render() {
+    return div();
+  }
+}
