@@ -16,7 +16,9 @@
 // CLAUDE_CONFIG_DIR string (isConfigDir), or null for System default
 // (~/.claude). A record written before T10 has none and reads as null: only a
 // ~/.claude Claude could sleep then. The version stays 1, since older code
-// ignores the field.
+// ignores the field. `title` (optional, text or null) is the title Claude gave
+// its terminal when it was stopped, for projects-agents' Sleeping row; it is
+// only shown, never checked, so a record without one stays valid.
 //
 // `sleeping.json` has an outside reader: claude-accounts' CLI
 // (cli/restart.mjs, resume-gaps D5) reads `records[<terminal address>].state`

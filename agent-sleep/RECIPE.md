@@ -58,10 +58,19 @@ its own.
   a workspace that is awake with a sleeping Claude (reserved badge key
   `badges.hibernate`). A workspace you put to sleep has projects-sidebar's own
   moon instead.
+- **The Agents list's Sleeping section.** projects-sidebar's Agents list ends
+  with every Claude asleep, a workspace's ones too, as "space · title" and
+  how long it has slept. A click opens its tab, which wakes it. This mod
+  publishes that list under `agent-sleep.asleep` (`{ icon, claudes: [{
+  address, title, since }] }`, newest first), only when it changes.
 - **Sleep a workspace** (the popup's "Sleep this workspace", or
   `agent-sleep.sleep-workspace`; Orca's "Sleep"): every space of the shown
-  workspace goes to sleep without closing, so its tabs, splits, sizes,
-  scrollback and terminal addresses are all there when it wakes. It works
+  workspace goes to sleep without closing. projects-sidebar's right-click
+  Sleep (a workspace's row, or an agent's in the Agents list) sleeps the one
+  it was opened on, shown or not, with `agent-sleep.sleep-workspace.<hex>`,
+  the workspace's path as UTF-8 in hex (a command is only a name). Either
+  way its tabs, splits, sizes, scrollback and terminal addresses are all
+  there when it wakes. It works
   whether automatic sleep is on or off.
   - **Which spaces.** A space belongs to the workspace its first pane with a
     folder is in (else the folder it was made in), as projects-sidebar
@@ -115,11 +124,14 @@ its own.
 **Keys** (projects layout): `cmd-alt-s` Sleep now, `cmd-alt-w` Wake all. Commands
 you can bind or run with `herdr-app do agent-sleep.<name>`: `sleep-now`,
 `wake-all`, `toggle` (automatic sleep), `less` and `more` (the wait), `panel`
-(the popup), `sleep-workspace` (no key, as in Orca; the popup's row runs it).
+(the popup), `sleep-workspace` (no key, as in Orca; the popup's row runs it),
+and `sleep-workspace.<hex>` (a workspace by its path's UTF-8 in hex, what
+projects-sidebar's right-click Sleep runs).
 
 **Files:** `<Herdr home>/agent-sleep/settings.json` (`enabled`, `idleMinutes`)
-and `sleeping.json` (one record per Claude: session id, folder, flags, and its
-account's folder, `configDir`, null for `~/.claude`). A broken `sleeping.json`
+and `sleeping.json` (one record per Claude: session id, folder, flags, its
+account's folder, `configDir`, null for `~/.claude`, and the `title` Claude
+had when it was stopped, for the Sleeping row). A broken `sleeping.json`
 is kept as `sleeping.json.bak`. claude-accounts reads `sleeping.json` too, read
 only: an account switch never restarts a Claude whose record is `stopping` or
 `asleep`, and a file that isn't version 1 with a `records` object counts as no

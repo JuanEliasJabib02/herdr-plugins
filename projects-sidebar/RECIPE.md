@@ -351,9 +351,16 @@ across repos.
   workspace starts from (kept on the project in `projects.v1` as `base`,
   e.g. `origin/develop`): origin's default first (clears it), then the
   saved one, then the latest remote branches.
-- **Right-click a workspace:** opens the workspace menu. Copy Path and Copy
-  Worktree Name (the folder's name) go to the clipboard, and a toast says
-  "Copied". Another plugin's item runs what that plugin published: its row
+- **Right-click a workspace:** opens the workspace menu. Sleep comes first,
+  with its moon, as in Orca, on every workspace, the main checkout too: it
+  puts the workspace to sleep through agent-sleep (its "Sleep a workspace",
+  by path: the command `agent-sleep.sleep-workspace.<the path's UTF-8 in
+  hex>`), which asks first when an agent is working, puts its tabs away (the
+  moon, and Inicio when it is the shown one) and then stops its agents. It is
+  greyed out, saying why on hover, with no space open on the workspace
+  ("Nothing open to put to sleep") or every one put away ("Already asleep").
+  Without agent-sleep it does nothing. Copy Path and Copy Worktree Name (the
+  folder's name) go to the clipboard, and a toast says "Copied". Another plugin's item runs what that plugin published: its row
   shows "…" while its program runs, then the menu closes; one with ▸
   reopens the menu at the pointer on its submenu.
 - **Delete…** (never on the main checkout): the dialog asks git first, on a
@@ -593,10 +600,37 @@ across repos.
 - **Mod `mods/projects-agents/`:** a copy of Herdr 0.1.13's shipped
   `agents` mod, made the way `mod.clone` makes one (`mod.json` records
   `cloned_from: { name: "agents", version: "0.1.13" }`, and the sort menu
-  opens `projects-agents`'s own overlay). The only change: a working agent's
-  mark is the projects tree's glyphs in Claude's orange instead of Herdr's
-  spinner. Herdr never updates this copy, so a newer Herdr's changes to its
-  agents list don't reach it. Herdr's Apache 2.0 license is in the folder.
+  opens `projects-agents`'s own overlay). The changes:
+  - a working agent's mark is the projects tree's glyphs in Claude's orange
+    instead of Herdr's spinner;
+  - a last section, **Sleeping**, lists the Claudes agent-sleep put to sleep
+    and will resume, newest first, in both sorts and never in the rail. A
+    terminal with no sleeping Claude never shows there. A row reads "space ·
+    title" (the title Claude had when it went to sleep, else its named tab),
+    with the moon where the agent's icon goes and how long it has slept. A
+    click opens its tab, which wakes it, and its whole workspace if it slept
+    with it. The list comes from agent-sleep's `agent-sleep.asleep` shared
+    key (`sleeping-model.js`); a row whose terminal is gone, has no pane or
+    runs an agent again is left out. Without agent-sleep the section never
+    shows.
+  - a row in Priority (and a pinned one, and a Sleeping one) reads "space ·
+    project", the project as the sidebar names it ("main · expenses-logs",
+    "AX-3704 · backend-action"), with the agent's title in its tooltip. When
+    the space reads the same as its project, or it is in none, the row keeps
+    the title. Grouped by space keeps the title: the header names the space;
+  - a right-click on a row (an agent's or a Sleeping one) opens its
+    workspace's menu, the sidebar's own with only Sleep, Rename… and Delete…
+    (`AGENT_MENU`; the sidebar's keeps everything). The main checkout's has
+    Sleep alone: it is never renamed or deleted. Sleep puts the whole
+    workspace to sleep, every agent in it, as the sidebar's does. A mod can't import another mod's
+    files, so the row opens the projects mod's `workspace-menu-at` view
+    (props `{ project, path, only }`), a 1 px popup at the pointer that opens
+    the real menu with just those items and closes itself; the space's
+    workspace comes from `workspace-model.js`, a copy of `matchSpaces` that
+    the root suite holds to it.
+
+  Herdr never updates this copy, so a newer Herdr's changes to its agents
+  list don't reach it. Herdr's Apache 2.0 license is in the folder.
 - **Mod `mods/projects/`** (`mod.json` `{ "place": "none" }`), one mod in
   views picked by `props.view`:
   - none = `tree.js` (the tree);

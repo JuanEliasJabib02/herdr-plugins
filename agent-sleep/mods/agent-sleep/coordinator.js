@@ -54,7 +54,7 @@ import {
   paths, parseSettings, DEFAULT_SETTINGS, loadRecords, saveRecords, reconcile, withRecord, withoutRecord, claim,
   foregroundIsShell, ENV_PATTERN,
 } from "./store.js";
-import { BADGE_KEY, badgeValue, sameValue, workspaceOf, parseWorktreeList } from "./badges.js";
+import { BADGE_KEY, ASLEEP_KEY, badgeValue, asleepValue, sameValue, workspaceOf, parseWorktreeList } from "./badges.js";
 import {
   loadSession, loadConfigDirs, loadWakeAccount, isClaudeName, parseExitScreen, exitSessionId, sessionFilePath,
 } from "./claude-session.js";
@@ -258,14 +258,15 @@ export const COMMANDS = Object.freeze({
 
 // A command by name: the table's, or a workspace sleep's (workspace-sleep
 // D5), which stay out of the table the popup's buttons are: `sleep-workspace`
-// sleeps the shown workspace, and the confirm's answers
+// sleeps the shown workspace, `sleep-workspace.<hex>` the one at that path
+// (T6, the right-click's Sleep), and the confirm's answers
 // (`confirm-sleep.<question>`, `cancel-sleep.<question>`) name the question
 // they answer. None does I/O either. Null for any other name.
 export function commandOf(name) {
   if (typeof name !== "string") return null;
   if (Object.hasOwn(COMMANDS, name)) return COMMANDS[name];
   const c = parseWorkspaceCommand(name);
-  if (c?.kind === "sleep") return (co) => co.requestSleepWorkspace();
+  if (c?.kind === "sleep") return (co) => co.requestSleepWorkspace(c.path ?? null);
   if (c?.kind === "answer") return (co) => co.answerQuestion(c.question, c.yes);
   return null;
 }
@@ -322,6 +323,7 @@ export class Coordinator {
     this.lastView = null; // what the last pulse left to show (pulse's return)
     this.publishedView = null; // the view as last handed out to share with the popup
     this.badge = undefined;
+    this.asleep = undefined; // the Sleeping list as last published (ASLEEP_KEY)
     this.worktrees = new Map(); // cwd → workspace path (or null)
     this.transcripts = new Map(); // find argv → its result, found transcripts only
     this.configDirs = null; // D15: where a Claude's session file can be, listed once per tick
@@ -366,6 +368,7 @@ export class Coordinator {
       if (this.wakeAllRequested) await this.wakeAllStep();
       await this.revealStep();
       this.publishBadges();
+      this.publishAsleep();
     } catch (e) {
       this.log(`pulse failed: ${e?.stack ?? e}`);
     } finally {
@@ -546,6 +549,7 @@ export class Coordinator {
     await this.loadRecords();
     await this.loadEntries();
     this.badge = this.safe(() => this.d.shared(BADGE_KEY), undefined);
+    this.asleep = this.safe(() => this.d.shared(ASLEEP_KEY), undefined);
     this.loaded = true;
     for (const name of this.deferred.splice(0)) this.command(name);
   }
@@ -667,6 +671,30 @@ export class Coordinator {
     return true;
   }
 
+  // projects-agents' Sleeping section (badges.js asleepValue), published
+  // only when it changes. Nothing asleep now and none listed before writes
+  // nothing.
+  publishAsleep() {
+    const value = asleepValue({ records: this.records, modFolder: MOD });
+    const none = (v) => !isObject(v) || !Array.isArray(v.claudes) || v.claudes.length === 0;
+    if (none(value) && (this.asleep === undefined || none(this.asleep))) return false;
+    if (sameValue(value, this.asleep)) return false;
+    this.d.setShared(ASLEEP_KEY, value);
+    this.asleep = value;
+    return true;
+  }
+
+  // The title Claude gave its terminal (its conversation's topic), kept on
+  // the record for projects-agents' Sleeping row: the shell that comes back
+  // after /exit sets its own. Core's, else its pane's; null when neither.
+  titleOf(t) {
+    const fromCore = typeof t?.title === "string" ? t.title.trim() : "";
+    if (fromCore) return fromCore;
+    const pane = this.safe(() => list(this.d.live.panes()), []).find((p) => isObject(p) && p.terminal === t?.address);
+    const fromPane = typeof pane?.title === "string" ? pane.title.trim() : "";
+    return fromPane || null;
+  }
+
   // ── Planning ──
 
   // planSleep twice (D2): once to learn which screens to read, again with
@@ -780,6 +808,7 @@ export class Coordinator {
       rssKb: await this.rssKb(t.foreground.pid),
       rootPid: Number.isInteger(t.pid) ? t.pid : null,
       holder: await this.holder(),
+      title: this.titleOf(t),
       at: now,
       by: manual ? "manual" : "auto",
     };
@@ -1396,6 +1425,7 @@ export class Coordinator {
       rssKb: await this.rssKb(t.foreground.pid),
       rootPid: Number.isInteger(t.pid) ? t.pid : null,
       holder: await this.holder(),
+      title: this.titleOf(t),
       at: this.d.now(),
       by: "manual",
       ...(cur.wake ? { wake: "now" } : {}),

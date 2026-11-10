@@ -277,15 +277,49 @@ export function filterMenuItems(ui) {
 
 // ── Workspace menu (D20) ───────────────────────────────────────────────────
 
-// The right-click menu of a workspace row: [{ id, label, text?, separator?,
-// danger? }]. Copy Path and Copy Worktree Name (its folder's name, not the
-// branch) on every checkout; on a worktree that isn't the main checkout,
-// Rename… (S22), then, after a separator, Delete… in the blocked color (S20,
-// S21). The main checkout is never renamed or deleted. A detached worktree
-// gets Rename… too: its dialog says why it can't. Unknown row: [].
-export function workspaceMenuItems(row) {
+// Sleep's hover text: what agent-sleep's workspace sleep does (Orca's says
+// "Close all active panels in this workspace to free up memory and CPU.";
+// this one closes nothing).
+export const SLEEP_TOOLTIP = "Puts its agents to sleep and its tabs away, to free up memory and CPU. Opening it wakes them.";
+
+// The command Sleep runs: agent-sleep's `sleep-workspace.<hex>`, the path's
+// UTF-8 in hex (a command is only a name). A copy of agent-sleep's
+// workspace-sleep.js sleepWorkspaceCommand, since a mod can't import
+// another's files; the root suite holds the two together. Null for no
+// absolute path.
+export function sleepCommand(path) {
+  if (typeof path !== "string" || !(path.startsWith("/") || /^[A-Za-z]:\//.test(path))) return null;
+  let bytes;
+  try {
+    bytes = encodeURIComponent(path);
+  } catch {
+    return null; // a lone surrogate
+  }
+  let hex = "";
+  for (let i = 0; i < bytes.length; i += 1) {
+    if (bytes[i] === "%") {
+      hex += bytes.slice(i + 1, i + 3).toLowerCase();
+      i += 2;
+    } else hex += bytes.charCodeAt(i).toString(16).padStart(2, "0");
+  }
+  return `agent-sleep.sleep-workspace.${hex}`;
+}
+
+// The right-click menu of a workspace row: [{ id, label, text?, tooltip?,
+// disabled?, why?, separator?, danger? }]. First Sleep (workspace-sleep T6,
+// Orca's, on every checkout, the main one too), then Copy Path and Copy
+// Worktree Name (its folder's name, not the branch); on a worktree that isn't
+// the main checkout, Rename… (S22), then, after a separator, Delete… in the
+// blocked color (S20, S21). The main checkout is never renamed or deleted. A
+// detached worktree gets Rename… too: its dialog says why it can't. Unknown
+// row: []. `sleep`: { open, asleep } as workspacesOf says them (the moon's
+// rule): Sleep is off, saying why, with no space open on it or every one put
+// away; unknown (undefined), it's on, and agent-sleep says why if it can't.
+export function workspaceMenuItems(row, sleep) {
   if (!row?.path) return [];
+  const why = !sleep ? null : !sleep.open ? "Nothing open to put to sleep" : sleep.asleep ? "Already asleep" : null;
   return [
+    { id: "sleep", label: "Sleep", tooltip: SLEEP_TOOLTIP, ...(why ? { disabled: true, why } : {}) },
     { id: "copy-path", label: "Copy Path", text: row.path },
     { id: "copy-name", label: "Copy Worktree Name", text: baseName(row.path) },
     ...(row.main ? [] : [

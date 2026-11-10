@@ -308,10 +308,58 @@ const QUESTION_ID = /^[A-Za-z0-9-]{1,64}$/;
 
 export const answerCommand = (question, yes) => `${yes ? CONFIRM : CANCEL}${question}`;
 
-// → { kind: "sleep" } | { kind: "answer", question, yes } | null.
+// T6, the right-click's Sleep (projects-sidebar's workspace menu, the Agents
+// rows' too): a workspace by its path, shown or not. A command is only a
+// name (nextCommand yields no args), so the path rides in it as its UTF-8
+// in hex, which any command name carries: `sleep-workspace.<hex>`.
+// projects-sidebar keeps a copy (tree-model.js sleepCommand) and the root
+// suite holds the two together. Null for what isn't an absolute path.
+const SLEEP_AT = `${SLEEP_WORKSPACE}.`;
+export const MAX_PATH_BYTES = 4096;
+
+export function sleepWorkspaceCommand(path) {
+  if (!isAbsolute(path)) return null;
+  let bytes;
+  try {
+    bytes = encodeURIComponent(path);
+  } catch {
+    return null; // a lone surrogate
+  }
+  let hex = "";
+  for (let i = 0; i < bytes.length; i += 1) {
+    if (bytes[i] === "%") {
+      hex += bytes.slice(i + 1, i + 3).toLowerCase();
+      i += 2;
+    } else hex += bytes.charCodeAt(i).toString(16).padStart(2, "0");
+  }
+  return `${SLEEP_AT}${hex}`;
+}
+
+// The path a `sleep-workspace.<hex>` names, its trailing slash gone (as
+// projects-sidebar's normPath), or null: odd or non-hex digits, more than
+// MAX_PATH_BYTES, bytes that aren't UTF-8, a NUL, or a relative path.
+function pathOfHex(hex) {
+  if (!/^(?:[0-9A-Fa-f]{2})+$/.test(hex) || hex.length > MAX_PATH_BYTES * 2) return null;
+  let path;
+  try {
+    path = decodeURIComponent(hex.replace(/../g, "%$&"));
+  } catch {
+    return null;
+  }
+  if (path.includes("\0") || !isAbsolute(path)) return null;
+  return path.replace(/\/+$/, "") || "/";
+}
+
+// → { kind: "sleep", path? } | { kind: "answer", question, yes } | null:
+// the bare command sleeps the shown workspace, `sleep-workspace.<hex>` the
+// one at that path.
 export function parseWorkspaceCommand(name) {
   if (typeof name !== "string") return null;
   if (name === SLEEP_WORKSPACE) return { kind: "sleep" };
+  if (name.startsWith(SLEEP_AT)) {
+    const path = pathOfHex(name.slice(SLEEP_AT.length));
+    return path === null ? null : { kind: "sleep", path };
+  }
   for (const [prefix, yes] of [[CONFIRM, true], [CANCEL, false]]) {
     if (!name.startsWith(prefix)) continue;
     const question = name.slice(prefix.length);
