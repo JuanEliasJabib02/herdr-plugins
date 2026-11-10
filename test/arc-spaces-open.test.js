@@ -55,8 +55,8 @@ const GROUPS = {
   version: 1,
   activeGroup: "g2",
   groups: [
-    { id: "g1", name: "Action Experience", projects: [project("/repos/action")] },
-    { id: "g2", name: "Arrecife", projects: [project("/repos/mine")] },
+    { id: "g1", name: "Nimbus", projects: [project("/repos/action")] },
+    { id: "g2", name: "Reef", projects: [project("/repos/mine")] },
     { id: "g3", name: "AG", projects: [project("/repos/ag")] },
   ],
 };
@@ -65,7 +65,7 @@ const CACHE = {
   "/repos/mine": [checkout("/repos/mine", true)],
   "/repos/ag": [checkout("/repos/ag", true), checkout("/repos/mine/nested-ag")],
 };
-const NAMES = { g1: "Action", g2: "Personal", g3: "Bulbasour" };
+const NAMES = { g1: "Nimbus", g2: "Personal", g3: "Studio" };
 
 const writeShared = (value) => writeFileSync(join(home, "shared.json"), typeof value === "string" ? value : JSON.stringify(value));
 const shared = (config = { enabled: true, names: NAMES }, more = {}) => ({
@@ -149,7 +149,7 @@ test("Herdr started from a terminal, as herdr-app, counts as Herdr", () => {
   const link = join(dir, "herdr-app");
   symlinkSync("/bin/bash", link);
   run([URL_A], { parent: link });
-  assertRouted("Action");
+  assertRouted("Nimbus");
 });
 
 test("flags and several arguments pass through untouched, in order", () => {
@@ -216,30 +216,30 @@ test("a group with no name doesn't route", () => {
 
 test("the space's own group wins over the active one", () => {
   run([URL_A]);
-  assertRouted("Action");
+  assertRouted("Nimbus");
 });
 
 test("http works too, and the URL arrives whole", () => {
   run(["http://localhost:3000/x?a=b&c=d#e"]);
-  assertRouted("Action", "http://localhost:3000/x?a=b&c=d#e");
+  assertRouted("Nimbus", "http://localhost:3000/x?a=b&c=d#e");
 });
 
 test("a space in a worktree belongs to its project's group", () => {
   lsAnswer([space("/work/action/feature")]);
   run([URL_A]);
-  assertRouted("Action");
+  assertRouted("Nimbus");
 });
 
 test("a space in a folder inside a checkout belongs to it", () => {
   lsAnswer([space("/repos/ag/packages/web")]);
   run([URL_A]);
-  assertRouted("Bulbasour");
+  assertRouted("Studio");
 });
 
 test("the longest checkout wins", () => {
   lsAnswer([space("/repos/mine/nested-ag/src")]);
   run([URL_A]);
-  assertRouted("Bulbasour");
+  assertRouted("Studio");
 });
 
 test("a folder that only shares a prefix doesn't match", () => {
@@ -251,13 +251,13 @@ test("a folder that only shares a prefix doesn't match", () => {
 test("only the shown space counts", () => {
   lsAnswer([space("/repos/ag", { active: false }), space("/repos/action")]);
   run([URL_A]);
-  assertRouted("Action");
+  assertRouted("Nimbus");
 });
 
 test("a trailing slash in a stored path still matches", () => {
   writeShared(shared(undefined, { "projects.cache.v1": { "/repos/action/": [checkout("/repos/action/", true)] } }));
   run([URL_A]);
-  assertRouted("Action");
+  assertRouted("Nimbus");
 });
 
 test("a space outside every group uses the active group", () => {
@@ -276,7 +276,7 @@ test("no valid active group: the first group", () => {
   lsAnswer([space("/Users/someone")]);
   writeShared(shared(undefined, { "projects.v1": { ...GROUPS, activeGroup: "gone" } }));
   run([URL_A]);
-  assertRouted("Action");
+  assertRouted("Nimbus");
 });
 
 // ── Where the space is now (projects-sidebar's placeOf) ────────────────────
@@ -285,28 +285,28 @@ test("a space whose terminal moved into a checkout belongs to that checkout's gr
   lsAnswer([space("/repos/ag", withTerminals("t1"))]);
   hcAnswer({ t1: { address: "t1", cwd: "/repos/ag", foreground: { name: "zsh", cwd: "/work/action/feature" } } });
   run([URL_A]);
-  assertRouted("Action");
+  assertRouted("Nimbus");
 });
 
 test("a space made outside every group joins the group its terminal moved into", () => {
   lsAnswer([space("/Users/someone", withTerminals("t1"))]);
   hcAnswer({ t1: { cwd: "/Users/someone", foreground: { cwd: "/repos/ag/web" } } });
   run([URL_A]);
-  assertRouted("Bulbasour");
+  assertRouted("Studio");
 });
 
 test("with no foreground, the terminal's own folder", () => {
   lsAnswer([space("/Users/someone", withTerminals("t1"))]);
   hcAnswer({ t1: { cwd: "/repos/action", foreground: null } });
   run([URL_A]);
-  assertRouted("Action");
+  assertRouted("Nimbus");
 });
 
 test("the first terminal with a folder counts", () => {
   lsAnswer([space("/Users/someone", withTerminals("t1", "t2", "t3"))]);
   hcAnswer({ t1: { foreground: null }, t2: { cwd: "/repos/ag" }, t3: { cwd: "/repos/action" } });
   run([URL_A]);
-  assertRouted("Bulbasour");
+  assertRouted("Studio");
   assert.deepEqual(logOf("hc"), ["t1", "t2"]);
 });
 
@@ -314,14 +314,14 @@ test("hc failing: the folder the space was made in", () => {
   lsAnswer([space("/repos/ag", withTerminals("t1"))]);
   tool("hc", "exit 1");
   run([URL_A]);
-  assertRouted("Bulbasour");
+  assertRouted("Studio");
 });
 
 test("a terminal hc can't read is skipped, as the sidebar skips a pane with no folder", () => {
   lsAnswer([space("/repos/ag", withTerminals("gone", "t2"))]);
   hcAnswer({ t2: { cwd: "/repos/action" } });
   run([URL_A]);
-  assertRouted("Action");
+  assertRouted("Nimbus");
   assert.deepEqual(logOf("hc"), ["gone", "t2"]);
 });
 
@@ -343,7 +343,7 @@ test("a hung hc: stopped at the limit with what it started, then the folder the 
   slowHc(`exec ${marker}`);
   const result = run([URL_A], { env: { ARC_SPACES_HC_TIMEOUT: "3" }, capMs: 120_000 });
   assert.equal(result.signal, null, "the click must not wait for the sleep to end");
-  assertRouted("Bulbasour");
+  assertRouted("Studio");
   assert.deepEqual(logOf("hc"), ["t1"], "t1 is asked, and nothing after the limit");
   // Its own alarm ends the hc left running when the search was cut.
   assert.ok(endsSoon(marker), "the hung hc ends by itself, not left behind");
@@ -366,7 +366,7 @@ test("a zero or bad limit is 1 s, and a huge one a day, never none", () => {
     for (const log of ["osascript.log", "hc.log"]) rmSync(join(dir, log), { force: true });
     const result = run([URL_A], { env: { ARC_SPACES_HC_TIMEOUT: value }, capMs: 120_000 });
     assert.equal(result.signal, null, `ARC_SPACES_HC_TIMEOUT=${value} must still stop the search`);
-    assertRouted("Bulbasour");
+    assertRouted("Studio");
     assert.deepEqual(logOf("hc"), ["t1"], `ARC_SPACES_HC_TIMEOUT=${value}: hc was asked`);
     assert.ok(endsSoon(marker), `ARC_SPACES_HC_TIMEOUT=${value}: the hung hc ends by itself`);
   }
@@ -376,7 +376,7 @@ test("a huge limit is a day, not the 1 s of a bad value", () => {
   lsAnswer([space("/repos/ag", withTerminals("t1"))]);
   slowHc(`sleep 2\ncat <<'EOF'\n${JSON.stringify({ cwd: "/repos/action" })}\nEOF`);
   run([URL_A], { env: { ARC_SPACES_HC_TIMEOUT: "200000000" }, capMs: 120_000 });
-  assertRouted("Action");
+  assertRouted("Nimbus");
 });
 
 test("an ignored SIGALRM, inherited from Herdr, doesn't turn the limits off", () => {
@@ -385,7 +385,7 @@ test("an ignored SIGALRM, inherited from Herdr, doesn't turn the limits off", ()
   slowHc(`exec ${marker}`);
   const result = run([URL_A], { env: { ARC_SPACES_HC_TIMEOUT: "3" }, capMs: 120_000, prelude: "trap '' ALRM; " });
   assert.equal(result.signal, null, "the search must still stop");
-  assertRouted("Bulbasour");
+  assertRouted("Studio");
   assert.deepEqual(logOf("hc"), ["t1"], "hc was asked");
   assert.ok(endsSoon(marker), "the hung hc ends by itself");
 });
@@ -395,14 +395,14 @@ test("many terminals hc can't read share one limit", () => {
   lsAnswer([space("/repos/ag", withTerminals(...terminals))]);
   slowHc("sleep 1\nexit 1");
   run([URL_A], { env: { ARC_SPACES_HC_TIMEOUT: "3" }, capMs: 120_000 });
-  assertRouted("Bulbasour");
+  assertRouted("Studio");
   const asked = logOf("hc") ?? [];
   assert.ok(asked.length >= 1 && asked.length < terminals.length, `asked ${asked.length} terminals`);
 });
 
 test("a repeated group id: only the first group counts, as parseRegistry keeps it", () => {
   const dup = { id: "g1", name: "Dup", projects: [project("/repos/action")] };
-  writeShared(shared(undefined, { "projects.v1": { ...GROUPS, groups: [{ id: "g1", name: "Action Experience", projects: [project("/repos/other")] }, ...GROUPS.groups.slice(1), dup] } }));
+  writeShared(shared(undefined, { "projects.v1": { ...GROUPS, groups: [{ id: "g1", name: "Nimbus", projects: [project("/repos/other")] }, ...GROUPS.groups.slice(1), dup] } }));
   run([URL_A]);
   assertRouted("Personal");
 });
@@ -411,7 +411,7 @@ test("a registry of another version reads as the sidebar's empty one: g1, active
   lsAnswer([space("/repos/ag")]);
   writeShared(shared(undefined, { "projects.v1": { ...GROUPS, version: 2 } }));
   run([URL_A]);
-  assertRouted("Action");
+  assertRouted("Nimbus");
 });
 
 test("a checkout the sidebar would drop takes its whole project with it", () => {
@@ -421,7 +421,7 @@ test("a checkout the sidebar would drop takes its whole project with it", () => 
 });
 
 test("a project with no name counts for nothing, as the sidebar drops it", () => {
-  writeShared(shared(undefined, { "projects.v1": { ...GROUPS, groups: [{ id: "g1", name: "Action Experience", projects: [{ path: "/repos/action" }] }, ...GROUPS.groups.slice(1)] } }));
+  writeShared(shared(undefined, { "projects.v1": { ...GROUPS, groups: [{ id: "g1", name: "Nimbus", projects: [{ path: "/repos/action" }] }, ...GROUPS.groups.slice(1)] } }));
   run([URL_A]);
   assertRouted("Personal");
 });
@@ -444,17 +444,17 @@ test("a space on another machine: its terminals aren't asked", () => {
 test("~ in the space's place is the home folder, as projects-sidebar reads it", () => {
   const action = join(dir, "repos/action");
   writeShared(shared(undefined, {
-    "projects.v1": { ...GROUPS, groups: [{ id: "g1", name: "Action Experience", projects: [project(action)] }, ...GROUPS.groups.slice(1)] },
+    "projects.v1": { ...GROUPS, groups: [{ id: "g1", name: "Nimbus", projects: [project(action)] }, ...GROUPS.groups.slice(1)] },
     "projects.cache.v1": { [action]: [checkout(action, true)] },
   }));
   lsAnswer([space("~/repos/action/src")]);
   run([URL_A]);
-  assertRouted("Action");
+  assertRouted("Nimbus");
 });
 
 test("a stored path that isn't absolute counts for nothing, as projects-sidebar drops it", () => {
   writeShared(shared(undefined, {
-    "projects.v1": { ...GROUPS, groups: [{ id: "g1", name: "Action Experience", projects: [project("~/repos/action")] }, ...GROUPS.groups.slice(1)] },
+    "projects.v1": { ...GROUPS, groups: [{ id: "g1", name: "Nimbus", projects: [project("~/repos/action")] }, ...GROUPS.groups.slice(1)] },
     "projects.cache.v1": { "~/repos/action": [checkout("~/repos/action", true)], "/repos/ag": [checkout("/repos/ag", true), checkout("relative/ag")] },
   }));
   for (const folder of [join(dir, "repos/action"), "/repos/ag"]) {
@@ -466,9 +466,9 @@ test("a stored path that isn't absolute counts for nothing, as projects-sidebar 
 });
 
 test("the name is trimmed", () => {
-  writeShared(shared({ enabled: true, names: { ...NAMES, g1: "  Action " } }));
+  writeShared(shared({ enabled: true, names: { ...NAMES, g1: "  Nimbus " } }));
   run([URL_A]);
-  assertRouted("Action");
+  assertRouted("Nimbus");
 });
 
 // ── The same group as the sidebar ──────────────────────────────────────────
@@ -614,13 +614,13 @@ test("no stored registry at all reads as the sidebar's empty one: g1", () => {
   const { "projects.v1": _, ...rest } = shared();
   writeShared(rest);
   run([URL_A]);
-  assertRouted("Action");
+  assertRouted("Nimbus");
 });
 
 test("a stored registry of the wrong shape reads as the sidebar's empty one: g1", () => {
   writeShared(shared(undefined, { "projects.v1": "nope", "projects.cache.v1": 7 }));
   run([URL_A]);
-  assertRouted("Action");
+  assertRouted("Nimbus");
 });
 
 // ── The file itself ────────────────────────────────────────────────────────

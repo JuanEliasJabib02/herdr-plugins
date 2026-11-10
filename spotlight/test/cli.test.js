@@ -1030,39 +1030,39 @@ test("`status --json` takes no lock, reaps nothing, and says queue: \"off\" when
 
 test("tester case 13: `status` shows the limit, this terminal's place and who blocks it", async () => {
   const w = makeWorld();
-  const ag = makeRepo(w, "arctic-grey", { tasks: ["ag-checkout"] });
-  const admin = makeRepo(w, "ag-admin", { tasks: ["ag-reports"] });
-  const action = makeRepo(w, "action-black", { tasks: ["checkout-flow"] });
-  const exp = makeRepo(w, "expenses-logs", { tasks: ["expenses-export"] });
+  const acme = makeRepo(w, "acme-co", { tasks: ["acme-checkout"] });
+  const admin = makeRepo(w, "acme-admin", { tasks: ["acme-reports"] });
+  const action = makeRepo(w, "nimbus-web", { tasks: ["checkout-flow"] });
+  const exp = makeRepo(w, "budget-app", { tasks: ["budget-export"] });
   w.register([
-    { id: "ag", repos: [ag, admin] },
+    { id: "acme", repos: [acme, admin] },
     { id: "action", repos: [action] },
-    { id: "arrecife", repos: [exp] },
+    { id: "reef", repos: [exp] },
   ]);
   const term = (repo, task) => ({ t: w.agent(repo.ws[task]), cwd: repo.ws[task] });
-  const checkout = term(ag, "ag-checkout");
+  const checkout = term(acme, "acme-checkout");
   const flow = term(action, "checkout-flow");
-  const reports = term(admin, "ag-reports");
-  const expenses = term(exp, "expenses-export");
+  const reports = term(admin, "acme-reports");
+  const budget = term(exp, "budget-export");
   for (const x of [checkout, flow]) assert.equal((await w.cli(["on"], { terminal: x.t, cwd: x.cwd })).code, 0);
-  for (const x of [reports, expenses]) assert.equal((await w.cli(["on", "--timeout-ms", "300"], { terminal: x.t, cwd: x.cwd })).code, 1);
+  for (const x of [reports, budget]) assert.equal((await w.cli(["on", "--timeout-ms", "300"], { terminal: x.t, cwd: x.cwd })).code, 1);
 
   const same = await w.cli(["status"], { terminal: reports.t });
   assert.equal(same.code, 0, same.stderr);
   assert.match(same.stdout, /^Limit: 2 tasks at a time$/m);
-  assert.match(same.stdout, /This terminal: #1 in line for ag-reports: ag-checkout is testing \(same space\)/);
-  assert.match(same.stdout, /^ {2}ag-checkout {2}arctic-grey {2}\(1 agent/m);
-  assert.match(same.stdout, /^ {2}ag-reports {2}ag-admin {2}\(since/m);
+  assert.match(same.stdout, /This terminal: #1 in line for acme-reports: acme-checkout is testing \(same space\)/);
+  assert.match(same.stdout, /^ {2}acme-checkout {2}acme-co {2}\(1 agent/m);
+  assert.match(same.stdout, /^ {2}acme-reports {2}acme-admin {2}\(since/m);
 
-  const limit = await w.cli(["status"], { terminal: expenses.t });
-  assert.match(limit.stdout, /This terminal: #2 in line for expenses-export/);
+  const limit = await w.cli(["status"], { terminal: budget.t });
+  assert.match(limit.stdout, /This terminal: #2 in line for budget-export/);
   assert.match(limit.stdout, /\(limit reached\)/);
 
   const holding = await w.cli(["status", "--json"], { terminal: checkout.t });
   const out = JSON.parse(holding.stdout);
   assert.equal(out.result.cap, 2);
   assert.equal(out.result.queue, "on");
-  assert.deepEqual({ kind: out.result.mine.kind, taskKey: out.result.mine.taskKey }, { kind: "holding", taskKey: "ag-checkout" });
+  assert.deepEqual({ kind: out.result.mine.kind, taskKey: out.result.mine.taskKey }, { kind: "holding", taskKey: "acme-checkout" });
   const none = await w.cli(["status", "--json"], { terminal: "t999" });
   assert.equal(JSON.parse(none.stdout).result.mine.kind, "none");
 });
@@ -1561,8 +1561,8 @@ test("a repeat `on` over a listening server whose repo lock is held says the roo
 test("J-003: a Herdr terminal on a main checkout or outside git takes a slot-only turn keyed by its folder; two terminals in one folder share it", async () => {
   const w = makeWorld();
   const harness = makeRepo(w, "harness", { pkg: DEV });
-  w.register([{ id: "arrecife", repos: [harness] }]);
-  w.settings({ queue: { perSpace: { arrecife: 1, spaceless: 1 }, cap: 4 } });
+  w.register([{ id: "reef", repos: [harness] }]);
+  w.settings({ queue: { perSpace: { reef: 1, spaceless: 1 }, cap: 4 } });
   const slotOnly = (label) => new RegExp(`^No project of ${label} can hold a Spotlight here, so this turn only holds a test slot: run your tests\\.$`, "m");
   const mine = async (t) => JSON.parse((await w.cli(["status", "--json"], { terminal: t })).stdout).result;
 
@@ -1573,8 +1573,8 @@ test("J-003: a Herdr terminal on a main checkout or outside git takes a slot-onl
   assert.match(main.stdout, /^Your test turn for harness is on\.$/m);
   assert.match(main.stdout, slotOnly("harness"));
   const req = requestOf(w.state(), t1);
-  assert.equal(req.taskKey, `arrecife/cwd:${harness.root}`);
-  assert.equal(req.lane, "arrecife");
+  assert.equal(req.taskKey, `reef/cwd:${harness.root}`);
+  assert.equal(req.lane, "reef");
   assert.equal(req.state, "holding");
   assert.deepEqual(refsOf(harness.root), []);
   assert.equal(w.serverTerminal(harness.root), null, "nothing was lit");
@@ -1703,7 +1703,7 @@ test("J-004, J-005: the pure rules (requestFgPid, classifyStep)", async () => {
 
 // ── T13: a busy port before start, and Liberar puerto y arrancar (D23, D24) ─
 
-// speaking-english's scripts (S14): `pnpm dev` runs both halves in parallel,
+// side-project's scripts (S14): `pnpm dev` runs both halves in parallel,
 // and Next's half wants 3008.
 const SE_PKG = {
   scripts: { dev: "npm-run-all --parallel dev:next dev:convex", "dev:next": "next dev -p 3008", "dev:convex": "convex dev" },
@@ -1743,19 +1743,19 @@ test("a listener outside the server terminal's tree on the expected port: port-b
   const app = makeRepo(w, "speaking", { pkg: SE_PKG, tasks: ["AX-7"] });
   w.register([{ id: "g1", repos: [app] }]);
   const holder = spawnProc("sleep", ["300"]);
-  w.foreign([{ pid: holder.pid, port: 3008, cwd: "/Users/u/old/speaking-english" }]);
+  w.foreign([{ pid: holder.pid, port: 3008, cwd: "/Users/u/old/side-project" }]);
   const ws = app.ws["AX-7"];
   const t = w.agent(ws);
 
   const on = await w.cli(["on", "--timeout-ms", "20000"], { terminal: t, cwd: ws });
   assert.equal(on.code, 0, on.stderr + on.stdout);
-  const message = `El puerto 3008 lo tiene sleep 300 (pid ${holder.pid}, en /Users/u/old/speaking-english).`;
+  const message = `El puerto 3008 lo tiene sleep 300 (pid ${holder.pid}, en /Users/u/old/side-project).`;
   // Agents get the message (D24), at once: nothing will open that port.
   assert.ok(on.stdout.includes(message), on.stdout);
   assert.ok(on.ms < 12_000, `waited ${on.ms} ms for a server that never starts`);
   const rec = w.state().repos[app.root];
   const { at, ...error } = rec.lastError;
-  assert.deepEqual(error, { code: "port-busy", port: 3008, pid: holder.pid, command: "sleep 300", cwd: "/Users/u/old/speaking-english", message });
+  assert.deepEqual(error, { code: "port-busy", port: 3008, pid: holder.pid, command: "sleep 300", cwd: "/Users/u/old/side-project", message });
   assert.ok(Number.isFinite(at));
   assert.deepEqual(scriptLines(w), [], "no server line is typed over a busy port");
   const toast = w.state().notes.find((n) => n.toast && n.text.includes(message));
@@ -1856,19 +1856,19 @@ test("restart --free-port: TERM to the port's holder and its descendants, KILL a
 
 const ESC = "\u001b";
 
-// What spotlight-1's last start printed in the speaking-english log of the
+// What spotlight-1's last start printed in the side-project log of the
 // incident (S14, L15), byte for byte: Next's half died on EADDRINUSE :3008.
 const SE_CRASH =
   "\r\n" +
-  "> speaking-english@1.0.0 dev /Users/juan/Desktop/Software/Sideprojects/speaking-english\r\n" +
+  "> side-project@1.0.0 dev /Users/alex/code/side-project\r\n" +
   "> npm-run-all --parallel dev:next dev:convex\r\n" +
   "\r\n" +
   "\r\n" +
-  "> speaking-english@1.0.0 dev:next /Users/juan/Desktop/Software/Sideprojects/speaking-english\r\n" +
+  "> side-project@1.0.0 dev:next /Users/alex/code/side-project\r\n" +
   "> next dev -p 3008\r\n" +
   "\r\n" +
   "\r\n" +
-  "> speaking-english@1.0.0 dev:convex /Users/juan/Desktop/Software/Sideprojects/speaking-english\r\n" +
+  "> side-project@1.0.0 dev:convex /Users/alex/code/side-project\r\n" +
   "> convex dev\r\n" +
   "\r\n" +
   "\u001b[31m\u001b[1m⨯\u001b[22m\u001b[39m Failed to start server\r\n" +
@@ -1910,7 +1910,7 @@ function listenNow(w, root, ports) {
 
 const toastsOf = (w, root, text) => w.state().notes.filter((n) => n.repo === root && n.toast && n.text.includes(text));
 
-test("the speaking-english death: the reap reads EADDRINUSE :3008 in the log since the last start → port-busy port 3008 (its holder while one listens), one toast that opens the popup; never while a start holds the repo lock; a later listen clears it", async () => {
+test("the side-project death: the reap reads EADDRINUSE :3008 in the log since the last start → port-busy port 3008 (its holder while one listens), one toast that opens the popup; never while a start holds the repo lock; a later listen clears it", async () => {
   const w = makeWorld();
   const app = makeRepo(w, "speaking", { pkg: SE_PKG, tasks: ["AX-30"] });
   w.register([{ id: "g1", repos: [app] }]);
@@ -1956,13 +1956,13 @@ test("the speaking-english death: the reap reads EADDRINUSE :3008 in the log sin
   assert.equal(scriptLines(w).length, 2);
   assert.equal(w.state().repos[app.root].lastError, null, "a start that goes through clears it");
   const holder = spawnProc("sleep", ["303"]);
-  w.foreign([{ pid: holder.pid, port: 3008, cwd: "/Users/u/old/speaking-english" }]);
+  w.foreign([{ pid: holder.pid, port: 3008, cwd: "/Users/u/old/side-project" }]);
   assert.equal((await w.cli(["reap"])).code, 0);
   rec = w.state().repos[app.root];
-  const message = `El puerto 3008 lo tiene sleep 303 (pid ${holder.pid}, en /Users/u/old/speaking-english).`;
+  const message = `El puerto 3008 lo tiene sleep 303 (pid ${holder.pid}, en /Users/u/old/side-project).`;
   {
     const { at, ...error } = rec.lastError;
-    assert.deepEqual(error, { code: "port-busy", port: 3008, pid: holder.pid, command: "sleep 303", cwd: "/Users/u/old/speaking-english", message });
+    assert.deepEqual(error, { code: "port-busy", port: 3008, pid: holder.pid, command: "sleep 303", cwd: "/Users/u/old/side-project", message });
   }
   assert.equal(toastsOf(w, app.root, message).length, 1);
   assert.equal(alive(holder.pid), true, "the reap kills nothing");

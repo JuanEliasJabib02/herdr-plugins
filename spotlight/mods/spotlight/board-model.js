@@ -124,7 +124,7 @@ function namers(registry) {
 
 // ── The board ──────────────────────────────────────────────────────────────
 
-// `orca · Arrecife · esperando 9 min`: repos, space and status, skipping
+// `orca · Reef · esperando 9 min`: repos, space and status, skipping
 // what is unknown. A task named after its only repo shows the name once.
 function rowMeta(name, repoNames, spaceName, status) {
   const repos = repoNames.join(", ");

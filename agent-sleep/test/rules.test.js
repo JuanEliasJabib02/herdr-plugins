@@ -330,7 +330,7 @@ test("visit 40 min, leave, next tick: idle starts at the leave", () => {
   let seen = { visible: [], lastSeen: {}, firstSeen: base.firstSeen };
   const step = (now, panes) => snapshot({ ...base, now, panes, previousVisible: seen.visible, lastSeen: seen.lastSeen, firstSeen: seen.firstSeen });
 
-  // T0: Juan shows t1's tab (a render). A quiet visit: no render for 40 min.
+  // T0: the user shows t1's tab (a render). A quiet visit: no render for 40 min.
   seen = observe(step(T0, inView));
   assert.ok(seen.visible.includes("t1"));
   // T0+40: he leaves (a render): t1 just left the visible set.

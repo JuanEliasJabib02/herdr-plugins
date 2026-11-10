@@ -2,7 +2,7 @@
 // in (`hc read` text, plain, no styling), verdicts out; no herdr import.
 //
 // The classifier is picked by Core's foreground.name, never by the `❯`
-// glyph: Claude's prompt and Juan's Starship prompt both end in it.
+// glyph: Claude's prompt and a Starship prompt both end in it.
 //
 // Claude Code 2.1.318 draws its input as a box between two rows of `─`:
 //

@@ -40,7 +40,7 @@ after(() => {
   for (const d of tmpRoots) rmSync(d, { recursive: true, force: true });
 });
 
-// Git with no global config or hooks, so Juan's own settings never leak in.
+// Git with no global config or hooks, so the user's own settings never leak in.
 const GIT_ENV = { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" };
 const GIT_ID = ["-c", "user.name=t", "-c", "user.email=t@t", "-c", "core.hooksPath=/dev/null", "-c", "commit.gpgsign=false"];
 const sh = (cwd, ...args) =>
@@ -993,7 +993,7 @@ test("chainInstall: installs first, each only if the previous one succeeded", ()
 
 // ── The port a start will take (T13, D23) ──────────────────────────────────
 // Read before typing the server line, so a port someone else holds is caught
-// first (D24). speaking-english's live incident: `pnpm dev` runs
+// first (D24). side-project's live incident: `pnpm dev` runs
 // `npm-run-all --parallel dev:next dev:convex`, and dev:next is
 // `next dev -p 3008`.
 

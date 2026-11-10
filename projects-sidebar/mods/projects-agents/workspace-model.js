@@ -59,8 +59,8 @@ export function workspacesBySpace({ registry, cache, spaces = [], panes = [], ho
 }
 
 // What an agent's row offers of its workspace's menu: Sleep, Rename… and
-// Delete… (Juan, 2026-11-09: "solo estas", then "falto la opcion de dormir
-// al agente aca manual"); the sidebar's own keeps everything.
+// Delete… (asked for: only these, plus a manual Sleep for the agent);
+// the sidebar's own keeps everything.
 export const AGENT_MENU = Object.freeze(["sleep", "rename", "delete"]);
 
 // The row's right-click: the sidebar's own menu with only AGENT_MENU, as a

@@ -53,17 +53,17 @@ const projects = parseProjects({
 const cache = parseCache({
   [BACK]: [
     { path: BACK, branch: "main", main: true },
-    { path: B1, branch: "juan/AX-3447", main: false },
-    { path: B2, branch: "juan/AX-3500", main: false },
+    { path: B1, branch: "alex/AX-3447", main: false },
+    { path: B2, branch: "alex/AX-3500", main: false },
   ],
   [FRONT]: [
     { path: FRONT, branch: "main", main: true },
-    { path: F1, branch: "juan/AX-3447", main: false },
+    { path: F1, branch: "alex/AX-3447", main: false },
     { path: F2, branch: "login", main: false },
   ],
   [OTHER]: [
     { path: OTHER, branch: "main", main: true },
-    { path: O1, branch: "juan/AX-3447", main: false },
+    { path: O1, branch: "alex/AX-3447", main: false },
   ],
 });
 const enabled = { [BACK]: true, [FRONT]: true, [OTHER]: false };
@@ -725,7 +725,7 @@ test("taskModeGroups: the ids of projects.v1's groups organized by Task; anythin
       { id: "ax", name: "AX", projects: [], organize: "task" },
       { id: "ag", name: "AG", projects: [] },
       { id: "", name: "x", projects: [], organize: "task" },
-      { id: "ar", name: "Arrecife", projects: [], organize: "project" },
+      { id: "ar", name: "Reef", projects: [], organize: "project" },
       { id: "ax", name: "again", projects: [], organize: "task" },
     ],
   };
@@ -771,7 +771,7 @@ test("D31: a Task-mode group's lanes get the task's flashlight, keyed and acting
 test("D31: no eligible member, no flashlight: a task only in repos whose Spotlight is off, the Servers lane and the No task lane publish none", () => {
   const laneCache = {
     ...cache,
-    [OTHER]: [...cache[OTHER], { path: `${WS}/other/ax-9`, branch: "juan/AX-9", main: false }, { path: `${WS}/other/none`, branch: null, main: false }],
+    [OTHER]: [...cache[OTHER], { path: `${WS}/other/ax-9`, branch: "alex/AX-9", main: false }, { path: `${WS}/other/none`, branch: null, main: false }],
   };
   const { value } = buildLanes(baseState(), { laneCache });
   assert.equal(value[laneKey("AX-9")], undefined);
@@ -791,7 +791,7 @@ test("D31, D33: a member's repo busy for one of the task's own workspaces, or th
   assert.deepEqual(out[laneKey("AX-3447")][0], RING);
   assert.equal(out[laneKey("AX-3447")][0].action, undefined);
   assert.equal(out[laneKey("AX-3500")][0].icon, "mods/spotlight/icons/flashlight.svg", "back isn't busy: AX-3500 keeps its flashlight");
-  // Juan's report (2026-11-09): lighting one task's workspace spun every
+  // A report (2026-11-09): lighting one task's workspace spun every
   // lane with a workspace in that repo. Front is login's member too, but
   // the work is for AX-3447's F1: login keeps its flashlight, as Orca's
   // TaskSpotlightButton spins only for its own task.
@@ -924,7 +924,7 @@ test("D32, D39, D46: with nobody holding, the pill is always shown only for a st
   const both = buildLanes(baseState({ envs: { "task:AX-3500": "prod", "ax/AX-3500": "dev" } })).value;
   assert.deepEqual(envOf(both[laneKey("AX-3500")]), pill("AX-3500", "Dev"));
   // No flashlight (no member with Spotlight on), no pill: there is no server to run.
-  const laneCache = { ...cache, [OTHER]: [...cache[OTHER], { path: `${WS}/other/ax-9`, branch: "juan/AX-9", main: false }] };
+  const laneCache = { ...cache, [OTHER]: [...cache[OTHER], { path: `${WS}/other/ax-9`, branch: "alex/AX-9", main: false }] };
   assert.equal(buildLanes(baseState({ envs: { "task:AX-9": "dev" } }), { laneCache }).value[laneKey("AX-9")], undefined);
   assertContract(value);
 });

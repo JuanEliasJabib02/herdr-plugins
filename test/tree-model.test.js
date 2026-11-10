@@ -246,7 +246,7 @@ test("a project git couldn't list (its folder gone) says so instead of loading f
 // ── Narrow rail (D18) ──────────────────────────────────────────────────────
 
 test("rail: project initials, the most urgent status of its spaces, the selected project", () => {
-  assert.deepEqual(["herdr-plugins", "app", ".claude", "app_english", "expenses-logs"].map(initials), ["HP", "A", "C", "AE", "EL"]);
+  assert.deepEqual(["herdr-plugins", "app", ".claude", "app_english", "budget-app"].map(initials), ["HP", "A", "C", "AE", "BA"]);
   assert.equal(mostUrgent(["working", "done", null, "idle"]), "done");
   assert.equal(mostUrgent(["idle", "blocked", "done"]), "blocked");
   assert.equal(mostUrgent([null]), null);
@@ -804,7 +804,7 @@ test("lane badges (D29): a lane finds what was published under its group and its
   const cache = {
     "/code/app": [
       { path: "/code/app", branch: "main", main: true },
-      { path: `${W}/app/ax-3653-fix`, branch: "juan/ax-3653-fix", main: false },
+      { path: `${W}/app/ax-3653-fix`, branch: "alex/ax-3653-fix", main: false },
       { path: `${W}/app/login`, branch: "feat/Login", main: false },
     ],
     "/code/api": [{ path: "/code/api", branch: "develop", main: true }, { path: `${W}/api/ax-3653`, branch: "AX_3653", main: false }],
@@ -875,7 +875,7 @@ test("spaceRenames: a space the mod named after the old branch takes the new nam
     [{ id: "s1", name: "agent-doc-open-endpoint" }],
   );
   assert.deepEqual(
-    spaceRenames({ path: at, before: "juan/feat-a", after: "juan/feat-b", spaces: [{ id: "s1", name: "feat-a", named: true }], matches }),
+    spaceRenames({ path: at, before: "alex/feat-a", after: "alex/feat-b", spaces: [{ id: "s1", name: "feat-a", named: true }], matches }),
     [{ id: "s1", name: "feat-b" }],
     "a namespaced branch: the label is its last segment, as openAction named it",
   );

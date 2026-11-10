@@ -2004,8 +2004,8 @@ test("D31: withTaskBatch marks queue.taskBatch[<groupId>/<KEY>] { op, since, pid
 
 // ── D38 (T29), D40 (T35): the server runs in the root's own terminal ───────
 // A fake Herdr and hc around the root: its space spRoot (made in the root)
-// with tab "1" holding Juan's plain terminal t5, in `cwd`. `busy`: t5 runs a
-// server Juan started by hand (npm, pid 7000; 7001 listens on 3008 for as
+// with tab "1" holding the user's plain terminal t5, in `cwd`. `busy`: t5 runs a
+// server the user started by hand (npm, pid 7000; 7001 listens on 3008 for as
 // long as it runs); otherwise its shell (pid 500) is at the prompt.
 // Spotlight's own terminals are made by `hc run` (t9, t10…); a terminal
 // given herdr.space (`hc run --label`, `hc label`) that Herdr shows nowhere
@@ -2117,7 +2117,7 @@ test("D40: lighting a root whose own terminal is at its prompt types the server 
 
 test("D40: the root's terminal at a prompt in another folder gets `cd '<root>' && ` before the helper", async () => {
   write(root, "package.json", NEXT_3008);
-  // Lit before: t5 is the root's Spotlight terminal, Juan cd'd into a subfolder since.
+  // Lit before: t5 is the root's Spotlight terminal, the user cd'd into a subfolder since.
   const w = rootWorld({ cwd: join(root, "apps") });
   w.terms.t5.labels["spotlight.repo"] = root;
   Object.assign(state.repos[root], { serverTerminal: "t5", logPath: join(base, "root.log") });
@@ -2149,10 +2149,10 @@ test("D40: a root whose own terminal runs something is left alone: nothing typed
   assert.equal(popup.serverNote, "Su terminal está ocupada: no se tocó.");
   assert.deepEqual(popup.actions.map((a) => a.label), ["Ver server", "Reiniciar", "Apagar"]);
 
-  // The reap reads Juan's server listening in t5: no server of Spotlight's
+  // The reap reads the user's server listening in t5: no server of Spotlight's
   // all the same, so the record stays as the start left it, with no toast.
-  const juans = { terminal: "t5", owner: "foreign", pid: 7000, state: "listening", ports: [3008], procs: [], port: 3008, url: "http://localhost:3008", label: ":3008" };
-  await reap(fullCx({ serverDeps: { exec: w.exec }, server: { readServerState: async () => juans } }));
+  const alexs = { terminal: "t5", owner: "foreign", pid: 7000, state: "listening", ports: [3008], procs: [], port: 3008, url: "http://localhost:3008", label: ":3008" };
+  await reap(fullCx({ serverDeps: { exec: w.exec }, server: { readServerState: async () => alexs } }));
   const after = state.repos[root];
   assert.deepEqual(
     { serverState: after.serverState, serverReason: after.serverReason, ports: after.ports },
@@ -2160,7 +2160,7 @@ test("D40: a root whose own terminal runs something is left alone: nothing typed
   );
   assert.deepEqual(toastTexts().filter((t) => !t.startsWith("Spotlight on")), []);
 
-  // Juan stops his server: Reiniciar types Spotlight's there, and the line goes.
+  // The user stops their server: Reiniciar types Spotlight's there, and the line goes.
   w.terms.t5.foreground = { pid: 500, name: "zsh", argv: ["/bin/zsh", "-l"], cwd: root };
   const r = await ensureServer(fullCx({ serverDeps: { exec: w.exec, ...fakeClock() } }), root, { workspace: rec.holder, restart: true });
   assert.equal(r.state, "started", JSON.stringify(r));
@@ -2176,7 +2176,7 @@ test("D40: once the program Spotlight left alone ends (its shell free again, not
   assert.equal(state.repos[root].serverReason, "terminal-busy");
   const noteOf = () => serverViewModel({ state, settings: readSettings(JSON.stringify({ version: 1 })), repo: root, workspace: holder, detection: null, bin: cliPathOf("/app") }).serverNote;
   const look = { terminal: "t5", ports: [], procs: [], port: null, url: null, label: "", state: "stopped" };
-  const juans = { ...look, owner: "foreign", pid: 7000 };
+  const alexs = { ...look, owner: "foreign", pid: 7000 };
   const free = { ...look, owner: null, pid: 500 };
   const member = { root, name: "root", workspace: holder, workspaces: [holder] };
   const reapReading = (live) => reap(fullCx({ serverDeps: { exec: w.exec }, server: { readServerState: async () => live } }));
@@ -2188,7 +2188,7 @@ test("D40: once the program Spotlight left alone ends (its shell free again, not
   for (const [what, read] of [["the reap", reapReading], ["on", onReading]]) {
     state.repos[root].serverReason = "terminal-busy";
     // His program still runs there, no port open: the reason stays.
-    await read(juans);
+    await read(alexs);
     assert.equal(state.repos[root].serverReason, "terminal-busy", what);
     assert.equal(noteOf(), "Su terminal está ocupada: no se tocó.", what);
     // It ended: the shell leads again. Stopped, and no longer busy.

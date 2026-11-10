@@ -3,7 +3,7 @@
 // puts its own helpers in its own *-model.js (D1).
 //
 // The copy is Orca's, word for word, from its sources
-// (~/Desktop/Software/Sideprojects/orca/src, cited per function). Times are
+// (~/code/orca/src, cited per function). Times are
 // epoch ms; `now` defaults to Date.now(). No Intl: dates are built from the
 // Date's local fields, so they read the same in Node and in Herdr's runtime.
 //

@@ -40,17 +40,17 @@ const projects = parseProjects(registry);
 const cache = parseCache({
   [BACK]: [
     { path: BACK, branch: "main", main: true },
-    { path: B1, branch: "juan/AX-3447", main: false },
-    { path: B2, branch: "juan/AX-3500", main: false },
+    { path: B1, branch: "alex/AX-3447", main: false },
+    { path: B2, branch: "alex/AX-3500", main: false },
     { path: BN, branch: "none", main: false },
   ],
   [FRONT]: [
     { path: FRONT, branch: "main", main: true },
-    { path: F1, branch: "juan/AX-3447", main: false },
+    { path: F1, branch: "alex/AX-3447", main: false },
   ],
   [OTHER]: [
     { path: OTHER, branch: "main", main: true },
-    { path: O1, branch: "juan/AX-3447", main: false },
+    { path: O1, branch: "alex/AX-3447", main: false },
   ],
 });
 const ENABLED = { [BACK]: true, [FRONT]: true, [OTHER]: false };

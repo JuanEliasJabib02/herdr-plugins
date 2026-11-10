@@ -160,7 +160,7 @@ test("the command's name, and the confirm's answers naming the question they ans
 test("T6: a workspace by its path, as the right-click's Sleep names it: `sleep-workspace.<the path's UTF-8 in hex>`", () => {
   assert.equal(sleepWorkspaceCommand("/code/app"), "sleep-workspace.2f636f64652f617070");
   assert.deepEqual(parseWorkspaceCommand("sleep-workspace.2f636f64652f617070"), { kind: "sleep", path: "/code/app" });
-  for (const path of ["/Users/juan/orca/workspaces/herdr-plugins/sleep-agent", "/code/ñandú app", "C:/code/app", "/"]) {
+  for (const path of ["/Users/alex/orca/workspaces/herdr-plugins/sleep-agent", "/code/ñandú app", "C:/code/app", "/"]) {
     assert.deepEqual(parseWorkspaceCommand(sleepWorkspaceCommand(path)), { kind: "sleep", path }, path);
   }
   assert.deepEqual(parseWorkspaceCommand(sleepWorkspaceCommand("/code/app/")), { kind: "sleep", path: "/code/app" }, "a trailing slash goes, as projects-sidebar's normPath");

@@ -381,7 +381,7 @@ export function snapshot(queue) {
   };
 }
 
-// "/code/action-back/" → "action-back".
+// "/code/nimbus-back/" → "nimbus-back".
 const folderName = (root) => root.split("/").filter(Boolean).pop() ?? root;
 
 /**

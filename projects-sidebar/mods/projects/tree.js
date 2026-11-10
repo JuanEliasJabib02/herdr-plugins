@@ -43,7 +43,7 @@ import { openTaskMenu } from "./task-menu.js";
 import { openFilterMenu } from "./filter-menu.js";
 import { showPrCard, cardTarget } from "./pr-card.js";
 
-// git listings at once (Juan has ~30 projects).
+// git listings at once (~30 projects is common).
 const LISTERS = 4;
 // Changes made outside a watch's reach: looked for this often, while the
 // window is in front (mods/spaces/main.js FALLBACK).

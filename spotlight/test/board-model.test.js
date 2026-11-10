@@ -18,20 +18,20 @@ import {
 const MINUTE = 60_000;
 const T0 = 1_000 * MINUTE;
 
-// projects-sidebar's projects.v1: Action holds action-black and action-api,
-// Arrecife holds orca.
+// projects-sidebar's projects.v1: Action holds nimbus-web and nimbus-api,
+// Reef holds orca.
 const REGISTRY = {
   version: 1,
   groups: [
     {
-      id: "g-action",
-      name: "Action",
+      id: "g-nimbus",
+      name: "Nimbus",
       projects: [
-        { path: "/code/action-black", name: "action-black" },
-        { path: "/code/action-api", name: "action-api" },
+        { path: "/code/nimbus-web", name: "nimbus-web" },
+        { path: "/code/nimbus-api", name: "nimbus-api" },
       ],
     },
-    { id: "g-arrecife", name: "Arrecife", projects: [{ path: "/code/orca", name: "orca" }] },
+    { id: "g-reef", name: "Reef", projects: [{ path: "/code/orca", name: "orca" }] },
   ],
 };
 
@@ -48,18 +48,18 @@ function ask(terminal, lane, label, root, workspace, at) {
   };
 }
 
-// Tester case 14: checkout-flow (action-black, Action) and test-queue (orca,
-// Arrecife) test; login-fix (action-api, Action) waits behind checkout-flow
+// Tester case 14: checkout-flow (nimbus-web, Action) and test-queue (orca,
+// Reef) test; login-fix (nimbus-api, Action) waits behind checkout-flow
 // (one task per space). Every agent asked at T0.
 function caseFourteen() {
   let queue = { requests: [], lighting: {} };
-  queue = request(queue, ask("t1", "g-action", "checkout-flow", "/code/action-black", "/ws/checkout-flow-black", T0), qctx(T0)).queue;
-  queue = request(queue, ask("t2", "g-action", "login-fix", "/code/action-api", "/ws/login-fix-api", T0), qctx(T0)).queue;
-  queue = request(queue, ask("t3", "g-arrecife", "test-queue", "/code/orca", "/ws/test-queue-orca", T0), qctx(T0)).queue;
+  queue = request(queue, ask("t1", "g-nimbus", "checkout-flow", "/code/nimbus-web", "/ws/checkout-flow-web", T0), qctx(T0)).queue;
+  queue = request(queue, ask("t2", "g-nimbus", "login-fix", "/code/nimbus-api", "/ws/login-fix-api", T0), qctx(T0)).queue;
+  queue = request(queue, ask("t3", "g-reef", "test-queue", "/code/orca", "/ws/test-queue-orca", T0), qctx(T0)).queue;
   return {
     version: 1,
     repos: {
-      "/code/action-black": { holder: "/ws/checkout-flow-black", serverTerminal: "t9", serverState: "listening", ports: [3000] },
+      "/code/nimbus-web": { holder: "/ws/checkout-flow-web", serverTerminal: "t9", serverState: "listening", ports: [3000] },
       "/code/orca": { holder: "/ws/test-queue-orca", serverTerminal: "t8", serverState: "starting", ports: [] },
     },
     queue,
@@ -77,10 +77,10 @@ describe("the board (Cola de pruebas)", () => {
     assert.equal(board.limit, "Límite: 2 a la vez");
     assert.deepEqual(board.sections.map((s) => s.title), ["Probando", "En cola"]);
     assert.deepEqual(board.testing.map((r) => [r.name, r.meta]), [
-      ["checkout-flow", "action-black · Action · sin actividad hace 12 min"],
-      ["test-queue", "orca · Arrecife · sin actividad hace 12 min"],
+      ["checkout-flow", "nimbus-web · Nimbus · sin actividad hace 12 min"],
+      ["test-queue", "orca · Reef · sin actividad hace 12 min"],
     ]);
-    assert.deepEqual(board.waiting.map((r) => [r.name, r.meta]), [["login-fix", "action-api · Action · esperando 12 min"]]);
+    assert.deepEqual(board.waiting.map((r) => [r.name, r.meta]), [["login-fix", "nimbus-api · Nimbus · esperando 12 min"]]);
     assert.deepEqual(board.paused, []);
     assert.equal(board.count, 3);
   });
@@ -100,14 +100,14 @@ describe("the board (Cola de pruebas)", () => {
     state.queue.requests.find((r) => r.terminal === "t1").lastActivityAt = T0 + 8 * MINUTE;
     const board = view(state, T0 + 12 * MINUTE);
     assert.equal(board.testing[0].idleMinutes, null);
-    assert.equal(board.testing[0].meta, "action-black · Action");
+    assert.equal(board.testing[0].meta, "nimbus-web · Nimbus");
     assert.equal(board.testing[0].release, false);
 
     // An agent that sat in line for 30 min without reporting, granted 3 min
     // ago: idle counts from its grant.
     let queue = { requests: [], lighting: {} };
-    queue = request(queue, ask("t0", "g-action", "busy", "/code/action-black", "/ws/busy", T0 - 40 * MINUTE), qctx(T0 - 40 * MINUTE)).queue;
-    queue = request(queue, ask("t1", "g-action", "slow", "/code/action-black", "/ws/slow", T0 - 30 * MINUTE), qctx(T0 - 30 * MINUTE)).queue;
+    queue = request(queue, ask("t0", "g-nimbus", "busy", "/code/nimbus-web", "/ws/busy", T0 - 40 * MINUTE), qctx(T0 - 40 * MINUTE)).queue;
+    queue = request(queue, ask("t1", "g-nimbus", "slow", "/code/nimbus-web", "/ws/slow", T0 - 30 * MINUTE), qctx(T0 - 30 * MINUTE)).queue;
     queue = release(queue, "t0", qctx(T0 - 3 * MINUTE)).queue;
     const late = view({ version: 1, repos: {}, queue, notes: [] }, T0);
     assert.equal(late.testing[0].name, "slow");
@@ -117,11 +117,11 @@ describe("the board (Cola de pruebas)", () => {
 
   test("a waiter under a minute shows no wait time, and a task named after its only repo shows it once", () => {
     let queue = { requests: [], lighting: {} };
-    queue = request(queue, ask("t1", "g-arrecife", "orca", "/code/orca", "/ws/orca-2", T0), qctx(T0)).queue;
-    queue = request(queue, ask("t2", "g-arrecife", "other", "/code/orca", "/ws/orca-3", T0), qctx(T0)).queue;
+    queue = request(queue, ask("t1", "g-reef", "orca", "/code/orca", "/ws/orca-2", T0), qctx(T0)).queue;
+    queue = request(queue, ask("t2", "g-reef", "other", "/code/orca", "/ws/orca-3", T0), qctx(T0)).queue;
     const board = view({ version: 1, repos: {}, queue, notes: [] }, T0 + 30_000);
-    assert.equal(board.testing[0].meta, "Arrecife");
-    assert.equal(board.waiting[0].meta, "orca · Arrecife");
+    assert.equal(board.testing[0].meta, "Reef");
+    assert.equal(board.waiting[0].meta, "orca · Reef");
   });
 
   test("a paused agent gets its own row in Pausados with its reason, and never counts", () => {
@@ -130,7 +130,7 @@ describe("the board (Cola de pruebas)", () => {
     const board = view(state, T0 + 12 * MINUTE);
 
     assert.deepEqual(board.sections.map((s) => s.title), ["Probando", "Pausados"]);
-    assert.deepEqual(board.paused.map((r) => [r.name, r.meta, r.terminal]), [["checkout-flow", "action-black · Action · se detuvo por un error", "t1"]]);
+    assert.deepEqual(board.paused.map((r) => [r.name, r.meta, r.terminal]), [["checkout-flow", "nimbus-web · Nimbus · se detuvo por un error", "t1"]]);
     // login-fix took checkout-flow's slot in Action; turns show in grant order.
     assert.deepEqual(board.testing.map((r) => r.name), ["test-queue", "login-fix"]);
     assert.equal(board.count, 2);
@@ -143,12 +143,12 @@ describe("the board (Cola de pruebas)", () => {
 
   test("a row click targets the server popup with D22's props: the holder's workspace in the row's first repo", () => {
     const board = view(caseFourteen(), T0);
-    assert.deepEqual(board.testing[0].server, { view: "server", repo: "/code/action-black", workspace: "/ws/checkout-flow-black" });
-    assert.deepEqual(board.waiting[0].server, { view: "server", repo: "/code/action-api", workspace: "/ws/login-fix-api" });
+    assert.deepEqual(board.testing[0].server, { view: "server", repo: "/code/nimbus-web", workspace: "/ws/checkout-flow-web" });
+    assert.deepEqual(board.waiting[0].server, { view: "server", repo: "/code/nimbus-api", workspace: "/ws/login-fix-api" });
 
     // A slot-only turn lights nothing, so it opens no popup.
     let queue = { requests: [], lighting: {} };
-    queue = request(queue, { ...ask("t5", "g-action", "docs", "/code/action-black", "/ws/docs", T0), members: [], slotOnly: true }, qctx(T0)).queue;
+    queue = request(queue, { ...ask("t5", "g-nimbus", "docs", "/code/nimbus-web", "/ws/docs", T0), members: [], slotOnly: true }, qctx(T0)).queue;
     assert.equal(view({ version: 1, repos: {}, queue, notes: [] }, T0).testing[0].server, null);
   });
 
@@ -174,7 +174,7 @@ describe("the footer flask", () => {
 
     // Paused agents never count, but keep the flask lit: they wait for a Continuar.
     let queue = { requests: [], lighting: {} };
-    queue = request(queue, ask("t1", "g-action", "a", "/code/action-black", "/ws/a", T0), qctx(T0)).queue;
+    queue = request(queue, ask("t1", "g-nimbus", "a", "/code/nimbus-web", "/ws/a", T0), qctx(T0)).queue;
     queue = pause(queue, "t1", { reason: "limit" }, qctx(T0)).queue;
     assert.deepEqual(footerView(view({ version: 1, repos: {}, queue, notes: [] }, T0)), { count: 0, quiet: false, tooltip: "Nadie está probando" });
   });

@@ -138,7 +138,7 @@ const LSOF_3008 = ["p900", "cnode", "f21", "n*:3008", "f22", "n[::1]:3008", "p10
 
 // A fake exec for the busy-port reads: lsof by its argv (the port listing or
 // one pid's cwd), ps for a pid's command, pgrep from CHILDREN.
-function holderExec({ listing = { code: 0, stdout: LSOF_3008 }, cwds = { 900: "/Users/u/old/speaking-english" }, commands = { 900: "next-server (v16.0.1)" } } = {}) {
+function holderExec({ listing = { code: 0, stdout: LSOF_3008 }, cwds = { 900: "/Users/u/old/side-project" }, commands = { 900: "next-server (v16.0.1)" } } = {}) {
   const base = fakeExec();
   const calls = [];
   const exec = async (file, args) => {
@@ -182,7 +182,7 @@ test("processCwd and processCommand: a pid's folder (lsof -d cwd) and its comman
   assert.equal(parseLsofCwd("p900\nfcwd\nn/Users/u/old app\n"), "/Users/u/old app");
   assert.equal(parseLsofCwd("p900\nftxt\nn/bin/node\n"), null);
   const { exec, calls } = holderExec();
-  assert.equal(await processCwd(900, { exec }), "/Users/u/old/speaking-english");
+  assert.equal(await processCwd(900, { exec }), "/Users/u/old/side-project");
   assert.deepEqual(calls.at(-1), ["lsof", "-a", "-p", "900", "-d", "cwd", "-F", "n"]);
   assert.equal(await processCommand(900, { exec }), "next-server (v16.0.1)");
   assert.deepEqual(calls.at(-1), ["ps", "-o", "command=", "-p", "900"]);
@@ -197,7 +197,7 @@ test("processCwd and processCommand: a pid's folder (lsof -d cwd) and its comman
 test("foreignListener: a listener outside the terminal's tree is reported with pid, command and cwd; one inside is not", async () => {
   // Terminal 100's tree is 100 → 101 → 102 → 103: 102 is Spotlight's server.
   assert.deepEqual(await foreignListener(3008, 100, holderExec()), {
-    pid: 900, command: "next-server (v16.0.1)", cwd: "/Users/u/old/speaking-english",
+    pid: 900, command: "next-server (v16.0.1)", cwd: "/Users/u/old/side-project",
   });
   const mine = holderExec({ listing: { code: 0, stdout: "p102\ncnode\nf23\nn*:3008\n" } });
   assert.equal(await foreignListener(3008, 100, mine), null);

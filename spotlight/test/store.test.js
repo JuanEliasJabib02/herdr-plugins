@@ -782,7 +782,7 @@ function machine() {
   const registry = {
     version: 1,
     activeGroup: "g1",
-    groups: [{ id: "g1", name: "Arrecife", projects: [web, plain, nogit, claudeLink].map((p) => ({ path: p, name: path.basename(p) })) }],
+    groups: [{ id: "g1", name: "Reef", projects: [web, plain, nogit, claudeLink].map((p) => ({ path: p, name: path.basename(p) })) }],
   };
   fs.mkdirSync(app, { recursive: true });
   fs.writeFileSync(path.join(app, "shared.json"), JSON.stringify({ "projects.v1": registry, layout: {} }));

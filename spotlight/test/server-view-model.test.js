@@ -105,7 +105,7 @@ test("D32, D46: with nobody holding the root, the popup selects the env stored f
   const BARE = "/Users/u/orca/workspaces/landing/none";
   const registry = { version: 1, groups: [{ id: "g1", name: "G1", projects: [{ path: ROOT, name: "landing" }] }] };
   const cache = {
-    [ROOT]: [{ path: ROOT, branch: "main", main: true }, { path: H, branch: "juan/AX-1", main: false }, { path: BARE, branch: "none", main: false }],
+    [ROOT]: [{ path: ROOT, branch: "main", main: true }, { path: H, branch: "alex/AX-1", main: false }, { path: BARE, branch: "none", main: false }],
   };
   const unlit = (envs, workspace) => model({ state: stateWith(null, { envs }), workspace, registry, cache });
   assert.equal(selectedOf(unlit({ "task:AX-1": "dev" }, H)), "dev");

@@ -264,7 +264,7 @@ export function baseMenuRows(originDefault, recent, saved) {
 // ── Projects (D16) ─────────────────────────────────────────────────────────
 
 // The Project list: the active group's projects only, the space you're in
-// (Juan: "no esta filtrado x el space en el q estoy"). Another group's
+// (it wasn't filtered by the space you're in). Another group's
 // projects are reached by switching groups. [{ path, name, group }]
 export function projectChoices(registry) {
   const active = activeGroup(registry);

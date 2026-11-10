@@ -369,7 +369,7 @@ const flush = async () => {
   for (let i = 0; i < 30; i++) await new Promise(setImmediate);
 };
 
-const HOME = "/home/juan";
+const HOME = "/home/alex";
 const APP = `${HOME}/.config/herdr-app`;
 const SOURCE = "// pdfpages\n";
 const SWIFT = `${APP}/mods/code-file/pdfpages.swift`;

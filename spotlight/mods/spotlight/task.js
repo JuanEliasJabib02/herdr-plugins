@@ -69,7 +69,7 @@ export function findTicket(text) {
 const stripRef = (branch) => String(branch).replace(/^refs\/heads\//, "");
 
 // A ticket in the branch, its `/` segments read from the last one, since
-// "juan/" or "feat/" come before the ticket and "team-1" reads as TEAM-1.
+// "alex/" or "feat/" come before the ticket and "team-1" reads as TEAM-1.
 function branchTicket(branch) {
   for (const segment of stripRef(branch).split("/").reverse()) {
     const ticket = findTicket(segment);

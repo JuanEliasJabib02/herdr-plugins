@@ -24,45 +24,45 @@ test("nothing stored, or a value of the wrong shape: off, no names", () => {
 });
 
 test("a stored config reads back as itself", () => {
-  const config = { enabled: true, names: { g1: "Action", g2: "Personal" } };
+  const config = { enabled: true, names: { g1: "Nimbus", g2: "Personal" } };
   assert.deepEqual(parseConfig(config), config);
 });
 
 test("only string names survive", () => {
-  assert.deepEqual(parseConfig({ enabled: true, names: { g1: "Action", g2: 7, g3: null } }), { enabled: true, names: { g1: "Action" } });
+  assert.deepEqual(parseConfig({ enabled: true, names: { g1: "Nimbus", g2: 7, g3: null } }), { enabled: true, names: { g1: "Nimbus" } });
 });
 
 test("switching off keeps the names", () => {
-  const on = { enabled: true, names: { g1: "Action" } };
-  assert.deepEqual(withEnabled(on, false), { enabled: false, names: { g1: "Action" } });
+  const on = { enabled: true, names: { g1: "Nimbus" } };
+  assert.deepEqual(withEnabled(on, false), { enabled: false, names: { g1: "Nimbus" } });
   assert.deepEqual(withEnabled(withEnabled(on, false), true), on);
 });
 
 test("a name is stored trimmed", () => {
-  assert.deepEqual(withName({ enabled: true, names: {} }, "g1", "  Action "), { enabled: true, names: { g1: "Action" } });
+  assert.deepEqual(withName({ enabled: true, names: {} }, "g1", "  Nimbus "), { enabled: true, names: { g1: "Nimbus" } });
 });
 
 test("a blank name removes the group's entry", () => {
-  assert.deepEqual(withName({ enabled: true, names: { g1: "Action", g2: "Personal" } }, "g1", "   "), { enabled: true, names: { g2: "Personal" } });
+  assert.deepEqual(withName({ enabled: true, names: { g1: "Nimbus", g2: "Personal" } }, "g1", "   "), { enabled: true, names: { g2: "Personal" } });
 });
 
 test("the same name returns the same config, so nothing is written", () => {
-  const config = { enabled: true, names: { g1: "Action" } };
-  assert.equal(withName(config, "g1", " Action "), config);
+  const config = { enabled: true, names: { g1: "Nimbus" } };
+  assert.equal(withName(config, "g1", " Nimbus "), config);
   assert.equal(withName(config, "g2", "  "), config);
   assert.equal(withEnabled(config, true), config);
 });
 
 test("changing a config never changes the one it came from", () => {
-  const config = { enabled: true, names: { g1: "Action" } };
+  const config = { enabled: true, names: { g1: "Nimbus" } };
   withName(config, "g1", "Other");
   withEnabled(config, false);
-  assert.deepEqual(config, { enabled: true, names: { g1: "Action" } });
+  assert.deepEqual(config, { enabled: true, names: { g1: "Nimbus" } });
 });
 
 test("groups come from projects-sidebar's registry, in order", () => {
-  const registry = { groups: [{ id: "g1", name: "Action Experience", projects: [] }, { id: "g2", name: "Arrecife", projects: [] }] };
-  assert.deepEqual(groupsOf(registry), [{ id: "g1", name: "Action Experience" }, { id: "g2", name: "Arrecife" }]);
+  const registry = { groups: [{ id: "g1", name: "Nimbus", projects: [] }, { id: "g2", name: "Reef", projects: [] }] };
+  assert.deepEqual(groupsOf(registry), [{ id: "g1", name: "Nimbus" }, { id: "g2", name: "Reef" }]);
 });
 
 test("no registry, or a bad one: no groups", () => {
@@ -84,7 +84,7 @@ test("the dialog draws with the switch on", { skip: herdr ? false : "herdr-app i
   const home = mkdtempSync("/tmp/arc-check-");
   try {
     writeFileSync(join(home, "shared.json"), JSON.stringify({
-      [KEY]: { enabled: true, names: { g1: "Action" } },
+      [KEY]: { enabled: true, names: { g1: "Nimbus" } },
       [GROUPS_KEY]: { groups: [{ id: "g1", name: "Work", projects: [] }, { id: "g2", name: "Personal", projects: [] }], activeGroup: "g1" },
     }));
     const result = spawnSync("herdr-app", ["check", fileURLToPath(plugin("mods/arc-spaces"))], {

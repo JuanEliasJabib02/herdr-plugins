@@ -12,15 +12,15 @@ import {
   PR_COLORS, prQueryArgs, parsePrAnswer, accountsOf, projectPrs, mergePrs, parsePrs, prLabel, prMemo, askGitHub,
 } from "../projects-sidebar/mods/projects/pr-model.js";
 
-const REPO = { owner: "Arctic-Grey", repo: "Target-Sports-USA" };
+const REPO = { owner: "Acme-Co", repo: "Web-Store" };
 // A PR node as the query asks for it; isCrossRepository: its head is a
 // fork's branch (J-002).
-const node = (number, state, isDraft = false, isCrossRepository = false) => ({ number, state, isDraft, url: `https://github.com/Arctic-Grey/Target-Sports-USA/pull/${number}`, isCrossRepository });
+const node = (number, state, isDraft = false, isCrossRepository = false) => ({ number, state, isDraft, url: `https://github.com/Acme-Co/Web-Store/pull/${number}`, isCrossRepository });
 // GitHub's answer: each field's nodes, newest first (one node, a list, or none).
 const answer = (fields) => JSON.stringify({ data: { repository: Object.fromEntries(Object.entries(fields).map(([k, n]) => [k, { nodes: Array.isArray(n) ? n : n ? [n] : [] }])) } });
 const NOT_FOUND = JSON.stringify({
   data: { repository: null },
-  errors: [{ type: "NOT_FOUND", path: ["repository"], message: "Could not resolve to a Repository with the name 'Arctic-Grey/Target-Sports-USA'." }],
+  errors: [{ type: "NOT_FOUND", path: ["repository"], message: "Could not resolve to a Repository with the name 'Acme-Co/Web-Store'." }],
 });
 
 // ── What the icon says ─────────────────────────────────────────────────────
@@ -39,7 +39,7 @@ test("label: the PR's number and its state, for the icon's hover", () => {
 // ── The query ──────────────────────────────────────────────────────────────
 
 test("query: one gh api graphql call names the repo and every branch as variables, never inside the query text", () => {
-  const args = prQueryArgs(REPO, ["juan/feat-x", 'evil"){x}']);
+  const args = prQueryArgs(REPO, ["alex/feat-x", 'evil"){x}']);
   assert.deepEqual(args.slice(0, 2), ["api", "graphql"]);
   const fields = [];
   for (let i = 2; i < args.length; i += 2) {
@@ -50,7 +50,7 @@ test("query: one gh api graphql call names the repo and every branch as variable
   assert.match(query, /^query=query\(\$o:String!,\$r:String!,\$b0:String!,\$b1:String!\)\{repository\(owner:\$o,name:\$r\)\{/);
   assert.match(query, /b0:pullRequests\(headRefName:\$b0,first:5,orderBy:\{field:CREATED_AT,direction:DESC\}\)\{nodes\{number state isDraft url isCrossRepository\}\}/, "a few, newest first, each saying whether its head is a fork's (J-002)");
   assert.ok(!query.includes("evil") && !query.includes("feat-x"), "no branch in the query text");
-  assert.deepEqual(fields.slice(1), ["o=Arctic-Grey", "r=Target-Sports-USA", "b0=juan/feat-x", 'b1=evil"){x}']);
+  assert.deepEqual(fields.slice(1), ["o=Acme-Co", "r=Web-Store", "b0=alex/feat-x", 'b1=evil"){x}']);
 });
 
 // ── Reading GitHub's answer ────────────────────────────────────────────────
@@ -61,10 +61,10 @@ test("answer: each branch's newest PR as open, draft, merged or closed; none as 
   assert.equal(r.ok, true);
   assert.equal(r.notFound, false);
   assert.deepEqual(r.prs, {
-    a: { number: 161, state: "open", url: "https://github.com/Arctic-Grey/Target-Sports-USA/pull/161" },
-    b: { number: 9, state: "draft", url: "https://github.com/Arctic-Grey/Target-Sports-USA/pull/9" },
-    c: { number: 8, state: "merged", url: "https://github.com/Arctic-Grey/Target-Sports-USA/pull/8" },
-    d: { number: 7, state: "closed", url: "https://github.com/Arctic-Grey/Target-Sports-USA/pull/7" },
+    a: { number: 161, state: "open", url: "https://github.com/Acme-Co/Web-Store/pull/161" },
+    b: { number: 9, state: "draft", url: "https://github.com/Acme-Co/Web-Store/pull/9" },
+    c: { number: 8, state: "merged", url: "https://github.com/Acme-Co/Web-Store/pull/8" },
+    d: { number: 7, state: "closed", url: "https://github.com/Acme-Co/Web-Store/pull/7" },
     e: null,
   });
 });
@@ -87,22 +87,22 @@ test("answer: a fork's PR from a branch of the same name is never the branch's: 
   const out = answer({
     b0: [node(170, "OPEN", false, true), node(161, "OPEN")],
     b1: [node(172, "OPEN", false, true), node(171, "MERGED", false, true)],
-    b2: [{ number: 9, state: "OPEN", isDraft: false, url: "https://github.com/Arctic-Grey/Target-Sports-USA/pull/9" }],
+    b2: [{ number: 9, state: "OPEN", isDraft: false, url: "https://github.com/Acme-Co/Web-Store/pull/9" }],
   });
-  assert.deepEqual(parsePrAnswer(out, ["juan/a", "juan/b", "juan/c"]).prs, {
-    "juan/a": { number: 161, state: "open", url: "https://github.com/Arctic-Grey/Target-Sports-USA/pull/161" },
-    "juan/b": null,
-    "juan/c": null,
+  assert.deepEqual(parsePrAnswer(out, ["alex/a", "alex/b", "alex/c"]).prs, {
+    "alex/a": { number: 161, state: "open", url: "https://github.com/Acme-Co/Web-Store/pull/161" },
+    "alex/b": null,
+    "alex/c": null,
   }, "a node that doesn't say where its head is counts as a fork's");
 });
 
 test("accounts: the github.com logins gh is signed into, from gh auth status --json hosts", () => {
   const out = JSON.stringify({ hosts: { "github.com": [
-    { state: "success", active: true, login: "juanjabibarcticgrey" },
-    { state: "success", active: false, login: "JuanEliasJabib02" },
+    { state: "success", active: true, login: "work-dev" },
+    { state: "success", active: false, login: "alexPersonal" },
     { state: "error", active: false, login: "expired-one" },
   ], "ghe.example.com": [{ state: "success", login: "elsewhere" }] } });
-  assert.deepEqual(accountsOf(out), ["juanjabibarcticgrey", "JuanEliasJabib02"]);
+  assert.deepEqual(accountsOf(out), ["work-dev", "alexPersonal"]);
   assert.deepEqual(accountsOf("not json"), []);
   assert.deepEqual(accountsOf(""), []);
 });
@@ -121,7 +121,7 @@ const BAD_CREDENTIALS = {
 // the account that can see the repo (null: the plain call, the project's
 // own folder, sees it); `broken`: { login: what ghAs answers as it }. Every
 // call is recorded as [account|null, args].
-function fakeIo({ url = "git@github.com:Arctic-Grey/Target-Sports-USA.git", sees = null, prs = {}, accounts = ["juanjabibarcticgrey", "JuanEliasJabib02"], fails = false, broken = {} } = {}) {
+function fakeIo({ url = "git@github.com:Acme-Co/Web-Store.git", sees = null, prs = {}, accounts = ["work-dev", "alexPersonal"], fails = false, broken = {} } = {}) {
   const calls = [];
   const reply = (who, args) => {
     calls.push([who, args]);
@@ -139,27 +139,27 @@ function fakeIo({ url = "git@github.com:Arctic-Grey/Target-Sports-USA.git", sees
     },
     ghAs: async (login, cwd, args) => reply(login, args),
     accounts: async () => accounts,
-    hostname: async (host) => (host === "github-arcticgrey" ? "github.com" : null),
+    hostname: async (host) => (host === "github-acme" ? "github.com" : null),
   };
   return { io, calls };
 }
 
 const CHECKOUTS = [
   { path: "/p", branch: "main", main: true },
-  { path: "/w/a", branch: "juan/a", main: false },
-  { path: "/w/b", branch: "juan/b", main: false },
+  { path: "/w/a", branch: "alex/a", main: false },
+  { path: "/w/b", branch: "alex/b", main: false },
   { path: "/w/detached", branch: null, main: false },
 ];
 
 test("project: one call for every branch but the main checkout's, each PR under its workspace's path", async () => {
-  const { io, calls } = fakeIo({ prs: { "juan/a": node(161, "OPEN"), "juan/b": node(8, "MERGED") } });
+  const { io, calls } = fakeIo({ prs: { "alex/a": node(161, "OPEN"), "alex/b": node(8, "MERGED") } });
   const r = await projectPrs("/p", CHECKOUTS, io, prMemo());
   assert.equal(calls.length, 1);
   assert.deepEqual(r, {
     ok: true,
     prs: {
-      "/w/a": { number: 161, state: "open", url: "https://github.com/Arctic-Grey/Target-Sports-USA/pull/161" },
-      "/w/b": { number: 8, state: "merged", url: "https://github.com/Arctic-Grey/Target-Sports-USA/pull/8" },
+      "/w/a": { number: 161, state: "open", url: "https://github.com/Acme-Co/Web-Store/pull/161" },
+      "/w/b": { number: 8, state: "merged", url: "https://github.com/Acme-Co/Web-Store/pull/8" },
     },
   });
 });
@@ -168,13 +168,13 @@ test("project: only the main checkout, or an origin that isn't GitHub, asks noth
   const main = fakeIo();
   assert.deepEqual(await projectPrs("/p", [CHECKOUTS[0]], main.io, prMemo()), { ok: true, prs: {} });
   assert.equal(main.calls.length, 0);
-  const bitbucket = fakeIo({ url: "git@bitbucket.org:iot4a-repos/x.git" });
+  const bitbucket = fakeIo({ url: "git@bitbucket.org:team-repos/x.git" });
   assert.deepEqual(await projectPrs("/p", CHECKOUTS, bitbucket.io, prMemo()), { ok: true, prs: {} });
   assert.equal(bitbucket.calls.length, 0);
 });
 
-test("project: an ssh alias of github.com (github-arcticgrey) is GitHub", async () => {
-  const { io, calls } = fakeIo({ url: "git@github-arcticgrey:Arctic-Grey/Target-Sports-USA.git", prs: { "juan/a": node(161, "OPEN") } });
+test("project: an ssh alias of github.com (github-acme) is GitHub", async () => {
+  const { io, calls } = fakeIo({ url: "git@github-acme:Acme-Co/Web-Store.git", prs: { "alex/a": node(161, "OPEN") } });
   const r = await projectPrs("/p", CHECKOUTS, io, prMemo());
   assert.equal(calls.length, 1);
   assert.equal(r.prs["/w/a"].number, 161);
@@ -182,79 +182,79 @@ test("project: an ssh alias of github.com (github-arcticgrey) is GitHub", async 
 
 test("two accounts: when the project's own folder can't see the repo, each other account is tried, and the one that sees it is remembered for that owner", async () => {
   const memo = prMemo();
-  const { io, calls } = fakeIo({ sees: "JuanEliasJabib02", prs: { "juan/a": node(5, "OPEN") } });
+  const { io, calls } = fakeIo({ sees: "alexPersonal", prs: { "alex/a": node(5, "OPEN") } });
   const first = await projectPrs("/p", CHECKOUTS, io, memo);
-  assert.deepEqual(calls.map(([who]) => who), [null, "juanjabibarcticgrey", "JuanEliasJabib02"]);
+  assert.deepEqual(calls.map(([who]) => who), [null, "work-dev", "alexPersonal"]);
   assert.equal(first.prs["/w/a"].number, 5);
   calls.length = 0;
   const again = await projectPrs("/p", CHECKOUTS, io, memo);
-  assert.deepEqual(calls.map(([who]) => who), ["JuanEliasJabib02"], "straight to the account that saw it");
+  assert.deepEqual(calls.map(([who]) => who), ["alexPersonal"], "straight to the account that saw it");
   assert.deepEqual(again, first);
 });
 
 test("two accounts: a remembered account that stops seeing the repo falls back to the folder, then the others", async () => {
   const memo = prMemo();
-  memo.owners.set("arctic-grey", "JuanEliasJabib02");
-  const { io, calls } = fakeIo({ sees: null, prs: { "juan/a": node(161, "OPEN") } });
+  memo.owners.set("acme-co", "alexPersonal");
+  const { io, calls } = fakeIo({ sees: null, prs: { "alex/a": node(161, "OPEN") } });
   const r = await projectPrs("/p", CHECKOUTS, io, memo);
-  assert.deepEqual(calls.map(([who]) => who), ["JuanEliasJabib02", null]);
+  assert.deepEqual(calls.map(([who]) => who), ["alexPersonal", null]);
   assert.equal(r.prs["/w/a"].number, 161);
-  assert.equal(memo.owners.has("arctic-grey"), false, "the folder's own account sees it now");
+  assert.equal(memo.owners.has("acme-co"), false, "the folder's own account sees it now");
 });
 
 test("two accounts: a remembered login that stops answering (gh logged out of it, a revoked token's 401) is forgotten, and the folder's account answers (J-003)", async () => {
   for (const [name, reply] of [["logged out", LOGGED_OUT], ["401", BAD_CREDENTIALS]]) {
     const memo = prMemo();
-    memo.owners.set("arctic-grey", "JuanEliasJabib02");
-    const { io, calls } = fakeIo({ sees: null, broken: { JuanEliasJabib02: reply }, prs: { "juan/a": node(161, "OPEN") } });
+    memo.owners.set("acme-co", "alexPersonal");
+    const { io, calls } = fakeIo({ sees: null, broken: { alexPersonal: reply }, prs: { "alex/a": node(161, "OPEN") } });
     const r = await projectPrs("/p", CHECKOUTS, io, memo);
-    assert.deepEqual(calls.map(([who]) => who), ["JuanEliasJabib02", null], name);
+    assert.deepEqual(calls.map(([who]) => who), ["alexPersonal", null], name);
     assert.equal(r.ok, true, name);
     assert.equal(r.prs["/w/a"].number, 161, name);
-    assert.equal(memo.owners.has("arctic-grey"), false, `${name}: the folder is asked first from now on`);
+    assert.equal(memo.owners.has("acme-co"), false, `${name}: the folder is asked first from now on`);
   }
 });
 
 test("two accounts: a remembered login gh logged out of, with a folder that can't see the repo: the other accounts are asked, and the one that answers is remembered (J-003)", async () => {
   const memo = prMemo();
-  memo.owners.set("arctic-grey", "JuanEliasJabib02");
-  const { io, calls } = fakeIo({ sees: "juanjabibarcticgrey", broken: { JuanEliasJabib02: LOGGED_OUT }, prs: { "juan/a": node(161, "OPEN") } });
+  memo.owners.set("acme-co", "alexPersonal");
+  const { io, calls } = fakeIo({ sees: "work-dev", broken: { alexPersonal: LOGGED_OUT }, prs: { "alex/a": node(161, "OPEN") } });
   const r = await projectPrs("/p", CHECKOUTS, io, memo);
-  assert.deepEqual(calls.map(([who]) => who), ["JuanEliasJabib02", null, "juanjabibarcticgrey"], "the logged-out login isn't asked twice");
+  assert.deepEqual(calls.map(([who]) => who), ["alexPersonal", null, "work-dev"], "the logged-out login isn't asked twice");
   assert.equal(r.prs["/w/a"].number, 161);
-  assert.equal(memo.owners.get("arctic-grey"), "juanjabibarcticgrey");
+  assert.equal(memo.owners.get("acme-co"), "work-dev");
   calls.length = 0;
   await projectPrs("/p", CHECKOUTS, io, memo);
-  assert.deepEqual(calls.map(([who]) => who), ["juanjabibarcticgrey"], "straight to it next time");
+  assert.deepEqual(calls.map(([who]) => who), ["work-dev"], "straight to it next time");
 });
 
 test("two accounts: a remembered login failing, then every other one: the project reads as failed, and the login is forgotten (J-003)", async () => {
   const memo = prMemo();
-  memo.owners.set("arctic-grey", "JuanEliasJabib02");
+  memo.owners.set("acme-co", "alexPersonal");
   const down = fakeIo({ fails: true });
   assert.deepEqual(await projectPrs("/p", CHECKOUTS, down.io, memo), { ok: false, prs: {} });
-  assert.deepEqual(down.calls.map(([who]) => who), ["JuanEliasJabib02", null], "the folder's failure isn't 'can't see it': no other account");
-  assert.equal(memo.owners.has("arctic-grey"), false);
+  assert.deepEqual(down.calls.map(([who]) => who), ["alexPersonal", null], "the folder's failure isn't 'can't see it': no other account");
+  assert.equal(memo.owners.has("acme-co"), false);
   const unseen = prMemo();
-  unseen.owners.set("arctic-grey", "JuanEliasJabib02");
-  const none = fakeIo({ sees: "nobody", broken: { JuanEliasJabib02: LOGGED_OUT } });
+  unseen.owners.set("acme-co", "alexPersonal");
+  const none = fakeIo({ sees: "nobody", broken: { alexPersonal: LOGGED_OUT } });
   assert.deepEqual(await projectPrs("/p", CHECKOUTS, none.io, unseen), { ok: false, prs: {} });
-  assert.deepEqual(none.calls.map(([who]) => who), ["JuanEliasJabib02", null, "juanjabibarcticgrey"]);
-  assert.equal(unseen.owners.has("arctic-grey"), false);
+  assert.deepEqual(none.calls.map(([who]) => who), ["alexPersonal", null, "work-dev"]);
+  assert.equal(unseen.owners.has("acme-co"), false);
 });
 
 test("two accounts: the remembered login, the only one that sees the repo, failing for a while (5xx, rate limit, exec's limit) is forgotten, the others are asked, and the read is that failure, never notFound (J-009)", async () => {
   const RATE_LIMITED = { ok: false, code: 1, out: JSON.stringify({ errors: [{ type: "RATE_LIMITED", message: "API rate limit exceeded for user ID 1." }] }), err: "gh: API rate limit exceeded for user ID 1." };
   const SERVER_ERROR = { ok: false, code: 1, out: "", err: "gh: Server Error (HTTP 502)" };
-  const branches = ["juan/a"];
+  const branches = ["alex/a"];
   for (const [name, reply] of [["502", SERVER_ERROR], ["rate limit", RATE_LIMITED], ["exec's limit", null]]) {
     const memo = prMemo();
-    memo.owners.set("arctic-grey", "JuanEliasJabib02");
-    const { io, calls } = fakeIo({ sees: "JuanEliasJabib02", broken: reply ? { JuanEliasJabib02: reply } : {}, prs: { "juan/a": node(161, "OPEN") } });
+    memo.owners.set("acme-co", "alexPersonal");
+    const { io, calls } = fakeIo({ sees: "alexPersonal", broken: reply ? { alexPersonal: reply } : {}, prs: { "alex/a": node(161, "OPEN") } });
     if (!reply) {
       const ghAs = io.ghAs;
       io.ghAs = async (login, cwd, args) => {
-        if (login === "JuanEliasJabib02") {
+        if (login === "alexPersonal") {
           calls.push([login, args]);
           throw new Error("exec timed out after 30000 ms");
         }
@@ -264,16 +264,16 @@ test("two accounts: the remembered login, the only one that sees the repo, faili
     const r = await askGitHub(io, "/p", REPO, prQueryArgs(REPO, branches), (out) => parsePrAnswer(out, branches), memo);
     assert.equal(r.ok, false, name);
     assert.equal(r.notFound, false, `${name}: GitHub didn't answer; it isn't that no account sees the repo`);
-    assert.deepEqual(calls.map(([who]) => who), ["JuanEliasJabib02", null, "juanjabibarcticgrey"], `${name}: the others are still asked, the failed login once`);
-    assert.equal(memo.owners.has("arctic-grey"), false, `${name}: forgotten, as any failure of the remembered login`);
+    assert.deepEqual(calls.map(([who]) => who), ["alexPersonal", null, "work-dev"], `${name}: the others are still asked, the failed login once`);
+    assert.equal(memo.owners.has("acme-co"), false, `${name}: forgotten, as any failure of the remembered login`);
   }
 });
 
 test("project: a fork's newer PR from a branch of the same name leaves the row's color to the branch's own PR; only forks' PRs leave it as it was (J-002)", async () => {
-  const { io } = fakeIo({ prs: { "juan/a": [node(170, "OPEN", false, true), node(161, "MERGED")], "juan/b": [node(171, "OPEN", false, true)] } });
+  const { io } = fakeIo({ prs: { "alex/a": [node(170, "OPEN", false, true), node(161, "MERGED")], "alex/b": [node(171, "OPEN", false, true)] } });
   assert.deepEqual(await projectPrs("/p", CHECKOUTS, io, prMemo()), {
     ok: true,
-    prs: { "/w/a": { number: 161, state: "merged", url: "https://github.com/Arctic-Grey/Target-Sports-USA/pull/161" } },
+    prs: { "/w/a": { number: 161, state: "merged", url: "https://github.com/Acme-Co/Web-Store/pull/161" } },
   });
 });
 
@@ -297,7 +297,7 @@ test("project: gh that can't start (not installed) reads as failed, never throws
 test("project: the accounts are listed once per memo, and only when a repo isn't seen", async () => {
   const memo = prMemo();
   let listed = 0;
-  const { io } = fakeIo({ sees: "JuanEliasJabib02" });
+  const { io } = fakeIo({ sees: "alexPersonal" });
   const accounts = io.accounts;
   io.accounts = async () => {
     listed++;

@@ -561,7 +561,7 @@ test("look (D39): the chip behind a button by tone, the working and blocked tone
   assert.equal(chipColor("working", THEME), "#e5c07b1a");
   assert.equal(chipColor("blocked", THEME), "#e06c751a");
   // Any other tone: the foreground at 15 %, drawn over the hovered row, so it
-  // shows as Orca's gray square does (Juan's screenshot, S24); the theme's
+  // shows as Orca's gray square does (a screenshot, S24); the theme's
   // hover color alone is the row's own and wouldn't show.
   for (const tone of ["dim", "accent", "done"]) assert.equal(chipColor(tone, THEME), "#abb2bf26", tone);
   // A tone the theme spells as no #hex falls back to the hover color.
