@@ -56,6 +56,11 @@ its own.
   a workspace that is awake with a sleeping Claude (reserved badge key
   `badges.hibernate`). A workspace you put to sleep has projects-sidebar's own
   moon instead.
+- **The Agents list's Sleeping section.** projects-sidebar's Agents list ends
+  with every Claude asleep, a workspace's ones too, as "space · title" and
+  how long it has slept. A click opens its tab, which wakes it. This mod
+  publishes that list under `agent-sleep.asleep` (`{ icon, claudes: [{
+  address, title, since }] }`, newest first), only when it changes.
 - **Sleep a workspace** (the popup's "Sleep this workspace", or
   `agent-sleep.sleep-workspace`; Orca's "Sleep"): every space of the shown
   workspace goes to sleep without closing, so its tabs, splits, sizes,
@@ -116,8 +121,9 @@ you can bind or run with `herdr-app do agent-sleep.<name>`: `sleep-now`,
 (the popup), `sleep-workspace` (no key, as in Orca; the popup's row runs it).
 
 **Files:** `<Herdr home>/agent-sleep/settings.json` (`enabled`, `idleMinutes`)
-and `sleeping.json` (one record per Claude: session id, folder, flags, and its
-account's folder, `configDir`, null for `~/.claude`). A broken `sleeping.json`
+and `sleeping.json` (one record per Claude: session id, folder, flags, its
+account's folder, `configDir`, null for `~/.claude`, and the `title` Claude
+had when it was stopped, for the Sleeping row). A broken `sleeping.json`
 is kept as `sleeping.json.bak`. `workspaces.json` holds the workspaces you put
 to sleep, by path: their spaces and tabs, and whether each is still going to
 sleep or asleep. A broken one is kept as `workspaces.json.bak`.

@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { BADGE_KEY, iconPath, parseWorktreeList, workspaceOf, badgeValue, sameValue } from "../mods/agent-sleep/badges.js";
+import { BADGE_KEY, ASLEEP_KEY, iconPath, parseWorktreeList, workspaceOf, badgeValue, asleepValue, sameValue } from "../mods/agent-sleep/badges.js";
 
 const at = (h, m) => new Date(2026, 10, 6, h, m).getTime();
 const rec = (over = {}) => ({
@@ -137,4 +137,32 @@ test("sameValue tells an unchanged value from a changed one", () => {
   assert.equal(sameValue(a, {}), false);
   assert.equal(sameValue(undefined, {}), false);
   assert.equal(sameValue({}, {}), true);
+});
+
+// ── The Sleeping section's list (projects-agents) ─────────────────────────
+
+test("asleepValue: one entry per asleep Claude, newest first, its slept workspace's ones too; live and stopping ones aren't asleep", () => {
+  assert.equal(ASLEEP_KEY, "agent-sleep.asleep");
+  const records = {
+    t1: rec({ at: at(14, 2), title: "  Lector de md sin mergear " }),
+    t2: rec({ at: at(15, 30), cwd: "/r/other", workspacePath: "/r/other" }),
+    t3: rec({ state: "live", at: at(16, 0) }),
+    t4: rec({ state: "stopping", at: at(16, 1) }),
+    t5: rec({ at: at(15, 30), title: "" }),
+  };
+  assert.deepEqual(asleepValue({ records, modFolder: "agent-sleep" }), {
+    icon: "mods/agent-sleep/icons/moon.svg",
+    claudes: [
+      { address: "t2", title: null, since: at(15, 30) },
+      { address: "t5", title: null, since: at(15, 30) },
+      { address: "t1", title: "Lector de md sin mergear", since: at(14, 2) },
+    ],
+  });
+});
+
+test("asleepValue: nothing asleep is an empty list; a bad mod folder leaves the icon out", () => {
+  assert.deepEqual(asleepValue({ records: {}, modFolder: "agent-sleep" }), { icon: "mods/agent-sleep/icons/moon.svg", claudes: [] });
+  assert.deepEqual(asleepValue({ records: { t1: rec({ title: 7 }) }, modFolder: "a/b" }), { claudes: [{ address: "t1", title: null, since: at(14, 2) }] });
+  const a = asleepValue({ records: { t1: rec() }, modFolder: "agent-sleep" });
+  assert.equal(sameValue(a, asleepValue({ records: { t1: rec() }, modFolder: "agent-sleep" })), true);
 });

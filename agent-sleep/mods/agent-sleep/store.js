@@ -16,7 +16,9 @@
 // CLAUDE_CONFIG_DIR string (isConfigDir), or null for System default
 // (~/.claude). A record written before T10 has none and reads as null: only a
 // ~/.claude Claude could sleep then. The version stays 1, since older code
-// ignores the field.
+// ignores the field. `title` (optional, text or null) is the title Claude gave
+// its terminal when it was stopped, for projects-agents' Sleeping row; it is
+// only shown, never checked, so a record without one stays valid.
 
 import { DEFAULT_IDLE_MINUTES, MIN_IDLE_MINUTES, MAX_IDLE_MINUTES } from "./rules.js";
 import { isConfigDir } from "./claude-session.js";

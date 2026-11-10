@@ -12,7 +12,7 @@ import {
   Coordinator, MOD, PULSE_MS, SETTLE_MS, isLoopCopy, startLoop, blockModel, stepMinutes, windowLabel, isClaudeCodeTerminal,
 } from "../mods/agent-sleep/coordinator.js";
 import { TICK_MS } from "../mods/agent-sleep/rules.js";
-import { BADGE_KEY } from "../mods/agent-sleep/badges.js";
+import { BADGE_KEY, ASLEEP_KEY } from "../mods/agent-sleep/badges.js";
 
 import {
   fixture, MIN, NOW, HOME, APP, SLEEPING, SETTINGS, SID1, SID2, NVM_CLAUDE, PROC_START, EMPTY, SUGGESTION, DRAFT, EXIT, SHELL_BARE, SHELL_TYPED, claude, shellOf, ok, fail, makeWorld, addClaude, putSession, exitClaude, show, liveTerminals, deps, records, exits, resumes, at, sleepT1, setup, storeRecord,
@@ -873,6 +873,8 @@ test("the coordinator's model: Next after the first tick, then asleep with MB fr
   assert.equal(co.model().last, "Slept app");
 });
 
+const published = (w, key) => w.publishes.filter((p) => p.key === key);
+
 test("the moon badge is published only when it changes", async () => {
   const { w, co } = setup();
   storeRecord(w, "t1");
@@ -880,16 +882,56 @@ test("the moon badge is published only when it changes", async () => {
   await at(co, w, NOW);
   await at(co, w, NOW + 1_000);
   await at(co, w, NOW + 1 * MIN);
-  assert.equal(w.publishes.length, 1);
-  assert.equal(w.publishes[0].key, BADGE_KEY);
-  const [badge] = w.publishes[0].value["/code/app"];
+  assert.equal(published(w, BADGE_KEY).length, 1);
+  const [badge] = published(w, BADGE_KEY)[0].value["/code/app"];
   assert.equal(badge.icon, `mods/${MOD}/icons/moon.svg`);
   delete w.core.t1; // the terminal is gone: the record goes, the moon too
   await at(co, w, NOW + 2 * MIN);
-  assert.equal(w.publishes.length, 2);
-  assert.deepEqual(w.publishes[1].value, {});
+  assert.equal(published(w, BADGE_KEY).length, 2);
+  assert.deepEqual(published(w, BADGE_KEY)[1].value, {});
   await at(co, w, NOW + 3 * MIN);
-  assert.equal(w.publishes.length, 2);
+  assert.equal(published(w, BADGE_KEY).length, 2);
+});
+
+test("the Sleeping list (projects-agents) is published only when it changes, and empties when the Claude is gone", async () => {
+  const { w, co } = setup();
+  storeRecord(w, "t1", { title: "Lector de md" });
+  exitClaude(w, "t1");
+  await at(co, w, NOW);
+  await at(co, w, NOW + 1 * MIN);
+  const since = records(w).t1.at;
+  const sleeping = published(w, ASLEEP_KEY);
+  assert.equal(sleeping.length, 1);
+  assert.deepEqual(sleeping[0].value, {
+    icon: `mods/${MOD}/icons/moon.svg`,
+    claudes: [{ address: "t1", title: "Lector de md", since }],
+  });
+  delete w.core.t1; // the terminal is gone: the record goes, and the row with it
+  await at(co, w, NOW + 2 * MIN);
+  assert.deepEqual(published(w, ASLEEP_KEY).map((p) => p.value.claudes), [[{ address: "t1", title: "Lector de md", since }], []]);
+  await at(co, w, NOW + 3 * MIN);
+  assert.equal(published(w, ASLEEP_KEY).length, 2);
+});
+
+test("a Claude put to sleep keeps its title on its record, from Core or else from its pane", async () => {
+  const { w, co } = setup();
+  w.core.t1.title = "✳ Lector de md sin mergear";
+  const t = await sleepT1(co, w);
+  assert.equal(exits(w).length, 1);
+  assert.equal(records(w).t1.title, "✳ Lector de md sin mergear");
+  exitClaude(w, "t1");
+  await at(co, w, t + 3_000);
+  assert.equal(records(w).t1.state, "asleep");
+  assert.equal(w.shared[ASLEEP_KEY].claudes[0].title, "✳ Lector de md sin mergear");
+
+  const other = setup();
+  other.w.panes = other.w.panes.map((p) => (p.terminal === "t1" ? { ...p, title: "Pane title" } : p));
+  await sleepT1(other.co, other.w);
+  assert.equal(records(other.w).t1.title, "Pane title");
+
+  const none = setup();
+  await sleepT1(none.co, none.w);
+  assert.equal(records(none.w).t1.title, null);
 });
 
 test("nothing asleep and no moon published before: nothing is written to shared state", async () => {
@@ -901,8 +943,9 @@ test("nothing asleep and no moon published before: nothing is written to shared 
 test("a stale moon from an earlier run is cleared", async () => {
   const { w, co } = setup({ t1: false });
   w.shared[BADGE_KEY] = { "/code/app": [{ icon: "mods/agent-sleep/icons/moon.svg", tone: "dim", tooltip: "x" }] };
+  w.shared[ASLEEP_KEY] = { icon: "mods/agent-sleep/icons/moon.svg", claudes: [{ address: "t7", title: null, since: NOW - MIN }] };
   await at(co, w, NOW);
-  assert.deepEqual(w.publishes.map((p) => p.value), [{}]);
+  assert.deepEqual(w.publishes.map((p) => p.value), [{}, { icon: "mods/agent-sleep/icons/moon.svg", claudes: [] }]);
 });
 
 // ── Settings (S6) ─────────────────────────────────────────────────────────
