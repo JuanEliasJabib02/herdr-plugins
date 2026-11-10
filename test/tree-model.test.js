@@ -15,7 +15,7 @@ import {
   buildTree, openAction, openMainAction, railAction, workspaceLabel, workspaceMenuItems, initials, mostUrgent,
   agentTitle, ago, isNarrow, projectMenuItems, withoutProject, pruneCache, projectPaths,
   watchDirs, eachLimit, liveFolder, addProjectAt, deletePrompt, deleteOutcome, terminalsStaying,
-  renamePrompt, renameOutcome, reorderProject, spaceRenames, filterMenuItems,
+  renamePrompt, renameOutcome, reorderProject, spaceRenames, filterMenuItems, sleepCommand, SLEEP_TOOLTIP,
 } from "../projects-sidebar/mods/projects/tree-model.js";
 import { buildTaskTree } from "../projects-sidebar/mods/projects/task-model.js";
 import { parseBadges, laneBadgeKey } from "../projects-sidebar/mods/projects/badges-model.js";
@@ -417,11 +417,11 @@ test("labels: another worktree by its branch's last segment, so a rename shows w
 
 // ── Workspace menu (D20) ───────────────────────────────────────────────────
 
-test("workspace menu: Copy Path and Copy Worktree Name, on main and on the others", () => {
+test("workspace menu: Sleep, then Copy Path and Copy Worktree Name, on main and on the others", () => {
   const ids = (row) => workspaceMenuItems(row).map((i) => `${i.id}:${i.label}`);
-  assert.deepEqual(ids({ path: "/code/app", branch: "main", main: true }), ["copy-path:Copy Path", "copy-name:Copy Worktree Name"]);
-  assert.deepEqual(ids({ path: "/w/app/feat-login", branch: "feat/login", main: false }).slice(0, 2), ["copy-path:Copy Path", "copy-name:Copy Worktree Name"]);
-  const [path, name] = workspaceMenuItems({ path: "/w/app/feat-login", branch: "feat/login", main: false });
+  assert.deepEqual(ids({ path: "/code/app", branch: "main", main: true }), ["sleep:Sleep", "copy-path:Copy Path", "copy-name:Copy Worktree Name"]);
+  assert.deepEqual(ids({ path: "/w/app/feat-login", branch: "feat/login", main: false }).slice(0, 3), ["sleep:Sleep", "copy-path:Copy Path", "copy-name:Copy Worktree Name"]);
+  const [, path, name] = workspaceMenuItems({ path: "/w/app/feat-login", branch: "feat/login", main: false });
   assert.equal(path.text, "/w/app/feat-login");
   assert.equal(name.text, "feat-login", "the worktree name is the folder's, not the branch's");
   assert.deepEqual(workspaceMenuItems(null), []);
@@ -435,6 +435,20 @@ test("workspace menu: Delete… last, after a separator, on a worktree; never on
   assert.equal(del.danger, true, "drawn in the blocked color");
   assert.equal(del.text, undefined, "nothing to copy");
   assert.ok(!workspaceMenuItems({ path: "/code/app", branch: "main", main: true }).some((i) => i.id === "delete"), "the main checkout is never deleted");
+});
+
+test("workspace menu: Sleep (Orca's, first, with its moon) puts the workspace to sleep through agent-sleep; off, saying why, with nothing open or already asleep", () => {
+  const row = { path: "/w/app/feat-login", branch: "feat/login", main: false };
+  const sleep = (state) => workspaceMenuItems(row, state)[0];
+  assert.deepEqual(sleep({ open: true, asleep: false }), { id: "sleep", label: "Sleep", tooltip: SLEEP_TOOLTIP });
+  assert.deepEqual(sleep(undefined), { id: "sleep", label: "Sleep", tooltip: SLEEP_TOOLTIP }, "a state not known yet: on, agent-sleep says why if it can't");
+  assert.deepEqual(sleep({ open: false, asleep: true }), { id: "sleep", label: "Sleep", tooltip: SLEEP_TOOLTIP, disabled: true, why: "Nothing open to put to sleep" });
+  assert.deepEqual(sleep({ open: true, asleep: true }), { id: "sleep", label: "Sleep", tooltip: SLEEP_TOOLTIP, disabled: true, why: "Already asleep" });
+  assert.equal(sleep({ open: true, asleep: false }).separator, undefined, "no separator: it opens the menu");
+  assert.equal(sleepCommand("/w/app/feat-login"), "agent-sleep.sleep-workspace.2f772f6170702f666561742d6c6f67696e");
+  assert.equal(sleepCommand("/code/ñ"), "agent-sleep.sleep-workspace.2f636f64652fc3b1", "the path's UTF-8");
+  assert.equal(sleepCommand(""), null);
+  assert.equal(sleepCommand(null), null);
 });
 
 // ── Delete dialog (D22) ────────────────────────────────────────────────────
@@ -545,8 +559,8 @@ test("delete outcome: changed shows the new check; failed and refused stay in th
 
 test("workspace menu: Rename… on a worktree, before Delete…; never on the main checkout (S22)", () => {
   const items = workspaceMenuItems({ path: "/w/app/feat-login", branch: "feat/login", main: false });
-  assert.deepEqual(items.map((i) => i.id), ["copy-path", "copy-name", "rename", "delete"]);
-  const rename = items[2];
+  assert.deepEqual(items.map((i) => i.id), ["sleep", "copy-path", "copy-name", "rename", "delete"]);
+  const rename = items[3];
   assert.equal(rename.label, "Rename…");
   assert.ok(!rename.separator && !rename.danger, "a plain item, above Delete…'s separator");
   assert.equal(rename.text, undefined, "nothing to copy");

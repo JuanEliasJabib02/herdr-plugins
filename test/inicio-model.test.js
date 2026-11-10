@@ -14,7 +14,7 @@ import { readFileSync, readdirSync } from "node:fs";
 import { registerHooks } from "node:module";
 import { matchSpaces } from "../projects-sidebar/mods/projects/lib.js";
 import { spacesToClose } from "../projects-sidebar/mods/projects/remove-workspace-model.js";
-import { spaceRenames, workspaceMenuItems } from "../projects-sidebar/mods/projects/tree-model.js";
+import { spaceRenames, workspaceMenuItems, sleepCommand, SLEEP_TOOLTIP } from "../projects-sidebar/mods/projects/tree-model.js";
 import { menuHeight } from "../projects-sidebar/mods/projects/menus-model.js";
 import {
   INICIO_NAME, parseInicio, inicioValue, validInicio, inicioState, spaceNewArgs, ensureInicio,
@@ -59,6 +59,7 @@ registerHooks({
 let fake = {};
 globalThis.__projectsHerdr = (name, args) => (fake[name] ? fake[name](...args) : undefined);
 const { default: Projects } = await import("../projects-sidebar/mods/projects/main.js");
+const { menuOf } = await import("../projects-sidebar/mods/projects/workspace-menu.js");
 
 const HOME = "/Users/demo";
 const WT = "/Users/demo/orca/workspaces/app/feat-login";
@@ -689,6 +690,8 @@ async function copyOf(w, view, extra = {}) {
     timer: { every: (_ms, fn) => w.timers.push(() => fn(cx)) },
     sleep: () => Promise.resolve(),
     notify() {},
+    focus_handle: () => ({ focus() {} }),
+    write_to_clipboard() {},
   };
   const c = new Projects();
   c.init(null, cx);
@@ -838,6 +841,41 @@ test("workspace-menu-at with `only` (the Agents rows: Rename… and Delete…) o
   }]);
   assert.ok(w.overlays[0].height < menuHeight(workspaceMenuItems({ path: WT, main: false })), "shorter than the whole menu");
   assert.deepEqual(w.closed, ["o9"]);
+});
+
+test("workspace-menu-at with the Agents rows' `only` (Sleep, Rename…, Delete…): a worktree gets the three, the main checkout Sleep alone", async () => {
+  const w = world();
+  const only = ["sleep", "rename", "delete"];
+  await copyOf(w, "workspace-menu-at", { project: "/code/app", path: WT, overlay: "o9", only });
+  await copyOf(w, "workspace-menu-at", { project: "/code/app", path: "/code/app", overlay: "o8", only });
+  assert.deepEqual(w.overlays.map((o) => o.props.only), [only, only]);
+  assert.deepEqual(menuOf("/code/app", WT, null, only).items.map((i) => i.id), only);
+  assert.deepEqual(menuOf("/code/app", "/code/app", null, only).items.map((i) => i.id), ["sleep"]);
+  assert.deepEqual(w.overlays.map((o) => o.height), [menuHeight(menuOf("/code/app", WT, null, only).items), menuHeight(menuOf("/code/app", "/code/app", null, only).items)]);
+});
+
+test("the menu's Sleep (T6): agent-sleep puts that workspace to sleep by its path, and the menu closes", async () => {
+  const w = world();
+  const c = await copyOf(w, "workspace-menu", { project: "/code/app", path: WT, overlay: "o5" });
+  const sleep = menuOf("/code/app", WT).items[0];
+  assert.equal(sleep.id, "sleep");
+  assert.equal(sleep.disabled, undefined, "b, open on WT, isn't put away");
+  c.view.choose(sleep, {});
+  assert.deepEqual(w.runs, [[sleepCommand(WT), undefined]]);
+  assert.deepEqual(w.closed, ["o5"]);
+  assert.deepEqual(w.toasts, [], "agent-sleep says the rest (its confirm, its popup)");
+});
+
+test("the menu's Sleep is off, saying why, while every space on the workspace is put away, or none is open on it", async () => {
+  const asleep = ordered(["a", "b", "ini", "c"], "a").map((s) => (s.id === "b" ? { ...s, tabs: s.tabs.map((t) => ({ ...t, settled: true })) } : s));
+  world({ spaces: asleep });
+  assert.deepEqual(menuOf("/code/app", WT).items[0], { id: "sleep", label: "Sleep", tooltip: SLEEP_TOOLTIP, disabled: true, why: "Already asleep" });
+  world({ panes: [term("a-t1", "/code/a"), view("ini-m"), term("c-t1", "/code/c")], spaces: ordered(["a", "ini", "c"], "a") });
+  assert.deepEqual(menuOf("/code/app", WT).items[0], { id: "sleep", label: "Sleep", tooltip: SLEEP_TOOLTIP, disabled: true, why: "Nothing open to put to sleep" });
+  const w = world();
+  const c = await copyOf(w, "workspace-menu", { project: "/code/app", path: WT, overlay: "o5" });
+  c.view.choose({ ...menuOf("/code/app", WT).items[0], disabled: true }, {});
+  assert.deepEqual(w.runs, [], "a disabled Sleep runs nothing");
 });
 
 test("workspace-menu-at with no workspace closes itself and opens nothing; not an overlay (herdr-app check), it does nothing", async () => {

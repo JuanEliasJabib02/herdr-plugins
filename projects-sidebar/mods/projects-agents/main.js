@@ -306,7 +306,8 @@ export default class Agents extends View {
     // Each space's workspace and project, as the sidebar has them. A row
     // names its project unless the space already reads the same ("main" says
     // nothing about which repo), and a right-click opens that workspace's
-    // menu, the sidebar's own (Copy Path, Rename…, Delete…, the plugins').
+    // menu, the sidebar's own with only Sleep, Rename… and Delete…
+    // (workspace-model.js AGENT_MENU; the main checkout's, Sleep alone).
     const where = workspacesBySpace({ registry: shared(REGISTRY_KEY), cache: shared(CACHE_KEY), spaces: spaceList, panes: paneList, home: home() });
     const projectOf = (spaceId, spaceName) => {
       const w = where.get(spaceId);

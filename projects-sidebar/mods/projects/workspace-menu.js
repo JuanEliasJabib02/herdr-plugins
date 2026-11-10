@@ -1,23 +1,26 @@
 // A workspace's right-click menu, a popup with props { project, path, sub }
-// (D20): Copy Path and Copy Worktree Name; on a worktree that isn't the main
-// checkout, Rename… (the Rename dialog, D25) and, after a separator, Delete…
-// (the Delete dialog, D22). Then, after a separator, other plugins' items for
-// that workspace (Spotlight's D30, menus-model.js): a submenu's item (▸)
-// reopens the menu at the pointer on its items (`sub`: { key, id }), like the
-// project menu's Move to group ▸; an item's action runs with the menu open,
+// (D20): Sleep (workspace-sleep T6: agent-sleep puts the workspace to sleep,
+// asking first when an agent is working), Copy Path and Copy Worktree Name;
+// on a worktree that isn't the main checkout, Rename… (the Rename dialog,
+// D25) and, after a separator, Delete… (the Delete dialog, D22). Then, after
+// a separator, other plugins' items for that workspace (Spotlight's D30,
+// menus-model.js): a submenu's item (▸) reopens the menu at the pointer on
+// its items (`sub`: { key, id }), like the project menu's Move to group ▸; an
+// item's action runs with the menu open,
 // its row showing "…", then the menu closes. The popup's height follows the
 // list. ↑/↓ move, Enter (→ on a submenu's item) runs, Esc closes. Copying
 // uses gpui's clipboard (D21), then a toast says what was copied. With
 // `only` (props.only, a list of own item ids) it draws just those of its own
-// items and no plugin's: the Agents list's rows ask for Rename… and Delete….
+// items and no plugin's: the Agents list's rows ask for Sleep, Rename… and
+// Delete….
 
 import { div, svg } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
-import { theme, props, run, exec, openOverlay, closeOverlay, notify } from "herdr";
+import { theme, props, run, exec, openOverlay, closeOverlay, notify, spaces, panes, home } from "herdr";
 import { MOD, icon } from "./config.js";
-import { normPath, baseName } from "./lib.js";
+import { normPath, baseName, matchSpaces } from "./lib.js";
 import * as store from "./store.js";
-import { workspaceMenuItems, workspaceLabel } from "./tree-model.js";
+import { workspaceMenuItems, workspaceLabel, workspacesOf, sleepCommand } from "./tree-model.js";
 import { workspaceMenuList, subMenuOf, menuChoice, menuRowKey, menuHeight } from "./menus-model.js";
 import { execFailure, startFailure } from "./badges-model.js";
 import { openDeleteWorkspace } from "./delete-workspace.js";
@@ -34,14 +37,23 @@ function rowOf(project, path) {
   return list.find((c) => normPath(c.path) === normPath(path)) ?? { path, branch: null, main: false };
 }
 
+// Whether Sleep can run now: { open, asleep } of the row's workspace, as the
+// tree draws its moon (tree-model.js workspacesOf over matchSpaces).
+function sleepOf(row) {
+  if (!row) return undefined;
+  const all = spaces() ?? [];
+  const [w] = workspacesOf([row], { matches: matchSpaces(store.cache(), all, panes() ?? [], home()), spaces: all });
+  return w ? { open: w.open, asleep: w.asleep } : undefined;
+}
+
 // What the menu draws: { title, items, empty }. The workspace's own items,
 // then the plugins' (store.menus, by its path); with `sub`, the items of that
 // plugin item's submenu; with `only`, just those own items. The opener and
 // the view both build it here, so the popup's height fits the list drawn.
-function menuOf(project, path, sub, only = null) {
+export function menuOf(project, path, sub, only = null) {
   if (only) {
     const row = rowOf(project, path);
-    return { title: row ? workspaceLabel(row) : "", items: workspaceMenuItems(row).filter((it) => only.includes(it.id)), empty: "Nothing to do here." };
+    return { title: row ? workspaceLabel(row) : "", items: workspaceMenuItems(row, sleepOf(row)).filter((it) => only.includes(it.id)), empty: "Nothing to do here." };
   }
   const plugin = path ? store.menus()[normPath(path)] ?? [] : [];
   if (sub) {
@@ -49,7 +61,7 @@ function menuOf(project, path, sub, only = null) {
     return { title: parent?.label ?? "", items: parent?.items ?? [], empty: "Not in the menu any more." };
   }
   const row = rowOf(project, path);
-  return { title: row ? workspaceLabel(row) : "", items: workspaceMenuList(workspaceMenuItems(row), plugin), empty: "No workspace." };
+  return { title: row ? workspaceLabel(row) : "", items: workspaceMenuList(workspaceMenuItems(row, sleepOf(row)), plugin), empty: "No workspace." };
 }
 
 // The only place that opens the menu, at the pointer. A popup is as tall as
@@ -59,6 +71,7 @@ export function openWorkspaceMenu(project, path, sub = null, only = null) {
 }
 
 const ICONS = {
+  sleep: icon("moon"),
   "copy-path": icon("copy"),
   "copy-name": icon("copy"),
   rename: "mods/workspace-chrome/square-pen.svg",
@@ -102,15 +115,30 @@ export default class WorkspaceMenu {
     } else if (c.exec) this.act(item, c.exec, cx);
   }
 
-  // This plugin's own items: a copy, or the Rename / Delete dialog.
+  // This plugin's own items: Sleep, a copy, or the Rename / Delete dialog.
   chooseOwn(item, cx) {
     if (item.text !== undefined) {
       cx.write_to_clipboard(item.text);
       notify({ title: "Copied", body: item.text, level: "success", timeout: 2500 });
     }
     this.close();
+    if (item.id === "sleep") this.sleep();
     if (item.id === "rename") openRenameWorkspace(this.project, this.path);
     if (item.id === "delete") openDeleteWorkspace(this.project, this.path);
+  }
+
+  // Sleep (T6): agent-sleep's `sleep-workspace.<hex>` with this workspace's
+  // path, a mod command run by name as a plugin item's is. agent-sleep does
+  // the rest: its confirm when an agent is working, its tabs put away (the
+  // moon, and Inicio when it's the shown one), then the stops.
+  sleep() {
+    const name = sleepCommand(normPath(this.path ?? ""));
+    if (!name) return;
+    try {
+      run(name);
+    } catch (e) {
+      notify({ title: "Sleep", body: startFailure(e), level: "warning" });
+    }
   }
 
   // A plugin item's exec (D30): argv only, never a shell, in the workspace's

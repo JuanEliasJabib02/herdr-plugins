@@ -11,7 +11,7 @@ import assert from "node:assert/strict";
 import { Coordinator, PULSE_MS, REQUEST_KEY } from "../mods/agent-sleep/coordinator.js";
 import {
   placeOf, localPlaces, kindOf, flightOf, promptStep, shownEdges, tabsToSettle, processGroups, hangUpGroup,
-  didntStopNotice, parseWorkspaceCommand, answerCommand, SLEEP_WORKSPACE, WAIT_PULSES, INTERRUPT_DEADLINE_MS, PROGRAM_GRACE_MS, CLEAR_KEY,
+  didntStopNotice, parseWorkspaceCommand, answerCommand, sleepWorkspaceCommand, SLEEP_WORKSPACE, WAIT_PULSES, INTERRUPT_DEADLINE_MS, PROGRAM_GRACE_MS, CLEAR_KEY,
 } from "../mods/agent-sleep/workspace-sleep.js";
 import { isShellRoot } from "../mods/agent-sleep/rules.js";
 import {
@@ -157,6 +157,22 @@ test("the command's name, and the confirm's answers naming the question they ans
   }
 });
 
+test("T6: a workspace by its path, as the right-click's Sleep names it: `sleep-workspace.<the path's UTF-8 in hex>`", () => {
+  assert.equal(sleepWorkspaceCommand("/code/app"), "sleep-workspace.2f636f64652f617070");
+  assert.deepEqual(parseWorkspaceCommand("sleep-workspace.2f636f64652f617070"), { kind: "sleep", path: "/code/app" });
+  for (const path of ["/Users/juan/orca/workspaces/herdr-plugins/sleep-agent", "/code/ñandú app", "C:/code/app", "/"]) {
+    assert.deepEqual(parseWorkspaceCommand(sleepWorkspaceCommand(path)), { kind: "sleep", path }, path);
+  }
+  assert.deepEqual(parseWorkspaceCommand(sleepWorkspaceCommand("/code/app/")), { kind: "sleep", path: "/code/app" }, "a trailing slash goes, as projects-sidebar's normPath");
+  assert.deepEqual(parseWorkspaceCommand("sleep-workspace.2F636F64652F617070"), { kind: "sleep", path: "/code/app" }, "either case");
+  // Not a path this could sleep: odd or non-hex digits, bytes that aren't
+  // UTF-8, a relative path, a NUL, or more than MAX_PATH_BYTES.
+  for (const hex of ["0123456789ab", "2f2", "zz", "616263", "2f00", "2fff", "2f".repeat(4097)]) {
+    assert.equal(parseWorkspaceCommand(`sleep-workspace.${hex}`), null, hex);
+  }
+  for (const path of ["", "code/app", null, 7]) assert.equal(sleepWorkspaceCommand(path), null, String(path));
+});
+
 test("D10's toast: \"<workspace>: <N> terminals didn't stop\", naming each and why", () => {
   assert.equal(didntStopNotice("app", []), null);
   assert.deepEqual(didntStopNotice("app", [{ address: "t1", why: "still working after 10 s" }]), {
@@ -230,6 +246,34 @@ test("Spaces: the shown workspace's two spaces get every tab settled, in one ent
   assert.deepEqual(w.runs, [["tab.settle", { id: "a1" }], ["tab.settle", { id: "a2" }], ["tab.settle", { id: "a3" }]]);
   assert.deepEqual(settledTabs(w), ["a1", "a2", "a3"]);
   assert.equal(co.view().last, "Putting app to sleep");
+});
+
+test("Spaces, by path (T6, the right-click's Sleep): that workspace's spaces sleep, shown or not, and the shown one is left", async () => {
+  const { w, co } = await ready();
+  co.command(sleepWorkspaceCommand("/code/checkout-flow"));
+  await step(co, w);
+  assert.deepEqual(entries(w), {
+    "/code/checkout-flow": { spaces: { sb: ["b1"] }, state: "sleeping", at: NOW + PULSE_MS },
+  });
+  assert.deepEqual(w.runs, [["tab.settle", { id: "b1" }]]);
+  assert.equal(co.view().last, "Putting checkout-flow to sleep");
+  await steps(co, w, 3);
+  assert.deepEqual(exits(w).map((s) => s.address), ["t2"], "t1, on the shown space, keeps running");
+});
+
+test("Spaces, by path: one with no open space, or already asleep, changes nothing and says why", async () => {
+  const { w, co } = await ready();
+  co.command(sleepWorkspaceCommand("/code/elsewhere"));
+  await step(co, w);
+  assert.deepEqual(entries(w), {});
+  assert.deepEqual(w.runs, []);
+  assert.equal(co.view().last, "elsewhere has no open space");
+  co.command(sleepWorkspaceCommand("/code/checkout-flow"));
+  await step(co, w);
+  co.command(sleepWorkspaceCommand("/code/checkout-flow"));
+  await step(co, w);
+  assert.equal(co.view().last, "checkout-flow is already going to sleep");
+  assert.deepEqual(w.runs, [["tab.settle", { id: "b1" }]], "settled once");
 });
 
 test("Spaces: a space with panes in two worktrees is its first pane's workspace's, and all its terminals sleep with it", async () => {
@@ -806,6 +850,8 @@ test("the bare command and the answers go through command(); the popup's table s
   assert.equal(co.command(SLEEP_WORKSPACE), true);
   assert.equal(co.command("confirm-sleep.no-such-question"), true, "a well-formed answer is taken, and answers nothing");
   assert.equal(co.command("confirm-sleep."), false);
-  assert.equal(co.command("sleep-workspace.0123456789ab"), false, "T6's targets aren't here yet");
+  assert.equal(co.command("sleep-workspace.0123456789ab"), false, "a target that isn't a path is no command");
+  assert.equal(co.command(sleepWorkspaceCommand("/code/checkout-flow")), true, "T6: one by its path");
+  assert.deepEqual(co.sleepRequest, { path: "/code/checkout-flow", force: false });
   assert.equal(SLEEPING.endsWith("/agent-sleep/sleeping.json"), true);
 });
