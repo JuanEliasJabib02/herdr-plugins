@@ -67,9 +67,10 @@ export const AGENT_MENU = Object.freeze(["sleep", "rename", "delete"]);
 // 1 px frameless popup at the pointer, the projects mod's
 // `workspace-menu-at` view, which opens the real one from inside that mod
 // (with the height its items take) and closes itself. The main checkout's
-// has Sleep alone: the menu never renames or deletes it. Null for no
-// workspace.
+// asks for Sleep alone: it is never renamed or deleted, whatever the menu's
+// own lookup of the checkout finds. Null for no workspace.
 export function workspaceMenuSpec(w) {
   if (!isObject(w) || typeof w.path !== "string" || !w.path) return null;
-  return { mod: "projects", kind: "popup", width: 1, height: 1, frame: "none", props: { view: "workspace-menu-at", project: w.project, path: w.path, only: [...AGENT_MENU] } };
+  const only = w.main === true ? ["sleep"] : [...AGENT_MENU];
+  return { mod: "projects", kind: "popup", width: 1, height: 1, frame: "none", props: { view: "workspace-menu-at", project: w.project, path: w.path, only } };
 }

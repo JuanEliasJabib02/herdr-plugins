@@ -91,11 +91,12 @@ test("the menu opens through the projects mod's relay, at the pointer, with Slee
     props: { view: "workspace-menu-at", project: "/repos/backend-action-experience", path: "/ws/backend-action/AX-3704", only: ["sleep", "rename", "delete"] },
   });
   assert.equal(workspaceMenuSpec(null), null);
-  // The main checkout sleeps too (Orca's Sleep is on every workspace); the
-  // menu leaves out its Rename… and Delete… (tree-model.js workspaceMenuItems).
+  // The main checkout sleeps too (Orca's Sleep is on every workspace), and
+  // asks for Sleep alone: never Rename… or Delete…, whatever the menu's own
+  // lookup of the checkout finds.
   const main = where().get("s1");
   assert.equal(main.main, true);
-  assert.deepEqual(workspaceMenuSpec(main).props, { view: "workspace-menu-at", project: main.project, path: main.path, only: ["sleep", "rename", "delete"] });
+  assert.deepEqual(workspaceMenuSpec(main).props, { view: "workspace-menu-at", project: main.project, path: main.path, only: ["sleep"] });
 });
 
 test("the Sleep command projects-sidebar runs is the one agent-sleep reads (two copies, mods can't import each other)", () => {

@@ -878,6 +878,14 @@ test("the menu's Sleep is off, saying why, while every space on the workspace is
   assert.deepEqual(w.runs, [], "a disabled Sleep runs nothing");
 });
 
+test("the menu's Sleep on a path it can't name says so, instead of doing nothing", async () => {
+  const w = world();
+  const c = await copyOf(w, "workspace-menu", { project: "/code/app", path: "relative/feat", overlay: "o5" });
+  c.view.choose({ id: "sleep", label: "Sleep" }, {});
+  assert.deepEqual(w.runs, []);
+  assert.deepEqual(w.toasts, [{ title: "Sleep", body: "No workspace path to put to sleep: relative/feat", level: "warning" }]);
+});
+
 test("workspace-menu-at with no workspace closes itself and opens nothing; not an overlay (herdr-app check), it does nothing", async () => {
   const none = world();
   await copyOf(none, "workspace-menu-at", { project: "/code/app", path: null, overlay: "o9" });

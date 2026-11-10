@@ -133,7 +133,10 @@ export default class WorkspaceMenu {
   // moon, and Inicio when it's the shown one), then the stops.
   sleep() {
     const name = sleepCommand(normPath(this.path ?? ""));
-    if (!name) return;
+    if (!name) {
+      notify({ title: "Sleep", body: `No workspace path to put to sleep: ${this.path ?? ""}`, level: "warning" });
+      return;
+    }
     try {
       run(name);
     } catch (e) {
