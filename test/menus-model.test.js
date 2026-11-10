@@ -206,7 +206,7 @@ test("the merged list: P's own items, a separator, then each plugin's; no separa
   const own = workspaceMenuItems({ path: W, branch: "login", main: false });
   const plugin = parseMenus([{ [W]: [TOGGLE, ENV] }])[W];
   const list = workspaceMenuList(own, plugin);
-  assert.deepEqual(list.map((i) => i.id), ["copy-path", "copy-name", "rename", "delete", "toggle", "env"]);
+  assert.deepEqual(list.map((i) => i.id), ["sleep", "copy-path", "copy-name", "rename", "delete", "toggle", "env"]);
   assert.deepEqual(list.slice(0, own.length), own, "P's own items, as they were");
   assert.equal(list[own.length].separator, true, "a separator before the plugin's");
   assert.equal(Object.hasOwn(list[own.length + 1], "separator"), false, "one separator per plugin");
@@ -217,7 +217,7 @@ test("the merged list: P's own items, a separator, then each plugin's; no separa
   assert.deepEqual(workspaceMenuList(own, undefined), own);
   // The main checkout's own list has no separator; the plugin's still gets one.
   const main = workspaceMenuItems({ path: "/code/app", branch: "main", main: true });
-  assert.deepEqual(workspaceMenuList(main, plugin).map((i) => Boolean(i.separator)), [false, false, true, false]);
+  assert.deepEqual(workspaceMenuList(main, plugin).map((i) => Boolean(i.separator)), [false, false, false, true, false]);
 
   // Two plugins: each plugin's items start with a separator, in key order.
   const two = parseMenus([{ [W]: [{ id: "a", text: "A" }] }, { [W]: [{ id: "b", text: "B" }, { id: "c", text: "C" }] }], ["menus.spotlight", "menus.pr"])[W];
@@ -298,7 +298,7 @@ test("workspace-menu.js draws the merged list, opens the submenu at the pointer 
   // opener and the view build the list in one place, so the height fits it.
   const of = menu.slice(menu.indexOf("function menuOf("), menu.indexOf("\n}\n", menu.indexOf("function menuOf(")));
   assert.match(of, /store\.menus\(\)\[normPath\(path\)\]/);
-  assert.match(of, /workspaceMenuList\(workspaceMenuItems\(row\), plugin\)/);
+  assert.match(of, /workspaceMenuList\(workspaceMenuItems\(row, sleepOf\(row\)\), plugin\)/);
   assert.match(of, /subMenuOf\(plugin, sub\)/);
   assert.match(open, /menuOf\(project, path, sub, only\)/);
   assert.match(body("render"), /menuOf\(this\.project, this\.path, this\.sub, this\.only\)/);

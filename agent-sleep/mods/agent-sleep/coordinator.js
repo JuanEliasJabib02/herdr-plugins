@@ -252,14 +252,15 @@ export const COMMANDS = Object.freeze({
 
 // A command by name: the table's, or a workspace sleep's (workspace-sleep
 // D5), which stay out of the table the popup's buttons are: `sleep-workspace`
-// sleeps the shown workspace, and the confirm's answers
+// sleeps the shown workspace, `sleep-workspace.<hex>` the one at that path
+// (T6, the right-click's Sleep), and the confirm's answers
 // (`confirm-sleep.<question>`, `cancel-sleep.<question>`) name the question
 // they answer. None does I/O either. Null for any other name.
 export function commandOf(name) {
   if (typeof name !== "string") return null;
   if (Object.hasOwn(COMMANDS, name)) return COMMANDS[name];
   const c = parseWorkspaceCommand(name);
-  if (c?.kind === "sleep") return (co) => co.requestSleepWorkspace();
+  if (c?.kind === "sleep") return (co) => co.requestSleepWorkspace(c.path ?? null);
   if (c?.kind === "answer") return (co) => co.answerQuestion(c.question, c.yes);
   return null;
 }

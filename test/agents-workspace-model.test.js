@@ -6,6 +6,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { REGISTRY_KEY, CACHE_KEY, AGENT_MENU, workspacesBySpace, workspaceMenuSpec } from "../projects-sidebar/mods/projects-agents/workspace-model.js";
+import { sleepCommand } from "../projects-sidebar/mods/projects/tree-model.js";
+import { sleepWorkspaceCommand, parseWorkspaceCommand } from "../agent-sleep/mods/agent-sleep/workspace-sleep.js";
 import { matchSpaces, KEYS } from "../projects-sidebar/mods/projects/lib.js";
 import { MOD } from "../projects-sidebar/mods/projects/config.js";
 
@@ -81,13 +83,25 @@ test("nothing stored yet, or malformed, is no workspaces", () => {
   assert.equal(workspacesBySpace({ registry: REGISTRY, cache: CACHE }).size, 0);
 });
 
-test("the menu opens through the projects mod's relay, at the pointer, with Rename… and Delete… only", () => {
-  assert.deepEqual(AGENT_MENU, ["rename", "delete"]);
+test("the menu opens through the projects mod's relay, at the pointer, with Sleep, Rename… and Delete… only", () => {
+  assert.deepEqual(AGENT_MENU, ["sleep", "rename", "delete"]);
   const w = where().get("s3");
   assert.deepEqual(workspaceMenuSpec(w), {
     mod: MOD, kind: "popup", width: 1, height: 1, frame: "none",
-    props: { view: "workspace-menu-at", project: "/repos/backend-action-experience", path: "/ws/backend-action/AX-3704", only: ["rename", "delete"] },
+    props: { view: "workspace-menu-at", project: "/repos/backend-action-experience", path: "/ws/backend-action/AX-3704", only: ["sleep", "rename", "delete"] },
   });
   assert.equal(workspaceMenuSpec(null), null);
-  assert.equal(workspaceMenuSpec(where().get("s1")), null, "the main checkout is never renamed or deleted: no menu");
+  // The main checkout sleeps too (Orca's Sleep is on every workspace), and
+  // asks for Sleep alone: never Rename… or Delete…, whatever the menu's own
+  // lookup of the checkout finds.
+  const main = where().get("s1");
+  assert.equal(main.main, true);
+  assert.deepEqual(workspaceMenuSpec(main).props, { view: "workspace-menu-at", project: main.project, path: main.path, only: ["sleep"] });
+});
+
+test("the Sleep command projects-sidebar runs is the one agent-sleep reads (two copies, mods can't import each other)", () => {
+  for (const path of ["/ws/backend-action/AX-3704", "/Users/juan/orca/workspaces/herdr-plugins/sleep-agent", "/code/ñandú app", "/"]) {
+    assert.equal(sleepCommand(path), `agent-sleep.${sleepWorkspaceCommand(path)}`, path);
+    assert.deepEqual(parseWorkspaceCommand(sleepCommand(path).slice("agent-sleep.".length)), { kind: "sleep", path });
+  }
 });
