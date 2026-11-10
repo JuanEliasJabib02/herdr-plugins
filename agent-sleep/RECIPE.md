@@ -172,8 +172,8 @@ is in the shown layout, and projects-sidebar's status bar has it.
   next check.
 - **It wakes in the active account.** Every wake (a shown tab, Wake all, a
   workspace's wake, after a restart) lands where a new Claude would start:
-  claude-accounts' active account, read as the `claude` launcher
-  (`~/my-mac-scripts/bin/claude`) reads it, the first line of
+  claude-accounts' active account, read as a `claude`
+  launcher script reads it, the first line of
   `<Herdr home>/claude-accounts/active`. So a Claude asleep through an account
   switch wakes on the account you switched to, as if the switch had restarted
   it. The resume starts with `CLAUDE_ACCOUNTS_DIR='<that folder>'` (`''` for

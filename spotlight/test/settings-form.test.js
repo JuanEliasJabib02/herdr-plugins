@@ -37,8 +37,8 @@ import { detectServerScripts } from "../mods/spotlight/server-plan.js";
 
 const REG = {
   groups: [
-    { id: "g-ax", name: "Action Experience", projects: [{ path: "/w/ax-back", name: "ax-back" }, { path: "/w/ax-admin/" }] },
-    { id: "g-me", name: "Arrecife", projects: [{ path: "/w/herdr-plugins", name: "herdr-plugins" }] },
+    { id: "g-ax", name: "Nimbus", projects: [{ path: "/w/ax-back", name: "ax-back" }, { path: "/w/ax-admin/" }] },
+    { id: "g-me", name: "Reef", projects: [{ path: "/w/herdr-plugins", name: "herdr-plugins" }] },
   ],
 };
 
@@ -46,8 +46,8 @@ const stored = (value) => parseSettings(JSON.stringify(value)).settings;
 
 test("lanes: each projects.v1 group, then the spaceless lane", () => {
   assert.deepEqual(lanesOf(REG), [
-    { id: "g-ax", name: "Action Experience" },
-    { id: "g-me", name: "Arrecife" },
+    { id: "g-ax", name: "Nimbus" },
+    { id: "g-me", name: "Reef" },
     { id: "spaceless", name: "Sin espacio" },
   ]);
   assert.deepEqual(lanesOf(null), [{ id: "spaceless", name: "Sin espacio" }]);

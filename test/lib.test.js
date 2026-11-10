@@ -284,10 +284,10 @@ test("select group: an existing group becomes active; an unknown id changes noth
 
 test("creation order: groups and projects stay in the order they were made", () => {
   let r = emptyRegistry();
-  for (const name of ["AG", "Arrecife", "Action"]) r = addGroup(r, name);
+  for (const name of ["AG", "Reef", "Action"]) r = addGroup(r, name);
   r = renameGroup(r, r.groups[0].id, "Zeta");
   for (const p of ["/z", "/a", "/m"]) r = addProject(r, { path: p });
-  assert.deepEqual(groupNames(r), ["Zeta", "AG", "Arrecife", "Action"]);
+  assert.deepEqual(groupNames(r), ["Zeta", "AG", "Reef", "Action"]);
   assert.deepEqual(pathsOf(r, 0), ["/z", "/a", "/m"]);
   assert.deepEqual(groupNames(parseRegistry(JSON.parse(JSON.stringify(r)))), groupNames(r), "survives a store round trip");
 });

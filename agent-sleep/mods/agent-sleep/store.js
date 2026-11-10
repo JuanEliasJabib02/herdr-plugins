@@ -169,7 +169,7 @@ export function withoutRecord(records, address) {
 const statusWord = (s) => (isObject(s) ? s.state : s) ?? null;
 
 // The shell is the foreground again when the foreground process is the
-// terminal's root process (Juan's terminals are a login shell with Claude
+// terminal's root process (a terminal is often a login shell with Claude
 // on top). Without both pids there is no evidence.
 export function foregroundIsShell(t) {
   return Boolean(t && t.foreground && t.pid != null && t.foreground.pid === t.pid);

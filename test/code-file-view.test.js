@@ -89,7 +89,7 @@ const flush = async () => {
 const FILE = "/repo/src/a.js";
 const REAL = "/private/repo/src/a.js";
 const REAL_DIR = "/private/repo/src";
-const HOME = "/home/juan";
+const HOME = "/home/alex";
 const APP = `${HOME}/.config/herdr-app`;
 const DRAFTS = `${APP}/code-editor/drafts`;
 const BLAMES = `${APP}/code-editor/blame`;

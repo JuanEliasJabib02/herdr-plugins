@@ -30,7 +30,7 @@ T0b also found: `ctrl+u` clears only the last line of a multi-line draft; one
 puts the prompt back on the input line; on `sleep 300` and `less` the report
 (`stopped`, `unknown`) didn't say whether the program was still in front.
 
-## Shell screens (Juan's zsh with Starship and zsh-autosuggestions)
+## Shell screens (zsh with Starship and zsh-autosuggestions)
 
 | File | What it shows |
 |---|---|

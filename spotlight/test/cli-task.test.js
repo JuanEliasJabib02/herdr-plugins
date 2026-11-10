@@ -132,7 +132,7 @@ test("taskKeyFrom: a lane's KEY as taskOf keys it: a ticket in any spelling, els
 
 test("resolveGroupTask: per enabled repo of the group, the task's workspace (the holder's when it holds, else the most recently active); repos whose Spotlight is off are skipped by name; other groups never count", async () => {
   const front = makeRepo("front", ["AX-50", "feat/AX-50-styles", "AX-51"]);
-  const back = makeRepo("back", ["juan/AX-50"]);
+  const back = makeRepo("back", ["alex/AX-50"]);
   const docs = makeRepo("docs", ["ax-50"]);
   const elsewhere = makeRepo("shop", ["AX-50"]);
   const shared = sharedOf([{ id: "g1", repos: [front, back, docs] }, { id: "g2", repos: [elsewhere] }]);
@@ -145,7 +145,7 @@ test("resolveGroupTask: per enabled repo of the group, the task's workspace (the
   assert.equal(r.taskKey, "AX-50");
   assert.deepEqual(r.members, [
     { root: front.root, name: "front", workspace: front.ws["feat/AX-50-styles"], workspaces: [front.ws["AX-50"], front.ws["feat/AX-50-styles"]] },
-    { root: back.root, name: "back", workspace: back.ws["juan/AX-50"], workspaces: [back.ws["juan/AX-50"]] },
+    { root: back.root, name: "back", workspace: back.ws["alex/AX-50"], workspaces: [back.ws["alex/AX-50"]] },
   ]);
   assert.deepEqual(r.skipped, ["docs"]);
   assert.deepEqual(r.projects.map((p) => p.name), ["front", "back", "docs"]);

@@ -742,7 +742,7 @@ test("ensureServerTerminal (D40): never an agent's terminal, another repo's, nor
   assert.deepEqual(none.calls.find(hcCall("run")), createTerminalArgv(ROOT, { space: "spRoot" }));
   assert.deepEqual(didOf(none, "tab.rename"), [{ id: r2.tab, name: "Spotlight" }]);
   assert.deepEqual(none.world[0].tabs.map((t) => t.name), ["1", "2", "3", "4", "Spotlight"]);
-  assert.equal(none.verbs().includes("label"), false, "no terminal of Juan's labeled");
+  assert.equal(none.verbs().includes("label"), false, "no terminal of the user's labeled");
   for (const w of [hc, none]) {
     assert.equal(w.verbs().includes("kill"), false);
     assert.deepEqual([...didOf(w, "tab.move"), ...didOf(w, "space.select"), ...didOf(w, "tab.select")], []);

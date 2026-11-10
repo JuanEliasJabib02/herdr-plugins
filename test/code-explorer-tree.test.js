@@ -368,7 +368,7 @@ test("S6: the mod opens files only through the model's tab.new, never a split, n
 });
 
 test("D22: the Explorer watches neither the home nor anything above it", () => {
-  const home = "/Users/juan";
+  const home = "/Users/alex";
   for (const dir of ["/", "/Users", home]) assert.equal(holdsHome(dir, home), true, dir);
-  for (const dir of [`${home}/repo`, "/Users/juana", "/tmp"]) assert.equal(holdsHome(dir, home), false, dir);
+  for (const dir of [`${home}/repo`, "/Users/alexa", "/tmp"]) assert.equal(holdsHome(dir, home), false, dir);
 });

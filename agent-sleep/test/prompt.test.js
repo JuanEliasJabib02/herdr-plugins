@@ -129,10 +129,10 @@ test("a bare Starship ❯ is a bare shell prompt; a typed line (with autosuggest
 });
 
 test("other prompts: bash $, zsh %, root #, a glyph after the path; typed text after the glyph is typed", () => {
-  for (const line of ["juan@mac:~/code$", "bash-5.2$", "juan@mac ~ %", "root@box:/#", "~/code ❯", "λ", "~/code >", "[main $] ~ %"]) {
+  for (const line of ["alex@mac:~/code$", "bash-5.2$", "alex@mac ~ %", "root@box:/#", "~/code ❯", "λ", "~/code >", "[main $] ~ %"]) {
     assert.equal(shellPrompt(line), "bare", line);
   }
-  for (const line of ["juan@mac:~/code$ ls", "juan@mac:~/code$ echo $", "❯ ls >", "% echo hi #", "~/code ❯ git", "❯ e"]) {
+  for (const line of ["alex@mac:~/code$ ls", "alex@mac:~/code$ echo $", "❯ ls >", "% echo hi #", "~/code ❯ git", "❯ e"]) {
     assert.equal(shellPrompt(line), "typed", line);
   }
 });

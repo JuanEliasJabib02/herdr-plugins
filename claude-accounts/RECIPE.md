@@ -187,7 +187,7 @@ scripts/install.sh claude-accounts
   (`projects-sidebar/layouts/projects.json`), so install `projects-sidebar`
   too and switch to the `projects` layout.
 - New terminals follow the active account only through the `claude`
-  launcher (`~/my-mac-scripts/bin/claude`), which reads the `active` file.
+  launcher (a wrapper script on the PATH), which reads the `active` file.
 - Live numbers between polls need the statusline drop in
   `~/.claude/statusline.sh`.
 - Usage details & history runs `~/.local/bin/claude-usage --json`.

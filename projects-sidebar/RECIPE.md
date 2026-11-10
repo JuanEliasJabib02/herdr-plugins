@@ -614,8 +614,8 @@ across repos.
     runs an agent again is left out. Without agent-sleep the section never
     shows.
   - a row in Priority (and a pinned one, and a Sleeping one) reads "space ·
-    project", the project as the sidebar names it ("main · expenses-logs",
-    "AX-3704 · backend-action"), with the agent's title in its tooltip. When
+    project", the project as the sidebar names it ("main · budget-app",
+    "AX-3704 · backend-nimbus"), with the agent's title in its tooltip. When
     the space reads the same as its project, or it is in none, the row keeps
     the title. Grouped by space keeps the title: the header names the space;
   - a right-click on a row (an agent's or a Sleeping one) opens its

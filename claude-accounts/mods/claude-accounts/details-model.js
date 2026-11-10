@@ -4,7 +4,7 @@
 //
 // The window is Orca's Claude usage pane (renderer/src/components/stats/
 // ClaudeUsagePane.tsx and ClaudeUsageDetails.tsx, under
-// ~/Desktop/Software/Sideprojects/orca/src), with Orca's copy where Orca has
+// ~/code/orca/src), with Orca's copy where Orca has
 // it, fed by claude-usage --json (one result per range). Orca's "Orca
 // worktrees only" scope and its share card aren't ported (D11).
 //

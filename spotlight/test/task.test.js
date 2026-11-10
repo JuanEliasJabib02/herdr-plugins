@@ -19,16 +19,16 @@ const W = "/Users/demo/orca/workspaces";
 const main = (root, branch = "main") => ({ path: root, branch, main: true });
 const wt = (repo, folder, branch) => ({ path: `${W}/${repo}/${folder}`, branch, main: false });
 
-const BACKEND = "/code/backend-action-experience";
-const FRONT = "/code/action-experience";
+const BACKEND = "/code/backend-nimbus-app";
+const FRONT = "/code/nimbus-app";
 const ADMIN = "/code/admin-action";
 const SHOP = "/code/shop";
 const LOOSE = "/code/scratch";
 
-const B_TASK = wt("backend-action", "ax-3447", "juan/AX-3447-auth");
-const B_LOGIN = wt("backend-action", "login", "feat/login");
-const F_TASK = wt("action-experience", "AX-3447", "ax-3447");
-const F_STYLES = wt("action-experience", "AX-3447-styles", "feat/AX-3447-styles");
+const B_TASK = wt("backend-nimbus", "ax-3447", "alex/AX-3447-auth");
+const B_LOGIN = wt("backend-nimbus", "login", "feat/login");
+const F_TASK = wt("nimbus-app", "AX-3447", "ax-3447");
+const F_STYLES = wt("nimbus-app", "AX-3447-styles", "feat/AX-3447-styles");
 const A_OTHER = wt("admin-action", "ax-12", "AX-12");
 const S_TASK = wt("shop", "ax-3447", "ax-3447");
 const L_TASK = wt("scratch", "ax-3447", "AX-3447");
@@ -46,7 +46,7 @@ const REPOS = {
 const REGISTRY = {
   version: 1,
   groups: [
-    { id: "g1", name: "Action Experience", projects: [{ path: BACKEND, name: "backend-action" }, { path: FRONT, name: "action-experience" }, { path: ADMIN, name: "admin-action" }] },
+    { id: "g1", name: "Nimbus", projects: [{ path: BACKEND, name: "backend-nimbus" }, { path: FRONT, name: "nimbus-app" }, { path: ADMIN, name: "admin-action" }] },
     { id: "g2", name: "AG", projects: [{ path: SHOP, name: "shop" }] },
   ],
   activeGroup: "g1",
@@ -143,11 +143,11 @@ test("AX-3447 across two enabled repos of one group is one task, one member per 
     ok: true,
     root: BACKEND,
     workspace: B_TASK.path,
-    branch: "juan/AX-3447-auth",
+    branch: "alex/AX-3447-auth",
     taskKey: "AX-3447",
     label: "AX-3447",
     lane: "g1",
-    members: [member(BACKEND, "backend-action", B_TASK.path), member(FRONT, "action-experience", F_TASK.path)],
+    members: [member(BACKEND, "backend-nimbus", B_TASK.path), member(FRONT, "nimbus-app", F_TASK.path)],
     skipped: [],
     slotOnly: false,
   });
@@ -155,7 +155,7 @@ test("AX-3447 across two enabled repos of one group is one task, one member per 
 
 test("a same-named worktree in another group is left out; from there, that group is the lane", async () => {
   const fromBackend = await resolve(B_TASK.path);
-  assert.ok(!fromBackend.members.some((m) => m.root === SHOP), "shop is AG's, not Action Experience's");
+  assert.ok(!fromBackend.members.some((m) => m.root === SHOP), "shop is another group's, not Nimbus's");
   const fromShop = await resolve(S_TASK.path);
   assert.equal(fromShop.lane, "g2");
   assert.deepEqual(fromShop.members, [member(SHOP, "shop", S_TASK.path)]);
@@ -164,8 +164,8 @@ test("a same-named worktree in another group is left out; from there, that group
 test("a disabled repo is listed as not included; `enabled` is asked only about the task's repos", async () => {
   const asked = [];
   const r = await resolve(B_TASK.path, { disabled: [FRONT], asked });
-  assert.deepEqual(r.members, [member(BACKEND, "backend-action", B_TASK.path)]);
-  assert.deepEqual(r.skipped, ["action-experience"]);
+  assert.deepEqual(r.members, [member(BACKEND, "backend-nimbus", B_TASK.path)]);
+  assert.deepEqual(r.skipped, ["nimbus-app"]);
   assert.equal(r.slotOnly, false);
   assert.deepEqual(asked, [BACKEND, FRONT], "admin-action and shop have no AX-3447 worktree here");
 });
@@ -175,7 +175,7 @@ test("a task whose only repo is disabled is slot-only: no member, its repo not i
   assert.equal(r.ok, true);
   assert.equal(r.taskKey, "login");
   assert.deepEqual(r.members, []);
-  assert.deepEqual(r.skipped, ["backend-action"]);
+  assert.deepEqual(r.skipped, ["backend-nimbus"]);
   assert.equal(r.slotOnly, true);
 });
 
@@ -189,7 +189,7 @@ test("two task worktrees in the caller's repo: the caller's own wins, even again
     terminals: [{ cwd: F_STYLES.path, status_ms: 9000 }],
     times: { [F_TASK.path]: 100, [F_STYLES.path]: 900 },
   });
-  assert.deepEqual(r.members.find((m) => m.root === FRONT), member(FRONT, "action-experience", F_TASK.path, [F_TASK.path, F_STYLES.path]));
+  assert.deepEqual(r.members.find((m) => m.root === FRONT), member(FRONT, "nimbus-app", F_TASK.path, [F_TASK.path, F_STYLES.path]));
 });
 
 test("two in another repo: the one whose agent terminal changed status last wins, over a newer commit", async () => {
@@ -203,31 +203,31 @@ test("two in another repo: the one whose agent terminal changed status last wins
     ],
     times: { [F_TASK.path]: 900, [F_STYLES.path]: 100 },
   });
-  assert.deepEqual(r.members.find((m) => m.root === FRONT), member(FRONT, "action-experience", F_STYLES.path, [F_TASK.path, F_STYLES.path]));
+  assert.deepEqual(r.members.find((m) => m.root === FRONT), member(FRONT, "nimbus-app", F_STYLES.path, [F_TASK.path, F_STYLES.path]));
 });
 
 test("two in another repo: with no agent status to tell them apart, the newest commit wins", async () => {
   const opts = { shared: TWO_SHARED, repos: TWO_FRONT, times: { [F_TASK.path]: 100, [F_STYLES.path]: 900 } };
   for (const terminals of [[], [{ cwd: F_TASK.path, status_ms: null }], [{ cwd: F_TASK.path, status_ms: 5 }, { cwd: F_STYLES.path, status_ms: 5 }]]) {
-    assert.deepEqual(brief(await resolve(B_TASK.path, { ...opts, terminals })), ["backend-action ax-3447", "action-experience AX-3447-styles"], JSON.stringify(terminals));
+    assert.deepEqual(brief(await resolve(B_TASK.path, { ...opts, terminals })), ["backend-nimbus ax-3447", "nimbus-app AX-3447-styles"], JSON.stringify(terminals));
   }
   const unborn = await resolve(B_TASK.path, { ...opts, times: { [F_STYLES.path]: 1 } });
-  assert.deepEqual(brief(unborn), ["backend-action ax-3447", "action-experience AX-3447-styles"], "a worktree git can't date loses to one it can");
+  assert.deepEqual(brief(unborn), ["backend-nimbus ax-3447", "nimbus-app AX-3447-styles"], "a worktree git can't date loses to one it can");
 });
 
 test("two in another repo: with neither status nor commit to tell them apart, projects.cache.v1's order wins", async () => {
   const same = { [F_TASK.path]: 500, [F_STYLES.path]: 500 };
   const first = await resolve(B_TASK.path, { shared: TWO_SHARED, repos: TWO_FRONT, times: same });
-  assert.deepEqual(brief(first), ["backend-action ax-3447", "action-experience AX-3447"]);
+  assert.deepEqual(brief(first), ["backend-nimbus ax-3447", "nimbus-app AX-3447"]);
   const flipped = { "projects.v1": REGISTRY, "projects.cache.v1": { ...cacheOf(TWO_FRONT), [FRONT]: [main(FRONT), F_STYLES, F_TASK] } };
   const second = await resolve(B_TASK.path, { shared: flipped, repos: TWO_FRONT, times: same });
-  assert.deepEqual(brief(second), ["backend-action ax-3447", "action-experience AX-3447-styles"], "the cache's order, not git's");
+  assert.deepEqual(brief(second), ["backend-nimbus ax-3447", "nimbus-app AX-3447-styles"], "the cache's order, not git's");
 });
 
 test("a main checkout has no task, nor does a worktree whose branch and folder can't name one", async () => {
   const expected = { ok: false, code: "no-task", message: "This workspace is not part of a task (main checkouts never are)." };
   assert.deepEqual(await resolve(`${BACKEND}/src`), expected);
-  const none = wt("backend-action", "none", "none");
+  const none = wt("backend-nimbus", "none", "none");
   assert.deepEqual(await resolve(none.path, { repos: { ...REPOS, [BACKEND]: [...REPOS[BACKEND], none] } }), expected);
 });
 
@@ -248,7 +248,7 @@ test("a repo outside every group is in lane spaceless, its members from its own 
 });
 
 test("missing or malformed shared values read as no group: lane spaceless, members from the caller's git worktrees", async () => {
-  const lone = [member(BACKEND, "backend-action-experience", B_TASK.path)];
+  const lone = [member(BACKEND, "backend-nimbus-app", B_TASK.path)];
   for (const shared of [undefined, null, {}, "garbage", { "projects.v1": "x", "projects.cache.v1": [1, 2] }, { "projects.v1": { ...REGISTRY, version: 2 } }, { "projects.v1": { version: 1, groups: [{ id: 7 }] } }]) {
     const r = await resolve(B_TASK.path, { shared });
     assert.equal(r.lane, SPACELESS, JSON.stringify(shared));
@@ -259,8 +259,8 @@ test("missing or malformed shared values read as no group: lane spaceless, membe
 test("a project with no usable cache entry is listed with git; the caller's repo is always listed live", async () => {
   const shared = { "projects.v1": REGISTRY, "projects.cache.v1": { [FRONT]: [{ path: 3 }] } };
   const r = await resolve(B_TASK.path, { shared });
-  assert.deepEqual(brief(r), ["backend-action ax-3447", "action-experience AX-3447"]);
-  const fresh = wt("backend-action", "ax-3447-b", "AX-3447-b");
+  assert.deepEqual(brief(r), ["backend-nimbus ax-3447", "nimbus-app AX-3447"]);
+  const fresh = wt("backend-nimbus", "ax-3447-b", "AX-3447-b");
   const live = await resolve(fresh.path, { repos: { ...REPOS, [BACKEND]: [...REPOS[BACKEND], fresh] } });
   assert.equal(live.members[0].workspace, fresh.path, "a worktree the cache hasn't seen yet is still the caller's");
 });
@@ -273,11 +273,11 @@ test("a repo registered twice counts in its first group, as projects-sidebar rea
 });
 
 test("names merge case-insensitively: Login and login are one task keyed login, labelled with the smallest casing", async () => {
-  const front = wt("action-experience", "Login", "Login");
+  const front = wt("nimbus-app", "Login", "Login");
   const repos = { ...REPOS, [FRONT]: [main(FRONT), front] };
   const r = await resolve(B_LOGIN.path, { repos, shared: { "projects.v1": REGISTRY, "projects.cache.v1": cacheOf(repos) } });
   assert.deepEqual([r.taskKey, r.label], ["login", "Login"]);
-  assert.deepEqual(brief(r), ["backend-action login", "action-experience Login"]);
+  assert.deepEqual(brief(r), ["backend-nimbus login", "nimbus-app Login"]);
 });
 
 // ── Against a real git ─────────────────────────────────────────────────────
@@ -359,11 +359,11 @@ test("D46: a task's env key is task:<KEY> in every space, a bare 2024 included; 
   assert.equal(taskEnvKey("login"), "task:login");
   for (const nothing of [null, undefined, "", "g1/", "task:"]) assert.equal(taskEnvKey(nothing), null, String(nothing));
   // An unlit workspace's key needs no lane: the same in any group (the registry isn't read).
-  const cache = { [BACKEND]: [main(BACKEND), B_TASK, wt("backend-action", "none", "none")] };
+  const cache = { [BACKEND]: [main(BACKEND), B_TASK, wt("backend-nimbus", "none", "none")] };
   const registry = { version: 1, groups: [{ id: "ax", name: "AX", projects: [{ path: BACKEND, name: "back" }] }] };
   assert.equal(checkoutEnvKey({ registry, cache, root: BACKEND, workspace: B_TASK.path }), "task:AX-3447");
   assert.equal(checkoutEnvKey({ cache, root: BACKEND, workspace: B_TASK.path }), "task:AX-3447");
-  assert.equal(checkoutEnvKey({ cache, root: BACKEND, workspace: `${W}/backend-action/none` }), `ws:${W}/backend-action/none`);
+  assert.equal(checkoutEnvKey({ cache, root: BACKEND, workspace: `${W}/backend-nimbus/none` }), `ws:${W}/backend-nimbus/none`);
 });
 
 test("D46: a stored <groupId>/<KEY> of any space is read when no task:<KEY> exists; with both, the later position wins; a record's old envKey reads the same", async () => {

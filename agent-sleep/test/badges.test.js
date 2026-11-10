@@ -10,15 +10,15 @@ const rec = (over = {}) => ({
 });
 
 const PORCELAIN = [
-  "worktree /Users/juan/Desktop/Software/Sideprojects/herdr-plugins",
+  "worktree /Users/alex/code/herdr-plugins",
   "HEAD 15ddd03",
   "branch refs/heads/main",
   "",
-  "worktree /Users/juan/orca/workspaces/herdr-plugins/wahoo",
+  "worktree /Users/alex/orca/workspaces/herdr-plugins/wahoo",
   "HEAD 944008f",
-  "branch refs/heads/juanjabibarcticgrey/agent-sleep",
+  "branch refs/heads/work-dev/agent-sleep",
   "",
-  "worktree /Users/juan/orca/workspaces/herdr-plugins/wahoo-2",
+  "worktree /Users/alex/orca/workspaces/herdr-plugins/wahoo-2",
   "HEAD 1111111",
   "detached",
   "",
@@ -44,9 +44,9 @@ test("the moon icon ships with the mod and is a tintable svg", () => {
 
 test("git worktree list --porcelain → the worktree folders", () => {
   assert.deepEqual(parseWorktreeList(PORCELAIN), [
-    "/Users/juan/Desktop/Software/Sideprojects/herdr-plugins",
-    "/Users/juan/orca/workspaces/herdr-plugins/wahoo",
-    "/Users/juan/orca/workspaces/herdr-plugins/wahoo-2",
+    "/Users/alex/code/herdr-plugins",
+    "/Users/alex/orca/workspaces/herdr-plugins/wahoo",
+    "/Users/alex/orca/workspaces/herdr-plugins/wahoo-2",
   ]);
   assert.deepEqual(parseWorktreeList(""), []);
   assert.deepEqual(parseWorktreeList(null), []);
@@ -54,13 +54,13 @@ test("git worktree list --porcelain → the worktree folders", () => {
 
 test("a terminal in a subfolder maps to its worktree as git prints it", () => {
   const trees = parseWorktreeList(PORCELAIN);
-  assert.equal(workspaceOf("/Users/juan/orca/workspaces/herdr-plugins/wahoo/agent-sleep/test", trees),
-    "/Users/juan/orca/workspaces/herdr-plugins/wahoo");
-  assert.equal(workspaceOf("/Users/juan/orca/workspaces/herdr-plugins/wahoo/", trees),
-    "/Users/juan/orca/workspaces/herdr-plugins/wahoo");
+  assert.equal(workspaceOf("/Users/alex/orca/workspaces/herdr-plugins/wahoo/agent-sleep/test", trees),
+    "/Users/alex/orca/workspaces/herdr-plugins/wahoo");
+  assert.equal(workspaceOf("/Users/alex/orca/workspaces/herdr-plugins/wahoo/", trees),
+    "/Users/alex/orca/workspaces/herdr-plugins/wahoo");
   // a sibling whose name starts the same is not a subfolder
-  assert.equal(workspaceOf("/Users/juan/orca/workspaces/herdr-plugins/wahoo-2/x", trees),
-    "/Users/juan/orca/workspaces/herdr-plugins/wahoo-2");
+  assert.equal(workspaceOf("/Users/alex/orca/workspaces/herdr-plugins/wahoo-2/x", trees),
+    "/Users/alex/orca/workspaces/herdr-plugins/wahoo-2");
   // outside every worktree: no workspace
   assert.equal(workspaceOf("/tmp/elsewhere", trees), null);
 });

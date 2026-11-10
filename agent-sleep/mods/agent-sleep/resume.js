@@ -5,7 +5,7 @@
 //
 // - The account it wakes in (D15; the caller picks it, resume-gaps D1:
 //   claude-accounts' active one unless it's full), always first: CLAUDE_ACCOUNTS_DIR is the
-//   claude launcher's rule 1 (~/my-mac-scripts/bin/claude, herdr_account):
+//   claude launcher's rule 1 (a `claude` wrapper script):
 //   set, even empty, it wins over claude-accounts' `active` file and is unset
 //   before Claude starts. '' is System default (~/.claude). A named account
 //   also gets CLAUDE_CONFIG_DIR, the same dir, so a shell without the
@@ -24,7 +24,7 @@
 //   first prompt) and a `--` tail are never replayed (as rjo and Orca,
 //   tui-agent-resume-startup.ts:107).
 // - The launcher's own `--mcp-config=…` and `--add-dir=…` (always joined
-//   with `=`; ~/my-mac-scripts/bin/claude) are dropped, never stored: it
+//   with `=` by the wrapper) are dropped, never stored: it
 //   adds them again. The user's space-separated forms are theirs and kept.
 // - `cd <cwd> &&` when the shell sits elsewhere: `claude --resume <id>`
 //   finds the transcript by the folder it runs in.

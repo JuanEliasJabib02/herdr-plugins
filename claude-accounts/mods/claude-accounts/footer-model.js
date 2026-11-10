@@ -2,7 +2,7 @@
 // accounts.v1.json as store.readAccounts reads it. Pure: no herdr or
 // gpui-kit import, so `node --test` loads it. Owner: T6.
 //
-// The views are Orca's (~/Desktop/Software/Sideprojects/orca/src/renderer/
+// The views are Orca's (~/code/orca/src/renderer/
 // src/components/status-bar/), with Orca's copy word for word:
 //   footer   StatusBarSurface.tsx's usage button and refresh, with
 //            ProviderSegment (StatusBarProviderSegment.tsx), the "Used" unit
@@ -59,7 +59,7 @@ export const MODES = Object.freeze([
   Object.freeze({ value: "compact", label: "Compact", tooltip: "Condensed usage: one summary per provider" }),
 ]);
 
-// Detailed unless the shared value says Compact; Juan's Orca value is
+// Detailed unless the shared value says Compact; the author's Orca value is
 // Detailed (D12).
 export function usageMode(ui) {
   return isObject(ui) && ui.usageMode === "compact" ? "compact" : "verbose";

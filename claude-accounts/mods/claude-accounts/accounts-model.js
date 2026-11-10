@@ -3,7 +3,7 @@
 // loads it; accounts.js and confirm.js only draw it. Owner: T7.
 //
 // The copy is Orca's, word for word, from its sources
-// (~/Desktop/Software/Sideprojects/orca/src/renderer/src/components/):
+// (~/code/orca/src/renderer/src/components/):
 //   settings/accounts/claude/accounts-pane-claude-section.tsx    the pane
 //   settings/accounts/claude/claude-running-session-switch-setting.tsx
 //   settings/accounts/claude/claude-sign-in-link-menu.tsx

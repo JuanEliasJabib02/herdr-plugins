@@ -200,9 +200,9 @@ test("D8: anything else is a path from the file's folder: file:// off, ?/# cut, 
 });
 
 test("D8: the toasts name the path, the home as ~", () => {
-  assert.equal(notFound(shownPath("/home/juan/repo/x.md", "/home/juan")), "File not found: ~/repo/x.md");
-  assert.equal(cannotOpenDir(shownPath("/etc", "/home/juan")), "Cannot open directory: /etc");
-  assert.equal(shownPath("/home/juanito/x", "/home/juan"), "/home/juanito/x");
+  assert.equal(notFound(shownPath("/home/alex/repo/x.md", "/home/alex")), "File not found: ~/repo/x.md");
+  assert.equal(cannotOpenDir(shownPath("/etc", "/home/alex")), "Cannot open directory: /etc");
+  assert.equal(shownPath("/home/alexito/x", "/home/alex"), "/home/alexito/x");
 });
 
 test("D8: what the shell probe says a path is", () => {
@@ -295,7 +295,7 @@ test("R7, C-1: the check takes linear time: thousands of comments before somethi
   assert.equal(isSvg("<!-- never closed <svg>"), false);
 });
 
-const APP = "/home/juan/.config/herdr-app";
+const APP = "/home/alex/.config/herdr-app";
 const CACHE = `${APP}/${IMG_DIR}`;
 
 // A disk for the cache: `files` are what stat and sips see, `urls` what curl gets.
@@ -605,7 +605,7 @@ const find = (e, id) => all(e, (x) => x.calls.id?.[0] === id)[0] ?? null;
 const kinds = (e, kind) => all(e, (x) => x.kind === kind);
 const textOf = (e) => (typeof e === "string" ? e : isEl(e) ? e.kids.map(textOf).filter(Boolean).join(" ") : "");
 
-const HOME = "/home/juan";
+const HOME = "/home/alex";
 const DOC = `${HOME}/repo/docs/README.md`;
 
 function previewWorld({ text = "", kinds: pathKinds = {}, files = {}, urls = {}, dark = true } = {}) {

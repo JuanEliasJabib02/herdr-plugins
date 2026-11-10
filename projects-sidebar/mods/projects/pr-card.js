@@ -161,7 +161,7 @@ export default class PrCard {
     this.place();
     if (!this.target || !changesShown(layout())) return;
     // A shown answer is read again every EVERY only from the window in front,
-    // as the sidebar's colors (D1): Juan keeps several windows open. A new
+    // as the sidebar's colors (D1): several windows can be open. A new
     // workspace is read in any window; coming back to the front reads at once.
     // The tree storing another PR for it (D8) reads it at once, in any window.
     const told = toldOf(this.target.path);
@@ -273,7 +273,7 @@ function note(s, t, create) {
 // S5's rows: the header in the PR's color with +/−, the title, head → base
 // with ↑↓, Checks, Reviews, then the buttons. merge(cx): [Mergear ▾]'s click.
 // J-005: the head truncates on its own and "→ base" never shrinks, so a long
-// head (Target-Sports #161's) never hides the base; ↑↓ stays at the right.
+// head (Web-Store #161's) never hides the base; ↑↓ stays at the right.
 function prRows(s, t, merge) {
   const color = t[s.color] ?? t.dim;
   return [

@@ -170,18 +170,18 @@ describe("queue: Orca's SpotlightTurnQueue", () => {
 describe("queue: lanes and cap (Orca)", () => {
   test("grants one task per lane at the same time while under the cap", () => {
     const Q = cappedQueue(2);
-    const ag = Q.request("pa", "AG-1", ["shop"], "ag");
+    const ag = Q.request("pa", "AG-1", ["shop"], "acme");
     const ax = Q.request("pb", "AX-1", ["back"], "action");
     assert.equal(ag.position.kind, "holding");
     assert.equal(ax.position.kind, "holding");
-    assert.deepEqual(Q.snapshot().turns.map((t) => [t.taskKey, t.lane]), [["AG-1", "ag"], ["AX-1", "action"]]);
+    assert.deepEqual(Q.snapshot().turns.map((t) => [t.taskKey, t.lane]), [["AG-1", "acme"], ["AX-1", "action"]]);
   });
 
   test("makes a task of a busy lane wait even for other projects, in order", () => {
     const Q = cappedQueue(2);
-    Q.request("pa", "AG-1", ["shop"], "ag");
-    const second = Q.request("pb", "AG-2", ["admin"], "ag");
-    const third = Q.request("pc", "AG-3", ["blog"], "ag");
+    Q.request("pa", "AG-1", ["shop"], "acme");
+    const second = Q.request("pb", "AG-2", ["admin"], "acme");
+    const third = Q.request("pc", "AG-3", ["blog"], "acme");
 
     assert.deepEqual(second.position, {
       kind: "waiting",
@@ -201,9 +201,9 @@ describe("queue: lanes and cap (Orca)", () => {
 
   test("makes a third lane wait while the cap is reached and grants it on a release", () => {
     const Q = cappedQueue(2);
-    Q.request("pa", "AG-1", ["shop"], "ag");
+    Q.request("pa", "AG-1", ["shop"], "acme");
     Q.request("pb", "AX-1", ["back"], "action");
-    const third = Q.request("pc", "EX-1", ["expenses"], "arrecife");
+    const third = Q.request("pc", "EX-1", ["budget"], "reef");
     const fourth = Q.request("pd", "OPM-1", [], "orca");
 
     assert.deepEqual(third.position, {
@@ -222,9 +222,9 @@ describe("queue: lanes and cap (Orca)", () => {
 
   test("reads the cap on every call, so lowering it holds back the next grant", () => {
     const Q = cappedQueue(2);
-    Q.request("pa", "AG-1", ["shop"], "ag");
+    Q.request("pa", "AG-1", ["shop"], "acme");
     Q.request("pb", "AX-1", ["back"], "action");
-    Q.request("pc", "EX-1", ["expenses"], "arrecife");
+    Q.request("pc", "EX-1", ["budget"], "reef");
     Q.limits.cap = 1;
 
     assert.deepEqual(Q.release("pa").granted, []);
@@ -233,7 +233,7 @@ describe("queue: lanes and cap (Orca)", () => {
 
   test("grants a waiter as soon as a raised cap is applied, with no other change", () => {
     const Q = cappedQueue(1);
-    Q.request("pa", "AG-1", ["shop"], "ag");
+    Q.request("pa", "AG-1", ["shop"], "acme");
     Q.request("pb", "AX-1", ["back"], "action");
     assert.deepEqual(Q.regrant().granted, []);
 
@@ -244,8 +244,8 @@ describe("queue: lanes and cap (Orca)", () => {
 
   test("lets a lane-blocked waiter keep its projects from a later waiter of another lane", () => {
     const Q = cappedQueue(2);
-    Q.request("pa", "AG-1", ["shop"], "ag");
-    Q.request("pb", "AG-2", ["shared"], "ag");
+    Q.request("pa", "AG-1", ["shop"], "acme");
+    Q.request("pb", "AG-2", ["shared"], "acme");
     const later = Q.request("pc", "AX-1", ["shared"], "action");
 
     assert.deepEqual(later.position, {
@@ -260,21 +260,21 @@ describe("queue: lanes and cap (Orca)", () => {
   test("lets a terminal of a task holding a turn join it past the cap", () => {
     const Q = cappedQueue(1);
     Q.request("px", "AX-1", ["back"], "action");
-    Q.request("pa", "AG-1", ["shop"], "ag");
-    Q.request("pa2", "AG-1", ["admin"], "ag");
+    Q.request("pa", "AG-1", ["shop"], "acme");
+    Q.request("pa2", "AG-1", ["admin"], "acme");
 
     const released = Q.release("px");
     assert.deepEqual(
       released.granted.map((t) => [t.taskKey, t.repos, t.terminals]),
       [["AG-1", ["shop", "admin"], ["pa", "pa2"]]],
     );
-    assert.equal(Q.request("pa3", "AG-1", ["shop"], "ag").position.kind, "holding");
+    assert.equal(Q.request("pa3", "AG-1", ["shop"], "acme").position.kind, "holding");
   });
 
   test("gives a task with no project a slot of its own", () => {
     const Q = cappedQueue(1);
     const orca = Q.request("po", "OPM-1", [], "orca");
-    const ag = Q.request("pa", "AG-1", ["shop"], "ag");
+    const ag = Q.request("pa", "AG-1", ["shop"], "acme");
 
     assert.deepEqual(orca.position, {
       kind: "holding",
@@ -299,8 +299,8 @@ describe("queue: paused terminals (Orca)", () => {
 
   test("pauses a holder: the next task goes, the terminal keeps a place and claims nothing", () => {
     const Q = cappedQueue(2);
-    Q.request("pa", "AG-1", ["shop"], "ag");
-    Q.request("pb", "AG-2", ["shop"], "ag");
+    Q.request("pa", "AG-1", ["shop"], "acme");
+    Q.request("pb", "AG-2", ["shop"], "acme");
 
     const paused = Q.pause("pa", "limit", "usage limit");
     assert.equal(paused.pausedTaskKey, "AG-1");
@@ -309,7 +309,7 @@ describe("queue: paused terminals (Orca)", () => {
 
     assert.deepEqual(Q.snapshot().waiting, []);
     assert.deepEqual(pausedBrief(Q), [
-      { terminal: "pa", taskKey: "AG-1", repos: ["shop"], lane: "ag", requestedAt: 3, pauseReason: "limit", pausedAt: 3 },
+      { terminal: "pa", taskKey: "AG-1", repos: ["shop"], lane: "acme", requestedAt: 3, pauseReason: "limit", pausedAt: 3 },
     ]);
     assert.equal(Q.snapshot().paused[0].pauseMsg, "usage limit");
     assert.deepEqual(Q.positionOf("pa"), {
@@ -341,9 +341,9 @@ describe("queue: paused terminals (Orca)", () => {
 
   test("keeps the turn of a two-terminal task while its other terminal works", () => {
     const Q = cappedQueue(2);
-    Q.request("pa", "AG-1", ["shop"], "ag");
-    Q.request("pa2", "AG-1", ["shop"], "ag");
-    Q.request("pb", "AG-2", ["admin"], "ag");
+    Q.request("pa", "AG-1", ["shop"], "acme");
+    Q.request("pa2", "AG-1", ["shop"], "acme");
+    Q.request("pb", "AG-2", ["admin"], "acme");
 
     assert.deepEqual(Q.pause("pa", "limit").granted, []);
     assert.deepEqual(turns(Q), [["AG-1", ["shop"], ["pa2"]]]);
@@ -352,12 +352,12 @@ describe("queue: paused terminals (Orca)", () => {
 
   test("puts a paused holder that asks again first in line for its lane", () => {
     const Q = cappedQueue(2);
-    Q.request("pa", "AG-1", ["shop"], "ag");
-    Q.request("pb", "AG-2", ["admin"], "ag");
-    Q.request("pc", "AG-3", ["blog"], "ag");
+    Q.request("pa", "AG-1", ["shop"], "acme");
+    Q.request("pb", "AG-2", ["admin"], "acme");
+    Q.request("pc", "AG-3", ["blog"], "acme");
     Q.pause("pa", "limit");
 
-    const again = Q.request("pa", "AG-1", ["shop"], "ag");
+    const again = Q.request("pa", "AG-1", ["shop"], "acme");
     assert.deepEqual(again.position, {
       kind: "waiting",
       position: 1,
@@ -407,8 +407,8 @@ describe("queue: paused terminals (Orca)", () => {
 
   test("drops a paused terminal that gives up its place", () => {
     const Q = cappedQueue(2);
-    Q.request("pa", "AG-1", ["shop"], "ag");
-    Q.request("pb", "AG-2", ["admin"], "ag");
+    Q.request("pa", "AG-1", ["shop"], "acme");
+    Q.request("pb", "AG-2", ["admin"], "acme");
     Q.pause("pa", "error");
 
     const out = Q.release("pa");
@@ -437,7 +437,7 @@ describe("queue: per-space limit (S9)", () => {
       ],
     });
     // Another space still has its own room under the cap.
-    assert.equal(Q.request("t4", "AG-1", ["shop"], "ag").position.kind, "holding");
+    assert.equal(Q.request("t4", "AG-1", ["shop"], "acme").position.kind, "holding");
     assert.deepEqual(keys(Q.release("t1")), ["AX-3"]);
   });
 
@@ -448,8 +448,8 @@ describe("queue: per-space limit (S9)", () => {
     const repoBound = Q.request("t2", "AX-2", ["back"], "action");
     assert.deepEqual(repoBound.position.blockers, [{ taskKey: "AX-1", repos: ["back"], holding: true }]);
     // ag has no setting: one task at a time.
-    Q.request("t3", "AG-1", ["shop"], "ag");
-    assert.deepEqual(Q.request("t4", "AG-2", ["blog"], "ag").position.blockers, [
+    Q.request("t3", "AG-1", ["shop"], "acme");
+    assert.deepEqual(Q.request("t4", "AG-2", ["blog"], "acme").position.blockers, [
       { taskKey: "AG-1", repos: ["shop"], holding: true, reason: "lane" },
     ]);
   });
@@ -486,26 +486,26 @@ describe("queue: tester cases", () => {
 
   test("02 tasks in two spaces test at the same time", () => {
     const Q = makeQueue({ ...TESTER });
-    assert.equal(Q.request("t-ag", "ag-checkout", [], "ag").position.kind, "holding");
+    assert.equal(Q.request("t-acme", "acme-checkout", [], "acme").position.kind, "holding");
     assert.equal(Q.request("t-checkout", "checkout-flow", [], "action").position.kind, "holding");
-    assert.deepEqual(turns(Q).map((t) => t[0]), ["ag-checkout", "checkout-flow"]);
+    assert.deepEqual(turns(Q).map((t) => t[0]), ["acme-checkout", "checkout-flow"]);
     assert.deepEqual(line(Q), []);
   });
 
   test("03 a third space waits with limit reached and gets the turn when one finishes", () => {
     const Q = makeQueue({ ...TESTER });
-    Q.request("t-ag", "ag-checkout", [], "ag");
+    Q.request("t-acme", "acme-checkout", [], "acme");
     Q.request("t-checkout", "checkout-flow", [], "action");
-    const waiting = Q.request("t-exp", "expenses-export", [], "arrecife");
+    const waiting = Q.request("t-exp", "budget-export", [], "reef");
     assert.equal(waiting.position.position, 1);
     assert.deepEqual(waiting.position.blockers.map((b) => describeBlocker(b)), [
-      "ag-checkout is testing (limit reached)",
+      "acme-checkout is testing (limit reached)",
       "checkout-flow is testing (limit reached)",
     ]);
 
     // Granted by the release itself: no new request needed.
-    assert.deepEqual(keys(Q.release("t-ag")), ["expenses-export"]);
-    assert.deepEqual(turns(Q).map((t) => t[0]), ["checkout-flow", "expenses-export"]);
+    assert.deepEqual(keys(Q.release("t-acme")), ["budget-export"]);
+    assert.deepEqual(turns(Q).map((t) => t[0]), ["checkout-flow", "budget-export"]);
     assert.equal(kind(Q, "t-exp"), "holding");
   });
 
@@ -519,29 +519,29 @@ describe("queue: tester cases", () => {
   test("05 empty queue: nobody testing, one task, then nobody again", () => {
     const Q = makeQueue({ ...TESTER });
     assert.deepEqual(Q.snapshot(), { turns: [], waiting: [], paused: [] });
-    Q.request("t-ag", "ag-checkout", [], "ag");
+    Q.request("t-acme", "acme-checkout", [], "acme");
     assert.equal(Q.snapshot().turns.length, 1);
-    Q.release("t-ag");
+    Q.release("t-acme");
     assert.deepEqual(Q.snapshot(), { turns: [], waiting: [], paused: [] });
   });
 
   test("07 changing the limit never evicts a task; raising it lets a waiter in at once", () => {
     const Q = makeQueue({ ...TESTER });
-    Q.request("t-ag", "ag-checkout", [], "ag");
+    Q.request("t-acme", "acme-checkout", [], "acme");
     Q.request("t-checkout", "checkout-flow", [], "action");
     Q.limits.cap = 1;
     assert.deepEqual(Q.regrant().granted, []);
-    assert.deepEqual(turns(Q).map((t) => t[0]), ["ag-checkout", "checkout-flow"]);
+    assert.deepEqual(turns(Q).map((t) => t[0]), ["acme-checkout", "checkout-flow"]);
 
-    const waiting = Q.request("t-exp", "expenses-export", [], "arrecife");
+    const waiting = Q.request("t-exp", "budget-export", [], "reef");
     assert.match(describeBlocker(waiting.position.blockers[0]), /\(limit reached\)$/);
-    // With cap 1, ag-checkout alone fills it.
+    // With cap 1, acme-checkout alone fills it.
     assert.deepEqual(Q.release("t-checkout").granted, []);
     assert.deepEqual(line(Q), ["t-exp"]);
 
     Q.limits.cap = 2;
-    assert.deepEqual(keys(Q.regrant()), ["expenses-export"]);
-    assert.deepEqual(turns(Q).map((t) => t[0]), ["ag-checkout", "expenses-export"]);
+    assert.deepEqual(keys(Q.regrant()), ["budget-export"]);
+    assert.deepEqual(turns(Q).map((t) => t[0]), ["acme-checkout", "budget-export"]);
   });
 
   test("08 an agent that stops on a failure is paused and the next task gets the turn", () => {
@@ -637,12 +637,12 @@ describe("queue: off (S9)", () => {
 
 describe("queue: describeBlocker", () => {
   test("names the repos by folder, and why: same space, limit reached, ahead of you", () => {
-    const back = "/Users/demo/code/action-back";
-    const admin = "/Users/demo/code/action-admin/";
-    assert.equal(describeBlocker({ taskKey: "AX-1", repos: [back], holding: true }), "AX-1 is testing action-back");
+    const back = "/Users/demo/code/nimbus-back";
+    const admin = "/Users/demo/code/nimbus-admin/";
+    assert.equal(describeBlocker({ taskKey: "AX-1", repos: [back], holding: true }), "AX-1 is testing nimbus-back");
     assert.equal(
       describeBlocker({ taskKey: "AX-2", repos: [back, admin], holding: false }),
-      "AX-2 is ahead of you for action-back, action-admin",
+      "AX-2 is ahead of you for nimbus-back, nimbus-admin",
     );
     assert.equal(
       describeBlocker({ taskKey: "AG-1", repos: ["/code/shop"], holding: true, reason: "lane" }),
@@ -693,15 +693,15 @@ describe("queue: the records in state.json", () => {
       return o;
     };
     const Q = cappedQueue(2);
-    Q.request("pa", "AG-1", ["shop"], "ag");
-    Q.request("pb", "AG-2", ["shop", "blog"], "ag");
+    Q.request("pa", "AG-1", ["shop"], "acme");
+    Q.request("pb", "AG-2", ["shop", "blog"], "acme");
     Q.request("pc", "AX-1", ["back"], "action");
     const frozen = deepFreeze(structuredClone(Q.q));
     const copy = structuredClone(frozen);
     const ctx = { now: 100, cap: 2 };
     const ask = (terminal, taskKey, roots, lane) => ({ terminal, taskKey, lane, members: roots.map(member) });
-    request(frozen, ask("pd", "AG-1", ["shop", "blog"], "ag"), ctx);
-    request(frozen, ask("pa", "AX-9", ["x"], "ag"), ctx);
+    request(frozen, ask("pd", "AG-1", ["shop", "blog"], "acme"), ctx);
+    request(frozen, ask("pa", "AX-9", ["x"], "acme"), ctx);
     release(frozen, "pa", ctx);
     pause(frozen, "pa", { reason: "limit" }, ctx);
     pause(frozen, "pb", { reason: "error" }, ctx);
@@ -712,7 +712,7 @@ describe("queue: the records in state.json", () => {
     assert.deepEqual(release(frozen, "pa", ctx).queue.lighting, {});
     // A missing queue reads as an empty one.
     assert.deepEqual(snapshot(undefined), { turns: [], waiting: [], paused: [] });
-    assert.equal(request(undefined, ask("pa", "AX-1", [], "ag"), ctx).position.kind, "holding");
+    assert.equal(request(undefined, ask("pa", "AX-1", [], "acme"), ctx).position.kind, "holding");
   });
 });
 

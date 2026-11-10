@@ -73,7 +73,7 @@ test("the launcher's --mcp-config=… and --add-dir=… are dropped, never store
   const argv = [
     NVM_CLAUDE,
     '--mcp-config={"mcpServers":{"action_board_mcp":{"type":"stdio","command":"node","args":["/x/dist/server.js"]}}}',
-    "--add-dir=/Users/demo/Desktop/Software/Turinng/support-scripts",
+    "--add-dir=/Users/demo/code/work/support-scripts",
     "--resume",
     "c2950f2d-2b78-43cd-b888-5e5f4d5d0ac3",
   ];

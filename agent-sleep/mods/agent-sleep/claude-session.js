@@ -327,7 +327,7 @@ export async function loadConfigDirs({ home, appHome } = {}, { readText, exec } 
 
 // ── The account a Claude wakes in (resume-gaps D1) ─────────────────────────
 // Where a new Claude would start: claude-accounts' active account, read as
-// the claude launcher reads it (~/my-mac-scripts/bin/claude, herdr_account:
+// the claude launcher reads it (a `claude` wrapper script:
 // the first line of <Herdr home>/claude-accounts/active, the exact string,
 // empty for System default). So a Claude asleep through an account switch
 // wakes on the account switched to (S2). Unless that account is at its limit

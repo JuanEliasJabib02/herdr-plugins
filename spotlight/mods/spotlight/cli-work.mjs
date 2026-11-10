@@ -586,7 +586,7 @@ function serverBusyOp({ restart = false, envName, chosenVariant }) {
 // state, still-running (M3), toasted as a failure is (the record's
 // restartStuck says the cause a sync already told, M1).
 // A server terminal that runs something Spotlight didn't start (the root's
-// own, Juan's program in it) is left alone, as Orca (D40): nothing typed, no
+// own, the user's program in it) is left alone, as Orca (D40): nothing typed, no
 // Ctrl-C, its port never checked, no failed start and no toast of it; the
 // record's server is stopped with the reason terminal-busy (serverReason),
 // which the popup says, and server.js's start leaves its line in the log.
@@ -703,7 +703,7 @@ async function planAndStart(cx, root, opts) {
       // D38, D40: the terminal comes first, so the port is checked from the
       // one the line goes to: the root's own terminal, chosen now, or one
       // made. One chosen now that runs something Spotlight didn't start
-      // (Juan's server, maybe on this very port) is left alone without a
+      // (the user's server, maybe on this very port) is left alone without a
       // check: the start answers terminal-busy. The check runs whatever the
       // terminal's answer, as before T29: a busy port is said before a
       // terminal that couldn't be made.
@@ -1014,7 +1014,7 @@ const diedAtStart = (record, live) =>
 // D40: a look (readServerState's) at a terminal Spotlight left alone
 // (serverReason terminal-busy) that still runs what Spotlight didn't start
 // reads no server of Spotlight's: stopped, with no ports, whatever that
-// program listens on (Juan's own server in the root's terminal), so the
+// program listens on (the user's own server in the root's terminal), so the
 // reap and `on` keep the record stopped as the start left it. Any other look
 // as it came.
 const leftAloneLook = (record, live) =>

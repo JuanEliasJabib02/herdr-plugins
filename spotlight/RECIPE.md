@@ -6,7 +6,7 @@ Orca Pro Max's Spotlight and test queue as a Herdr plugin. One dev server per re
 - The engine is the `spotlight` CLI, in `mods/spotlight/cli.mjs` and `bin/spotlight`.
 - State lives in `~/.config/herdr-app/spotlight/`; logs in `~/.local/state/herdr-spotlight/logs/`.
 
-Being built (ODD plan `odd/tasks/spotlight.md`, kept out of git). Verbs and probes get documented here as each task lands.
+Being built. Verbs and probes get documented here as each task lands.
 
 ## Install
 
@@ -71,7 +71,7 @@ The server runs in the root's own terminal, as in Orca (D38, D40): a tab named "
   - `hc run --bg --keep --no-parent … --label herdr.space=<id>` puts the terminal in a new tab of that space and leaves the focused space alone. An id Herdr doesn't know makes a space named after the cwd's folder, also without focus.
   - `hc label <t> herdr.space=<id>` on a running hidden terminal shows it as a tab at once. `herdr-app do tab.rename {id, name}` names it.
   - Killing a terminal removes its tab, and a space left with no tab closes.
-- Not probed (T35): `hc label <t> spotlight.repo=<root>` on a terminal Herdr already shows in a tab (it should add the label and leave the tab as it is); `spotlight-serve` on the PATH of the shells Juan opens (`~/.local/bin`). Probed since: `hc get`'s top-level `cwd` is the terminal's start folder and doesn't follow a `cd`, while `foreground.cwd` does; the `cd` is always typed, so neither is read.
+- Not probed (T35): `hc label <t> spotlight.repo=<root>` on a terminal Herdr already shows in a tab (it should add the label and leave the tab as it is); `spotlight-serve` on the PATH of the shells the user opens (`~/.local/bin`). Probed since: `hc get`'s top-level `cwd` is the terminal's start folder and doesn't follow a `cd`, while `foreground.cwd` does; the `cd` is always typed, so neither is read.
 - The pieces are `server.js` (`findRootSpace`, `ensureServerTerminal`, `wrapServerLine`, `serverTerminalHidden`, `showServerTerminal`, `showServer`), `bin/spotlight-serve`, `cli-work.mjs` (`ensureServer`, which ensures the terminal before the port check and records terminal-busy; `leftAloneLook`; the reap's `showHiddenServer`), `server-view-model.js` (`serverNote`), `server-view.js` (draws it) and `cli.mjs` (`peek`).
 
 ## Badge command probe
@@ -124,7 +124,7 @@ Beyond Orca, which neither checks nor frees the port: before typing the server l
 
 - The expected port is the repo's `port` setting when set. Otherwise it comes from `package.json`: the script the command runs, followed through `pnpm|npm|yarn|bun run <s>`, `pnpm|yarn <s>`, `npm-run-all`/`run-p`/`run-s` (globs like `dev:*` included) and `concurrently` (quoted commands and `npm:<s>`), up to three scripts deep. The first `-p N`, `--port N` or `--port=N` on a `next`, `vite`, `astro`, `nuxt`, `remix`, `react-router`, `webpack-dev-server` or `serve` line wins, else a `PORT=N` on it. `pnpm dev` → `npm-run-all --parallel dev:next dev:convex` → `next dev -p 3008` gives 3008. With no port found there is no check. `server-plan.js` `expectedPort` holds the rule.
 - The check: `lsof -nP -iTCP:<port> -sTCP:LISTEN -F pcn`, then the listener's pids against the tree under the server terminal's own process (`pgrep -P`), as the ports of a running server are read. A listener in that tree is Spotlight's own server, so a restart goes ahead. A listener outside it refuses the start:
-  - `lastError {code: "port-busy", port, pid, command, cwd, message}`, the message reading "El puerto 3008 lo tiene next-server (v16.0.1) (pid 4242, en /Users/…/speaking-english)." The command comes from `ps -o command=`, cut to 120 characters, and the folder from `lsof -a -p <pid> -d cwd`.
+  - `lastError {code: "port-busy", port, pid, command, cwd, message}`, the message reading "El puerto 3008 lo tiene next-server (v16.0.1) (pid 4242, en /Users/…/side-project)." The command comes from `ps -o command=`, cut to 120 characters, and the folder from `lsof -a -p <pid> -d cwd`.
   - A toast with that message whose action opens the server popup, once per holder; a line in the server log; nothing typed. `spotlight on` prints the message under the repo's line and doesn't wait for a port that won't open, and `spotlight restart` and `spotlight env` exit 1 with it.
   - A sync doesn't clear the error, and neither does the same workspace lit again: a refused `spotlight restart` over a server that kept listening keeps its `port-busy`. A start that goes through clears it, and so do a takeover whose server needs no start and a plan with no command once no server of Spotlight's may still run there; a start that fails replaces it with its own `server-start-failed` (see "A root error and a server error").
 - The popup shows "Liberar puerto y arrancar" on `port-busy` only. It runs `spotlight restart --repo <root> --free-port`: SIGTERM to the process the error names and to its descendants, up to 5 s for them to go, SIGKILL to the ones left, then a normal start. A note records it ("Puerto 3008 liberado: …").

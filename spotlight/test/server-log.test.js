@@ -213,14 +213,14 @@ test("tailLog: the last N lines of a big log without reading it whole; a missing
 // address in use becomes port-busy, anything else server-exited with the
 // first error line.
 
-// The speaking-english log of the incident (S14, L15), byte for byte as
+// The side-project log of the incident (S14, L15), byte for byte as
 // `script -F` and the CLI wrote it: haddock's start interrupted, then two
 // starts of spotlight-1 that died on EADDRINUSE :3008.
 const SPEAKING_ENGLISH_LOG =
   "\n" +
-  "── Spotlight: haddock (juanjabibarcticgrey/fix-app-direction) · 19:38:20 ──\n" +
+  "── Spotlight: haddock (work-dev/fix-app-direction) · 19:38:20 ──\n" +
   "\n" +
-  "── Spotlight: haddock (juanjabibarcticgrey/fix-app-direction) · started: pnpm install --frozen-lockfile && pnpm dev · 19:38:20 ──\n" +
+  "── Spotlight: haddock (work-dev/fix-app-direction) · started: pnpm install --frozen-lockfile && pnpm dev · 19:38:20 ──\n" +
   "Lockfile is up to date, resolution step is skipped\r\n" +
   "Progress: resolved \u001b[96m1\u001b[39m, reused \u001b[96m0\u001b[39m, downloaded \u001b[96m0\u001b[39m, added \u001b[96m0\u001b[39m\r\n" +
   "\u001b[1APackages: \u001b[32m+228\u001b[39m\u001b[0K\r\n" +
@@ -228,21 +228,21 @@ const SPEAKING_ENGLISH_LOG =
   "Progress: resolved \u001b[96m1\u001b[39m, reused \u001b[96m0\u001b[39m, downloaded \u001b[96m0\u001b[39m, added \u001b[96m0\u001b[39m\r\n" +
   "\u001b[1AProgress: resolved \u001b[96m228\u001b[39m, reused \u001b[96m0\u001b[39m, downloaded \u001b[96m0\u001b[39m, added \u001b[96m0\u001b[39m\r\n" +
   "^C\n" +
-  "── Spotlight: haddock (juanjabibarcticgrey/fix-app-direction) · stopped · 19:38:22 ──\n" +
+  "── Spotlight: haddock (work-dev/fix-app-direction) · stopped · 19:38:22 ──\n" +
   "\n" +
   "── Spotlight: spotlight-1 (spotlight-1) · 12:49:42 ──\n" +
   "\n" +
   "── Spotlight: spotlight-1 (spotlight-1) · started: pnpm dev · 12:49:42 ──\n" +
   "\r\n" +
-  "> speaking-english@1.0.0 dev /Users/juan/Desktop/Software/Sideprojects/speaking-english\r\n" +
+  "> side-project@1.0.0 dev /Users/alex/code/side-project\r\n" +
   "> npm-run-all --parallel dev:next dev:convex\r\n" +
   "\r\n" +
   "\r\n" +
-  "> speaking-english@1.0.0 dev:next /Users/juan/Desktop/Software/Sideprojects/speaking-english\r\n" +
+  "> side-project@1.0.0 dev:next /Users/alex/code/side-project\r\n" +
   "> next dev -p 3008\r\n" +
   "\r\n" +
   "\r\n" +
-  "> speaking-english@1.0.0 dev:convex /Users/juan/Desktop/Software/Sideprojects/speaking-english\r\n" +
+  "> side-project@1.0.0 dev:convex /Users/alex/code/side-project\r\n" +
   "> convex dev\r\n" +
   "\r\n" +
   "\u001b[31m\u001b[1m⨯\u001b[22m\u001b[39m Failed to start server\r\n" +
@@ -265,15 +265,15 @@ const SPEAKING_ENGLISH_LOG =
   "\n" +
   "── Spotlight: spotlight-1 (spotlight-1) · started: pnpm dev · 12:51:18 ──\n" +
   "\r\n" +
-  "> speaking-english@1.0.0 dev /Users/juan/Desktop/Software/Sideprojects/speaking-english\r\n" +
+  "> side-project@1.0.0 dev /Users/alex/code/side-project\r\n" +
   "> npm-run-all --parallel dev:next dev:convex\r\n" +
   "\r\n" +
   "\r\n" +
-  "> speaking-english@1.0.0 dev:next /Users/juan/Desktop/Software/Sideprojects/speaking-english\r\n" +
+  "> side-project@1.0.0 dev:next /Users/alex/code/side-project\r\n" +
   "> next dev -p 3008\r\n" +
   "\r\n" +
   "\r\n" +
-  "> speaking-english@1.0.0 dev:convex /Users/juan/Desktop/Software/Sideprojects/speaking-english\r\n" +
+  "> side-project@1.0.0 dev:convex /Users/alex/code/side-project\r\n" +
   "> convex dev\r\n" +
   "\r\n" +
   "\u001b[31m\u001b[1m⨯\u001b[22m\u001b[39m Failed to start server\r\n" +
@@ -327,11 +327,11 @@ test("isStartMarker: the CLI's started and restarted headers, never a holder swi
   assert.equal(isStartMarker("started: pnpm dev"), false);
 });
 
-test("logSinceLastStart: the speaking-english log (two starts of spotlight-1) → only what the last start printed, as plain text", () => {
+test("logSinceLastStart: the side-project log (two starts of spotlight-1) → only what the last start printed, as plain text", () => {
   const { dir, p } = logFile(SPEAKING_ENGLISH_LOG);
   const text = logSinceLastStart(p);
   assert.ok(!text.includes(ESC) && !text.includes("\r"), "ANSI codes and CRs stripped");
-  assert.ok(text.startsWith("\n> speaking-english@1.0.0 dev /Users/juan/Desktop/Software/Sideprojects/speaking-english\n"), text.slice(0, 120));
+  assert.ok(text.startsWith("\n> side-project@1.0.0 dev /Users/alex/code/side-project\n"), text.slice(0, 120));
   assert.equal(text.match(/Failed to start server/g)?.length, 1, "the first start of spotlight-1 is not read");
   assert.ok(!text.includes("Lockfile is up to date"), "nor haddock's");
   assert.ok(text.includes("\n⨯ Failed to start server\nError: listen EADDRINUSE: address already in use :::3008\n"));
@@ -339,7 +339,7 @@ test("logSinceLastStart: the speaking-english log (two starts of spotlight-1) �
   rmSync(dir, { recursive: true, force: true });
 });
 
-test("readStartFailure: the speaking-english log is an address in use on 3008", () => {
+test("readStartFailure: the side-project log is an address in use on 3008", () => {
   const { dir, p } = logFile(SPEAKING_ENGLISH_LOG);
   assert.deepEqual(readStartFailure(p), {
     kind: "addr-in-use", port: 3008, line: "Error: listen EADDRINUSE: address already in use :::3008",
