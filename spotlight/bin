@@ -1,4 +1,6 @@
 # Commands scripts/install.sh puts on PATH: each line an executable of this
 # plugin's mods, linked as ~/.local/bin/<its name> to the installed copy, so
-# agents, the harness hook and badge clicks run `spotlight` by name.
+# agents, the harness hook and badge clicks run `spotlight` by name, and the
+# server line Spotlight types into the root's terminal runs `spotlight-serve`.
 mods/spotlight/bin/spotlight
+mods/spotlight/bin/spotlight-serve

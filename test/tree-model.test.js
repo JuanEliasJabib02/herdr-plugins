@@ -19,6 +19,11 @@ import {
 } from "../projects-sidebar/mods/projects/tree-model.js";
 import { buildTaskTree } from "../projects-sidebar/mods/projects/task-model.js";
 import { parseBadges, laneBadgeKey } from "../projects-sidebar/mods/projects/badges-model.js";
+import * as badgesModel from "../projects-sidebar/mods/projects/badges-model.js";
+
+// Spotlight T33's (its D42), read off the module so its test fails alone
+// while it is missing.
+const { badgeLines } = badgesModel;
 
 const HOME = "/Users/demo";
 const NOW = 1_800_000_000_000;
@@ -812,6 +817,31 @@ test("lane badges (D29): a lane finds what was published under its group and its
   assert.deepEqual(drawn(r), { "task:AX-3653": ["on"], "task:login": ["Dev"], servers: [] });
   // Another group active: its own lane of the same name, never g1's.
   assert.deepEqual(drawn(selectGroup(r, "g2")), { "task:AX-3653": ["client"], servers: [] });
+});
+
+// Spotlight T33 (its D42): a badge's `line: 2` puts it under a workspace
+// row's label, which grows to 42 px; a lane header keeps one 28 px line.
+test("badge lines (D42): a workspace row with a line-2 badge is two lines, 42 px; a lane header joins its line-2 badges to its one line", () => {
+  const W = "/Users/demo/orca/workspaces";
+  let r = emptyRegistry();
+  r = addProject(r, { path: "/code/app" });
+  const cache = { "/code/app": [{ path: "/code/app", branch: "main", main: true }, { path: `${W}/app/ax-3653`, branch: "ax-3653", main: false }] };
+  const published = parseBadges([{
+    "/code/app": [{ text: "Spotlight", pill: true, bar: "working" }, { text: ":3000", line: 2 }],
+    [`${W}/app/ax-3653`]: [{ text: "on" }],
+    "g1/task:AX-3653": [{ text: ":3000", line: 2 }, { text: "Probando", pill: true, look: "secondary" }],
+  }]);
+  const texts = (lines) => [lines.line1.map((b) => b.text), lines.line2.map((b) => b.text), lines.height];
+  // Project mode: the root's port under its label; the other row one line.
+  const rows = buildTree({ registry: r, cache, spaces: [], panes: [], agents: [], collapsed: [], home: HOME, now: NOW }).rows.filter((x) => x.kind === "workspace");
+  assert.deepEqual(Object.fromEntries(rows.map((w) => [w.path, texts(badgeLines(published[w.path] ?? []))])), {
+    "/code/app": [["Spotlight"], [":3000"], 42],
+    [`${W}/app/ax-3653`]: [["on"], [], 28],
+  });
+  // Task mode: the lane header has one line, its line-2 badge at its end.
+  const t = buildTaskTree({ registry: setOrganize(r, "g1", "task"), cache, spaces: [], panes: [], agents: [], collapsed: [], home: HOME, now: NOW, tasks: [] });
+  const lane = t.rows.find((x) => x.kind === "task" && x.lane === "task:AX-3653");
+  assert.deepEqual(texts(badgeLines(published[laneBadgeKey(t.group.id, lane.lane)], { lane: true })), [["Probando", ":3000"], [], 28]);
 });
 
 test("reorder: the drag is wired into the tree (D33)", async () => {

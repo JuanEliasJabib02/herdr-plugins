@@ -95,20 +95,25 @@ test("D32: the selected env is the holder's: the pick stored for its key (record
   assert.equal(selectedOf(model({ settings, state: stateWith(repo({ envOverride: "local" }), { envs: { [KEY]: "dev" } }) })), "local");
   // A value that isn't an env reads as none.
   assert.equal(selectedOf(model({ settings, state: stateWith(repo({ envKey: KEY }), { envs: { [KEY]: "staging" } }) })), "dev");
+  // D46: a record keyed before D46 reads its task's entry in any space, the later one winning.
+  assert.equal(selectedOf(model({ settings, state: stateWith(repo({ envKey: KEY }), { envs: { "task:AX-1": "local" } }) })), "local");
+  assert.equal(selectedOf(model({ settings, state: stateWith(repo({ envKey: "task:AX-1" }), { envs: { "g2/AX-1": "local" } }) })), "local");
+  assert.equal(selectedOf(model({ settings, state: stateWith(repo({ envKey: "task:AX-1" }), { envs: { "task:AX-1": "prod", [KEY]: "local" } }) })), "local");
 });
 
-test("D32: with nobody holding the root, the popup selects the env stored for its workspace: its task's key in its space, else ws:<path>", () => {
+test("D32, D46: with nobody holding the root, the popup selects the env stored for its workspace: its task's key in any space, else ws:<path>", () => {
   const BARE = "/Users/u/orca/workspaces/landing/none";
   const registry = { version: 1, groups: [{ id: "g1", name: "G1", projects: [{ path: ROOT, name: "landing" }] }] };
   const cache = {
     [ROOT]: [{ path: ROOT, branch: "main", main: true }, { path: H, branch: "juan/AX-1", main: false }, { path: BARE, branch: "none", main: false }],
   };
   const unlit = (envs, workspace) => model({ state: stateWith(null, { envs }), workspace, registry, cache });
-  assert.equal(selectedOf(unlit({ "g1/AX-1": "dev" }, H)), "dev");
+  assert.equal(selectedOf(unlit({ "task:AX-1": "dev" }, H)), "dev");
+  assert.equal(selectedOf(unlit({ "g1/AX-1": "dev" }, H)), "dev", "stored before D46");
   assert.equal(selectedOf(unlit({ [`ws:${BARE}`]: "dev" }, BARE)), "dev");
-  assert.equal(selectedOf(unlit({ "g1/AX-1": "dev" }, BARE)), "local", "another workspace's pick isn't this one's");
-  assert.equal(selectedOf(unlit({ "g2/AX-1": "dev" }, H)), "local", "the same task in another space is another key");
-  // A workspace the worktree cache doesn't list yet, or no registry given: the settings' env.
+  assert.equal(selectedOf(unlit({ "task:AX-1": "dev", "g1/AX-1": "dev" }, BARE)), "local", "another workspace's pick isn't this one's");
+  assert.equal(selectedOf(unlit({ "g2/AX-1": "dev" }, H)), "dev", "D46: the same task in another space is the same task");
+  // A workspace the worktree cache doesn't list yet, or no cache given: the settings' env.
   assert.equal(selectedOf(unlit({ "g1/AX-1": "dev" }, "/Users/u/orca/workspaces/landing/ax-9")), "local");
   assert.equal(selectedOf(model({ state: stateWith(null, { envs: { "g1/AX-1": "dev" } }) })), "local");
   // Its radio picks for that workspace.
@@ -368,6 +373,24 @@ test("a gone server (its tab closed): no Ver server nor Ver log, Reiniciar and A
     const m = model({ state: stateWith(repo({ serverState })) });
     assert.deepEqual(m.actions.map((a) => a.label), ["Ver server", "Reiniciar", "Apagar"], serverState);
   }
+});
+
+test("D40: a server left alone because its terminal was busy says so: the popup's line, with Ver server, Reiniciar and Apagar; any other state or reason has none", () => {
+  const busy = model({ state: stateWith(repo({ serverState: "stopped", serverReason: "terminal-busy", ports: [] })) });
+  assert.equal(busy.serverNote, "Su terminal está ocupada: no se tocó.");
+  assert.deepEqual(busy.actions.map((a) => a.label), ["Ver server", "Reiniciar", "Apagar"]);
+  assert.equal(busy.errorTitle, null);
+  // A reason the record no longer stands by (the server runs again) or never had.
+  for (const fields of [
+    { serverState: "listening", serverReason: "terminal-busy" },
+    { serverState: "starting", serverReason: "terminal-busy" },
+    { serverState: "stopped" },
+    { serverState: "stopped", serverReason: "something-else" },
+    { serverState: "gone", serverReason: "terminal-busy" },
+  ]) {
+    assert.equal(model({ state: stateWith(repo(fields)) }).serverNote, null, JSON.stringify(fields));
+  }
+  assert.equal(model({ state: stateWith(null) }).serverNote, null);
 });
 
 // F6, F7: a server error can sit under a root error (lastError.serverError).

@@ -11,8 +11,9 @@
 //     workspace). Only the ready rows run. A row with changes makes the
 //     button "Delete anyway", which forces that row only.
 //   - The run (remove-workspace-model.js removeTask: D23's whole sequence
-//     per workspace) lives in a task no view owns, like the Delete dialog's
-//     (D22): Herdr's Esc may close even a modal dialog, and a closed
+//     per workspace, other plugins' remove hooks included, run with each
+//     workspace's path) lives in a task no view owns, like the Delete
+//     dialog's (D22): Herdr's Esc may close even a modal dialog, and a closed
 //     dialog's tasks are cancelled. It outlives the dialog; a reload stops
 //     it between workspaces. Every row stores its fresh list as it goes, so
 //     the tree drops it at once.
@@ -122,6 +123,9 @@ export default class DeleteTask {
     const targets = run.map((i) => ({ project: this.targets[i].project, path: this.targets[i].path, seen: this.checks[i] }));
     const label = this.label;
     const key = noteKeyOf(this.lane);
+    // Other plugins' workspace hooks (Spotlight's D43), run for each target
+    // after its check and before its spaces close.
+    const hooks = store.removeHooks().workspace;
     this.busy = true;
     this.error = "";
     for (const i of run) this.running.add(i);
@@ -153,6 +157,7 @@ export default class DeleteTask {
       let results;
       try {
         results = await removeTask({ targets }, {
+          hooks,
           closeSpaces: (target) => closeSpaces(target.path, bg),
           // D23 step 5, per target: its row goes from the tree at once.
           each: (r, i) => {

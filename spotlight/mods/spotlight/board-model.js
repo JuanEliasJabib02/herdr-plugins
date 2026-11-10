@@ -2,10 +2,11 @@
 // (T8, S1, S9, S13), ported from Orca's test-queue-board.ts and
 // TestQueuePopover.tsx (O/src/renderer/src/components/sidebar/test-queue/),
 // with the words of Orca's Spanish locale (tester case 14). Plus the footer
-// copy's three bookkeepers: the toasts' high-water mark (D18), the state
-// watch's batch filter (D18) and the reaper's debounce (D13).
+// copy's bookkeepers: the toasts' high-water mark (D18, kept in shared
+// state, D45) and the state watch's batch filter (D18); and the terminals the
+// watcher's reap follows (D13, D44).
 // Pure: no herdr or gpui-kit import, so `node --test` loads it; footer.js,
-// board.js and reaper.js read the files and the live data and hand them in.
+// board.js and watch.mjs read the files and the live data and hand them in.
 //
 // The rows come from the CLI's own `status --json` model (cli-format.mjs
 // buildStatus, pure), fed with state.json and settings.json as the mod reads
@@ -16,13 +17,14 @@
 //   boardView({ state, settings, registry, now })
 //                            the popup: header, sections and rows
 //   footerView(board)        the flask: { count, quiet, tooltip }
-//   toastMark(startedAt), takeToasts(notes, mark)
-//                            notes with `toast: true` newer than the mark,
-//                            as notify() takes them (an error for 60 s, D35)
+//   toastMark(startedAt, stored), takeToasts(notes, mark, { now, stored })
+//                            notes with `toast: true` newer than the mark
+//                            (the later of the copy's own and the one stored
+//                            under TOAST_KEY) and under 10 minutes old (D45),
+//                            as notify() takes them (an error for 60 s, D35;
+//                            the note's own title, body and timeout, D41)
 //   isStateBatch(dir, paths) whether a watchFolder batch touched state.json
-//   reapTargets(state), reapFingerprint(terminals, targets),
-//   reapClock(), reapTick(clock, { now, print }), reapDone(clock)
-//                            when the footer copy runs `spotlight reap`
+//   reapTargets(state)       the terminals whose changes make the watcher reap
 
 import { buildStatus } from "./cli-format.mjs";
 import { IDLE_MS } from "./cli-turns.mjs";
@@ -257,12 +259,38 @@ export function footerView(board) {
   return { count: board.count, quiet: board.count === 0 && board.paused.length === 0, tooltip };
 }
 
-// ── Toasts (D18) ───────────────────────────────────────────────────────────
+// ── Toasts (D18, D45) ──────────────────────────────────────────────────────
 
 // The high-water mark: the newest note time shown, and which notes of that
-// very millisecond were shown (two writes can share one). It starts at the
-// footer copy's start time, so a restarted copy never replays old notes.
-export const toastMark = (startedAt) => ({ at: startedAt, seen: [] });
+// very millisecond were shown (two writes can share one). Herdr runs the
+// footer copy only while `projects` is shown, so the whole mark is kept in
+// shared state under this key (D45): a copy that starts again, after another
+// layout was shown or Herdr restarted, toasts the notes written meanwhile.
+export const TOAST_KEY = "spotlight.toasts.v1";
+// Notes this old or older when a copy reads them are skipped, not toasted
+// late (D45: "if under 10 minutes old").
+export const TOAST_MAX_AGE_MS = 10 * MINUTE_MS;
+
+// A stored mark as the footer wrote it, or null when the value isn't one.
+function storedMark(value) {
+  if (!isObject(value) || !Number.isFinite(value.at) || !Array.isArray(value.seen)) return null;
+  if (!value.seen.every((key) => typeof key === "string")) return null;
+  return { at: value.at, seen: [...value.seen] };
+}
+
+// The later of two marks; in the same millisecond, what either saw.
+function laterMark(own, other) {
+  if (!other || other.at < own.at) return own;
+  if (other.at > own.at) return other;
+  return { at: own.at, seen: [...new Set([...own.seen, ...other.seen])] };
+}
+
+/**
+ * The mark a footer copy starts from: the stored one (`shared(TOAST_KEY)`),
+ * else, with none stored or an unreadable one, the copy's start time, so it
+ * never replays notes written before it started (D18).
+ */
+export const toastMark = (startedAt, stored) => storedMark(stored) ?? { at: startedAt, seen: [] };
 
 const noteKey = (n) => `${n.at}\n${n.repo ?? ""}\n${n.text}`;
 
@@ -280,19 +308,26 @@ const ERROR_TOAST_MS = 60_000;
 
 // notify()'s argument for one note. Its level is the note's own (D35); a
 // note without one (or with one notify doesn't know) is a warning when it
-// has an action (a toast that opens the server popup), else info. An error
-// lasts ERROR_TOAST_MS. Herdr's notify has one action and no labeled button,
-// so a toast that opens the popup names the button waiting there in its
-// body ("Clic: Forzar sync en el popup"), from the note's `button`.
+// has an action (a toast that opens the server popup), else info. Its title
+// and body are the note's own (D41: Orca's words), else "Spotlight" over
+// its text, as before; an empty body is a title-only toast (Orca's plain
+// success). Its timeout is the note's own (D41: a warning or the variant
+// prompt for 60 s), else ERROR_TOAST_MS for an error, else Herdr's default.
+// Herdr's notify has one action and no labeled button, so a toast that
+// opens the popup names the button waiting there after its body ("Clic:
+// Forzar sync en el popup"), from the note's `button`.
 function toastOf(note) {
   const action = actionOf(note.action);
   const level = LEVELS.has(note.level) ? note.level : action ? "warning" : "info";
-  const hint = action && isText(note.button) ? ` Clic: ${note.button} en el popup` : "";
+  const hint = action && isText(note.button) ? `Clic: ${note.button} en el popup` : "";
+  const said = typeof note.body === "string" ? note.body : note.text;
+  const body = [said, hint].filter(isText).join(" ");
+  const timeout = Number.isFinite(note.timeout) && note.timeout > 0 ? note.timeout : level === "error" ? ERROR_TOAST_MS : null;
   return {
-    title: "Spotlight",
-    body: `${note.text}${hint}`,
+    title: isText(note.title) ? note.title : "Spotlight",
+    ...(body ? { body } : {}),
     level,
-    ...(level === "error" ? { timeout: ERROR_TOAST_MS } : {}),
+    ...(timeout ? { timeout } : {}),
     ...(action ? { action } : {}),
   };
 }
@@ -300,15 +335,23 @@ function toastOf(note) {
 /**
  * The notes to post as toasts: `toast: true`, newer than the mark, oldest
  * first. → { toasts: [notify argument], mark: the mark after them }.
+ * `stored`: the mark in shared state (`shared(TOAST_KEY)`), which another
+ * copy may have moved; the later of it and `mark` is where this read starts,
+ * so a note another copy already toasted isn't toasted again (D45).
+ * `now`: with it, a note TOAST_MAX_AGE_MS old or older is skipped. The mark
+ * moves only to the last note toasted, so when some toast the caller writes
+ * the returned mark back to TOAST_KEY.
  */
-export function takeToasts(notes, mark) {
+export function takeToasts(notes, mark, { now, stored } = {}) {
+  const from = laterMark(mark, storedMark(stored));
   const fresh = (Array.isArray(notes) ? notes : [])
     .filter((n) => isObject(n) && n.toast === true && isText(n.text) && Number.isFinite(n.at))
-    .filter((n) => n.at > mark.at || (n.at === mark.at && !mark.seen.includes(noteKey(n))))
+    .filter((n) => n.at > from.at || (n.at === from.at && !from.seen.includes(noteKey(n))))
+    .filter((n) => !Number.isFinite(now) || now - n.at < TOAST_MAX_AGE_MS)
     .sort((a, b) => a.at - b.at);
-  if (fresh.length === 0) return { toasts: [], mark };
+  if (fresh.length === 0) return { toasts: [], mark: from };
   const at = fresh[fresh.length - 1].at;
-  const seen = [...(at === mark.at ? mark.seen : []), ...fresh.filter((n) => n.at === at).map(noteKey)];
+  const seen = [...(at === from.at ? from.seen : []), ...fresh.filter((n) => n.at === at).map(noteKey)];
   return { toasts: fresh.map(toastOf), mark: { at, seen } };
 }
 
@@ -329,15 +372,11 @@ export function isStateBatch(dir, paths) {
   });
 }
 
-// ── The reaper (D13) ───────────────────────────────────────────────────────
-
-// A burst of terminals() changes is reaped once, this long after the last.
-export const REAP_DEBOUNCE_MS = 1_000;
-// With nothing changing, a reap this often (idle times, gone servers, grants).
-export const REAP_EVERY_MS = 30_000;
+// ── The reaper's targets (D13, D44) ────────────────────────────────────────
 
 // The terminals whose changes can end a turn or a server: every agent in
-// line and every repo's server terminal.
+// line and every repo's server terminal. The watcher (watch.mjs) reads them
+// every 3 s and reaps when one changes.
 export function reapTargets(state) {
   const ids = [
     ...state.queue.requests.map((r) => r.terminal),
@@ -345,40 +384,3 @@ export function reapTargets(state) {
   ].filter(isText);
   return [...new Set(ids)];
 }
-
-// What of terminals() a reap cares about: the targets' state, status word and
-// turn count (hc ls --json), so a title or an unrelated agent never wakes it.
-// A target that went away changes it too.
-export function reapFingerprint(terminals, targets) {
-  const want = new Set(targets);
-  return (Array.isArray(terminals) ? terminals : [])
-    .filter((t) => isObject(t) && (want.has(t.address) || want.has(t.name)))
-    .map((t) => `${t.address}|${t.state ?? ""}|${t.status ?? ""}|${t.turn ?? ""}`)
-    .sort()
-    .join("\n");
-}
-
-// The reaper's clock: the last fingerprint, when it last changed, the last
-// reap, and whether one runs now. The first look reaps (the copy just
-// started) and takes the fingerprint as its baseline.
-export const reapClock = () => ({ looked: false, print: null, changedAt: null, lastReapAt: null, running: false });
-
-/**
- * One look at terminals(): → { clock, reap }. `reap` is true when the
- * fingerprint has been still for REAP_DEBOUNCE_MS after a change (a trailing
- * debounce), or REAP_EVERY_MS passed since the last reap; never while one
- * runs (a change seen meanwhile is reaped once it ends). Call reapDone when
- * the reap ends.
- */
-export function reapTick(clock, { now, print }) {
-  const c = { ...clock };
-  if (!c.looked) Object.assign(c, { looked: true, print });
-  else if (print !== c.print) Object.assign(c, { print, changedAt: now });
-  if (c.running) return { clock: c, reap: false };
-  const settled = c.changedAt !== null && now - c.changedAt >= REAP_DEBOUNCE_MS;
-  const periodic = c.lastReapAt === null || now - c.lastReapAt >= REAP_EVERY_MS;
-  if (!settled && !periodic) return { clock: c, reap: false };
-  return { clock: { ...c, changedAt: null, lastReapAt: now, running: true }, reap: true };
-}
-
-export const reapDone = (clock) => ({ ...clock, running: false });

@@ -6,9 +6,13 @@
 // passed in (M/git.js binds them to Herdr's exec; tests pass a real git), like
 // createWorkspace. Every outcome is read from git's state (the worktree list,
 // the refs, the exit code), never from its words: they are translated under
-// another locale and reworded across versions.
+// another locale and reworded across versions. Other plugins' remove hooks
+// (Spotlight's D43) run before the spaces close and before a project leaves
+// the list (parseRemoveHooks, runHooks, removeProjectWith); M/git.js runs
+// them through exec.
 
 import { normPath, baseName, isAbsolute, parseWorktrees, WORKTREE_LIST } from "./lib.js";
+import { actionOf } from "./badges-model.js";
 
 // ── The git it runs ────────────────────────────────────────────────────────
 // Paths and branches only ever reach git as one argv entry each (Herdr's exec
@@ -168,8 +172,11 @@ export function spacesToClose(matches, path) {
 //   1. removalCheck again. Not a non-main checkout → "refused"; locked →
 //      "locked"; changes or submodules that `seen` (the check the person
 //      confirmed) didn't have → "changed"; git unanswered → "failed". In all
-//      of them nothing runs, closeSpaces included.
-//   2. await io.closeSpaces() (it waits until the spaces are gone).
+//      of them nothing runs, beforeRemove and closeSpaces included.
+//   2. await io.beforeRemove(path), other plugins' workspace hooks with the
+//      normalized path (Spotlight's D43: M/git.js binds it to runHooks), a
+//      throw or a rejection ignored: a hook never stops a delete. Then
+//      await io.closeSpaces() (it waits until the spaces are gone).
 //   3. git worktree remove, with one --force only when `seen` had changes or
 //      submodules. A re-list decides: still listed → "failed", with the
 //      didn't-finish text when git rejected (exec's 30 s limit), else git's
@@ -179,8 +186,8 @@ export function spacesToClose(matches, path) {
 //      refs/heads/<b> is still there (branchErr: git's first line), else
 //      "deleted".
 //   5. The fresh list goes back for the dialog to store.
-// req = { project, path, seen }; io = { git, exists, closeSpaces }. Never
-// rejects. Resolves
+// req = { project, path, seen }; io = { git, exists, closeSpaces,
+// beforeRemove? }. Never rejects. Resolves
 //   { status: "removed" | "refused" | "locked" | "changed" | "failed",
 //     err, branch: "deleted" | "kept" | "in-use" | "none" | null, branchErr,
 //     list, check }
@@ -202,7 +209,12 @@ export async function removeWorkspace({ project, path, seen }, io) {
   if (check.changes && !confirmed.changes) return result("changed", { err: `${label} now has changes that aren't committed.` });
   if (check.submodules && !confirmed.submodules) return result("changed", { err: `${label} now has submodules.` });
 
-  // 2. Close the spaces.
+  // 2. Other plugins' hooks, then close the spaces.
+  try {
+    await io.beforeRemove?.(dir);
+  } catch {
+    // runHooks never rejects; a binding that does still lets the delete go on
+  }
   try {
     await io.closeSpaces?.();
   } catch (e) {
@@ -267,9 +279,11 @@ async function goesOn(io) {
 // "Delete anyway" forces only the rows that had changes or submodules.
 //   - One target at a time, never together: targets share repos, and git
 //     locks .git/worktrees. Each runs removeWorkspace's whole D23 sequence
-//     (check again, close its spaces, remove, branch -d only if merged), with
-//     closeSpaces bound to it: io.closeSpaces(target). A missing closeSpaces
-//     fails that target before anything is removed.
+//     (check again, other plugins' hooks, close its spaces, remove, branch
+//     -d only if merged), with closeSpaces bound to it:
+//     io.closeSpaces(target); io.beforeRemove reaches it as it is, called
+//     with that target's path. A missing closeSpaces fails that target
+//     before anything is removed.
 //   - A failure doesn't stop the others.
 //   - io.each(result, i) is awaited after every target that ran, with its
 //     entry of the result and its index; a throw or a rejection is ignored.
@@ -277,8 +291,8 @@ async function goesOn(io) {
 //     Once it says no, it isn't asked again: that target and the rest don't
 //     run, read "skipped" with "Stopped: the plugin was reloaded.", and get
 //     no each.
-// io = { git, exists, closeSpaces(target), each?(result, i), alive?() }.
-// Never rejects. Resolves, in the targets' order,
+// io = { git, exists, closeSpaces(target), each?(result, i), alive?(),
+// beforeRemove?(path) }. Never rejects. Resolves, in the targets' order,
 //   [{ project, path, ...removeWorkspace's { status, err, branch, branchErr,
 //      list, check } }]
 // with status "skipped" too (branch, branchErr, list and check null), and
@@ -310,4 +324,86 @@ export async function removeTask(req, io) {
     }
   }
   return results;
+}
+
+// ── Other plugins' remove hooks (Spotlight's D43) ──────────────────────────
+// A plugin that holds on to a workspace or a project (Spotlight: a root lit
+// from a workspace, its refs) gets to let go before it goes, without this
+// plugin knowing it: it publishes programs under config.js REMOVE_HOOK_KEYS,
+// and Delete, Delete task and Remove from list run them first. The contract
+// is RECIPE.md "Remove hooks from other plugins"; it only grows.
+//
+//   each key:  { workspace?: argv, project?: argv }
+//   argv:      [program, ...args], a badge's exec (badges-model.js actionOf);
+//              an argument that is exactly "{path}" becomes the path
+
+// How long one hook may run (exec's timeout, M/git.js): past it, exec
+// rejects and the next hook, or the delete, goes on.
+export const HOOK_TIMEOUT = 120_000;
+
+const isObject = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
+
+// A hook's argv, or null: a badge's exec rules (argv[0] absolute or a bare
+// name, 1 to 20 strings of at most 500 chars, no NUL).
+const hookOf = (argv) => actionOf({ exec: argv }, null)?.exec ?? null;
+
+// Every plugin's hooks: { workspace: [argv], project: [argv] }, each list in
+// the keys' order. `values`: the keys' shared() values, in that order
+// (store.js removeHooks()). A bad argv is dropped alone, the plugin's other
+// one kept; any other field is ignored; a value that isn't an object is no
+// hooks. Never throws.
+export function parseRemoveHooks(values) {
+  const hooks = { workspace: [], project: [] };
+  if (!Array.isArray(values)) return hooks;
+  for (const value of values) {
+    if (!isObject(value)) continue;
+    for (const kind of ["workspace", "project"]) {
+      const argv = hookOf(value[kind]);
+      if (argv) hooks[kind].push(argv);
+    }
+  }
+  return hooks;
+}
+
+// The argv a hook runs for `path`: every argument after the program that is
+// exactly "{path}" becomes the path, one argument as it is, never part of
+// another (no quoting to get wrong: exec runs no shell). The program is never
+// replaced: it was checked as one (an absolute path or a bare name), and a
+// path in its place would run a file the workspace holds. A new list.
+export function hookArgv(argv, path) {
+  return argv.map((a, i) => (i > 0 && a === "{path}" ? path : a));
+}
+
+// Runs `hooks` (parseRemoveHooks' workspace or project list) for `path`, one
+// after another, each awaited: `run(argv)` (M/git.js: exec in the home folder
+// with HOOK_TIMEOUT) resolving, rejecting or throwing, the next one runs. Its
+// outcome is ignored: a hook never stops a delete. An entry that isn't a list
+// is skipped; no hooks or no run, nothing runs. Never rejects.
+export async function runHooks(hooks, path, run) {
+  if (!Array.isArray(hooks) || typeof run !== "function") return;
+  for (const argv of hooks) {
+    if (!Array.isArray(argv)) continue;
+    try {
+      await run(hookArgv(argv, path));
+    } catch {
+      // failed, timed out or couldn't start: the next hook runs anyway
+    }
+  }
+}
+
+// Remove from list (D11) with other plugins' project hooks first:
+//   1. await io.beforeRemove(path), the project hooks with its normalized
+//      path (project-menu.js binds it to M/git.js runRemoveHooks), a throw
+//      or a rejection ignored: a hook never keeps a project in the list.
+//   2. await io.remove(path), the registry and cache writes.
+// req = { project }; io = { beforeRemove?(path), remove(path) }. Resolves
+// once the project is off the list; rejects only when remove does.
+export async function removeProjectWith({ project }, io) {
+  const path = normPath(project);
+  try {
+    await io?.beforeRemove?.(path);
+  } catch {
+    // runHooks never rejects; a binding that does still lets the removal go on
+  }
+  await io.remove(path);
 }

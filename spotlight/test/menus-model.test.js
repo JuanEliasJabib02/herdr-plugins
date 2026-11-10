@@ -63,17 +63,18 @@ function repo(fields) {
   };
 }
 
-// back is lit by AX-3447's B1, which runs the env stored for its task (dev).
+// back is lit by AX-3447's B1, which runs the env stored for its task (dev),
+// keyed by the task in any space (D46).
 function baseState({ back = {}, repos = {}, envs = {} } = {}) {
   return readState(JSON.stringify({
     version: 1,
     repos: {
-      [BACK]: repo({ holder: B1, envKey: "ax/AX-3447", serverEnv: "dev", serverState: "listening", ports: [3000], ...back }),
+      [BACK]: repo({ holder: B1, envKey: "task:AX-3447", serverEnv: "dev", serverState: "listening", ports: [3000], ...back }),
       ...repos,
     },
     queue: { requests: [], lighting: {} },
     notes: [],
-    envs: { "ax/AX-3447": "dev", ...envs },
+    envs: { "task:AX-3447": "dev", ...envs },
   }));
 }
 
@@ -86,7 +87,8 @@ function build({ state = baseState(), settings = settingsOf(), enabled = ENABLED
 const ids = (list) => (list ?? []).map((it) => it.id);
 const itemOf = (list, id) => (list ?? []).find((it) => it.id === id);
 const checkedOf = (list) => (itemOf(list, "env")?.items ?? []).filter((it) => it.checked).map((it) => it.text);
-const toggleExec = (at) => ({ exec: [BIN, "toggle", "--workspace", at] });
+// D41: the menu's toggle carries --note, as the badges' (a refusal toasts, exit 0).
+const toggleExec = (at) => ({ exec: [BIN, "toggle", "--workspace", at, "--note"] });
 const BUSY = { op: "sync", since: 5, pid: 4242 };
 const codePoints = (s) => [...s].length;
 
@@ -111,20 +113,22 @@ test("an eligible unlit workspace: Proyectar este workspace, then Entorno de Spo
   // Nothing stored for AX-3500: the repo's settings env, local by default.
   assert.deepEqual(checkedOf(value[B2]), ["Local"]);
 
-  // Its task's pick in its space, `ax/AX-3500`.
-  assert.deepEqual(checkedOf(build({ state: baseState({ envs: { "ax/AX-3500": "prod" } }) })[B2]), ["Prod"]);
-  // The same task in another space is another key.
-  assert.deepEqual(checkedOf(build({ state: baseState({ envs: { "zz/AX-3500": "prod" } }) })[B2]), ["Local"]);
+  // Its task's pick, `task:AX-3500`.
+  assert.deepEqual(checkedOf(build({ state: baseState({ envs: { "task:AX-3500": "prod" } }) })[B2]), ["Prod"]);
+  // D46: the same task in another space is the same task: a pick stored
+  // before D46 under any space's `<groupId>/<KEY>` is this one's too.
+  assert.deepEqual(checkedOf(build({ state: baseState({ envs: { "zz/AX-3500": "prod" } }) })[B2]), ["Prod"]);
+  assert.deepEqual(checkedOf(build({ state: baseState({ envs: { "ax/AX-3500": "dev" } }) })[B2]), ["Dev"]);
   // The repo's settings env when nothing is stored.
   const devFront = settingsOf({ version: 1, repos: { [FRONT]: { enabled: true, env: "prod" } } });
-  const front = build({ state: baseState({ envs: { "ax/AX-3447": null } }), settings: devFront });
+  const front = build({ state: baseState({ envs: { "task:AX-3447": null } }), settings: devFront });
   assert.deepEqual(checkedOf(front[F1]), ["Prod"]);
   // One pick sets the env of the whole task: front's AX-3447 workspace reads the task's (dev).
   assert.deepEqual(checkedOf(build()[F1]), ["Dev"]);
 
   // A task-less workspace's key is ws:<path>; another workspace's pick isn't its own.
   assert.deepEqual(checkedOf(build({ state: baseState({ envs: { [`ws:${BN}`]: "prod" } }) })[BN]), ["Prod"]);
-  assert.deepEqual(checkedOf(build({ state: baseState({ envs: { "ax/AX-3500": "prod" } }) })[BN]), ["Local"]);
+  assert.deepEqual(checkedOf(build({ state: baseState({ envs: { "task:AX-3500": "prod" } }) })[BN]), ["Local"]);
   assert.deepEqual(ids(value[BN]), ["toggle", "env"]);
 });
 
@@ -140,9 +144,11 @@ test("the holder: Apagar Spotlight, and the env its server runs checked (D32)", 
   // A record lit before T22 (no envKey): its envOverride, until it turns off.
   const old = baseState({ back: { envKey: undefined, envOverride: "prod" } });
   assert.deepEqual(checkedOf(build({ state: old })[B1]), ["Prod"]);
+  // D46: a record keyed before D46 (`<groupId>/<KEY>`) reads the task's entry.
+  assert.deepEqual(checkedOf(build({ state: baseState({ back: { envKey: "ax/AX-3447" }, envs: { "task:AX-3447": "prod" } }) })[B1]), ["Prod"]);
   // Nothing stored for its key: the repo's settings env.
   const settings = settingsOf({ version: 1, repos: { [BACK]: { enabled: true, env: "dev" } } });
-  assert.deepEqual(checkedOf(build({ state: baseState({ envs: { "ax/AX-3447": null } }), settings })[B1]), ["Dev"]);
+  assert.deepEqual(checkedOf(build({ state: baseState({ envs: { "task:AX-3447": null } }), settings })[B1]), ["Dev"]);
 });
 
 test("the holder on a root-diverged root: Forzar sync too, danger, the popup's sync --force --detach; never elsewhere, nor for another error", () => {
@@ -270,4 +276,44 @@ test("nothing to offer: null, so menus.spotlight is cleared; an unchanged value 
   assert.deepEqual(nextPublish({ [B2]: [] }, none), { write: true, value: null });
   const value = build();
   assert.equal(nextPublish(JSON.parse(JSON.stringify(value)), build()).write, false);
+});
+
+// ── D43: Spotlight's remove hooks ──────────────────────────────────────────
+
+test("D43: removeHooksOf(bin) is projects-sidebar's remove hooks: `teardown --workspace {path}` and `teardown --repo {path}`, kept by its parser, {path} replaced as a whole argument", async () => {
+  const { removeHooksOf } = await import("../mods/spotlight/menus-model.js");
+  const { parseRemoveHooks, hookArgv } = await import("../../projects-sidebar/mods/projects/remove-workspace-model.js");
+  const { REMOVE_HOOK_KEYS } = await import("../../projects-sidebar/mods/projects/config.js");
+  assert.equal(typeof removeHooksOf, "function", "menus-model.js exports removeHooksOf");
+  const value = removeHooksOf(BIN);
+  assert.deepEqual(value, {
+    workspace: [BIN, "teardown", "--workspace", "{path}"],
+    project: [BIN, "teardown", "--repo", "{path}"],
+  });
+  // projects-sidebar reads this key and keeps both argv as published.
+  assert.ok(REMOVE_HOOK_KEYS.includes("removeHooks.spotlight"));
+  const parsed = parseRemoveHooks([value]);
+  assert.deepEqual(parsed, { workspace: [value.workspace], project: [value.project] });
+  // {path} is one whole element: the path goes in as one argument, never spliced into another.
+  assert.deepEqual(hookArgv(parsed.workspace[0], B1), [BIN, "teardown", "--workspace", B1]);
+  assert.deepEqual(hookArgv(parsed.project[0], BACK), [BIN, "teardown", "--repo", BACK]);
+  assert.ok(value.workspace.every((a) => a === "{path}" || !a.includes("{path}")));
+  // Published with nextPublish: the same value again writes nothing.
+  assert.equal(nextPublish(JSON.parse(JSON.stringify(value)), removeHooksOf(BIN)).write, false);
+});
+
+// badges.js and main.js import "herdr", which `node --test` can't load: their
+// wiring is asserted on the source, as projects-sidebar's smoke test does.
+test("D43: the footer copy publishes removeHooks.spotlight from the same refresh as menus.spotlight, only when it changes, and clears it when it closes", () => {
+  const badges = fs.readFileSync(path.join(MOD_DIR, "badges.js"), "utf8");
+  assert.match(badges, /export const REMOVE_HOOKS_KEY = "removeHooks\.spotlight";/);
+  assert.match(badges, /import \{ buildMenus, removeHooksOf \} from "\.\/menus-model\.js";/);
+  const refresh = badges.slice(badges.indexOf("async function refresh()"), badges.indexOf("export async function handleCommand"));
+  assert.match(refresh, /nextPublish\(shared\(MENU_KEY\)/);
+  assert.match(refresh, /const hooks = nextPublish\(shared\(REMOVE_HOOKS_KEY\), removeHooksOf\(bin\)\);/);
+  assert.match(refresh, /if \(hooks\.write\) setShared\(REMOVE_HOOKS_KEY, hooks\.value\);/);
+  const main = fs.readFileSync(path.join(MOD_DIR, "main.js"), "utf8");
+  assert.match(main, /import \{ startBadges, handleCommand, MENU_KEY, REMOVE_HOOKS_KEY \} from "\.\/badges\.js";/);
+  const close = main.slice(main.indexOf("async close(cx)"), main.indexOf("render(cx)"));
+  assert.match(close, /setShared\(MENU_KEY, null\);\s*setShared\(REMOVE_HOOKS_KEY, null\);/);
 });

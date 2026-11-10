@@ -334,6 +334,8 @@ export function makeContext() {
     pollMs: envMs("SPOTLIGHT_POLL_MS", 2_500),
     portPollMs: envMs("SPOTLIGHT_PORT_POLL_MS", 2_500),
     graceMs: envMs("SPOTLIGHT_NO_SERVER_GRACE_MS", 15_000),
+    // `spotlight teardown`'s wait in all (D43, cli-work.mjs TEARDOWN_MS).
+    teardownMs: envMs("SPOTLIGHT_TEARDOWN_MS", 80_000),
     get settings() {
       settings ??= store.readSettings().settings;
       return settings;

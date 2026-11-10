@@ -10,12 +10,24 @@
 //   sync --repo r [--force] [--detach]   restart --repo r [--free-port]
 //   logs [--repo r] [--lines N] [--path] peek --workspace p | --repo r
 //   env --workspace p [--env e] [--variant v]   reap
-//   env --task KEY --group id --env e    the task's env, from its lane's pill (D32)
+//   env --task KEY --group id --env e    the task's env in every space, from its lane's pill (D32, D46)
 //   continue [--terminal t] [--account id]  Continuar on a paused or idle agent (T11)
+//   teardown --workspace p | --repo r    Spotlight off before projects-sidebar
+//                                        deletes a workspace or removes a
+//                                        project (its remove hooks, D43)
+//   watch --ensure                       start the background watcher unless
+//                                        it runs (D44: the footer copy's
+//                                        start; `on` and every light call it
+//                                        too)
 //   internal: light --task k [--force], classify --terminal t,
+//             watch (the watcher itself: auto-sync, the server and queue
+//             checks every 3 s, the full reap every 30 s; watch.mjs),
 //             continue --inline [--auto], env --task k --group id --inline,
 //             sync --repo r --auto (auto-sync's and the reap's: an
-//             automatic sync, which leaves an env that couldn't run, N4)
+//             automatic sync, which leaves an env that couldn't run, N4),
+//             toggle --workspace p --note (projects-sidebar's click, the
+//             badges' and the menu's: a refusal it answers at once is an
+//             error toast and exit 0, D41)
 //
 // `restart --free-port` is the server popup's "Liberar puerto y arrancar"
 // (D24): it stops the process the recorded port-busy error names, then
@@ -31,8 +43,7 @@ import path from "node:path";
 import { resolveTask, taskKeyFrom, hasGroup } from "./task.js";
 import { request, release, positionOf } from "./queue.js";
 import { readRefs, assertDeactivatable, toSpotlightError } from "./sync.js";
-import { rememberVariant } from "./store.js";
-import { envKeyOf } from "./task-env.js";
+import { envKeyOf, taskEnvKey, sameEnvKey, storedEnv } from "./task-env.js";
 import { pidAlive, LockError } from "./locks.js";
 import { normRoot } from "./settings.js";
 import { isSafeVariant, isServerEnv, SERVER_ENVS } from "./server-plan.js";
@@ -48,11 +59,12 @@ import {
 } from "./cli-format.mjs";
 import {
   markGranted, spawnLights, dropStaleMarkers, lightTask, syncRepo, deactivateRepo, ensureServer, waitForTurnServers,
-  recordServers, reap, rescuedNotes, errorNote, survivorsPhrase, writeEnv, applyEnv,
+  recordServers, reap, rescuedNotes, errorNote, survivorsPhrase, writeEnv, applyEnv, rememberTaskVariant, teardownWorkspace, teardownRepo,
 } from "./cli-work.mjs";
 import { setRootError } from "./server-errors.js";
 import { settleResumes, autoResume, continueTask, classifyTerminal } from "./cli-resume.mjs";
 import { toggleTask } from "./cli-task.mjs";
+import { ensureWatch, watchMain } from "./watch.mjs";
 
 // Orca's: under an agent shell's 2-minute command cap; `on` is rerun to keep waiting.
 export const DEFAULT_ON_TIMEOUT_MS = 100_000;
@@ -77,11 +89,13 @@ People and the mod
   spotlight peek --workspace p | --repo r        show the server's Spotlight tab (or peek at its terminal)
   spotlight env --workspace p [--env local|dev|prod] [--variant v]
   spotlight env --task KEY --group id --env local|dev|prod
-                                                 the env of a whole task in that space (kept after the turn-off)
+                                                 the env of a whole task, in every space (kept after the turn-off)
   spotlight reap                                 turn ends, gone servers, idle times, grants
   spotlight continue [--terminal t] [--account id]
                                                  Continuar: resume a paused agent on the account with
                                                  limit left, or nudge an idle holder (Esc + message)
+  spotlight teardown --workspace p | --repo r    turn Spotlight off before the workspace is deleted or the
+                                                 project leaves the list (always exit 0)
 
 The terminal is --terminal or $HC_TERMINAL_ID. A repo is a path or its name.`;
 
@@ -101,8 +115,10 @@ const FLAGS = {
   group: "string",
   account: "string",
   inline: "bool",
+  note: "bool",
   auto: "bool",
   "free-port": "bool",
+  ensure: "bool",
   help: "bool",
 };
 
@@ -230,6 +246,9 @@ async function verbOn(cx, opts) {
   // D13: turn ends are checked by `on` too, so a finished holder never blocks the line.
   await reapQueue(cx, { full: false, skip: terminal });
   let asked = await askQueue();
+  // D44: the watcher reaps this request's turn end and syncs its lit repos
+  // in any layout, the footer shown or not.
+  await ensureWatcher(cx);
   const skipped = [...task.skipped, ...asked.skipped];
   let turn = null;
   for (;;) {
@@ -371,16 +390,22 @@ async function verbToggle(cx, opts) {
       // (D27), over a server error the record has, which still applies (R8,
       // F6). A refused click on orca-holds also answers with a toast (T1),
       // with no popup action: no force path takes a root from Orca, as with
-      // orca-active.
-      if (forceable || error.code === "orca-holds") {
+      // orca-active. D41: a click (`--note`: projects-sidebar's badge or
+      // menu, whose own exec-failure toast would say it again) answers every
+      // refusal with a turn-off's error toast, opening the popup where it
+      // can act (Apagar igual), and exits 0; the popup's Apagar, the
+      // settings' --inline and agents keep exit 1 and stderr.
+      const recorded = forceable || error.code === "orca-holds";
+      const noted = opts.note || error.code === "orca-holds";
+      if (recorded || noted) {
         const now = cx.now();
         await cx.store.updateState((s) => {
-          if (s.repos[root]) setRootError(s.repos[root], { ...error, at: now });
-          if (error.code === "orca-holds") errorNote(s, { root, name, workspace, error, now });
+          if (recorded && s.repos[root]) setRootError(s.repos[root], { ...error, at: now });
+          if (noted) errorNote(s, { root, name, workspace, error, now, op: "off" });
         });
       }
       err(`${error.code}: ${error.message}${hint}`);
-      return 1;
+      return opts.note ? 0 : 1;
     }
     cx.spawn(["toggle", "--workspace", workspace, "--inline", ...(force ? ["--force"] : [])]);
     out(`Turning Spotlight off in ${name}: the root goes back to how it was and its server stops.`);
@@ -389,8 +414,15 @@ async function verbToggle(cx, opts) {
 
   if (workspace === root) return usage("root-is-holder: the repository root cannot hold the Spotlight: it is the sync target.");
   if (!(await cx.store.repoEnabled(root, cx.settings))) {
-    err(`not-enabled: Spotlight is off for ${name}. Turn it on in Spotlight's settings first.`);
-    return 2;
+    const error = { code: "not-enabled", message: `Spotlight is off for ${name}. Turn it on in Spotlight's settings first.` };
+    // D41: a click (`--note`) answers with a light's error toast and exit 0;
+    // anyone else keeps exit 2 (a usage error) and stderr.
+    if (opts.note) {
+      const now = cx.now();
+      await cx.store.updateState((s) => errorNote(s, { root, name, workspace, error, now, op: "light" }));
+    }
+    err(`${error.code}: ${error.message}`);
+    return opts.note ? 0 : 2;
   }
   const key = `direct/${root}`;
   const taskKey = await taskKeyOfWorkspace(workspace, root, cx.shared);
@@ -404,6 +436,8 @@ async function verbToggle(cx, opts) {
     const failed = r.errors[root];
     if (failed) err(failed);
     else out(`Spotlight on: ${path.basename(workspace)} onto ${name}.`);
+    // D44: a lit root is watched, whoever lit it.
+    if (!failed) await ensureWatcher(cx);
     return failed ? 1 : 0;
   }
   await spawnLights(cx, [key]);
@@ -427,6 +461,8 @@ async function verbToggleTask(cx, opts) {
     return 0;
   }
   const r = await toggleTask(cx, { group: opts.group, task, terminals: await terminalFacts() });
+  // D44: the task's lit roots are watched.
+  if (r.op === "on" && r.ok) await ensureWatcher(cx);
   if (r.code === "no-group" || r.code === "no-task") return usage(`spotlight toggle: ${r.message}`);
   if (r.code) {
     err(`${r.code}: ${r.message}`);
@@ -567,12 +603,14 @@ async function verbPeek(cx, opts) {
 }
 
 // `env --workspace p` (the server popup, D32): the pick is stored under the
-// workspace's key (its task's `<lane>/<KEY>`, else ws:<path>), for every repo
-// of that task there, and survives the turn-off. It reaches a running server
+// workspace's key (its task's task:<KEY>, the same in every space, D46; else
+// ws:<path>), for every repo of that task, and survives the turn-off. It
+// reaches a running server
 // only when this repo's holder has that key (record.envKey: the workspace
 // holds it, or another workspace of its task does); a workspace that doesn't
 // hold the root just stores it. A variant is remembered for the workspace's
-// task and applies to it only while it holds the root: picked for a
+// task in this repo (task:<KEY>::<root>, D46) and applies to it only while
+// it holds the root: picked for a
 // workspace another one took the root from (a popup or prompt answered
 // late), it starts nothing and exits 1, "ya no tiene el root" (D36, Orca's
 // chooseSpotlightVariant). On a root nobody holds it is only remembered.
@@ -593,15 +631,16 @@ async function verbEnv(cx, opts) {
   const r = await cx.store.withRepoLock(root, async () => {
     if (opts.variant && taskKey) {
       await cx.store.updateState((s) => {
-        rememberVariant(s, `${taskKey}::${normRoot(root)}`, opts.variant);
+        rememberTaskVariant(s, taskKey, root, opts.variant);
       });
     }
     if (opts.env) await writeEnv(cx, key, opts.env);
     const record = cx.store.readState().repos[root];
     if (!record?.holder) return { state: "stored" };
     if (opts.variant !== undefined && record.holder !== workspace) return { state: "lost-root", holder: record.holder };
-    // The pick is this holder's only when it holds W's key (D32).
-    const envHere = opts.env !== undefined && record.envKey === key;
+    // The pick is this holder's only when it holds W's key (D32), one
+    // written before D46 for the same task too.
+    const envHere = opts.env !== undefined && sameEnvKey(record.envKey, key);
     if (!envHere && opts.variant === undefined) return { state: "stored" };
     // An env restarts only a server whose command changes; a variant, one
     // whose command or env changes (D22).
@@ -646,9 +685,11 @@ function reportEnv(cx, root, what, r) {
 }
 
 // `env --task <KEY> --group <id> --env <e>` (D32): the lane's env pill. The
-// pick is stored under `<id>/<KEY>` before it answers (writeEnv); the lit
-// repos the task holds there run it after, in a detached `--inline` copy
-// (D18), which restarts only the servers whose command changes (applyEnv).
+// pick is stored under task:<KEY> before it answers (writeEnv): D46, the
+// task in every space, as Orca's; `--group` names the lane it was picked on.
+// The lit repos the task holds, in any space, run it after, in a detached
+// `--inline` copy (D18), which restarts only the servers whose command
+// changes (applyEnv).
 // That copy gets no --env: it runs what is stored when it gets there, so
 // two picks in a row end in the last one. The detached call checks only
 // what needs no git, so it answers at once.
@@ -660,16 +701,16 @@ async function verbEnvTask(cx, opts) {
   const task = taskKeyFrom(opts.task);
   if (!task) return usage(`spotlight env: "${opts.task}" can't name a task.`);
   if (!hasGroup(cx.shared["projects.v1"], opts.group)) return usage(`spotlight env: no group "${opts.group}" in projects-sidebar's spaces.`);
-  const key = `${opts.group}/${task}`;
+  const key = taskEnvKey(task);
   if (opts.env !== undefined) await writeEnv(cx, key, opts.env);
   if (!opts.inline) {
     cx.spawn(["env", "--task", task, "--group", opts.group, "--inline"]);
-    out(`Env ${opts.env} saved for ${task} in ${opts.group}; its lit repos switch in the background. \`spotlight status\` shows when it is done.`);
+    out(`Env ${opts.env} saved for ${task} in every space; its lit repos switch in the background. \`spotlight status\` shows when it is done.`);
     return 0;
   }
   const results = await applyEnv(cx, key);
   if (Object.keys(results).length === 0) {
-    out(`${task}: env ${cx.store.readState().envs?.[key] ?? "of each repo's settings"} saved; none of its repos is lit.`);
+    out(`${task}: env ${storedEnv(cx.store.readState().envs, key) ?? "of each repo's settings"} saved; none of its repos is lit.`);
     return 0;
   }
   let code = 0;
@@ -680,6 +721,49 @@ async function verbEnvTask(cx, opts) {
     } else if (reportEnv(cx, root, `env ${r.env}`, r.server) !== 0) code = 1;
   }
   return code;
+}
+
+// ── teardown ───────────────────────────────────────────────────────────────
+
+// `spotlight teardown --workspace <W> | --repo <root>` (D43): projects-sidebar
+// runs it before it deletes a workspace or removes a project (Spotlight's
+// remove hooks, menus-model.js removeHooksOf), as Orca turns Spotlight off
+// before it removes a worktree or a repo. It prints what it did and always
+// exits 0, even refused, given up waiting or failing: a delete is never
+// blocked by Spotlight. A usage error alone exits 2. The work is
+// cli-work.mjs teardownWorkspace and teardownRepo.
+async function verbTeardown(cx, opts) {
+  if (Boolean(opts.workspace) === Boolean(opts.repo)) {
+    return usage("spotlight teardown: --workspace <path> or --repo <path>, one of them.");
+  }
+  try {
+    const lines = opts.workspace
+      ? await teardownWorkspace(cx, pathForms(opts.workspace))
+      : await teardownRepo(cx, await projectRoot(opts.repo));
+    for (const line of lines) out(line);
+  } catch (e) {
+    out(`spotlight teardown: ${e?.message ?? e}`);
+  }
+  return 0;
+}
+
+// A workspace path as given (absolute, no trailing slash), then its realpath
+// when that differs: holders are what git printed, the folder may still be
+// reached through a link. No git: the folder is about to go.
+function pathForms(value) {
+  const given = normRoot(path.resolve(value));
+  try {
+    return [...new Set([given, normRoot(fs.realpathSync(given))])];
+  } catch {
+    return [given];
+  }
+}
+
+// A project's root: the main checkout git names for it, or the path as given
+// when git can't (a folder gone already).
+async function projectRoot(value) {
+  const given = normRoot(path.resolve(value));
+  return (await repoRootOf(given)) ?? given;
 }
 
 // ── reap, light, continue, classify ────────────────────────────────────────
@@ -698,6 +782,9 @@ async function verbReap(cx) {
 
 async function verbLight(cx, opts) {
   if (!opts.task) return usage("spotlight light: --task <key> is required.");
+  // D44: before the light, so `on` never returns ahead of it; its marker,
+  // at work until the holder is written, keeps a new watcher from leaving.
+  await ensureWatcher(cx);
   const r = await lightTask(cx, opts.task, { force: Boolean(opts.force) });
   if (!r.ran) out(`Nothing to light for ${opts.task}.`);
   for (const [root, message] of Object.entries(r.errors)) err(`${cx.nameOf(root)}: ${message}`);
@@ -726,6 +813,43 @@ async function verbClassify(cx, opts) {
   return 0;
 }
 
+// ── watch ──────────────────────────────────────────────────────────────────
+
+// D44: `--ensure` starts the watcher unless one of this build runs (and
+// replaces another build's); bare, it is the watcher (watch.mjs watchMain),
+// which hc runs in its hidden terminal.
+async function verbWatch(cx, opts) {
+  if (!opts.ensure) {
+    const r = await watchMain(cx);
+    out(r.reason === "another" ? "spotlight watch: another watcher runs." : `spotlight watch: stopped (${r.reason}).`);
+    return 0;
+  }
+  const r = await ensureWatch(cx);
+  if (r.action === "failed") {
+    err(`spotlight watch: couldn't start the watcher: ${r.message}`);
+    return 1;
+  }
+  const said = {
+    running: `running in ${r.terminal}`,
+    started: `started in ${r.terminal}`,
+    replaced: `replaced ${r.replaced}: started in ${r.terminal}`,
+    unknown: `hc can't say whether ${r.terminal} still runs it: left as it is`,
+  };
+  out(`spotlight watch: ${said[r.action] ?? r.action}.`);
+  return 0;
+}
+
+// `on`'s and the lights' ensure: never in their way. A failure is said on
+// stderr and the verb goes on.
+async function ensureWatcher(cx) {
+  try {
+    const r = await ensureWatch(cx);
+    if (r.action === "failed") err(`spotlight: the watcher didn't start: ${r.message}`);
+  } catch (e) {
+    err(`spotlight: the watcher didn't start: ${e?.message ?? e}`);
+  }
+}
+
 const VERBS = {
   on: verbOn,
   off: verbOff,
@@ -740,6 +864,8 @@ const VERBS = {
   light: verbLight,
   continue: verbContinue,
   classify: verbClassify,
+  teardown: verbTeardown,
+  watch: verbWatch,
 };
 
 export async function main(argv) {
