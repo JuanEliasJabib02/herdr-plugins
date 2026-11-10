@@ -55,7 +55,9 @@ import {
   foregroundIsShell, ENV_PATTERN,
 } from "./store.js";
 import { BADGE_KEY, badgeValue, sameValue, workspaceOf, parseWorktreeList } from "./badges.js";
-import { loadSession, loadConfigDirs, isClaudeName, parseExitScreen, exitSessionId, sessionFilePath } from "./claude-session.js";
+import {
+  loadSession, loadConfigDirs, loadWakeAccount, isClaudeName, parseExitScreen, exitSessionId, sessionFilePath,
+} from "./claude-session.js";
 import { readPrompt, classifyProbe, promptRestored, PROBE_KEY, ERASE_KEY } from "./prompt.js";
 import { resumeFlags, resumeCommand, canResumeIn, hintDifference, REPLAYABLE_ENV } from "./resume.js";
 import {
@@ -973,9 +975,18 @@ export class Coordinator {
       this.hold(address, envHold(label, hint.env ?? "no env"), now);
       return false;
     }
-    // D15: back in the account it slept in (a record without one is System
-    // default), and only into a folder that still exists.
-    const configDir = r.configDir ?? null;
+    // resume-gaps D1: in claude-accounts' active account, where a new Claude
+    // would start, unless that one is full and the one it slept in isn't
+    // (S4); without an active file, in the one it slept in (D15; a record
+    // without one is System default). Read here, once its shell is ready:
+    // every wake (reveal, Wake all, a workspace's wake: "now", restart
+    // recovery) comes through this one place. Only into a folder that still
+    // exists.
+    const account = await loadWakeAccount(
+      { appHome: this.d.appHome, configDir: r.configDir ?? null },
+      { readText: (path) => this.d.files.read(path) },
+    );
+    const configDir = account.configDir;
     const cmd = resumeCommand({
       flags: r.flags, sessionId: r.sessionId, cwd: r.cwd, shellCwd: t.foreground.cwd ?? null, shell: t.foreground.name, env, configDir,
     });
@@ -994,6 +1005,9 @@ export class Coordinator {
       return false;
     }
     delete this.retryAt[address];
+    // Said once per wake (the claim above succeeds once), only when it isn't
+    // the active account.
+    if (account.why !== null) this.log(`${address}: wakes in the account it slept in (${configDir ?? "System default"}): ${account.why}`);
     const sent = await this.call(["send", address, cmd.command]);
     if (sent.code !== 0) {
       this.lastEvent = `Couldn't resume ${label}`;
