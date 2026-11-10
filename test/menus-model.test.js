@@ -293,15 +293,15 @@ test("workspace-menu.js draws the merged list, opens the submenu at the pointer 
   const open = menu.slice(menu.indexOf("export function openWorkspaceMenu("), menu.indexOf("\n}\n", menu.indexOf("export function openWorkspaceMenu(")));
   assert.match(open, /height: menuHeight\(/);
   assert.doesNotMatch(open, /height: 200/);
-  assert.match(open, /props: \{ view: "workspace-menu", project, path, sub \}/);
+  assert.match(open, /props: \{ view: "workspace-menu", project, path, sub, \.\.\.\(only \? \{ only \} : \{\}\) \}/);
   // P's own items, then the plugins' (store.menus, by the row's path); the
   // opener and the view build the list in one place, so the height fits it.
   const of = menu.slice(menu.indexOf("function menuOf("), menu.indexOf("\n}\n", menu.indexOf("function menuOf(")));
   assert.match(of, /store\.menus\(\)\[normPath\(path\)\]/);
   assert.match(of, /workspaceMenuList\(workspaceMenuItems\(row\), plugin\)/);
   assert.match(of, /subMenuOf\(plugin, sub\)/);
-  assert.match(open, /menuOf\(project, path, sub\)/);
-  assert.match(body("render"), /menuOf\(this\.project, this\.path, this\.sub\)/);
+  assert.match(open, /menuOf\(project, path, sub, only\)/);
+  assert.match(body("render"), /menuOf\(this\.project, this\.path, this\.sub, this\.only\)/);
 
   // A click goes through menuChoice: P's own by id, a submenu reopened at
   // the pointer, a command run, an exec run with the menu open.

@@ -612,12 +612,14 @@ across repos.
     the space reads the same as its project, or it is in none, the row keeps
     the title. Grouped by space keeps the title: the header names the space;
   - a right-click on a row (an agent's or a Sleeping one) opens its
-    workspace's menu, the sidebar's own: Copy Path, Copy Worktree Name,
-    Rename…, Delete… and the plugins' items. A mod can't import another
-    mod's files, so the row opens the projects mod's `workspace-menu-at`
-    view, a 1 px popup at the pointer that opens the real menu and closes
-    itself; the space's workspace comes from `workspace-model.js`, a copy of
-    `matchSpaces` that the root suite holds to it.
+    workspace's menu, the sidebar's own with only Rename… and Delete…
+    (`AGENT_MENU`; the sidebar's keeps everything). The main checkout has
+    neither, so its rows open nothing. A mod can't import another mod's
+    files, so the row opens the projects mod's `workspace-menu-at` view
+    (props `{ project, path, only }`), a 1 px popup at the pointer that opens
+    the real menu with just those items and closes itself; the space's
+    workspace comes from `workspace-model.js`, a copy of `matchSpaces` that
+    the root suite holds to it.
 
   Herdr never updates this copy, so a newer Herdr's changes to its agents
   list don't reach it. Herdr's Apache 2.0 license is in the folder.

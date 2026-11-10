@@ -58,11 +58,16 @@ export function workspacesBySpace({ registry, cache, spaces = [], panes = [], ho
   return out;
 }
 
-// The workspace's right-click menu, the sidebar's own: a 1 px frameless popup
-// at the pointer, the projects mod's `workspace-menu-at` view, which opens
-// the real one from inside that mod (its items, Spotlight's and the others',
-// and the height they take) and closes itself. Null for no workspace.
+// What an agent's row offers of its workspace's menu: Rename… and Delete…
+// (Juan, 2026-11-09: "solo estas"); the sidebar's own keeps everything.
+export const AGENT_MENU = Object.freeze(["rename", "delete"]);
+
+// The row's right-click: the sidebar's own menu with only AGENT_MENU, as a
+// 1 px frameless popup at the pointer, the projects mod's
+// `workspace-menu-at` view, which opens the real one from inside that mod
+// (with the height its items take) and closes itself. Null for no workspace,
+// and for the main checkout, which is never renamed or deleted.
 export function workspaceMenuSpec(w) {
-  if (!isObject(w) || typeof w.path !== "string" || !w.path) return null;
-  return { mod: "projects", kind: "popup", width: 1, height: 1, frame: "none", props: { view: "workspace-menu-at", project: w.project, path: w.path } };
+  if (!isObject(w) || typeof w.path !== "string" || !w.path || w.main === true) return null;
+  return { mod: "projects", kind: "popup", width: 1, height: 1, frame: "none", props: { view: "workspace-menu-at", project: w.project, path: w.path, only: [...AGENT_MENU] } };
 }

@@ -7,7 +7,9 @@
 // project menu's Move to group ▸; an item's action runs with the menu open,
 // its row showing "…", then the menu closes. The popup's height follows the
 // list. ↑/↓ move, Enter (→ on a submenu's item) runs, Esc closes. Copying
-// uses gpui's clipboard (D21), then a toast says what was copied.
+// uses gpui's clipboard (D21), then a toast says what was copied. With
+// `only` (props.only, a list of own item ids) it draws just those of its own
+// items and no plugin's: the Agents list's rows ask for Rename… and Delete….
 
 import { div, svg } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
@@ -21,6 +23,9 @@ import { execFailure, startFailure } from "./badges-model.js";
 import { openDeleteWorkspace } from "./delete-workspace.js";
 import { openRenameWorkspace } from "./rename-workspace.js";
 
+// props.only: a list of own item ids, or null for the whole menu.
+const onlyOf = (v) => (Array.isArray(v) ? v.filter((id) => typeof id === "string") : null);
+
 // The checkout as the tree lists it (main, branch), from the cache; a path
 // the cache doesn't hold yet still gets its copies.
 function rowOf(project, path) {
@@ -31,9 +36,13 @@ function rowOf(project, path) {
 
 // What the menu draws: { title, items, empty }. The workspace's own items,
 // then the plugins' (store.menus, by its path); with `sub`, the items of that
-// plugin item's submenu. The opener and the view both build it here, so the
-// popup's height fits the list drawn.
-function menuOf(project, path, sub) {
+// plugin item's submenu; with `only`, just those own items. The opener and
+// the view both build it here, so the popup's height fits the list drawn.
+function menuOf(project, path, sub, only = null) {
+  if (only) {
+    const row = rowOf(project, path);
+    return { title: row ? workspaceLabel(row) : "", items: workspaceMenuItems(row).filter((it) => only.includes(it.id)), empty: "Nothing to do here." };
+  }
   const plugin = path ? store.menus()[normPath(path)] ?? [] : [];
   if (sub) {
     const parent = subMenuOf(plugin, sub);
@@ -45,8 +54,8 @@ function menuOf(project, path, sub) {
 
 // The only place that opens the menu, at the pointer. A popup is as tall as
 // its items; height is only the most, and it follows the list (D30).
-export function openWorkspaceMenu(project, path, sub = null) {
-  return openOverlay({ mod: MOD, kind: "popup", width: 220, height: menuHeight(menuOf(project, path, sub).items), props: { view: "workspace-menu", project, path, sub } });
+export function openWorkspaceMenu(project, path, sub = null, only = null) {
+  return openOverlay({ mod: MOD, kind: "popup", width: 220, height: menuHeight(menuOf(project, path, sub, only).items), props: { view: "workspace-menu", project, path, sub, ...(only ? { only } : {}) } });
 }
 
 const ICONS = {
@@ -61,6 +70,7 @@ export default class WorkspaceMenu {
     this.project = p?.project ?? null;
     this.path = p?.path ?? null;
     this.sub = p?.sub && typeof p.sub === "object" ? p.sub : null;
+    this.only = onlyOf(p?.only);
     this.overlay = props()?.overlay ?? p?.overlay ?? null; // kept: an action's task outlives this copy's props
     this.running = null; // menuRowKey of the item whose program runs
     this.at = 0;
@@ -140,7 +150,7 @@ export default class WorkspaceMenu {
 
   render() {
     const t = theme();
-    const m = menuOf(this.project, this.path, this.sub);
+    const m = menuOf(this.project, this.path, this.sub, this.only);
     const list = m.items;
     return v_flex()
       .id("workspace-menu")
@@ -190,19 +200,20 @@ export default class WorkspaceMenu {
 
 // The menu opened from another mod (projects-agents' rows): a mod can't
 // import another's files, so that one opens this view, a 1 px frameless
-// popup at the pointer (props { project, path }), and this opens the real
-// menu from here, at the same pointer, with its items and the height they
-// take, then closes itself. With no workspace it only closes; not an
+// popup at the pointer (props { project, path, only }), and this opens the
+// real menu from here, at the same pointer, with its items (`only` those) and
+// the height they take, then closes itself. With no workspace it only closes; not an
 // overlay (herdr-app check) it does nothing.
 export class WorkspaceMenuAt {
   init(p, cx) {
     const overlay = props()?.overlay ?? p?.overlay ?? null;
     const project = p?.project ?? null;
     const path = typeof p?.path === "string" && p.path ? p.path : null;
+    const only = onlyOf(p?.only);
     cx.spawn(async () => {
       if (overlay === null) return;
       try {
-        if (path) openWorkspaceMenu(project, path);
+        if (path) openWorkspaceMenu(project, path, null, only);
       } finally {
         closeOverlay(overlay);
       }

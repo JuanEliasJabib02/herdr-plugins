@@ -5,7 +5,7 @@
 // worlds, and check the menu it opens.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { REGISTRY_KEY, CACHE_KEY, workspacesBySpace, workspaceMenuSpec } from "../projects-sidebar/mods/projects-agents/workspace-model.js";
+import { REGISTRY_KEY, CACHE_KEY, AGENT_MENU, workspacesBySpace, workspaceMenuSpec } from "../projects-sidebar/mods/projects-agents/workspace-model.js";
 import { matchSpaces, KEYS } from "../projects-sidebar/mods/projects/lib.js";
 import { MOD } from "../projects-sidebar/mods/projects/config.js";
 
@@ -81,11 +81,13 @@ test("nothing stored yet, or malformed, is no workspaces", () => {
   assert.equal(workspacesBySpace({ registry: REGISTRY, cache: CACHE }).size, 0);
 });
 
-test("the menu opens through the projects mod's relay, at the pointer", () => {
+test("the menu opens through the projects mod's relay, at the pointer, with Rename… and Delete… only", () => {
+  assert.deepEqual(AGENT_MENU, ["rename", "delete"]);
   const w = where().get("s3");
   assert.deepEqual(workspaceMenuSpec(w), {
     mod: MOD, kind: "popup", width: 1, height: 1, frame: "none",
-    props: { view: "workspace-menu-at", project: "/repos/backend-action-experience", path: "/ws/backend-action/AX-3704" },
+    props: { view: "workspace-menu-at", project: "/repos/backend-action-experience", path: "/ws/backend-action/AX-3704", only: ["rename", "delete"] },
   });
   assert.equal(workspaceMenuSpec(null), null);
+  assert.equal(workspaceMenuSpec(where().get("s1")), null, "the main checkout is never renamed or deleted: no menu");
 });

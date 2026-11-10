@@ -827,6 +827,19 @@ test("workspace-menu-at opens the workspace's own menu at the pointer, as tall a
   assert.deepEqual(w.closed, ["o9"]);
 });
 
+test("workspace-menu-at with `only` (the Agents rows: Rename… and Delete…) opens just those, as tall as they take", async () => {
+  const w = world();
+  await copyOf(w, "workspace-menu-at", { project: "/code/app", path: WT, overlay: "o9", only: ["rename", "delete"] });
+  const items = workspaceMenuItems({ path: WT, main: false }).filter((it) => it.id === "rename" || it.id === "delete");
+  assert.equal(items.length, 2);
+  assert.deepEqual(w.overlays, [{
+    mod: "projects", kind: "popup", width: 220, height: menuHeight(items),
+    props: { view: "workspace-menu", project: "/code/app", path: WT, sub: null, only: ["rename", "delete"] },
+  }]);
+  assert.ok(w.overlays[0].height < menuHeight(workspaceMenuItems({ path: WT, main: false })), "shorter than the whole menu");
+  assert.deepEqual(w.closed, ["o9"]);
+});
+
 test("workspace-menu-at with no workspace closes itself and opens nothing; not an overlay (herdr-app check), it does nothing", async () => {
   const none = world();
   await copyOf(none, "workspace-menu-at", { project: "/code/app", path: null, overlay: "o9" });
