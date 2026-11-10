@@ -120,7 +120,15 @@ and `sleeping.json` (one record per Claude: session id, folder, flags, and its
 account's folder, `configDir`, null for `~/.claude`). A broken `sleeping.json`
 is kept as `sleeping.json.bak`. `workspaces.json` holds the workspaces you put
 to sleep, by path: their spaces and tabs, and whether each is still going to
-sleep or asleep. A broken one is kept as `workspaces.json.bak`.
+sleep or asleep. A broken one is kept as `workspaces.json.bak`. `log.txt` is
+where to look when a Claude didn't sleep or wake: Herdr sends a mod's console
+to `/dev/null`, so every line the mod logs lands here too, one per event with
+its local time (`2026-11-09 19:28:03 t1: not resumed (reveal): its shell line
+isn't a bare prompt (shell, typed)`). A resume that waits (a line typed at
+the shell, another program in front, its claim beaten by another window's
+write) says why once per terminal and reason, not on every look. The lines are
+written once a second at most, and past 1 MB the file becomes `log.1.txt`,
+replacing the older one.
 
 **Install:** `scripts/install.sh agent-sleep`. The mod only runs while its moon
 is in the shown layout, and projects-sidebar's status bar has it.

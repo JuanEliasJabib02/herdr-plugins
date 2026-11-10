@@ -15,7 +15,8 @@
 //     herdrRun(name, args)      herdr's run(), for tab.settle / tab.unsettle
 //                               (not `run`: Coordinator.run wraps exec)
 //     home, appHome             herdr's home() / appHome()
-//     log(line)                 optional
+//     log(line)                 optional: the console. Every line also goes
+//                               to <appHome>/agent-sleep/log.txt (log.js)
 //   }
 //
 // One copy runs it (D11): the moon's (view "moon", the one a copy with no
@@ -40,7 +41,9 @@
 //   - every visible terminal with an `asleep` record is resumed (D8: level,
 //     not edge, so a reveal during a stop resumes once the shell is back).
 //     Wake all and this reveal leave alone the terminals of a workspace put to
-//     sleep as a whole until its wake (workspace-sleep D4: no undo of a sleep).
+//     sleep as a whole until its wake (workspace-sleep D4: no undo of a sleep);
+//   - last, the lines logged since the last pulse are appended to log.txt in
+//     one exec (resume-gaps D2), whatever happened before.
 // Pulses never overlap: everything that types into a terminal runs one at a
 // time, in the order above (Risk item 4).
 
@@ -63,6 +66,7 @@ import {
 import {
   workspacesPaths, loadWorkspaces, saveWorkspaces, withEntry, withoutEntry, listedTabs, terminalsOf, reconcileSpaces,
 } from "./workspaces-store.js";
+import { LogBuffer, appendCommand, logPaths } from "./log.js";
 
 // This mod's folder under mods/: asset paths go through it, never a literal
 // (Herdr's mod.clone rewrites it in a copy).
@@ -271,7 +275,15 @@ export class Coordinator {
   constructor(deps) {
     this.d = deps;
     this.p = paths(deps.appHome);
-    this.log = typeof deps.log === "function" ? deps.log : () => {};
+    // resume-gaps D2: each line goes to the console at once, and to log.txt,
+    // timed now, with the pulse's other lines when it ends (flushLog).
+    this.toConsole = typeof deps.log === "function" ? deps.log : () => {};
+    this.logFiles = logPaths(this.p.dir);
+    this.logBuffer = new LogBuffer();
+    this.log = (line) => {
+      this.toConsole(line);
+      this.logBuffer.add(this.d.now(), line);
+    };
     this.sleep = async () => {};
     this.settings = { ...DEFAULT_SETTINGS };
     this.settingsText = null;
@@ -289,6 +301,7 @@ export class Coordinator {
     this.refused = {};
     this.holds = {}; // address → why that asleep Claude stays asleep
     this.retryAt = {}; // address → when a waiting reveal looks again
+    this.waits = {}; // address → the last reason its resume waited, as logged (resume-gaps D3)
     this.due = {};
     this.dueLabels = {};
     this.lastEvent = null;
@@ -350,6 +363,7 @@ export class Coordinator {
     } catch (e) {
       this.log(`pulse failed: ${e?.stack ?? e}`);
     } finally {
+      await this.flushLog();
       this.running = false;
     }
     const view = JSON.stringify(this.view());
@@ -938,6 +952,8 @@ export class Coordinator {
     if (!t || t.state !== "live") return false; // gone: the next tick drops it
     if (!foregroundIsShell(t)) {
       // You took over (D8): your own program is in front of its shell.
+      const program = t.foreground?.name ?? "another program";
+      this.waitLog(address, `not resumed (${via}): ${program} is in front of its shell${via === "reveal" ? "; taken over, its record goes" : ""}`);
       if (via === "reveal") {
         if (await this.save(withoutRecord(this.records, address))) this.lastEvent = `${label}: taken over, not resumed`;
       }
@@ -947,6 +963,7 @@ export class Coordinator {
     const prompt = readPrompt(screen, t.foreground.name);
     if (prompt.program !== "shell" || prompt.state !== "bare") {
       this.retryAt[address] = now + RETRY_MS; // a typed line: wait for it
+      this.waitLog(address, `not resumed (${via}): its shell line isn't a bare prompt (${prompt.program}, ${prompt.state})`);
       return false;
     }
     // Claude's own hint, still on screen, has the last word on the env.
@@ -972,7 +989,10 @@ export class Coordinator {
     }
     // Claimed and saved before anything is typed: resumed exactly once.
     const { records: next, claimed } = claim(this.records, address);
-    if (!claimed || !(await this.save(next))) return false;
+    if (!claimed || !(await this.save(next))) {
+      this.waitLog(address, `not resumed (${via}): its claim wasn't saved (sleeping.json changed under it)`);
+      return false;
+    }
     delete this.retryAt[address];
     const sent = await this.call(["send", address, cmd.command]);
     if (sent.code !== 0) {
@@ -989,6 +1009,17 @@ export class Coordinator {
   hold(address, why, now) {
     this.holds[address] = why;
     this.retryAt[address] = now + TICK_MS;
+    delete this.waits[address]; // the popup says this one; a wait after it is a new reason
+  }
+
+  // resume-gaps D3: why a resume waited (a typed shell line, another program
+  // in front, a claim that wasn't saved), in the log once per terminal and
+  // reason, not on every RETRY_MS look. Forgotten with its asleep record
+  // (save), so a later sleep's wait is said again.
+  waitLog(address, line) {
+    if (this.waits[address] === line) return;
+    this.waits[address] = line;
+    this.log(`${address}: ${line}`);
   }
 
   // ── A workspace's sleep (workspace-sleep D2, D5, D9–D12) ──
@@ -1630,6 +1661,22 @@ export class Coordinator {
     }
   }
 
+  // resume-gaps D2: the lines logged since the last append, to log.txt in one
+  // exec, rotated past 1 MB (log.js). A failed append is said on the console
+  // only and its lines are dropped (they reached the console when logged):
+  // the pulse never fails, nor grows, on its own log.
+  async flushLog() {
+    try {
+      const text = this.logBuffer.drain();
+      if (text === null) return;
+      const { cmd, args } = appendCommand(this.logFiles, text);
+      const r = await this.run(cmd, args);
+      if (r.code !== 0) this.toConsole(`log.txt not written (${(r.stderr || r.stdout || `exit ${r.code}`).trim()})`);
+    } catch (e) {
+      this.toConsole(`log.txt not written (${e})`);
+    }
+  }
+
   // One of Herdr's commands (run(): tab.settle, tab.unsettle). They apply
   // right after the call returns; a failure is logged, never thrown.
   herdr(name, args) {
@@ -1712,6 +1759,9 @@ export class Coordinator {
       this.records = next;
       for (const address of Object.keys(this.holds)) {
         if (own(next, address)?.state !== "asleep") delete this.holds[address];
+      }
+      for (const address of Object.keys(this.waits)) {
+        if (own(next, address)?.state !== "asleep") delete this.waits[address];
       }
       return true;
     } catch (e) {

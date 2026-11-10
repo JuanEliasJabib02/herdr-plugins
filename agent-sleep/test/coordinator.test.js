@@ -986,6 +986,141 @@ test("Claude Code is recognised in every terminal shape", () => {
   assert.equal(isClaudeCodeTerminal({ address: "t1", agent: "zsh", status: "idle" }), false);
 });
 
+// ── The log file (resume-gaps D2, D3) ─────────────────────────────────────
+
+const LOG = `${APP}/agent-sleep/log.txt`;
+
+// A line's local time as log.txt writes it.
+const stamp = (ms) => {
+  const d = new Date(ms);
+  const p = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+};
+
+// The appends to log.txt (an `sh -c` naming it), with how many hc calls and
+// execs had run when each ran. `result()` is what the append returns, or
+// throws: a success by default.
+function logFile(w, co, result = () => ok("")) {
+  const appends = [];
+  const exec = co.d.exec;
+  co.d.exec = async (cmd, args, options) => {
+    if (!(/(^|\/)sh$/.test(cmd) && args[0] === "-c" && args.includes(LOG))) return exec(cmd, args, options);
+    appends.push({ text: args.at(-1), calls: w.calls.length, execs: w.execs.length });
+    return result();
+  };
+  return appends;
+}
+
+const vimIn = (t) => ({ ...shellOf(t), foreground: { argv: ["vim"], cwd: "/code/app", name: "vim", pid: 300 } });
+
+test("D2: every log line goes to log.txt too, with its local time, in one append that is the pulse's last act", async () => {
+  const { w, co } = setup({ t2: true });
+  storeRecord(w, "t1");
+  storeRecord(w, "t2", { sessionId: SID2, cwd: "/code/checkout-flow", workspacePath: "/code/checkout-flow", rootPid: 101 });
+  w.core.t1 = vimIn(w.core.t1);
+  exitClaude(w, "t2", SHELL_TYPED);
+  const appends = logFile(w, co);
+  co.requestWakeAll();
+  await at(co, w, NOW);
+  assert.ok(w.logs.some((l) => l.startsWith("t1: ")) && w.logs.some((l) => l.startsWith("t2: ")), JSON.stringify(w.logs));
+  assert.equal(appends.length, 1, "one append for the whole pulse");
+  assert.equal(appends[0].calls, w.calls.length, "no hc call after it");
+  assert.equal(appends[0].execs, w.execs.length, "no exec after it");
+  assert.equal(appends[0].text, w.logs.map((l) => `${stamp(NOW)} ${l}\n`).join(""), "each console line, timed, in order");
+});
+
+test("D2: a pulse with nothing to log appends nothing; a line logged between pulses goes with the next one", async () => {
+  const { w, co } = setup();
+  const appends = logFile(w, co);
+  await at(co, w, NOW);
+  const before = { appends: appends.length, logs: w.logs.length };
+  await at(co, w, NOW + 1_000);
+  assert.deepEqual({ appends: appends.length, logs: w.logs.length }, before, "a quiet pulse runs no append");
+  w.now = NOW + 1_500;
+  co.command("nope"); // a key the mod doesn't know, outside any pulse
+  assert.equal(appends.length, before.appends, "nothing appended outside a pulse");
+  await at(co, w, NOW + 2_000);
+  assert.equal(appends.at(-1).text, `${stamp(NOW + 1_500)} no command "nope"\n`);
+});
+
+test("D2: an append that fails or throws never breaks the pulse; its lines stay on the console only and aren't appended again", async () => {
+  const { w, co } = setup();
+  storeRecord(w, "t1");
+  exitClaude(w, "t1", SHELL_TYPED);
+  show(w, "back");
+  let mode = "fail";
+  const appends = logFile(w, co, () => {
+    if (mode === "throw") throw new Error("exec gone");
+    return mode === "fail" ? fail("disk full") : ok("");
+  });
+  assert.equal(typeof (await at(co, w, NOW)), "boolean", "the pulse ends normally");
+  assert.equal(appends.length, 1);
+  assert.ok(w.logs.some((l) => l.includes("log.txt") && l.includes("disk full")), JSON.stringify(w.logs));
+  mode = "throw";
+  w.screens.t1 = ""; // a new reason to wait: a line is logged again
+  assert.equal(typeof (await at(co, w, NOW + 3_000)), "boolean");
+  assert.equal(appends.length, 2);
+  assert.ok(w.logs.some((l) => l.includes("log.txt") && l.includes("exec gone")), JSON.stringify(w.logs));
+  mode = "ok";
+  w.screens.t1 = SHELL_BARE;
+  co.command("nope");
+  await at(co, w, NOW + 6_000);
+  assert.equal(resumes(w).length, 1, "the pulses kept running: the resume went");
+  assert.equal(appends.at(-1).text, `${stamp(NOW + 3_000)} no command "nope"\n`, "neither the failed lines nor the failures");
+});
+
+test("D3: a resume waiting on a typed shell line says why once, not on every retry; a new reason is said once more", async () => {
+  const { w, co } = setup();
+  storeRecord(w, "t1");
+  exitClaude(w, "t1", SHELL_TYPED);
+  show(w, "back");
+  const appends = logFile(w, co);
+  const waits = () => w.logs.filter((l) => l.startsWith("t1: not resumed"));
+  for (let s = 0; s <= 10; s += 2) await at(co, w, NOW + s * 1_000);
+  assert.equal(w.sends.length, 0);
+  assert.equal(waits().length, 1, JSON.stringify(w.logs));
+  assert.match(waits()[0], /bare prompt/);
+  w.screens.t1 = ""; // nothing on screen now: another reason
+  for (let s = 12; s <= 20; s += 2) await at(co, w, NOW + s * 1_000);
+  assert.equal(waits().length, 2, JSON.stringify(w.logs));
+  assert.notEqual(waits()[1], waits()[0]);
+  const inFile = appends.map((a) => a.text).join("");
+  for (const l of waits()) assert.ok(inFile.includes(` ${l}\n`), l);
+  w.screens.t1 = SHELL_BARE;
+  await at(co, w, NOW + 22_000);
+  assert.equal(resumes(w).length, 1);
+});
+
+test("D3: another program in front (Wake all) and a claim that wasn't saved are each said once per terminal", async () => {
+  const { w, co } = setup({ t2: true });
+  storeRecord(w, "t1");
+  storeRecord(w, "t2", { sessionId: SID2, cwd: "/code/checkout-flow", workspacePath: "/code/checkout-flow", rootPid: 101 });
+  exitClaude(w, "t1");
+  w.core.t2 = vimIn(w.core.t2);
+  // sleeping.json changes under t1's resume once, between its read and its claim.
+  let raced = false;
+  w.onRead = (address) => {
+    if (address !== "t1" || raced) return;
+    raced = true;
+    w.files[SLEEPING] += "\n";
+  };
+  co.requestWakeAll();
+  await at(co, w, NOW);
+  assert.equal(resumes(w).length, 0, "the claim lost the race");
+  co.requestWakeAll();
+  await at(co, w, NOW + 1_000);
+  co.requestWakeAll();
+  await at(co, w, NOW + 2_000);
+  assert.deepEqual(resumes(w).map((s) => s.address), ["t1"], "claimed on the next try");
+  const t1 = w.logs.filter((l) => l.startsWith("t1: not resumed"));
+  const t2 = w.logs.filter((l) => l.startsWith("t2: not resumed"));
+  assert.equal(t1.length, 1, JSON.stringify(w.logs));
+  assert.match(t1[0], /claim/);
+  assert.equal(t2.length, 1, JSON.stringify(w.logs));
+  assert.match(t2[0], /vim/);
+  assert.equal(records(w).t2.state, "asleep", "Wake all leaves it asleep");
+});
+
 // ── Purity ────────────────────────────────────────────────────────────────
 
 test("coordinator.js never imports herdr: everything comes injected", () => {
