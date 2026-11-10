@@ -2,17 +2,20 @@
 // LICENSE in this folder), made the way `mod.clone` makes one: its sort menu
 // opens this mod's own overlay. Changed from Herdr's version: only the
 // working mark, which draws the projects tree's Claude glyphs in Claude's
-// orange (status() below) instead of Herdr's spinner; and a last "Sleeping"
-// section with the Claudes agent-sleep put to sleep (sleeping-model.js).
-// Herdr never updates this copy.
+// orange (status() below) instead of Herdr's spinner; a last "Sleeping"
+// section with the Claudes agent-sleep put to sleep (sleeping-model.js); and,
+// by projects-sidebar's rule (workspace-model.js), a row in Priority names
+// its project with its title in the tooltip, and a right-click on a row opens
+// its workspace's menu. Herdr never updates this copy.
 
 // Agents in grouped or priority views; parents take their most urgent sub-agent's place.
 // A viewed done agent stays in Done until left.
 
 import { View, div, image, svg } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
-import { agents, terminals, panes, focused, spaces, run, theme, shared, setShared, setAgentOrder, openOverlay, closeOverlay, props, window, layout } from "herdr";
+import { agents, terminals, panes, focused, spaces, run, theme, shared, setShared, setAgentOrder, openOverlay, closeOverlay, props, window, layout, home } from "herdr";
 import { ASLEEP_KEY, clean, sleepingRows } from "./sleeping-model.js";
+import { REGISTRY_KEY, CACHE_KEY, workspacesBySpace, workspaceMenuSpec } from "./workspace-model.js";
 
 // The same marks as mods/projects/tree.js: Claude's own working glyphs, run
 // natively by frames() (spin() stutters), in the fill of Herdr's claude.svg.
@@ -300,6 +303,21 @@ export default class Agents extends View {
     const tabLabels = new Map(spaceList.flatMap(s => s.tabs).map(tab => [tab.id, title(tab, leads.get(tab.id))]));
     // The Claudes agent-sleep put to sleep, for the last section (not in the rail).
     const sleeping = collapsed ? [] : sleepingRows({ value: shared(ASLEEP_KEY), terminals: all, panes: paneList, spaces: spaceList, agents: this.listed, tabLabels });
+    // Each space's workspace and project, as the sidebar has them. A row
+    // names its project unless the space already reads the same ("main" says
+    // nothing about which repo), and a right-click opens that workspace's
+    // menu, the sidebar's own (Copy Path, Rename…, Delete…, the plugins').
+    const where = workspacesBySpace({ registry: shared(REGISTRY_KEY), cache: shared(CACHE_KEY), spaces: spaceList, panes: paneList, home: home() });
+    const projectOf = (spaceId, spaceName) => {
+      const w = where.get(spaceId);
+      return w && w.name !== spaceName ? w.name : null;
+    };
+    // Stopped either way: a right press would also reach on_click (its event carries no button).
+    const openMenu = (spaceId) => (_e, cx) => {
+      cx.stop_propagation();
+      const spec = workspaceMenuSpec(where.get(spaceId));
+      if (spec) openOverlay(spec);
+    };
     const labels = new Map(list.map(a => [a.address, tabLabels.get(a.tab) ?? (a.title || a.program?.name || "")]));
     const label = (a) => labels.get(a.address);
     const detail = new Map(list.map(a => [a.address, /^\d+$/.test(label(a)) ? null : label(a)]));
@@ -311,7 +329,6 @@ export default class Agents extends View {
 
     const row = (a, i, subs = []) => {
       const pic = icon(a.program, 16, t.foreground);
-      const more = detail.get(a.address);
       // An agent on another machine (`vps/t7`) says which.
       const machine = a.address.includes("/") ? a.address.split("/")[0] : null;
       if (collapsed) {
@@ -350,6 +367,10 @@ export default class Agents extends View {
       // Under a space header the space goes without saying; an automatic tab number says nothing.
       // Without a space header above (priority, pinned) the row names its space.
       const full = byPriority || isPinned;
+      // There the project goes after the space, and the title to the tooltip.
+      const project = full ? projectOf(a.space, a.space_name) : null;
+      const more = project ?? detail.get(a.address);
+      const tip = project ? detail.get(a.address) : null;
       const name = full ? a.space_name || label(a) : more ?? (/^\d+$/.test(label(a)) ? a.program?.name || label(a) : label(a));
       return h_flex()
         .id(`ag-${a.address}`)
@@ -367,6 +388,8 @@ export default class Agents extends View {
           else if (this.hovered === a.address) this.hovered = null;
           cx.notify();
         })
+        .when(Boolean(tip), (el) => el.tooltip(tip))
+        .on_mouse_down("right", openMenu(a.space))
         .on_click(() => run("pane.focus", { pane: a.pane }))
         .when(Boolean(pic), el => el.child(div().id(`agent-fold-${a.address}`)
           .when(subs.length > 0, el => el.on_click((_e, cx) => {
@@ -384,28 +407,35 @@ export default class Agents extends View {
         .child(this.status(t, a, byPriority && !isPinned));
     };
 
-    // A sleeping Claude's row, as an agent's in Priority: "space · title", how
-    // long it has slept, the moon where the agent's icon goes. Opening its tab
-    // is what wakes it (agent-sleep), its whole workspace if it slept with it.
-    const sleepRow = (s) => h_flex()
-      .id(`zz-${s.address}`)
-      .px(8)
-      .h(30)
-      .flex_none()
-      .rounded(8)
-      .items_center()
-      .gap(9)
-      .cursor_pointer()
-      .hover((st) => st.bg(t.hover))
-      .tooltip("Asleep · opening it wakes Claude")
-      .on_click(() => run("pane.focus", { pane: s.pane }))
-      .when(Boolean(s.icon), (el) => el.child(svg(s.icon).size(16).flex_none().text_color(t.dim)))
-      .child(h_flex().flex_1().min_w(0).gap(5).items_center()
-        .child(div().min_w(0).max_w(s.space && s.detail ? 120 : 200).truncate().text_color(t.muted).child(s.space || s.detail || s.address))
-        .when(Boolean(s.space && s.detail), (el) => el.child(div().flex_1().min_w(0).truncate().text_color(t.dim).child(`· ${s.detail}`))))
-      .child(div().flex_none().text_size(11).text_color(t.dim).child(duration(now - s.since)))
-      // Where the agents' status mark goes, so the times line up.
-      .child(div().size(7).mx(3).flex_none());
+    // A sleeping Claude's row, as an agent's in Priority: "space · project"
+    // (else its title), how long it has slept, the moon where the agent's icon
+    // goes. Opening its tab is what wakes it (agent-sleep), its whole
+    // workspace if it slept with it; a right-click opens its workspace's menu.
+    const sleepRow = (s) => {
+      const project = projectOf(s.spaceId, s.space);
+      const more = project ?? s.detail;
+      const tip = project && s.detail ? `${s.detail} \u00b7 asleep, opening it wakes Claude` : "Asleep \u00b7 opening it wakes Claude";
+      return h_flex()
+        .id(`zz-${s.address}`)
+        .px(8)
+        .h(30)
+        .flex_none()
+        .rounded(8)
+        .items_center()
+        .gap(9)
+        .cursor_pointer()
+        .hover((st) => st.bg(t.hover))
+        .tooltip(tip)
+        .on_mouse_down("right", openMenu(s.spaceId))
+        .on_click(() => run("pane.focus", { pane: s.pane }))
+        .when(Boolean(s.icon), (el) => el.child(svg(s.icon).size(16).flex_none().text_color(t.dim)))
+        .child(h_flex().flex_1().min_w(0).gap(5).items_center()
+          .child(div().min_w(0).max_w(s.space && more ? 120 : 200).truncate().text_color(t.muted).child(s.space || more || s.address))
+          .when(Boolean(s.space && more), (el) => el.child(div().flex_1().min_w(0).truncate().text_color(t.dim).child(`\u00b7 ${more}`))))
+        .child(div().flex_none().text_size(11).text_color(t.dim).child(duration(now - s.since)))
+        // Where the agents' status mark goes, so the times line up.
+        .child(div().size(7).mx(3).flex_none());
+    };
 
     // Groups in list order: spaces (grouped) or priority sections. Agents of a
     // space are next to each other in agents(), so neighbours make a group.

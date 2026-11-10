@@ -33,7 +33,7 @@ test("the key is the one agent-sleep publishes", () => {
   assert.equal(ASLEEP_KEY, PUBLISHED_KEY);
 });
 
-test("one row per sleeping Claude, in agent-sleep's order: its space, its title (or its named tab), since when, its pane", () => {
+test("one row per sleeping Claude, in agent-sleep's order: its space (id and name), its title (or its named tab), since when, its pane", () => {
   const rows = sleepingRows({
     ...world(),
     value: value([
@@ -42,8 +42,8 @@ test("one row per sleeping Claude, in agent-sleep's order: its space, its title 
     ]),
   });
   assert.deepEqual(rows, [
-    { address: "t54", pane: "p2", space: "claude-accounts", detail: "Carga automática", since: T, icon: MOON },
-    { address: "t4d", pane: "p1", space: "lector-md", detail: "Lector de md sin mergear", since: T - 3_600_000, icon: MOON },
+    { address: "t54", pane: "p2", spaceId: "s2", space: "claude-accounts", detail: "Carga automática", since: T, icon: MOON },
+    { address: "t4d", pane: "p1", spaceId: "s1", space: "lector-md", detail: "Lector de md sin mergear", since: T - 3_600_000, icon: MOON },
   ]);
 });
 

@@ -13,7 +13,7 @@ const isObject = (v) => typeof v === "object" && v !== null && !Array.isArray(v)
 
 // One row per listed Claude whose terminal is still live, has a pane to open
 // and has no agent in front again (agents() lists it then): { address, pane,
-// space, detail, since, icon }. `detail` is the title Claude had when it went
+// spaceId, space, detail, since, icon }. `detail` is the title Claude had when it went
 // to sleep, else its tab's label, never an automatic tab number. `agents`:
 // the addresses agents() lists (a Map or a Set); `tabLabels`: tab id → label.
 export function sleepingRows({ value, terminals = [], panes = [], spaces = [], agents = new Map(), tabLabels = new Map() } = {}) {
@@ -36,7 +36,8 @@ export function sleepingRows({ value, terminals = [], panes = [], spaces = [], a
     // A tab number or the terminal's own address ("t54", a shell's title) says nothing.
     const telling = typeof label === "string" && label !== "" && !/^\d+$/.test(label) && label !== c.address;
     const detail = clean(typeof c.title === "string" ? c.title : "") || (telling ? label : null);
-    rows.push({ address: c.address, pane: pane.pane, space: spaceOf.get(pane.tab)?.name ?? "", detail, since: c.since, icon });
+    const space = spaceOf.get(pane.tab);
+    rows.push({ address: c.address, pane: pane.pane, spaceId: space?.id ?? null, space: space?.name ?? "", detail, since: c.since, icon });
   }
   return rows;
 }
