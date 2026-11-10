@@ -69,6 +69,8 @@ function herdrDeps() {
     setShared,
     home: home(),
     appHome: appHome(),
+    // The console, which Herdr sends to /dev/null: the Coordinator also
+    // appends every line to <appHome>/agent-sleep/log.txt (log.js).
     log: (line) => console.log(`agent-sleep: ${line}`),
   };
 }
@@ -111,8 +113,8 @@ class Moon {
   // sent, never left for a later copy (F1). `panel` opens the popup at once;
   // every other command only sets what the next pulse does, and a pulse does
   // nothing without a window, so one sent before the window waits for it.
-  // A command that throws (the popup with no window) is logged, and the
-  // loop keeps listening.
+  // A command that throws (the popup with no window) is logged (the console
+  // and, with the next pulse, log.txt), and the loop keeps listening.
   listen(cx) {
     cx.spawn(async (cx) => {
       for (;;) {
@@ -121,7 +123,7 @@ class Moon {
           if (c === "panel") this.openPanel();
           else this.co.command(c);
         } catch (e) {
-          console.log(`agent-sleep: ${c} failed: ${e}`);
+          this.co.log(`${c} failed: ${e}`);
         }
         cx.notify();
       }

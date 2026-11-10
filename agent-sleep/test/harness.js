@@ -20,6 +20,11 @@ export const SETTINGS = `${APP}/agent-sleep/settings.json`;
 // accounts (a top-level JSON array), and the three roots of profile folders
 // (`<root>/<name>/home`).
 export const ACCOUNTS = `${APP}/claude-accounts/accounts.json`;
+// resume-gaps D1: claude-accounts' active account (its config folder, the
+// exact string, empty for System default; no file without claude-accounts),
+// and its contract file, whose usage keeps a Claude off a full active account.
+export const ACTIVE = `${APP}/claude-accounts/active`;
+export const ACCOUNTS_V1 = `${APP}/claude-accounts/accounts.v1.json`;
 export const ORCA_DEV_PROFILES = `${HOME}/Library/Application Support/Orca Dev/claude-profiles`;
 export const ORCA_PROFILES = `${HOME}/Library/Application Support/Orca/claude-profiles`;
 export const HERDR_PROFILES = `${APP}/claude-accounts-profiles`;

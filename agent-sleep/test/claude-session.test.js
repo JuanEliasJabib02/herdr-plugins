@@ -13,6 +13,7 @@ import {
   checkSession, transcriptLookupCommand, parseTranscriptLookup, loadSession,
   parseExitScreen, exitSessionId,
   isConfigDir, accountsPath, profileRoots, profileListCommand, parseProfileList, parseAccounts, loadConfigDirs,
+  activePath, accountsV1Path, parseActive, parseAccountsV1, peakOf, pickWakeAccount, loadWakeAccount,
 } from "../mods/agent-sleep/claude-session.js";
 
 const fixture = (name) => readFileSync(new URL(`./fixtures/${name}`, import.meta.url), "utf8");
@@ -497,6 +498,156 @@ test("loadSession skips a candidate failing the predicate: its file is never rea
   const result = await loadSession({ home: HOME, pid: PID, foregroundName: "claude.exe", configDirs: ["rel/home", "/x\n/home"] }, io);
   assert.deepEqual(result, { ok: false, reason: "no-session-file" });
   assert.deepEqual(io.calls, []);
+});
+
+// ── resume-gaps D1: the account a Claude wakes in ─────────────────────────
+
+const ACTIVE = `${APP}/claude-accounts/active`;
+const ACCOUNTS_V1 = `${APP}/claude-accounts/accounts.v1.json`;
+const OTHER = `${ORCA_DEV}/p2/home`;
+
+// A usage window, and an account of accounts.v1.json (CONTRACT.md's shape).
+const win = (percent) => ({ percent, resetsAt: null });
+function v1Account(id, configDir, { session = null, weekly = null, fable = null, monthly = null, ...over } = {}) {
+  return {
+    id,
+    label: configDir === null ? "System default" : `${id}@example.com`,
+    email: configDir === null ? null : `${id}@example.com`,
+    org: null,
+    configDir,
+    isDefault: configDir === null,
+    needsSignIn: false,
+    error: null,
+    errorDetail: null,
+    usage: { session, weekly, fable, monthly },
+    credits: null,
+    usageUpdatedAt: 1,
+    lastAuthenticatedAt: null,
+    duplicateOf: null,
+    signedInAs: null,
+    ...over,
+  };
+}
+const v1 = (accounts, over = {}) => ({ version: 1, updatedAt: 1, active: "default", accounts, ...over });
+const active = (configDir) => ({ ok: true, configDir });
+
+test("D1: the active file and the contract file sit in claude-accounts' folder under Herdr's home", () => {
+  assert.equal(activePath(APP), ACTIVE);
+  assert.equal(activePath(`${APP}/`), ACTIVE);
+  assert.equal(accountsV1Path(APP), ACCOUNTS_V1);
+  for (const bad of [null, undefined, "", "relative", "/"]) {
+    assert.equal(activePath(bad), null, JSON.stringify(bad));
+    assert.equal(accountsV1Path(bad), null, JSON.stringify(bad));
+  }
+});
+
+test("D1: the active file is read as the launcher reads it: its first line, exactly; empty is System default", () => {
+  assert.deepEqual(parseActive(SAVED), { ok: true, configDir: SAVED }, "no newline, as claude-accounts writes it; the slash kept");
+  assert.deepEqual(parseActive(`${PROFILE}\n`), { ok: true, configDir: PROFILE });
+  assert.deepEqual(parseActive(`${PROFILE}\n/second/line\n`), { ok: true, configDir: PROFILE }, "only the first line");
+  assert.deepEqual(parseActive(""), { ok: true, configDir: null }, "System default");
+  assert.deepEqual(parseActive("\n"), { ok: true, configDir: null });
+  assert.deepEqual(parseActive(null), { ok: false, reason: "no-active-file" });
+  assert.deepEqual(parseActive(undefined), { ok: false, reason: "no-active-file" });
+  for (const text of ["rel/home", "~/x", `${PROFILE}\r\n`, "/a\tb", " /x"]) {
+    assert.deepEqual(parseActive(text), { ok: false, reason: "bad-active", value: text.split("\n")[0] }, JSON.stringify(text));
+  }
+});
+
+test("D1: accounts.v1.json counts only as version 1 with an accounts array; anything else is no usage", () => {
+  const doc = v1([v1Account("default", null), v1Account("a", SAVED), "junk", null]);
+  assert.deepEqual(parseAccountsV1(JSON.stringify(doc)), [v1Account("default", null), v1Account("a", SAVED)]);
+  for (const text of [null, undefined, "", "{oops", "null", "[]", JSON.stringify(v1([], { version: 2 })), JSON.stringify({ version: 1 }), JSON.stringify(v1(null))]) {
+    assert.equal(parseAccountsV1(text), null, JSON.stringify(text));
+  }
+});
+
+test("D1: an account's peak is its fullest known window over session, weekly, fable and monthly, as Spotlight's", () => {
+  assert.equal(peakOf(v1Account("a", SAVED, { session: win(40), weekly: win(73), fable: win(12), monthly: null })), 73);
+  assert.equal(peakOf(v1Account("a", SAVED, { monthly: win(100) })), 100);
+  assert.equal(peakOf(v1Account("a", SAVED)), null, "no window known");
+  assert.equal(peakOf(v1Account("a", SAVED, { session: { percent: "90" }, weekly: { percent: null } })), null, "a percent that isn't a number isn't known");
+  assert.equal(peakOf({ id: "a" }), null);
+  assert.equal(peakOf(null), null);
+});
+
+test("D1: it wakes in the active account; without an active file, or one holding no config folder, in its own", () => {
+  assert.deepEqual(pickWakeAccount({ configDir: PROFILE, active: active(SAVED), accounts: null }), { configDir: SAVED, why: null });
+  assert.deepEqual(pickWakeAccount({ configDir: PROFILE, active: active(null), accounts: null }), { configDir: null, why: null }, "System default");
+  assert.deepEqual(pickWakeAccount({ configDir: null, active: active(SAVED), accounts: null }), { configDir: SAVED, why: null });
+  assert.deepEqual(pickWakeAccount({ configDir: SAVED, active: active(SAVED), accounts: null }), { configDir: SAVED, why: null }, "already there");
+  assert.deepEqual(pickWakeAccount({ configDir: PROFILE, active: { ok: false, reason: "no-active-file" }, accounts: null }), {
+    configDir: PROFILE, why: null,
+  });
+  assert.deepEqual(pickWakeAccount({ configDir: null, active: { ok: false, reason: "bad-active", value: "rel/home" }, accounts: null }), {
+    configDir: null, why: "claude-accounts' active file holds no config folder (\"rel/home\")",
+  });
+});
+
+// S4: the active account at its limit, its own not: it stays in its own.
+test("D1 (S4): active at 100 and its own at 40 → its own, and why; any other usage → the active", () => {
+  const full = v1Account("b", SAVED, { session: win(100), weekly: win(60) });
+  const room = v1Account("a", PROFILE, { session: win(40) });
+  const stay = pickWakeAccount({ configDir: PROFILE, active: active(SAVED), accounts: [full, room] });
+  assert.deepEqual(stay, { configDir: PROFILE, why: "the active account, b@example.com, is at 100% and its own, a@example.com, at 40%" });
+  const cases = [
+    ["both at 100", [full, v1Account("a", PROFILE, { weekly: win(100) })]],
+    ["the active one has room", [v1Account("b", SAVED, { session: win(99) }), room]],
+    ["the active one's usage unknown", [v1Account("b", SAVED), room]],
+    ["its own needs a sign-in", [full, { ...room, needsSignIn: true }]],
+    ["its own has an error", [full, { ...room, error: "network" }]],
+    ["its own has no known usage", [full, v1Account("a", PROFILE)]],
+    ["its own isn't in the file", [full, v1Account("c", OTHER, { session: win(10) })]],
+    ["the active one isn't in the file", [v1Account("c", OTHER, { session: win(100) }), room]],
+    ["no usage file", null],
+  ];
+  for (const [name, accounts] of cases) {
+    assert.deepEqual(pickWakeAccount({ configDir: PROFILE, active: active(SAVED), accounts }), { configDir: SAVED, why: null }, name);
+  }
+});
+
+test("D1 (S4): System default is the account with isDefault, for an active file that is empty and for a record with no folder", () => {
+  const defaultFull = v1Account("default", null, { fable: win(100) });
+  const saved = v1Account("a", SAVED, { session: win(5) });
+  assert.deepEqual(pickWakeAccount({ configDir: SAVED, active: active(null), accounts: [defaultFull, saved] }), {
+    configDir: SAVED, why: "the active account, System default, is at 100% and its own, a@example.com, at 5%",
+  });
+  const savedFull = v1Account("a", SAVED, { session: win(100) });
+  const defaultRoom = v1Account("default", null, { weekly: win(20) });
+  assert.deepEqual(pickWakeAccount({ configDir: null, active: active(SAVED), accounts: [defaultRoom, savedFull] }), {
+    configDir: null, why: "the active account, a@example.com, is at 100% and its own, System default, at 20%",
+  });
+});
+
+test("loadWakeAccount reads the active file once, and accounts.v1.json only when the active account isn't its own", async () => {
+  const usage = JSON.stringify(v1([v1Account("b", SAVED, { session: win(100) }), v1Account("a", PROFILE, { session: win(40) })]));
+  const io = worldIo({ files: { [ACTIVE]: SAVED, [ACCOUNTS_V1]: usage } });
+  assert.deepEqual(await loadWakeAccount({ appHome: APP, configDir: PROFILE }, io), {
+    configDir: PROFILE, why: "the active account, b@example.com, is at 100% and its own, a@example.com, at 40%",
+  });
+  assert.deepEqual(io.calls, [["read", ACTIVE], ["read", ACCOUNTS_V1]]);
+
+  const same = worldIo({ files: { [ACTIVE]: SAVED, [ACCOUNTS_V1]: usage } });
+  assert.deepEqual(await loadWakeAccount({ appHome: APP, configDir: SAVED }, same), { configDir: SAVED, why: null });
+  assert.deepEqual(same.calls, [["read", ACTIVE]], "already in the active account: no usage read");
+
+  const none = worldIo({ files: { [ACCOUNTS_V1]: usage } });
+  assert.deepEqual(await loadWakeAccount({ appHome: APP, configDir: PROFILE }, none), { configDir: PROFILE, why: null });
+  assert.deepEqual(none.calls, [["read", ACTIVE]]);
+
+  const v2 = worldIo({ files: { [ACTIVE]: SAVED, [ACCOUNTS_V1]: usage.replace('"version":1', '"version":2') } });
+  assert.deepEqual(await loadWakeAccount({ appHome: APP, configDir: PROFILE }, v2), { configDir: SAVED, why: null }, "version 2: the active");
+});
+
+test("loadWakeAccount never throws: an active file it can't read is no active file", async () => {
+  const io = {
+    readText: async () => {
+      throw new Error("EACCES");
+    },
+  };
+  assert.deepEqual(await loadWakeAccount({ appHome: APP, configDir: PROFILE }, io), { configDir: PROFILE, why: null });
+  assert.deepEqual(await loadWakeAccount({ appHome: APP, configDir: null }, {}), { configDir: null, why: null });
+  assert.deepEqual(await loadWakeAccount({ appHome: "relative", configDir: PROFILE }, worldIo()), { configDir: PROFILE, why: null });
 });
 
 test("claude-session.js is pure: no herdr import, no clock", () => {

@@ -64,8 +64,9 @@ the same files and run the same commands: see [CONTRACT.md](CONTRACT.md).
 - **Toasts:** "Restarting N Claude sessions on {account}", "N other sessions
   weren't moved." with **Review**, a terminal waiting for idle, a restart
   that failed with the `claude --resume <session>` command to run by hand,
-  and "Sign-in link copied. Open it in a private window to sign in with a
-  different account."
+  "Claude in … is asking a question" with the question a restarted Claude
+  stopped at, and "Sign-in link copied. Open it in a private window to sign
+  in with a different account."
 - **Usage details & history** (a window): 7, 30 or 90 days or all time.
   Orca's eight cards: input and output tokens, cache read, cache write, cache
   reuse rate, zero-cache-read turns, sessions / turns, and the estimated
@@ -154,6 +155,25 @@ the same files and run the same commands: see [CONTRACT.md](CONTRACT.md).
   - If Claude refuses the resume line (say, the conversation isn't there),
     the restart fails within seconds with Claude's own message and the line
     to run by hand, instead of waiting out the 2-minute limit.
+  - If the restarted Claude stops at a startup question (the folder trust
+    check, "Allow external CLAUDE.md file imports?"), a toast says the
+    question, for a `resume` from another plugin too (Spotlight's moves).
+    The restart waits up to 10 minutes for your answer instead of 2, then
+    ends with the question and no line to run, since Claude is running.
+    Orca says nothing in that case.
+  - A Claude that sits for 10 minutes with no session file while its
+    restart waits (one stopped at such a question never writes one) isn't
+    restarted: the restart fails with the question it asks, so you answer
+    it and switch again.
+  - A Claude that agent-sleep is putting to sleep, or put to sleep, isn't
+    restarted: claude-accounts reads agent-sleep's
+    `<Herdr home>/agent-sleep/sleeping.json` (read only) and drops that
+    terminal's restart, or holds it while agent-sleep can still undo its
+    stop. agent-sleep's wake starts that Claude on the active account, where
+    the restart would have moved it. Orca restarts every terminal once it's
+    idle. One gap: a working Claude that agent-sleep interrupts to sleep its
+    workspace can still be restarted in the moment before agent-sleep writes
+    its record.
   - A later switch moves restarts still waiting for idle to the account
     selected then, and drops the ones whose terminal is already on it.
 

@@ -18,12 +18,17 @@
 //     launcher and Claude would. As the real Claude, it refuses a session
 //     whose transcript that folder's projects/ doesn't have: it prints "No
 //     conversation found with session ID: …" and the shell is back;
+//     With `startDialog` (screen lines), the new Claude stops at a startup
+//     dialog instead: no session file, and those lines on the screen;
 //   - `hc read` prints the terminal's screen: a starship-like two-line
 //     prompt ("ws on  main", then "❯ "), the typed lines, Claude's error;
 //   - `hc get` shows the fake terminal's `records` (its subagents) while Claude lives;
 //   - every call is logged with whether HC_TERMINAL_ID or HC_SCOPE reached it.
 // Session files and transcripts are real files in fake config dirs; every
 // profile's projects/ links to ~/.claude/projects, as on the person's Mac.
+// agent-sleep's sleeping.json (resume-gaps D5) is a real file beside the
+// sandbox's state folder, <box>/agent-sleep/sleeping.json, as it lies beside
+// claude-accounts' state folder in Herdr's home.
 // The restart timings are set through CLAUDE_ACCOUNTS_RESTART_TIMING (see
 // TIMING), and every wait is on a condition with a generous ceiling, since
 // node --test runs this file alongside the rest of the suite.
@@ -40,6 +45,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 const repo = fileURLToPath(new URL("..", import.meta.url));
 const SRC = join(repo, "claude-accounts/mods/claude-accounts");
 const RESTART_MJS = pathToFileURL(join(SRC, "cli/restart.mjs")).href;
+const DIALOG_MJS = pathToFileURL(join(SRC, "cli/dialog.mjs")).href;
 
 const root = realpathSync(mkdtempSync(join(tmpdir(), "claude-accounts-t4-")));
 const MOD = join(root, "mod");
@@ -250,6 +256,11 @@ if (cmd === "ls") {
       save(t, { ...load(t), screen: [...screen, ...prompt, "❯"] });
     } else if (!transcript) {
       save(t, { ...load(t), screen: [...screen, "No conversation found with session ID: " + sid, ...prompt, "❯"] });
+    } else if (v.startDialog) {
+      const child = spawn("/bin/sleep", [process.env.FAKE_LIFE_S], { detached: true, stdio: "ignore" });
+      child.unref();
+      fs.appendFileSync(path.join(dir, "pids"), child.pid + "\\n");
+      save(t, { ...load(t), claude: child.pid, argv: ["/Users/tester/.local/bin/claude", ...typed.args], state: "idle", records: null, screen: [...screen, ...v.startDialog] });
     } else {
       const child = spawn("/bin/sleep", [process.env.FAKE_LIFE_S], { detached: true, stdio: "ignore" });
       child.unref();
@@ -399,6 +410,12 @@ function sandbox({ active = A, switchMode = "ask", timing = {} } = {}) {
   s.shell = (t) => s.world(t, { address: t, pid: ++shellPids, claude: null, own: false, argv: [], where: `ws / ${t}` });
   s.world = (t, value) => writeFileSync(join(world, "terminals", `${t}.json`), JSON.stringify(value));
   s.worldOf = (t) => JSON.parse(readFileSync(join(world, "terminals", `${t}.json`), "utf8"));
+  // agent-sleep's sleeping.json (resume-gaps D5): a doc, or raw text for a
+  // broken file.
+  s.sleeping = (doc) => {
+    mkdirSync(join(box, "agent-sleep"), { recursive: true });
+    writeFileSync(join(box, "agent-sleep", "sleeping.json"), typeof doc === "string" ? doc : `${JSON.stringify(doc, null, 2)}\n`);
+  };
 
   // The login a saved account's folder holds, and writing one: a /login.
   s.loginOf = (id) => JSON.parse(readFileSync(join(dirs[id], ".claude.json"), "utf8")).oauthAccount;
@@ -1728,6 +1745,242 @@ test("fail fast: Claude refusing the resume line ends the item failed (9) as soo
   const q = await s.final(quiet.job);
   assert.equal(q.state, "failed");
   assert.match(q.detail, /^no new Claude came up after the resume line: CLAUDE_ACCOUNTS_DIR='' claude --resume /);
+});
+
+// ── Startup dialogs (resume-gaps D4) ───────────────────────────────────────
+
+// Real screens of a Claude stopped at a startup dialog (test/fixtures/README.md).
+const screenOf = (name) => readFileSync(new URL(`fixtures/claude-screens/${name}`, import.meta.url), "utf8");
+const IMPORTS_DIALOG = screenOf("external-imports-dialog.txt");
+const TRUST_DIALOG = screenOf("trust-dialog.txt");
+const IMPORTS_QUESTION = "Allow external CLAUDE.md file imports?";
+// The trust dialog's question is a sentence inside its text, not its
+// "Accessing workspace:" label (strict review r1 J-001).
+const TRUST_QUESTION = "Is this a project you created or one you trust?";
+const screenLines = (text) => text.replace(/\n$/, "").split("\n");
+// Claude's input box, as a running Claude draws it at the bottom.
+const INPUT_BOX = ["─".repeat(80), "❯ ", "─".repeat(80), "  ? for shortcuts"];
+
+// The person answers the dialog of the Claude a resume line started in t:
+// that Claude writes its session file in `dir`, saying `status`, and draws
+// its input box under the dialog.
+function answerDialog(s, t, dir, sessionId, status) {
+  const pid = s.worldOf(t).claude;
+  mkdirSync(join(dir, "sessions"), { recursive: true });
+  writeFileSync(join(dir, "sessions", `${pid}.json`), JSON.stringify({ pid, sessionId, status }));
+  s.world(t, { ...s.worldOf(t), screen: [...s.worldOf(t).screen, ...INPUT_BOX] });
+  return pid;
+}
+
+const reads = (s, t) => s.calls().filter((c) => c.argv[0] === "read" && c.argv.includes(t));
+const isFinalState = (i) => ["done", "timeout", "landedElsewhere", "failed", "cancelled"].includes(i.state);
+
+test("dialogQuestion (D4): t32's external-imports dialog and the trust dialog read as their question, never the border on top nor the older render above", async () => {
+  const { dialogQuestion } = await import(DIALOG_MJS);
+  assert.equal(dialogQuestion(IMPORTS_DIALOG), IMPORTS_QUESTION);
+  assert.equal(dialogQuestion(TRUST_DIALOG), TRUST_QUESTION, "a cursor indented one space");
+  // The older render above the live one asked something else: the live one's
+  // question still wins, read from the bottom.
+  const older = screenLines(IMPORTS_DIALOG);
+  older[1] = `  ${TRUST_QUESTION}`;
+  assert.equal(dialogQuestion(older.join("\n")), IMPORTS_QUESTION);
+  // Not a dialog: Claude's input box under a dialog it answered, Claude idle,
+  // a shell, a dialog with no cursor or no "Enter to confirm", no border at
+  // all, nothing.
+  assert.equal(dialogQuestion([...screenLines(IMPORTS_DIALOG), ...INPUT_BOX].join("\n")), null);
+  assert.equal(dialogQuestion(["", "ws on  main", "❯ claude", "╭─ Claude Code ─╮", ...INPUT_BOX].join("\n")), null);
+  assert.equal(dialogQuestion(["", "ws on  main", "❯ claude", "", "ws on  main", "❯ "].join("\n")), null);
+  assert.equal(dialogQuestion(IMPORTS_DIALOG.replace("  ❯ No", "    No")), null);
+  assert.equal(dialogQuestion(IMPORTS_DIALOG.replace("Enter to confirm", "Esc to go back")), null);
+  assert.equal(dialogQuestion(screenLines(TRUST_DIALOG).filter((l) => !l.startsWith("─")).join("\n")), null);
+  assert.equal(dialogQuestion(""), null);
+  assert.equal(dialogQuestion(null), null);
+});
+
+test("a new Claude stopped at a startup dialog (D4): its question goes in the item once, and the new Claude's cap waits while it asks", async () => {
+  const s = sandbox({ timing: { ...SHORT_CAPS, dialog: WAIT } });
+  s.term("t1", { on: A, startDialog: screenLines(IMPORTS_DIALOG) });
+  const { job } = s.json(["resume", "--terminal", "t1", "--account", B]);
+  const asking = await until(() => s.item((i) => i.id === job && (i.question || isFinalState(i))), WAIT, "the question", s.queue);
+  assert.deepEqual([asking.state, asking.question], ["starting", IMPORTS_QUESTION]);
+  // Well past the new Claude's cap (the one wait here that has to be a span
+  // of time): still starting, and restart.json untouched since the question
+  // went in.
+  await sleep(SHORT_CAPS.claude + 1000);
+  const still = s.item((i) => i.id === job);
+  assert.deepEqual([still.state, still.question, still.updatedAt], ["starting", IMPORTS_QUESTION, asking.updatedAt]);
+  const st = s.status(job);
+  assert.equal(st.state, "starting");
+  assert.ok(!("question" in st), "--status doesn't print it");
+  // Ends the test: the new Claude quits, the shell is back.
+  process.kill(s.worldOf("t1").claude, "SIGKILL");
+  assert.equal((await s.final(job)).state, "failed");
+});
+
+test("a startup dialog answered after the new Claude's cap (D4): the question goes, the cap starts over, and the job ends done with its message", async () => {
+  const s = sandbox({ timing: { ...SHORT_CAPS, dialog: WAIT } });
+  const t1 = s.term("t1", { on: A, startDialog: screenLines(TRUST_DIALOG) });
+  const { job } = s.json(["resume", "--terminal", "t1", "--account", B, "--message", "di hola"]);
+  const asking = await until(() => s.item((i) => i.id === job && (i.question || isFinalState(i))), WAIT, "the question", s.queue);
+  assert.equal(asking.question, TRUST_QUESTION);
+  await sleep(SHORT_CAPS.claude + 500);
+  // Answered: Claude writes its session file, busy at first.
+  const pid = answerDialog(s, "t1", s.dirs[B], t1.sessionId, "busy");
+  const answered = await until(() => s.item((i) => i.id === job && (!i.question || isFinalState(i))), WAIT, "the question to go", s.queue);
+  assert.equal(answered.state, "starting", JSON.stringify(answered));
+  // Then idle, within the cap that started over.
+  writeFileSync(join(s.dirs[B], "sessions", `${pid}.json`), JSON.stringify({ pid, sessionId: t1.sessionId, status: "idle" }));
+  const st = await s.final(job);
+  assert.deepEqual([st.state, st.code], ["done", 0], st.detail);
+  assert.deepEqual(s.sends("t1").map((x) => (x.text.startsWith("CLAUDE_ACCOUNTS_DIR=") ? "line" : x.text)), ["line", "di hola"]);
+  assert.ok(!("question" in s.item((i) => i.id === job)), "a final item asks nothing");
+});
+
+test("a new Claude still asking after TIMING.dialog (D4): timeout (4) with the question and no line to type, since Claude runs", async () => {
+  const s = sandbox({ timing: { claude: 1000, dialog: 2500 } });
+  s.term("t1", { on: A, startDialog: screenLines(IMPORTS_DIALOG) });
+  const { job } = s.json(["resume", "--terminal", "t1", "--account", B]);
+  const st = await s.final(job);
+  assert.deepEqual([st.state, st.code, st.exit], ["timeout", 4, 4]);
+  assert.equal(st.detail, `the new Claude is still asking “${IMPORTS_QUESTION}” in t1; answer it there`);
+  assert.ok(!("question" in s.item((i) => i.id === job)), "a final item asks nothing");
+  assert.ok(alive(s.worldOf("t1").claude), "the asking Claude is left running");
+  process.kill(s.worldOf("t1").claude, "SIGKILL");
+});
+
+test("the shell back under a dialog's last frame (D4): never read as a question; it fails fast, as Claude refusing the line does", async () => {
+  const s = sandbox({ timing: { dialog: WAIT } });
+  s.term("t1", { on: A, noStart: true, screen: ["", "ws on  main", "❯ claude", ...screenLines(IMPORTS_DIALOG)] });
+  const { job } = s.json(["resume", "--terminal", "t1", "--account", B]);
+  const st = await s.final(job);
+  assert.equal(st.state, "failed");
+  assert.equal(reads(s, "t1").length, 1, "the screen is read once: for the failure's reason");
+});
+
+test("step 1, no session file for TIMING.dialog (D4): failed with the dialog's question, or with how long it's had none; Claude is never stopped", async () => {
+  const s = sandbox({ timing: { dialog: 2000 } });
+  const t1 = s.term("t1", { on: A, session: false, screen: ["", "ws on  main", "❯ claude", ...screenLines(IMPORTS_DIALOG)] });
+  const t2 = s.term("t2", { on: A, session: false });
+  s.writeQueue(["t1", "t2"].map((t) => resumeItem({ id: `sw-${t}`, kind: "switch", terminal: t, from: A, to: B })));
+  const run = await s.exec(["restart", "--detach"]);
+  assert.equal(run.status, 0, run.stderr);
+  const one = s.item((i) => i.id === "sw-t1");
+  assert.deepEqual([one.state, one.code], ["failed", 9]);
+  assert.equal(one.detail, `Claude in t1 is asking “${IMPORTS_QUESTION}”; answer it and switch again`);
+  const two = s.item((i) => i.id === "sw-t2");
+  assert.deepEqual([two.state, two.code], ["failed", 9]);
+  assert.equal(two.detail, "Claude in t2 has had no session file for 2 s");
+  assert.ok(alive(t1.pid) && alive(t2.pid), "Claude was never stopped");
+  assert.deepEqual(s.sends(), []);
+  assert.equal(reads(s, "t1").length, 1, "the screen is read only once the cap is up");
+});
+
+test("step 1: a Claude blocked on a permission (it has a session file) is never read as a startup dialog, however long it waits", async () => {
+  const s = sandbox({ active: A, switchMode: "restart", timing: { dialog: 300 } });
+  const t1 = s.term("t1", { on: A, status: "busy", state: "blocked", screen: ["", "ws on  main", "❯ claude", ...screenLines(IMPORTS_DIALOG)] });
+  s.json(["use", B]);
+  const item = await until(() => s.item((i) => i.state === "waitingIdle" && i.claimedBy), WAIT, "waitingIdle");
+  // Many times TIMING.dialog (the one wait here that has to be a span of time).
+  await sleep(1500);
+  assert.equal(s.item((i) => i.id === item.id).state, "waitingIdle");
+  assert.ok(alive(t1.pid), "Claude was never stopped");
+  assert.deepEqual(reads(s, "t1"), [], "its screen is never read");
+  s.json(["restart", "--cancel", "t1"]);
+});
+
+// ── A Claude agent-sleep is putting to sleep (resume-gaps D5) ──────────────
+//
+// agent-sleep writes a terminal's record "stopping" before its /exit, turns
+// it "asleep" once the shell is back, and keeps a "live" one for every
+// running Claude (its restart recovery). Its wake starts Claude on the active
+// account (D1), so a switch item has nothing left to do there.
+
+// A record as agent-sleep writes it; only `state` is read here.
+const sleepRecord = (state, sessionId) => ({ state, sessionId, cwd: "/tmp", flags: [], at: Date.now(), by: "auto", configDir: null });
+
+const FINAL_STATES = ["done", "timeout", "landedElsewhere", "failed", "cancelled"];
+// Each of these items is gone (dropped) or final.
+const ended = (s, ids) => s.queue().every((i) => !ids.includes(i.id) || FINAL_STATES.includes(i.state));
+
+test("D5: a waiting restart whose Claude agent-sleep put to sleep (its /exit, the shell back, the record stopping or asleep) is dropped: nothing is typed into the sleeping terminal", async () => {
+  const s = sandbox({ active: A, switchMode: "restart" });
+  const t1 = s.term("t1", { on: A, status: "busy", state: "working" });
+  const t2 = s.term("t2", { on: A, status: "busy", state: "working" });
+  s.json(["use", B]);
+  const items = await until(() => {
+    const waiting = s.queue().filter((i) => i.state === "waitingIdle" && i.claimedBy);
+    return waiting.length === 2 && waiting;
+  }, WAIT, "both restarts waitingIdle", s.queue);
+  // agent-sleep stops both: its record goes in before its /exit. t1's already
+  // reads asleep (agent-sleep saw the shell), t2's still stopping.
+  s.sleeping({ version: 1, records: { t1: sleepRecord("asleep", t1.sessionId), t2: sleepRecord("stopping", t2.sessionId) } });
+  process.kill(t1.pid, "SIGKILL");
+  process.kill(t2.pid, "SIGKILL");
+  const ids = items.map((i) => i.id);
+  await until(() => ended(s, ids), WAIT, "both restarts to end", s.queue);
+  assert.deepEqual(s.queue().filter((i) => ids.includes(i.id)), [], "both dropped");
+  assert.deepEqual(s.typed(), [], "no resume line in a sleeping terminal");
+  assert.deepEqual(s.sends(), []);
+});
+
+test("D5: right before stopping an idle Claude, an asleep record drops the restart, and Claude is never stopped", async () => {
+  const s = sandbox({ active: B });
+  const t1 = s.term("t1", { on: A });
+  s.sleeping({ version: 1, records: { t1: sleepRecord("asleep", t1.sessionId) } });
+  s.writeQueue([resumeItem({ kind: "switch", id: "sw-asleep", terminal: "t1", from: A, to: B, sessionId: t1.sessionId })]);
+  const r = s.cli(["restart", "--detach"]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(s.queue(), [], "dropped");
+  assert.ok(alive(t1.pid), "never stopped");
+  assert.deepEqual(s.sends(), []);
+});
+
+test("D5: a stopping record holds an idle Claude's restart with no SIGTERM; agent-sleep undoing its stop lets it go on, its /exit landing drops it", async () => {
+  const s = sandbox({ active: A, switchMode: "restart" });
+  const t1 = s.term("t1", { on: A });
+  const t2 = s.term("t2", { on: A });
+  s.sleeping({ version: 1, records: { t1: sleepRecord("stopping", t1.sessionId), t2: sleepRecord("stopping", t2.sessionId) } });
+  s.json(["use", B]);
+  const [one, two] = ["t1", "t2"].map((t) => s.item((i) => i.terminal === t));
+  await until(() => s.queue().every((i) => i.state !== "queued"), WAIT, "both restarts to start", s.queue);
+  // Many polls (the one wait here that has to be a span of time): still held.
+  await sleep(1000);
+  assert.deepEqual(s.queue().map((i) => [i.terminal, i.state]), [["t1", "waitingIdle"], ["t2", "waitingIdle"]]);
+  assert.ok(alive(t1.pid) && alive(t2.pid), "never stopped");
+  assert.deepEqual(s.sends(), []);
+
+  // agent-sleep undoes t1's stop (its record goes) and its /exit lands in t2
+  // (the shell back, the record asleep).
+  s.sleeping({ version: 1, records: { t2: sleepRecord("asleep", t2.sessionId) } });
+  process.kill(t2.pid, "SIGKILL");
+  await until(() => ended(s, [one.id, two.id]), WAIT, "both restarts to end", s.queue);
+  assert.deepEqual(s.queue().map((i) => [i.id, i.state]), [[one.id, "done"]], "t1 restarted, t2 dropped");
+  assert.deepEqual(s.typed().map((x) => [x.terminal, x.dir]), [["t1", s.dirs[B]]]);
+  assert.equal(accountNow(s, "t1"), B);
+});
+
+test("D5: with sleeping.json missing, broken, of another version, or holding only live records, restarts go on as before (an idle Claude, and one that quit by hand)", async () => {
+  const cases = [
+    ["missing", null],
+    ["broken", () => "{ not json"],
+    ["version 2", (t1, t2) => ({ version: 2, records: { t1: sleepRecord("asleep", t1.sessionId), t2: sleepRecord("asleep", t2.sessionId) } })],
+    ["live records", (t1, t2) => ({ version: 1, records: { t1: sleepRecord("live", t1.sessionId), t2: sleepRecord("live", t2.sessionId) } })],
+  ];
+  for (const [name, doc] of cases) {
+    const s = sandbox({ active: B });
+    // t1 idle: the step that stops Claude. t2's Claude quit by hand: the
+    // shell is in front, so the line goes in with no stop.
+    const t1 = s.term("t1", { on: A });
+    const t2 = s.term("t2", { on: A });
+    process.kill(t2.pid, "SIGKILL");
+    await until(() => !alive(t2.pid), WAIT, "t2's Claude to quit");
+    if (doc) s.sleeping(doc(t1, t2));
+    s.writeQueue([t1, t2].map((term, i) => resumeItem({ kind: "switch", id: `sw-t${i + 1}`, terminal: `t${i + 1}`, from: A, to: B, sessionId: term.sessionId })));
+    const r = s.cli(["restart", "--detach"]);
+    assert.equal(r.status, 0, r.stderr);
+    assert.deepEqual(s.queue().map((i) => [i.id, i.state]), [["sw-t1", "done"], ["sw-t2", "done"]], name);
+    assert.deepEqual(s.typed().map((x) => [x.terminal, x.dir]).sort(), [["t1", s.dirs[B]], ["t2", s.dirs[B]]], name);
+  }
 });
 
 // ── The allowlist and the quoting, as functions ────────────────────────────

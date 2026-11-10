@@ -7,7 +7,7 @@
 // the exact string its Keychain item was hashed from (D2's invariant).
 //
 // Owner: T2 (final): T1 wrote the first set, T2 added claudeStateFile and
-// orcaRoots.
+// orcaRoots; resume-gaps T4 added sleepingFile.
 
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
@@ -41,6 +41,13 @@ export function stateHome(env = process.env) {
 // a test never creates a real profile.
 export function profilesHome(env = process.env) {
   return join(dirname(stateHome(env)), "claude-accounts-profiles");
+}
+
+// agent-sleep's records (resume-gaps D5): <Herdr home>/agent-sleep/sleeping.json,
+// beside the state folder as profilesHome is, so a test's CLAUDE_ACCOUNTS_HOME
+// gets its own. Read only, never written: it's agent-sleep's file.
+export function sleepingFile(env = process.env) {
+  return join(dirname(stateHome(env)), "agent-sleep", "sleeping.json");
 }
 
 // One entry of the state folder: statePath(FILES.restart).

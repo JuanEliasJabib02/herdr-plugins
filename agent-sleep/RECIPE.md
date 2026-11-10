@@ -28,10 +28,12 @@ its own.
 - **How it sleeps.** One at a time: it checks everything again and sends
   `/exit`, and the shell comes back. Nothing else in the terminal changes.
 - **How it wakes.** When you show its tab, it types
-  `CLAUDE_ACCOUNTS_DIR=<its account> claude <your flags> --resume <id>` into
-  the shell, exactly once, and a toast says so. It wakes in the account it
-  slept in. If you typed something at the shell it waits for you, and if
-  another program is in front it forgets that Claude.
+  `CLAUDE_ACCOUNTS_DIR=<an account> claude <your flags> --resume <id>` into
+  the shell, exactly once, and a toast says so. It wakes in claude-accounts'
+  active account, the one a new Claude would start on, unless that one is
+  full (see "It wakes in the active account" below). If you typed something
+  at the shell it waits for you, and if another program is in front it
+  forgets that Claude.
 - **After a restart** (needs automatic sleep on). If Core loses a kept
   terminal (crash, reboot, logout, `hc server stop`), the Claude that was
   running there comes back the same way when you show its tab. A Claude you
@@ -107,8 +109,8 @@ its own.
     spaces, by a click on its row, the picker, an agent's focus or `herdr-app
     do`, wakes all of them. Its tabs come back, each Claude that was working
     when it went to sleep resumes at once, and the others when their tab is
-    shown, each in the account it slept in. A space already shown when Herdr
-    or the mod starts again isn't a wake: leave it and come back.
+    shown, each in the active account, as any wake. A space already shown
+    when Herdr or the mod starts again isn't a wake: leave it and come back.
   - **Shown again mid-sleep** (a click on its row): its remaining stops are
     dropped, so no `/exit` reaches a Claude you came back to, and it wakes once
     the stops already under way are done.
@@ -130,9 +132,21 @@ projects-sidebar's right-click Sleep runs).
 and `sleeping.json` (one record per Claude: session id, folder, flags, its
 account's folder, `configDir`, null for `~/.claude`, and the `title` Claude
 had when it was stopped, for the Sleeping row). A broken `sleeping.json`
-is kept as `sleeping.json.bak`. `workspaces.json` holds the workspaces you put
+is kept as `sleeping.json.bak`. claude-accounts reads `sleeping.json` too, read
+only: an account switch never restarts a Claude whose record is `stopping` or
+`asleep`, and a file that isn't version 1 with a `records` object counts as no
+records. A version bump, renamed states, or records keyed by anything but the
+terminal's address turn that off. `workspaces.json` holds the workspaces you put
 to sleep, by path: their spaces and tabs, and whether each is still going to
-sleep or asleep. A broken one is kept as `workspaces.json.bak`.
+sleep or asleep. A broken one is kept as `workspaces.json.bak`. `log.txt` is
+where to look when a Claude didn't sleep or wake: Herdr sends a mod's console
+to `/dev/null`, so every line the mod logs lands here too, one per event with
+its local time (`2026-11-09 19:28:03 t1: not resumed (reveal): its shell line
+isn't a bare prompt (shell, typed)`). A resume that waits (a line typed at
+the shell, another program in front, its claim beaten by another window's
+write) says why once per terminal and reason, not on every look. The lines are
+written once a second at most, and past 1 MB the file becomes `log.1.txt`,
+replacing the older one.
 
 **Install:** `scripts/install.sh agent-sleep`. The mod only runs while its moon
 is in the shown layout, and projects-sidebar's status bar has it.
@@ -156,19 +170,36 @@ is in the shown layout, and projects-sidebar's status bar has it.
   doesn't need it installed; if their layout changes, fewer Claudes sleep. The
   folders are listed once a minute, so an account added since waits for the
   next check.
-- **It wakes in the account it slept in.** The resume starts with
-  `CLAUDE_ACCOUNTS_DIR='<its folder>'` (`''` for `~/.claude`), which the
-  `claude` launcher (`~/my-mac-scripts/bin/claude`) takes over claude-accounts'
-  active account. A named account also gets `CLAUDE_CONFIG_DIR`, so a shell
-  without the launcher lands there too. This decides the login (org, usage
-  limit, telemetry), not whether the conversation is found: every profile
-  shares `~/.claude/projects`. A Claude asleep through an account switch wakes
-  on the account it slept in, unlike claude-accounts' `restart` switch mode,
-  which moves only running Claudes. Move it afterwards with
-  `claude-accounts resume --terminal <t> --account <id>`.
-- **An account removed while its Claude sleeps.** That Claude stays asleep and
-  the popup says "its account folder is gone": resuming would recreate the
-  folder, signed out. Start it yourself in another account.
+- **It wakes in the active account.** Every wake (a shown tab, Wake all, a
+  workspace's wake, after a restart) lands where a new Claude would start:
+  claude-accounts' active account, read as the `claude` launcher
+  (`~/my-mac-scripts/bin/claude`) reads it, the first line of
+  `<Herdr home>/claude-accounts/active`. So a Claude asleep through an account
+  switch wakes on the account you switched to, as if the switch had restarted
+  it. The resume starts with `CLAUDE_ACCOUNTS_DIR='<that folder>'` (`''` for
+  `~/.claude`), which the launcher takes as this start's account. A named
+  account also gets `CLAUDE_CONFIG_DIR`, so a shell without the launcher lands
+  there too. This decides the login (org, usage limit, telemetry), not whether
+  the conversation is found: every profile shares `~/.claude/projects`.
+  - **Unless the active account is full.** When one of its limits is at 100%
+    and the account it slept in has room (in claude-accounts'
+    `accounts.v1.json`: some usage known and all of it under 100%, signed in,
+    no read error), it stays in its own, so a Claude Spotlight moved off a full
+    account isn't sent back to it. Both full, or usage it can't read (no file,
+    another `version`, an account not in it): the active one. `log.txt` says
+    when it stays in its own and why.
+  - **Without claude-accounts** (no `active` file), or with an `active` whose
+    first line isn't an absolute folder, it wakes in the account it slept in.
+  - A Claude you moved by hand (`claude-accounts resume --account`) also wakes
+    in the active one. Move it again afterwards with
+    `claude-accounts resume --terminal <t> --account <id>`.
+- **An account removed while its Claude sleeps.** If the folder it would wake
+  in is gone, that Claude stays asleep and the popup says "its account folder
+  is gone": resuming would recreate the folder, signed out. Removing the
+  active account in claude-accounts makes System default active, so this is
+  left for an `active` file pointing at a deleted folder, or its own folder
+  deleted while it wakes there (no claude-accounts, or the active one full).
+  Start it yourself in another account.
 - **The account prefix and your shell.** `NAME=value claude …` reaches
   `claude` in sh, bash, zsh, dash and ksh, and through a zsh or bash `claude()`
   function. fish needs 3.1 or later (not verified here). A `claude()` function

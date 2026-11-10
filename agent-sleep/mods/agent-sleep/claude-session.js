@@ -325,6 +325,128 @@ export async function loadConfigDirs({ home, appHome } = {}, { readText, exec } 
   return dirs;
 }
 
+// ── The account a Claude wakes in (resume-gaps D1) ─────────────────────────
+// Where a new Claude would start: claude-accounts' active account, read as
+// the claude launcher reads it (~/my-mac-scripts/bin/claude, herdr_account:
+// the first line of <Herdr home>/claude-accounts/active, the exact string,
+// empty for System default). So a Claude asleep through an account switch
+// wakes on the account switched to (S2). Unless that account is at its limit
+// and the one it slept in isn't (S4: a Claude Spotlight moved off a full
+// account stays where it was put), by the usage in claude-accounts' contract
+// file, accounts.v1.json, read the way Spotlight reads it. Without an active
+// file (claude-accounts not installed), or one whose first line isn't a
+// config folder, it wakes in the account it slept in (D15). Read-only, as
+// accounts.json above: claude-accounts' CONTRACT.md names this mod as a
+// reader of `active` beside the launcher.
+
+const USAGE_WINDOWS = ["session", "weekly", "fable", "monthly"];
+const FULL = 100; // CONTRACT.md: "100 means the limit is reached"
+
+export function activePath(appHome) {
+  return isHome(appHome) ? `${trimSlash(appHome)}/claude-accounts/active` : null;
+}
+
+export function accountsV1Path(appHome) {
+  return isHome(appHome) ? `${trimSlash(appHome)}/claude-accounts/accounts.v1.json` : null;
+}
+
+// The active file's text (null when there is no file) →
+//   { ok: true, configDir }   its first line, exactly; null for an empty one
+//                             (System default), as the launcher unsets
+//                             CLAUDE_CONFIG_DIR then
+//   { ok: false, reason: "no-active-file" }
+//   { ok: false, reason: "bad-active", value }   a first line failing
+//                             isConfigDir (relative, a control character)
+export function parseActive(text) {
+  if (typeof text !== "string") return { ok: false, reason: "no-active-file" };
+  const line = text.split("\n")[0];
+  if (line === "") return { ok: true, configDir: null };
+  return isConfigDir(line) ? { ok: true, configDir: line } : { ok: false, reason: "bad-active", value: line };
+}
+
+// accounts.v1.json → its accounts (objects only), or null when it can't be
+// used: missing, not JSON, a `version` other than 1 (CONTRACT.md bumps it
+// for any change in meaning), no accounts array.
+export function parseAccountsV1(text) {
+  if (typeof text !== "string") return null;
+  let doc;
+  try {
+    doc = JSON.parse(text);
+  } catch {
+    return null;
+  }
+  if (!isObject(doc) || doc.version !== 1 || !Array.isArray(doc.accounts)) return null;
+  return doc.accounts.filter(isObject);
+}
+
+// An account's peak: the fullest of its known windows (session, weekly,
+// fable, monthly), null when none is known. Spotlight's peakOf
+// (spotlight/mods/spotlight/resume.js).
+export function peakOf(account) {
+  const usage = isObject(account) && isObject(account.usage) ? account.usage : {};
+  const known = USAGE_WINDOWS.map((k) => usage[k])
+    .filter((w) => isObject(w) && typeof w.percent === "number" && Number.isFinite(w.percent))
+    .map((w) => w.percent);
+  return known.length > 0 ? Math.max(...known) : null;
+}
+
+// A folder's account in accounts.v1.json, by its exact configDir; System
+// default (null, or "") is the one with isDefault.
+function accountOf(accounts, configDir) {
+  if (configDir === null || configDir === "") return accounts.find((a) => a.isDefault === true) ?? null;
+  return accounts.find((a) => a.configDir === configDir) ?? null;
+}
+
+const accountName = (a) => (typeof a.label === "string" && a.label !== "" ? a.label : String(a.id));
+
+// { configDir (the record's), active (parseActive's), accounts
+// (parseAccountsV1's, or null) } → { configDir, why }: the folder the resume
+// types (null for System default), and why it isn't the active account's
+// (for the log), null when it is, or when there is no active file at all
+// (no claude-accounts: the account it slept in, as before D1, is nothing to
+// explain). It stays in its own only when all of this holds: its own isn't
+// the active account; the active one's peak is 100; its own is in the file
+// with a peak under 100 (at least one window known), needsSignIn false and
+// error null. Anything else (no usage file, either account not in it, both
+// full) → the active one.
+export function pickWakeAccount({ configDir = null, active, accounts = null } = {}) {
+  const own = configDir ?? null;
+  if (!isObject(active) || active.ok !== true) {
+    const why = isObject(active) && active.reason === "bad-active"
+      ? `claude-accounts' active file holds no config folder (${JSON.stringify(active.value)})`
+      : null;
+    return { configDir: own, why };
+  }
+  const chosen = { configDir: active.configDir, why: null };
+  if (active.configDir === own || !Array.isArray(accounts)) return chosen;
+  const current = accountOf(accounts, active.configDir);
+  const mine = accountOf(accounts, own);
+  if (current === null || mine === null || current === mine) return chosen;
+  const activePeak = peakOf(current);
+  const ownPeak = peakOf(mine);
+  if (activePeak === null || activePeak < FULL || ownPeak === null || ownPeak >= FULL) return chosen;
+  if (mine.needsSignIn !== false || mine.error !== null) return chosen;
+  return {
+    configDir: own,
+    why: `the active account, ${accountName(current)}, is at ${activePeak}% and its own, ${accountName(mine)}, at ${ownPeak}%`,
+  };
+}
+
+// pickWakeAccount from the files: the active file read once, accounts.v1.json
+// only when the active account isn't the one it slept in. Never throws: a
+// read that fails is a missing file.
+export async function loadWakeAccount({ appHome, configDir = null } = {}, { readText } = {}) {
+  const own = configDir ?? null;
+  const path = activePath(appHome);
+  const active = parseActive(path === null ? null : await read(readText, path));
+  let accounts = null;
+  if (active.ok && active.configDir !== own) {
+    const usage = accountsV1Path(appHome);
+    accounts = usage === null ? null : parseAccountsV1(await read(readText, usage));
+  }
+  return pickWakeAccount({ configDir: own, active, accounts });
+}
+
 // ── The exit screen ────────────────────────────────────────────────────────
 
 const HINT_COMMAND = /^(\w+=\S+ )?claude( \S+)* (--resume|-r) (\S+)$/;

@@ -17,6 +17,7 @@ import { BADGE_KEY, ASLEEP_KEY } from "../mods/agent-sleep/badges.js";
 import {
   fixture, MIN, NOW, HOME, APP, SLEEPING, SETTINGS, SID1, SID2, NVM_CLAUDE, PROC_START, EMPTY, SUGGESTION, DRAFT, EXIT, SHELL_BARE, SHELL_TYPED, claude, shellOf, ok, fail, makeWorld, addClaude, putSession, exitClaude, show, liveTerminals, deps, records, exits, resumes, at, sleepT1, setup, storeRecord,
   ORCA_DEV_PROFILES, HERDR_PROFILES, PROFILE, SAVED, addProfile, putAccounts,
+  ACTIVE, ACCOUNTS_V1, WORKSPACES, workspaceSetup, spacesWorld, showSpace, addShell,
 } from "./harness.js";
 
 // ── Which copy runs the loop (D11) ────────────────────────────────────────
@@ -752,6 +753,212 @@ test("the account list is built once per tick: three listings, and none for Slee
   assert.equal(listings(), 6);
 });
 
+// ── The account it wakes in (resume-gaps D1: S2, S4, C2) ──────────────────
+
+// claude-accounts' active account, as it writes it: the exact folder with
+// no newline, "" for System default.
+const putActive = (w, dir) => {
+  w.files[ACTIVE] = dir;
+};
+
+// accounts.v1.json (claude-accounts' CONTRACT.md): each account with its
+// peak as its 5-hour window, null for no known usage.
+function usageAccount(id, configDir, peak, over = {}) {
+  return {
+    id,
+    label: configDir === null ? "System default" : `${id}@example.com`,
+    email: configDir === null ? null : `${id}@example.com`,
+    org: null,
+    configDir,
+    isDefault: configDir === null,
+    needsSignIn: false,
+    error: null,
+    errorDetail: null,
+    usage: { session: peak === null ? null : { percent: peak, resetsAt: NOW + 60 * MIN }, weekly: null, fable: null, monthly: null },
+    credits: null,
+    usageUpdatedAt: NOW,
+    lastAuthenticatedAt: null,
+    duplicateOf: null,
+    signedInAs: null,
+    ...over,
+  };
+}
+const putUsage = (w, accounts, over = {}) => {
+  w.files[ACCOUNTS_V1] = JSON.stringify({ version: 1, updatedAt: NOW, active: "b", accounts, ...over });
+};
+
+// t1 asleep in `configDir`, its shell back at a bare prompt, its tab shown:
+// what one pulse typed to wake it. Both account folders exist.
+async function wakeIn(w, co, configDir) {
+  w.dirs.add(PROFILE);
+  w.dirs.add(SAVED);
+  storeRecord(w, "t1", { configDir });
+  exitClaude(w, "t1");
+  show(w, "back");
+  await at(co, w, NOW);
+  return resumes(w).map((s) => s.text);
+}
+const ownLines = (w) => w.logs.filter((l) => l.startsWith("t1: wakes in the account it slept in"));
+
+test("D1 (S2, C2): asleep in one account with another one active → it wakes in the active one, and the log says nothing of it", async () => {
+  const { w, co } = setup();
+  putActive(w, SAVED);
+  assert.deepEqual(await wakeIn(w, co, PROFILE), [resumeLine(named(SAVED))]);
+  assert.equal(records(w).t1, undefined, "claimed once");
+  assert.deepEqual(ownLines(w), []);
+  assert.ok(w.execs.some((c) => c[0] === "test" && c[2] === SAVED), "the active folder is the one checked");
+});
+
+test("D1: an empty active file is System default: CLAUDE_ACCOUNTS_DIR='' and no CLAUDE_CONFIG_DIR", async () => {
+  const { w, co } = setup();
+  putActive(w, "");
+  const typed = await wakeIn(w, co, PROFILE);
+  assert.deepEqual(typed, [resumeLine(SYSTEM)]);
+  assert.doesNotMatch(typed[0], /CLAUDE_CONFIG_DIR/);
+});
+
+test("D1: no active file (claude-accounts not installed) → the account it slept in, as before D1, with no line about it", async () => {
+  const { w, co } = setup();
+  assert.deepEqual(await wakeIn(w, co, PROFILE), [resumeLine(named(PROFILE))]);
+  assert.deepEqual(ownLines(w), []);
+  assert.ok(w.execs.some((c) => c[0] === "test" && c[2] === PROFILE), "its own folder is the one checked");
+});
+
+test("D1: an active file holding no config folder (relative, a control character) → the account it slept in", async () => {
+  for (const value of ["rel/home", "/x\u0007/home", " /x"]) {
+    const { w, co } = setup();
+    putActive(w, value);
+    assert.deepEqual(await wakeIn(w, co, PROFILE), [resumeLine(named(PROFILE))], JSON.stringify(value));
+    assert.deepEqual(ownLines(w), [
+      `t1: wakes in the account it slept in (${PROFILE}): claude-accounts' active file holds no config folder (${JSON.stringify(value)})`,
+    ]);
+  }
+});
+
+test("D1: the active account's folder removed → held with the popup's line, never typed; it wakes there once the folder is back", async () => {
+  const { w, co } = setup();
+  putActive(w, SAVED);
+  w.dirs.add(PROFILE);
+  storeRecord(w, "t1", { configDir: PROFILE });
+  exitClaude(w, "t1");
+  show(w, "back");
+  await at(co, w, NOW);
+  await at(co, w, NOW + 5_000);
+  assert.equal(resumes(w).length, 0, "never typed into a removed account");
+  assert.equal(records(w).t1.state, "asleep");
+  assert.deepEqual(co.model().holds, ["app stays asleep: its account folder is gone"]);
+  w.dirs.add(SAVED);
+  await at(co, w, NOW + 2 * MIN);
+  assert.deepEqual(resumes(w).map((s) => s.text), [resumeLine(named(SAVED))]);
+  assert.deepEqual(co.model().holds, []);
+});
+
+test("D1 (S4): the active account at 100 and its own at 40 → it stays in its own, and the log says why", async () => {
+  const { w, co } = setup();
+  putActive(w, SAVED);
+  putUsage(w, [usageAccount("default", null, 10), usageAccount("b", SAVED, 100), usageAccount("a", PROFILE, 40)]);
+  assert.deepEqual(await wakeIn(w, co, PROFILE), [resumeLine(named(PROFILE))]);
+  assert.deepEqual(ownLines(w), [
+    `t1: wakes in the account it slept in (${PROFILE}): the active account, b@example.com, is at 100% and its own, a@example.com, at 40%`,
+  ]);
+});
+
+test("D1 (S4): both at 100 → the active one", async () => {
+  const { w, co } = setup();
+  putActive(w, SAVED);
+  putUsage(w, [usageAccount("default", null, 10), usageAccount("b", SAVED, 100), usageAccount("a", PROFILE, 100)]);
+  assert.deepEqual(await wakeIn(w, co, PROFILE), [resumeLine(named(SAVED))]);
+  assert.deepEqual(ownLines(w), []);
+});
+
+test("D1 (S4): its own account needing a sign-in, with an error or with no known usage → the active one, full as it is", async () => {
+  const cases = [
+    ["needsSignIn", { needsSignIn: true }, 40],
+    ["error", { error: "rateLimited" }, 40],
+    ["no usage", {}, null],
+  ];
+  for (const [name, over, peak] of cases) {
+    const { w, co } = setup();
+    putActive(w, SAVED);
+    putUsage(w, [usageAccount("default", null, 10), usageAccount("b", SAVED, 100), usageAccount("a", PROFILE, peak, over)]);
+    assert.deepEqual(await wakeIn(w, co, PROFILE), [resumeLine(named(SAVED))], name);
+  }
+});
+
+test("D1 (S4): accounts.v1.json missing, of version 2 or broken → the active one", async () => {
+  const full = [usageAccount("b", SAVED, 100), usageAccount("a", PROFILE, 40)];
+  const cases = [
+    ["missing", () => {}],
+    ["version 2", (w) => putUsage(w, full, { version: 2 })],
+    ["broken", (w) => {
+      w.files[ACCOUNTS_V1] = "{oops";
+    }],
+  ];
+  for (const [name, build] of cases) {
+    const { w, co } = setup();
+    putActive(w, SAVED);
+    build(w);
+    assert.deepEqual(await wakeIn(w, co, PROFILE), [resumeLine(named(SAVED))], name);
+  }
+});
+
+// The four ways a Claude wakes all go through resume(), so all four land in
+// the active account: the reveal (above), Wake all, a workspace's wake:
+// "now", and restart recovery.
+
+test("D1, Wake all: a hidden Claude asleep in another account wakes in the active one", async () => {
+  const { w, co } = setup();
+  w.dirs.add(PROFILE);
+  w.dirs.add(SAVED);
+  putActive(w, SAVED);
+  storeRecord(w, "t1", { configDir: PROFILE });
+  exitClaude(w, "t1");
+  co.requestWakeAll();
+  await at(co, w, NOW);
+  assert.deepEqual(resumes(w).map((s) => s.text), [resumeLine(named(SAVED))]);
+});
+
+test("D1, a workspace's wake: \"now\": the Claude that was working wakes at once in the active account", async () => {
+  const { w, co } = workspaceSetup();
+  spacesWorld(w, [
+    { id: "sa", tabs: { a1: [["pa1", null, null]], a2: [["pa2", "t1", "/code/app"]] } },
+    { id: "inicio", folder: HOME, tabs: { i1: [["pi1", null, null]] } },
+  ], "inicio");
+  w.spaces = w.spaces.map((s) => (s.id === "sa" ? { ...s, tabs: s.tabs.map((t) => ({ ...t, settled: true })) } : s));
+  addShell(w, "t1", { pid: 100 });
+  w.dirs.add(PROFILE);
+  w.dirs.add(SAVED);
+  putActive(w, SAVED);
+  storeRecord(w, "t1", { configDir: PROFILE, wake: "now", by: "manual" });
+  w.files[WORKSPACES] = JSON.stringify({ version: 1, workspaces: { "/code/app": { spaces: { sa: ["a1", "a2"] }, state: "asleep", at: NOW - MIN } } });
+  await at(co, w, NOW);
+  assert.equal(resumes(w).length, 0, "asleep until its workspace is shown");
+  showSpace(w, "sa"); // its row's click; t1's tab (a2) stays hidden
+  await at(co, w, NOW + 1_000);
+  assert.deepEqual(resumes(w).map((s) => s.text), [resumeLine(named(SAVED))]);
+  assert.ok(w.logs.includes('/code/app: woken, 2 tab(s) back, 1 of 1 wake: "now" Claude(s) resumed'), JSON.stringify(w.logs));
+});
+
+test("D1, restart recovery: a Claude lost in a restart in another account comes back in the active one", async () => {
+  const { w, co } = setup({ t1: false });
+  const dir = addProfile(w, ORCA_DEV_PROFILES, "p1");
+  addClaude(w, "t1", { pid: 100, fgPid: 200, sid: SID1, configDir: dir });
+  await at(co, w, NOW);
+  assert.equal(records(w).t1?.state, "live");
+  assert.equal(records(w).t1.configDir, PROFILE);
+  w.core.t1 = shellOf({ ...w.core.t1, pid: 300 }); // the shell back with a new root pid
+  w.screens.t1 = SHELL_BARE;
+  await at(co, w, NOW + MIN);
+  assert.equal(records(w).t1?.state, "asleep");
+  assert.equal(records(w).t1.by, "restart");
+  w.dirs.add(SAVED);
+  putActive(w, SAVED);
+  show(w, "back");
+  await at(co, w, NOW + MIN + 1_000);
+  assert.deepEqual(resumes(w).map((s) => s.text), [resumeLine(named(SAVED))]);
+  assert.match(w.notes.at(-1)?.title ?? "", /after a restart/);
+});
+
 // ── Sleep now / Wake all (D9) ─────────────────────────────────────────────
 
 test("Sleep now skips the idle window and the confirmation, one Claude at a time", async () => {
@@ -1043,6 +1250,141 @@ test("Claude Code is recognised in every terminal shape", () => {
   assert.equal(isClaudeCodeTerminal({ address: "t1", program: { key: "claude" } }), true);
   assert.equal(isClaudeCodeTerminal({ address: "t1", foreground: { name: "claude.exe" } }), true);
   assert.equal(isClaudeCodeTerminal({ address: "t1", agent: "zsh", status: "idle" }), false);
+});
+
+// ── The log file (resume-gaps D2, D3) ─────────────────────────────────────
+
+const LOG = `${APP}/agent-sleep/log.txt`;
+
+// A line's local time as log.txt writes it.
+const stamp = (ms) => {
+  const d = new Date(ms);
+  const p = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+};
+
+// The appends to log.txt (an `sh -c` naming it), with how many hc calls and
+// execs had run when each ran. `result()` is what the append returns, or
+// throws: a success by default.
+function logFile(w, co, result = () => ok("")) {
+  const appends = [];
+  const exec = co.d.exec;
+  co.d.exec = async (cmd, args, options) => {
+    if (!(/(^|\/)sh$/.test(cmd) && args[0] === "-c" && args.includes(LOG))) return exec(cmd, args, options);
+    appends.push({ text: args.at(-1), calls: w.calls.length, execs: w.execs.length });
+    return result();
+  };
+  return appends;
+}
+
+const vimIn = (t) => ({ ...shellOf(t), foreground: { argv: ["vim"], cwd: "/code/app", name: "vim", pid: 300 } });
+
+test("D2: every log line goes to log.txt too, with its local time, in one append that is the pulse's last act", async () => {
+  const { w, co } = setup({ t2: true });
+  storeRecord(w, "t1");
+  storeRecord(w, "t2", { sessionId: SID2, cwd: "/code/checkout-flow", workspacePath: "/code/checkout-flow", rootPid: 101 });
+  w.core.t1 = vimIn(w.core.t1);
+  exitClaude(w, "t2", SHELL_TYPED);
+  const appends = logFile(w, co);
+  co.requestWakeAll();
+  await at(co, w, NOW);
+  assert.ok(w.logs.some((l) => l.startsWith("t1: ")) && w.logs.some((l) => l.startsWith("t2: ")), JSON.stringify(w.logs));
+  assert.equal(appends.length, 1, "one append for the whole pulse");
+  assert.equal(appends[0].calls, w.calls.length, "no hc call after it");
+  assert.equal(appends[0].execs, w.execs.length, "no exec after it");
+  assert.equal(appends[0].text, w.logs.map((l) => `${stamp(NOW)} ${l}\n`).join(""), "each console line, timed, in order");
+});
+
+test("D2: a pulse with nothing to log appends nothing; a line logged between pulses goes with the next one", async () => {
+  const { w, co } = setup();
+  const appends = logFile(w, co);
+  await at(co, w, NOW);
+  const before = { appends: appends.length, logs: w.logs.length };
+  await at(co, w, NOW + 1_000);
+  assert.deepEqual({ appends: appends.length, logs: w.logs.length }, before, "a quiet pulse runs no append");
+  w.now = NOW + 1_500;
+  co.command("nope"); // a key the mod doesn't know, outside any pulse
+  assert.equal(appends.length, before.appends, "nothing appended outside a pulse");
+  await at(co, w, NOW + 2_000);
+  assert.equal(appends.at(-1).text, `${stamp(NOW + 1_500)} no command "nope"\n`);
+});
+
+test("D2: an append that fails or throws never breaks the pulse; its lines stay on the console only and aren't appended again", async () => {
+  const { w, co } = setup();
+  storeRecord(w, "t1");
+  exitClaude(w, "t1", SHELL_TYPED);
+  show(w, "back");
+  let mode = "fail";
+  const appends = logFile(w, co, () => {
+    if (mode === "throw") throw new Error("exec gone");
+    return mode === "fail" ? fail("disk full") : ok("");
+  });
+  assert.equal(typeof (await at(co, w, NOW)), "boolean", "the pulse ends normally");
+  assert.equal(appends.length, 1);
+  assert.ok(w.logs.some((l) => l.includes("log.txt") && l.includes("disk full")), JSON.stringify(w.logs));
+  mode = "throw";
+  w.screens.t1 = ""; // a new reason to wait: a line is logged again
+  assert.equal(typeof (await at(co, w, NOW + 3_000)), "boolean");
+  assert.equal(appends.length, 2);
+  assert.ok(w.logs.some((l) => l.includes("log.txt") && l.includes("exec gone")), JSON.stringify(w.logs));
+  mode = "ok";
+  w.screens.t1 = SHELL_BARE;
+  co.command("nope");
+  await at(co, w, NOW + 6_000);
+  assert.equal(resumes(w).length, 1, "the pulses kept running: the resume went");
+  assert.equal(appends.at(-1).text, `${stamp(NOW + 3_000)} no command "nope"\n`, "neither the failed lines nor the failures");
+});
+
+test("D3: a resume waiting on a typed shell line says why once, not on every retry; a new reason is said once more", async () => {
+  const { w, co } = setup();
+  storeRecord(w, "t1");
+  exitClaude(w, "t1", SHELL_TYPED);
+  show(w, "back");
+  const appends = logFile(w, co);
+  const waits = () => w.logs.filter((l) => l.startsWith("t1: not resumed"));
+  for (let s = 0; s <= 10; s += 2) await at(co, w, NOW + s * 1_000);
+  assert.equal(w.sends.length, 0);
+  assert.equal(waits().length, 1, JSON.stringify(w.logs));
+  assert.match(waits()[0], /bare prompt/);
+  w.screens.t1 = ""; // nothing on screen now: another reason
+  for (let s = 12; s <= 20; s += 2) await at(co, w, NOW + s * 1_000);
+  assert.equal(waits().length, 2, JSON.stringify(w.logs));
+  assert.notEqual(waits()[1], waits()[0]);
+  const inFile = appends.map((a) => a.text).join("");
+  for (const l of waits()) assert.ok(inFile.includes(` ${l}\n`), l);
+  w.screens.t1 = SHELL_BARE;
+  await at(co, w, NOW + 22_000);
+  assert.equal(resumes(w).length, 1);
+});
+
+test("D3: another program in front (Wake all) and a claim that wasn't saved are each said once per terminal", async () => {
+  const { w, co } = setup({ t2: true });
+  storeRecord(w, "t1");
+  storeRecord(w, "t2", { sessionId: SID2, cwd: "/code/checkout-flow", workspacePath: "/code/checkout-flow", rootPid: 101 });
+  exitClaude(w, "t1");
+  w.core.t2 = vimIn(w.core.t2);
+  // sleeping.json changes under t1's resume once, between its read and its claim.
+  let raced = false;
+  w.onRead = (address) => {
+    if (address !== "t1" || raced) return;
+    raced = true;
+    w.files[SLEEPING] += "\n";
+  };
+  co.requestWakeAll();
+  await at(co, w, NOW);
+  assert.equal(resumes(w).length, 0, "the claim lost the race");
+  co.requestWakeAll();
+  await at(co, w, NOW + 1_000);
+  co.requestWakeAll();
+  await at(co, w, NOW + 2_000);
+  assert.deepEqual(resumes(w).map((s) => s.address), ["t1"], "claimed on the next try");
+  const t1 = w.logs.filter((l) => l.startsWith("t1: not resumed"));
+  const t2 = w.logs.filter((l) => l.startsWith("t2: not resumed"));
+  assert.equal(t1.length, 1, JSON.stringify(w.logs));
+  assert.match(t1[0], /claim/);
+  assert.equal(t2.length, 1, JSON.stringify(w.logs));
+  assert.match(t2[0], /vim/);
+  assert.equal(records(w).t2.state, "asleep", "Wake all leaves it asleep");
 });
 
 // ── Purity ────────────────────────────────────────────────────────────────

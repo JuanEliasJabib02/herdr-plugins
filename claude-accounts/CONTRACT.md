@@ -193,7 +193,11 @@ typed it. It never changes the active account.
 - The job waits for that Claude to be idle (however long it takes), stops
   it, types `CLAUDE_ACCOUNTS_DIR=<folder> claude <its safe flags> --resume
   <session>` in the same shell, waits for the new Claude to be idle (up to
-  2 minutes), checks it landed on the account, and sends the message.
+  2 minutes), checks it landed on the account, and sends the message. A new
+  Claude that stops at a startup question (the folder trust check, "Allow
+  external CLAUDE.md file imports?") waits up to 10 minutes for you to
+  answer it, the job still `starting`, and the 2 minutes start over once
+  it's answered.
 - A terminal that already has a live job to the same account gets that
   job's id back (exit 0). A live job to another account exits 11, with
   "terminal <t> already has a live job <job> to <account>: cancel it
@@ -219,7 +223,7 @@ typed it. It never changes the active account.
 | `starting` | no | | Typing the resume line and waiting for the new Claude. |
 | `sending` | no | | Sending the message. |
 | `done` | yes | 0 | Resumed on the account, message sent. |
-| `timeout` | yes | 4 | The shell or the new Claude didn't come back in time. |
+| `timeout` | yes | 4 | The shell or the new Claude didn't come back in time, or the new Claude still asks a startup question after 10 minutes. |
 | `landedElsewhere` | yes | 6 | The new Claude runs on another account. |
 | `failed` | yes | 9 | It couldn't go on. `detail` says why, with the `claude --resume <session>` command to run by hand. |
 | `cancelled` | yes | 10 | Cancelled before Claude was stopped. |
@@ -227,7 +231,7 @@ typed it. It never changes the active account.
 - A `failed` or `timeout` job's `detail` reads `<why>: <line>`, where
   `<line>` is what to type in that terminal to finish by hand:
   `CLAUDE_ACCOUNTS_DIR=<folder> claude <flags> --resume <session>`.
-- `failed` (9) also covers two more cases:
+- `failed` (9) also covers three more cases:
   - right before Claude is stopped, the session has no transcript any more.
     Claude is not stopped, and `detail` is "there's no conversation to resume
     yet in terminal <t>: Claude hasn't saved session <id> (it has no
@@ -235,7 +239,16 @@ typed it. It never changes the active account.
   - Claude refuses the resume line: the shell is back for 5 seconds with no
     new Claude. `detail` is the last line Claude printed (e.g. "No
     conversation found with session ID: <id>"), or "no new Claude came up
-    after the resume line", followed by `: <line to run by hand>`.
+    after the resume line", followed by `: <line to run by hand>`;
+  - while the job waits for idle, that terminal's Claude has had no session
+    file for 10 minutes (one stopped at a startup question never writes
+    one). Claude is not stopped, and `detail` is "Claude in <t> is asking
+    “<question>”; answer it and switch again" when its screen shows the
+    question, else "Claude in <t> has had no session file for 10 min", with
+    no line after it.
+- `timeout` (4) has one case with no line: the new Claude still asks a
+  startup question after 10 minutes. It's running, so `detail` is "the new
+  Claude is still asking “<question>” in <t>; answer it there".
 - `--status` exits with the job's code once the job is final (0, 4, 6, 9 or
   10), and 0 while it runs. `--wait <s>` works here too.
 - An unknown job exits 7.
@@ -284,7 +297,13 @@ code you don't know as a failure, as you read 1.
 - The other files in the state folder (`accounts.json`, `settings.json`,
   `usage-state.json`, `restart.json`, `pending-switch.json`, `live/`,
   `details.json`, `login-link`, `lock/`): read `accounts.v1.json` instead.
+  One exception: agent-sleep reads `accounts.json` (a top-level array, each
+  element's `configDir`) to find the folders a Claude's session file can be
+  in.
 - `active` (the active account's config folder, the exact string, empty for
-  System default) is read by the `claude` launcher in `~/my-mac-scripts`,
-  which starts every new Claude in a Herdr terminal on it. Other plugins
-  read `active` from `accounts.v1.json`.
+  System default) is read by two outside readers, which take its first line
+  as is: the `claude` launcher in `~/my-mac-scripts`, which starts every new
+  Claude in a Herdr terminal on it, and agent-sleep, which wakes a sleeping
+  Claude on it (`claude-session.js`, `loadWakeAccount`). Writing anything
+  but the exact folder on its first line breaks both. Other plugins read
+  `active` from `accounts.v1.json`.

@@ -3,7 +3,8 @@
 //
 //   [cd <cwd> &&] CLAUDE_ACCOUNTS_DIR=<dir> [CLAUDE_CONFIG_DIR=<dir>] claude <the user's flags> --resume <id>
 //
-// - The account it slept in (D15), always first: CLAUDE_ACCOUNTS_DIR is the
+// - The account it wakes in (D15; the caller picks it, resume-gaps D1:
+//   claude-accounts' active one unless it's full), always first: CLAUDE_ACCOUNTS_DIR is the
 //   claude launcher's rule 1 (~/my-mac-scripts/bin/claude, herdr_account):
 //   set, even empty, it wins over claude-accounts' `active` file and is unset
 //   before Claude starts. '' is System default (~/.claude). A named account

@@ -97,7 +97,19 @@
 //      nothing to resume, or with its terminal closed or another program in
 //      front, it's dropped. A resume job in those cases fails. A
 //      session with no transcript (a `/clear` nobody has written to yet)
-//      fails, and Claude is never stopped.
+//      fails, and Claude is never stopped. A Claude with no session file
+//      (one stopped at a startup dialog, resume-gaps D4) has no turn that
+//      ends: after TIMING.dialog (10 min) of such readings in a row the
+//      item fails, Claude never stopped, with "Claude in <t> is asking
+//      “<question>”; answer it and switch again" when its screen shows a
+//      dialog (dialog.mjs), else "Claude in <t> has had no session file
+//      for 10 min". A switch item never restarts a Claude agent-sleep is
+//      putting to sleep or put to sleep (its sleeping.json, read only,
+//      resume-gaps D5; agent-sleep's wake starts it on the active account):
+//      with the shell back and a "stopping" or "asleep" record, it's
+//      dropped; right before stopping an idle Claude, an "asleep" record
+//      drops it and a "stopping" one keeps it waiting, since agent-sleep
+//      can still undo that stop.
 //   2. stopping: SIGTERM to the foreground pid (probe b4). From here on the
 //      item can't be cancelled.
 //   3. Waits up to 30 s for the shell to be the foreground again, else
@@ -110,12 +122,20 @@
 //      When the shell is back in the foreground for 5 s with no new Claude
 //      (Claude refused the resume, "No conversation found…", and exited),
 //      it fails at once: detail is the error Claude left on the screen
-//      (`hc read`), then the line to run by hand.
+//      (`hc read`), then the line to run by hand. Each poll the new Claude
+//      isn't idle (and the shell isn't in front), its screen is read: at a
+//      startup dialog (D4) the item gets `question: "<question>"`, written
+//      when it changes (the mod toasts it), and the 120 s cap waits. When
+//      the dialog goes, `question` goes and the 120 s start over. Still
+//      asking after TIMING.dialog: timeout, detail "the new Claude is still
+//      asking “<question>” in <t>; answer it there".
 //   6. A resume job with a message, or a switch item that stopped running
 //      subagents (relaunchMessage names them for the resumed Claude):
 //      sending, `hc send` as the user (no HC_TERMINAL_ID). Then done.
 // A failed, timed-out or orphaned item's detail is `<why>: <the line to run
-// by hand>`. A non-final item whose runner died (its claim void: a dead pid,
+// by hand>`; the two D4 cases have no line, since Claude is running there
+// (never stopped, or already started again). A final item has no
+// `question`. A non-final item whose runner died (its claim void: a dead pid,
 // or an `at` older than the stale window) reads failed "runner gone"
 // whenever restart.json is read under the lock, and stays failed: it's never
 // run again. Final items are pruned 24 h after they ended.
@@ -133,23 +153,27 @@ import { rm } from "node:fs/promises";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { parseArgs } from "node:util";
-import { FILES, cliPath, defaultConfigDir, stateHome } from "./paths.mjs";
+import { FILES, cliPath, defaultConfigDir, sleepingFile, stateHome } from "./paths.mjs";
 import { failure, isAlive, readJson, render, withLock, writeAtomic } from "./files.mjs";
 import { knownAccounts, readSettings, sameEmail } from "./accounts.mjs";
 import { contractUsage } from "./usage.mjs";
+import { dialogQuestion } from "./dialog.mjs";
 import { HC_SEND_TIMEOUT_MS, getTerminal, hasTranscript, hc, inspectTerminal, isIdle, lastPrompt, lastTurn, listClaudeTerminals } from "./terminals.mjs";
 
 // Milliseconds. poll: how often a loop re-reads its terminal; shell and
 // claude: D8's step 3 and step 5 caps; shellBack: how long the shell may be
 // back in the foreground after the typed line, with no new Claude, before
-// the item fails; heartbeat: how often a runner refreshes its claims; stale:
-// a claim (or an unclaimed queued item) older than this is void; waitPoll:
-// how often --wait reads the job.
+// the item fails; dialog: how long a Claude may sit with no session file in
+// step 1, or the new Claude at a startup dialog in step 5 (resume-gaps D4),
+// before the item ends; heartbeat: how often a runner refreshes its claims;
+// stale: a claim (or an unclaimed queued item) older than this is void;
+// waitPoll: how often --wait reads the job.
 const TIMING = Object.freeze({
   poll: 1000,
   shell: 30_000,
   claude: 120_000,
   shellBack: 5_000,
+  dialog: 600_000,
   heartbeat: 15_000,
   stale: 60_000,
   waitPoll: 250,
@@ -313,6 +337,13 @@ function manualLine(item, known) {
 
 const withLine = (why, line) => (line ? `${why}: ${line}` : why);
 
+// A cap as a message says it: "10 min", or "30 s" under a minute.
+const span = (ms) => (ms >= 60_000 ? `${Math.round(ms / 60_000)} min` : `${Math.round(ms / 1000)} s`);
+
+// The question a startup dialog asks on the terminal's screen (dialog.mjs),
+// null when there's none, or undefined when hc couldn't read the screen.
+const askedOn = (terminal) => hc(["read", "--", terminal]).then(dialogQuestion, () => undefined);
+
 // What a switch tells the resumed Claude when its restart stopped subagents
 // still running: a resumed Claude doesn't launch them again on its own, and
 // never hears from them. Their titles when Herdr listed them (and how many
@@ -370,8 +401,10 @@ export function screenReason(screen, line) {
   return lastText(after)?.trim() ?? null;
 }
 
+// A final item asks nothing: a startup dialog's question (step 5) goes.
 function finalize(item, state, detail, now) {
   Object.assign(item, { state, code: FINAL_CODES[state], detail: detail ?? null, claimedBy: null, updatedAt: now });
+  delete item.question;
 }
 
 // A non-final item whose runner is gone: its claim's pid is dead or its `at`
@@ -814,6 +847,24 @@ const blockedBy = (doc, item, t) => {
 // The terminal's own shell is the foreground: nothing else runs in it.
 const atShell = (found) => Number.isInteger(found.foregroundPid) && found.foregroundPid === found.pid;
 
+const isObject = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
+
+// agent-sleep's record for a terminal (resume-gaps D5): "live" (a running
+// Claude it keeps for its restart recovery), "stopping" (written before its
+// /exit) or "asleep" (the shell is back), from its sleeping.json, read only:
+// {version: 1, records: {<terminal address>: {state, …}}}. null when there's
+// none: no file, a file that doesn't parse, a version other than 1 or
+// `records` that isn't an object (agent-sleep's own parseRecords reads those
+// as no records), or no record for the terminal. Between agent-sleep's
+// interrupt of a working Claude and its "stopping" record there's nothing
+// here to read: a switch in that moment can still restart that Claude.
+async function sleepState(terminal) {
+  const doc = await readJson(sleepingFile()).catch(() => null);
+  if (!isObject(doc) || doc.version !== 1 || !isObject(doc.records)) return null;
+  const record = Object.hasOwn(doc.records, terminal) ? doc.records[terminal] : null;
+  return isObject(record) && typeof record.state === "string" ? record.state : null;
+}
+
 // Moves a waiting item to stopping with `fields`, but only on the target its
 // line is built for: from here on it can't be cancelled. Resolves to the
 // item, to "skip" (a later switch moved it: read it again) or to null (no
@@ -834,12 +885,16 @@ async function runItem(home, id, t) {
   // own, its own session is the one to resume (a /resume or /clear while
   // the item waited changes it).
   let seenClaude = null;
+  // Since when every reading has been a Claude with no session file (D4),
+  // null after any other reading.
+  let noSessionSince = null;
   // 1. Wait for idle, with no cap.
   for (;;) {
     const own = await ownItem(home, id);
     if (!own) return;
     item = own.item;
     if (blockedBy(own.doc, item, t)) {
+      noSessionSince = null;
       await sleep(t.poll);
       continue;
     }
@@ -850,6 +905,7 @@ async function runItem(home, id, t) {
     }
     found = await inspectTerminal(item.terminal, known);
     if (found.kind === "claude") seenClaude = { account: found.account, sessionId: found.sessionId, configDir: found.configDir, args: keptArgs(found.argv) };
+    if (found.kind !== "noSession") noSessionSince = null;
     if (found.kind === "missing" || found.kind === "notClaude") {
       if (item.kind === "switch") {
         // Orca's pending restart: Claude quit on its own (a /exit by hand)
@@ -857,7 +913,13 @@ async function runItem(home, id, t) {
         // The session's folder, else the target's (projects/ is shared):
         // the line Claude refuses fails with its own words at step 5.
         const quit = found.kind === "notClaude" && atShell(found) ? (seenClaude ?? { account: item.from, sessionId: item.sessionId, configDir: configDirOf(known, item.from), args: item.args ?? [] }) : null;
-        if (quit?.sessionId && (await hasTranscript(quit.configDir ?? configDirOf(known, item.to), quit.sessionId))) {
+        // Unless agent-sleep is why the shell is back (resume-gaps D5): its
+        // record goes in before its /exit, so by now it reads "stopping" or
+        // "asleep". Its wake starts Claude on the active account (D1), as
+        // this line would, so the item goes and nothing is typed into the
+        // sleeping terminal.
+        const slept = quit !== null && ["stopping", "asleep"].includes(await sleepState(item.terminal));
+        if (!slept && quit?.sessionId && (await hasTranscript(quit.configDir ?? configDirOf(known, item.to), quit.sessionId))) {
           line = resumeLine(targetDir(known, item.to), quit.args, quit.sessionId);
           const stopping = await toStopping(home, id, item, { from: quit.account, sessionId: quit.sessionId, args: quit.args });
           if (stopping === null) return;
@@ -883,6 +945,28 @@ async function runItem(home, id, t) {
       await finish(home, id, "failed", `Claude is terminal ${item.terminal}'s own program: there's no shell to restart it in`);
       return;
     }
+    // A Claude with no session file (D4): one stopped at a startup dialog
+    // (trust, external imports) before it wrote any, or one whose file
+    // can't be read or isn't in any folder configDirs searches. No turn of
+    // it ever ends, so after TIMING.dialog of such readings in a row the
+    // item fails, with Claude never stopped; only then is the screen read,
+    // to say what it asks. A running Claude blocked on a permission has a
+    // session file: it never comes here.
+    if (found.kind === "noSession") {
+      noSessionSince ??= Date.now();
+      if (Date.now() - noSessionSince >= t.dialog) {
+        const question = await askedOn(item.terminal);
+        await finish(
+          home,
+          id,
+          "failed",
+          question
+            ? `Claude in ${item.terminal} is asking “${question}”; answer it and switch again`
+            : `Claude in ${item.terminal} has had no session file for ${span(t.dialog)}`,
+        );
+        return;
+      }
+    }
     // A switch goes once Claude's own turn is over, as Orca's does: its
     // background subagents keep it busy, and they're stopped with it (then
     // named in a message after the resume). Not while blocked on a question.
@@ -903,13 +987,26 @@ async function runItem(home, id, t) {
         await sleep(t.poll);
         continue;
       }
-      const stopping = await toStopping(home, id, item, { from: found.account, sessionId: found.sessionId, args, ...(told ? { message: told } : {}) });
-      if (stopping === null) return;
-      if (stopping !== "skip") {
-        item = stopping;
-        break;
+      // agent-sleep may have begun putting this Claude to sleep since
+      // (resume-gaps D5): read its record once more right before the stop.
+      // "asleep": Claude is gone and its wake brings it back on the active
+      // account (D1), so the item goes. "stopping": agent-sleep can still
+      // undo its stop, so the item keeps waiting, and the next readings say
+      // which way it went (the shell back, or the record gone).
+      const slept = item.kind === "switch" ? await sleepState(item.terminal) : null;
+      if (slept === "asleep") {
+        if ((await drop(home, id, item)) === "skip") continue;
+        return;
       }
-      continue;
+      if (slept !== "stopping") {
+        const stopping = await toStopping(home, id, item, { from: found.account, sessionId: found.sessionId, args, ...(told ? { message: told } : {}) });
+        if (stopping === null) return;
+        if (stopping !== "skip") {
+          item = stopping;
+          break;
+        }
+        continue;
+      }
     }
     if (item.state !== "waitingIdle" && !(await setState(home, id, "waitingIdle"))) return;
     await sleep(t.poll);
@@ -961,9 +1058,14 @@ async function runItem(home, id, t) {
 
   // 5. Wait for the new Claude, idle and on the target. The shell back in
   // the foreground for shellBack with no new Claude means Claude refused
-  // the line and exited: fail now, with what it printed.
-  const claudeBy = Date.now() + t.claude;
+  // the line and exited: fail now, with what it printed. A new Claude
+  // stopped at a startup dialog (D4) holds the cap while it asks, up to
+  // TIMING.dialog; once answered, the cap starts over.
+  let claudeBy = Date.now() + t.claude;
   let shellSince = null;
+  // The question the item holds in restart.json (null: none), and since when.
+  let asked = null;
+  let askedSince = null;
   for (;;) {
     const fresh = await inspectTerminal(item.terminal, known);
     if (fresh.kind === "missing") {
@@ -985,7 +1087,29 @@ async function runItem(home, id, t) {
       }
       if (isIdle(fresh)) break;
     }
-    if (Date.now() >= claudeBy) {
+    // Not idle yet: is it asking a startup question? Never read while the
+    // shell is in front: its screen can still show the last frame of a
+    // dialog Claude quit from. The question is written only when it
+    // changes (the mod's toast says it); a screen hc can't read changes
+    // nothing.
+    const question = shellUp ? null : await askedOn(item.terminal);
+    if (question !== undefined && question !== asked) {
+      const changed = await mutate(home, id, (current) => {
+        if (question === null) delete current.question;
+        else current.question = question;
+      });
+      if (!changed) return;
+      if (question === null) claudeBy = Date.now() + t.claude;
+      else if (asked === null) askedSince = Date.now();
+      asked = question;
+    }
+    if (asked !== null) {
+      if (Date.now() - askedSince >= t.dialog) {
+        // Claude runs, so there's no line to type by hand.
+        await finish(home, id, "timeout", `the new Claude is still asking “${asked}” in ${item.terminal}; answer it there`);
+        return;
+      }
+    } else if (Date.now() >= claudeBy) {
       await finish(home, id, "timeout", withLine(`the new Claude didn't report idle within ${Math.round(t.claude / 1000)} s`, line));
       return;
     }

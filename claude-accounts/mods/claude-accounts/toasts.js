@@ -39,6 +39,12 @@
 //     - failed and timeout: the manual `claude --resume <sid>` (D8) when
 //       the CLI's detail carries a line to type, and why;
 //     - landedElsewhere: a warning with the CLI's detail.
+//   The one exception, for switch items and resume jobs alike: a starting
+//   item whose new Claude stopped at a startup dialog (the CLI writes its
+//   `question`, resume-gaps D4) is "Claude in … is asking a question", once
+//   per question. Only the person can answer it, and `resume --status`
+//   doesn't carry it, so a caller such as Spotlight couldn't say it. Not in
+//   Orca, which says nothing about a dialog after it restarts a pane.
 //   login-link: copied, with Orca's "Sign-in link copied…" toast.
 // Herdr's toast draws a title and one line of body, and runs its action
 // when clicked, so Orca's long one-sentence toasts are split at their
@@ -183,8 +189,14 @@ export function react(state, seen) {
   // ── The restarts' progress ──────────────────────────────────────────────
   const where = (item) => titles.get(item.terminal) ?? item.terminal ?? "a terminal";
   const waiting = [];
+  const questions = [];
   const failures = [];
   for (const item of restart?.items ?? []) {
+    if (item.state === "starting" && typeof item.question === "string" && item.question !== "") {
+      if (first(`item:${item.id}:question:${item.question}`) && fresh(item.updatedAt)) {
+        questions.push(toast(`Claude in ${where(item)} is asking a question`, `${item.question} Answer it there.`, "warning", item.terminal ? focus(item.terminal) : null));
+      }
+    }
     if (item.kind !== "switch" || !item.state) continue;
     if (item.state !== "waitingIdle" && !FAILED.has(item.state)) continue;
     if (!first(`item:${item.id}:${item.state}`) || !fresh(item.updatedAt)) continue;
@@ -197,7 +209,7 @@ export function react(state, seen) {
   } else if (waiting.length > 1) {
     notify.push(toast(`${waiting.length} Claude sessions are busy`, `Each one restarts on ${label(waiting[0].to)} once it's idle.`, "info"));
   }
-  notify.push(...failures);
+  notify.push(...questions, ...failures);
 
   // ── The sign-in link ────────────────────────────────────────────────────
   if (link && first(`link:${link}`)) {

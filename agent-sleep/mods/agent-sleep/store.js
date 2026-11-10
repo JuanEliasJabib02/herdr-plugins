@@ -19,6 +19,14 @@
 // ignores the field. `title` (optional, text or null) is the title Claude gave
 // its terminal when it was stopped, for projects-agents' Sleeping row; it is
 // only shown, never checked, so a record without one stays valid.
+//
+// `sleeping.json` has an outside reader: claude-accounts' CLI
+// (cli/restart.mjs, resume-gaps D5) reads `records[<terminal address>].state`
+// read only, so an account switch never restarts a Claude this plugin is
+// stopping ("stopping") or stopped ("asleep"). It reads a file that isn't
+// version 1 with a `records` object as no records, as parseRecords does. A
+// version bump, renamed states or records keyed by anything but the terminal
+// address silently turn that check off: change claude-accounts with them.
 
 import { DEFAULT_IDLE_MINUTES, MIN_IDLE_MINUTES, MAX_IDLE_MINUTES } from "./rules.js";
 import { isConfigDir } from "./claude-session.js";
