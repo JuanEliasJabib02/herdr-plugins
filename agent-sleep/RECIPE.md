@@ -118,7 +118,11 @@ you can bind or run with `herdr-app do agent-sleep.<name>`: `sleep-now`,
 **Files:** `<Herdr home>/agent-sleep/settings.json` (`enabled`, `idleMinutes`)
 and `sleeping.json` (one record per Claude: session id, folder, flags, and its
 account's folder, `configDir`, null for `~/.claude`). A broken `sleeping.json`
-is kept as `sleeping.json.bak`. `workspaces.json` holds the workspaces you put
+is kept as `sleeping.json.bak`. claude-accounts reads `sleeping.json` too, read
+only: an account switch never restarts a Claude whose record is `stopping` or
+`asleep`, and a file that isn't version 1 with a `records` object counts as no
+records. A version bump, renamed states, or records keyed by anything but the
+terminal's address turn that off. `workspaces.json` holds the workspaces you put
 to sleep, by path: their spaces and tabs, and whether each is still going to
 sleep or asleep. A broken one is kept as `workspaces.json.bak`. `log.txt` is
 where to look when a Claude didn't sleep or wake: Herdr sends a mod's console

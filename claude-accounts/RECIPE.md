@@ -165,6 +165,15 @@ the same files and run the same commands: see [CONTRACT.md](CONTRACT.md).
     restart waits (one stopped at such a question never writes one) isn't
     restarted: the restart fails with the question it asks, so you answer
     it and switch again.
+  - A Claude that agent-sleep is putting to sleep, or put to sleep, isn't
+    restarted: claude-accounts reads agent-sleep's
+    `<Herdr home>/agent-sleep/sleeping.json` (read only) and drops that
+    terminal's restart, or holds it while agent-sleep can still undo its
+    stop. agent-sleep's wake starts that Claude on the active account, where
+    the restart would have moved it. Orca restarts every terminal once it's
+    idle. One gap: a working Claude that agent-sleep interrupts to sleep its
+    workspace can still be restarted in the moment before agent-sleep writes
+    its record.
   - A later switch moves restarts still waiting for idle to the account
     selected then, and drops the ones whose terminal is already on it.
 

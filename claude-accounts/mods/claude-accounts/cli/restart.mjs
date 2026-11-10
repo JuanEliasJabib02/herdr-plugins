@@ -103,7 +103,13 @@
 //      item fails, Claude never stopped, with "Claude in <t> is asking
 //      “<question>”; answer it and switch again" when its screen shows a
 //      dialog (dialog.mjs), else "Claude in <t> has had no session file
-//      for 10 min".
+//      for 10 min". A switch item never restarts a Claude agent-sleep is
+//      putting to sleep or put to sleep (its sleeping.json, read only,
+//      resume-gaps D5; agent-sleep's wake starts it on the active account):
+//      with the shell back and a "stopping" or "asleep" record, it's
+//      dropped; right before stopping an idle Claude, an "asleep" record
+//      drops it and a "stopping" one keeps it waiting, since agent-sleep
+//      can still undo that stop.
 //   2. stopping: SIGTERM to the foreground pid (probe b4). From here on the
 //      item can't be cancelled.
 //   3. Waits up to 30 s for the shell to be the foreground again, else
@@ -147,7 +153,7 @@ import { rm } from "node:fs/promises";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { parseArgs } from "node:util";
-import { FILES, cliPath, defaultConfigDir, stateHome } from "./paths.mjs";
+import { FILES, cliPath, defaultConfigDir, sleepingFile, stateHome } from "./paths.mjs";
 import { failure, isAlive, readJson, render, withLock, writeAtomic } from "./files.mjs";
 import { knownAccounts, readSettings, sameEmail } from "./accounts.mjs";
 import { contractUsage } from "./usage.mjs";
@@ -841,6 +847,24 @@ const blockedBy = (doc, item, t) => {
 // The terminal's own shell is the foreground: nothing else runs in it.
 const atShell = (found) => Number.isInteger(found.foregroundPid) && found.foregroundPid === found.pid;
 
+const isObject = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
+
+// agent-sleep's record for a terminal (resume-gaps D5): "live" (a running
+// Claude it keeps for its restart recovery), "stopping" (written before its
+// /exit) or "asleep" (the shell is back), from its sleeping.json, read only:
+// {version: 1, records: {<terminal address>: {state, …}}}. null when there's
+// none: no file, a file that doesn't parse, a version other than 1 or
+// `records` that isn't an object (agent-sleep's own parseRecords reads those
+// as no records), or no record for the terminal. Between agent-sleep's
+// interrupt of a working Claude and its "stopping" record there's nothing
+// here to read: a switch in that moment can still restart that Claude.
+async function sleepState(terminal) {
+  const doc = await readJson(sleepingFile()).catch(() => null);
+  if (!isObject(doc) || doc.version !== 1 || !isObject(doc.records)) return null;
+  const record = Object.hasOwn(doc.records, terminal) ? doc.records[terminal] : null;
+  return isObject(record) && typeof record.state === "string" ? record.state : null;
+}
+
 // Moves a waiting item to stopping with `fields`, but only on the target its
 // line is built for: from here on it can't be cancelled. Resolves to the
 // item, to "skip" (a later switch moved it: read it again) or to null (no
@@ -889,7 +913,13 @@ async function runItem(home, id, t) {
         // The session's folder, else the target's (projects/ is shared):
         // the line Claude refuses fails with its own words at step 5.
         const quit = found.kind === "notClaude" && atShell(found) ? (seenClaude ?? { account: item.from, sessionId: item.sessionId, configDir: configDirOf(known, item.from), args: item.args ?? [] }) : null;
-        if (quit?.sessionId && (await hasTranscript(quit.configDir ?? configDirOf(known, item.to), quit.sessionId))) {
+        // Unless agent-sleep is why the shell is back (resume-gaps D5): its
+        // record goes in before its /exit, so by now it reads "stopping" or
+        // "asleep". Its wake starts Claude on the active account (D1), as
+        // this line would, so the item goes and nothing is typed into the
+        // sleeping terminal.
+        const slept = quit !== null && ["stopping", "asleep"].includes(await sleepState(item.terminal));
+        if (!slept && quit?.sessionId && (await hasTranscript(quit.configDir ?? configDirOf(known, item.to), quit.sessionId))) {
           line = resumeLine(targetDir(known, item.to), quit.args, quit.sessionId);
           const stopping = await toStopping(home, id, item, { from: quit.account, sessionId: quit.sessionId, args: quit.args });
           if (stopping === null) return;
@@ -957,13 +987,26 @@ async function runItem(home, id, t) {
         await sleep(t.poll);
         continue;
       }
-      const stopping = await toStopping(home, id, item, { from: found.account, sessionId: found.sessionId, args, ...(told ? { message: told } : {}) });
-      if (stopping === null) return;
-      if (stopping !== "skip") {
-        item = stopping;
-        break;
+      // agent-sleep may have begun putting this Claude to sleep since
+      // (resume-gaps D5): read its record once more right before the stop.
+      // "asleep": Claude is gone and its wake brings it back on the active
+      // account (D1), so the item goes. "stopping": agent-sleep can still
+      // undo its stop, so the item keeps waiting, and the next readings say
+      // which way it went (the shell back, or the record gone).
+      const slept = item.kind === "switch" ? await sleepState(item.terminal) : null;
+      if (slept === "asleep") {
+        if ((await drop(home, id, item)) === "skip") continue;
+        return;
       }
-      continue;
+      if (slept !== "stopping") {
+        const stopping = await toStopping(home, id, item, { from: found.account, sessionId: found.sessionId, args, ...(told ? { message: told } : {}) });
+        if (stopping === null) return;
+        if (stopping !== "skip") {
+          item = stopping;
+          break;
+        }
+        continue;
+      }
     }
     if (item.state !== "waitingIdle" && !(await setState(home, id, "waitingIdle"))) return;
     await sleep(t.poll);

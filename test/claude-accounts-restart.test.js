@@ -26,6 +26,9 @@
 //   - every call is logged with whether HC_TERMINAL_ID or HC_SCOPE reached it.
 // Session files and transcripts are real files in fake config dirs; every
 // profile's projects/ links to ~/.claude/projects, as on the person's Mac.
+// agent-sleep's sleeping.json (resume-gaps D5) is a real file beside the
+// sandbox's state folder, <box>/agent-sleep/sleeping.json, as it lies beside
+// claude-accounts' state folder in Herdr's home.
 // The restart timings are set through CLAUDE_ACCOUNTS_RESTART_TIMING (see
 // TIMING), and every wait is on a condition with a generous ceiling, since
 // node --test runs this file alongside the rest of the suite.
@@ -407,6 +410,12 @@ function sandbox({ active = A, switchMode = "ask", timing = {} } = {}) {
   s.shell = (t) => s.world(t, { address: t, pid: ++shellPids, claude: null, own: false, argv: [], where: `ws / ${t}` });
   s.world = (t, value) => writeFileSync(join(world, "terminals", `${t}.json`), JSON.stringify(value));
   s.worldOf = (t) => JSON.parse(readFileSync(join(world, "terminals", `${t}.json`), "utf8"));
+  // agent-sleep's sleeping.json (resume-gaps D5): a doc, or raw text for a
+  // broken file.
+  s.sleeping = (doc) => {
+    mkdirSync(join(box, "agent-sleep"), { recursive: true });
+    writeFileSync(join(box, "agent-sleep", "sleeping.json"), typeof doc === "string" ? doc : `${JSON.stringify(doc, null, 2)}\n`);
+  };
 
   // The login a saved account's folder holds, and writing one: a /login.
   s.loginOf = (id) => JSON.parse(readFileSync(join(dirs[id], ".claude.json"), "utf8")).oauthAccount;
@@ -1875,6 +1884,101 @@ test("step 1: a Claude blocked on a permission (it has a session file) is never 
   assert.ok(alive(t1.pid), "Claude was never stopped");
   assert.deepEqual(reads(s, "t1"), [], "its screen is never read");
   s.json(["restart", "--cancel", "t1"]);
+});
+
+// ── A Claude agent-sleep is putting to sleep (resume-gaps D5) ──────────────
+//
+// agent-sleep writes a terminal's record "stopping" before its /exit, turns
+// it "asleep" once the shell is back, and keeps a "live" one for every
+// running Claude (its restart recovery). Its wake starts Claude on the active
+// account (D1), so a switch item has nothing left to do there.
+
+// A record as agent-sleep writes it; only `state` is read here.
+const sleepRecord = (state, sessionId) => ({ state, sessionId, cwd: "/tmp", flags: [], at: Date.now(), by: "auto", configDir: null });
+
+const FINAL_STATES = ["done", "timeout", "landedElsewhere", "failed", "cancelled"];
+// Each of these items is gone (dropped) or final.
+const ended = (s, ids) => s.queue().every((i) => !ids.includes(i.id) || FINAL_STATES.includes(i.state));
+
+test("D5: a waiting restart whose Claude agent-sleep put to sleep (its /exit, the shell back, the record stopping or asleep) is dropped: nothing is typed into the sleeping terminal", async () => {
+  const s = sandbox({ active: A, switchMode: "restart" });
+  const t1 = s.term("t1", { on: A, status: "busy", state: "working" });
+  const t2 = s.term("t2", { on: A, status: "busy", state: "working" });
+  s.json(["use", B]);
+  const items = await until(() => {
+    const waiting = s.queue().filter((i) => i.state === "waitingIdle" && i.claimedBy);
+    return waiting.length === 2 && waiting;
+  }, WAIT, "both restarts waitingIdle", s.queue);
+  // agent-sleep stops both: its record goes in before its /exit. t1's already
+  // reads asleep (agent-sleep saw the shell), t2's still stopping.
+  s.sleeping({ version: 1, records: { t1: sleepRecord("asleep", t1.sessionId), t2: sleepRecord("stopping", t2.sessionId) } });
+  process.kill(t1.pid, "SIGKILL");
+  process.kill(t2.pid, "SIGKILL");
+  const ids = items.map((i) => i.id);
+  await until(() => ended(s, ids), WAIT, "both restarts to end", s.queue);
+  assert.deepEqual(s.queue().filter((i) => ids.includes(i.id)), [], "both dropped");
+  assert.deepEqual(s.typed(), [], "no resume line in a sleeping terminal");
+  assert.deepEqual(s.sends(), []);
+});
+
+test("D5: right before stopping an idle Claude, an asleep record drops the restart, and Claude is never stopped", async () => {
+  const s = sandbox({ active: B });
+  const t1 = s.term("t1", { on: A });
+  s.sleeping({ version: 1, records: { t1: sleepRecord("asleep", t1.sessionId) } });
+  s.writeQueue([resumeItem({ kind: "switch", id: "sw-asleep", terminal: "t1", from: A, to: B, sessionId: t1.sessionId })]);
+  const r = s.cli(["restart", "--detach"]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(s.queue(), [], "dropped");
+  assert.ok(alive(t1.pid), "never stopped");
+  assert.deepEqual(s.sends(), []);
+});
+
+test("D5: a stopping record holds an idle Claude's restart with no SIGTERM; agent-sleep undoing its stop lets it go on, its /exit landing drops it", async () => {
+  const s = sandbox({ active: A, switchMode: "restart" });
+  const t1 = s.term("t1", { on: A });
+  const t2 = s.term("t2", { on: A });
+  s.sleeping({ version: 1, records: { t1: sleepRecord("stopping", t1.sessionId), t2: sleepRecord("stopping", t2.sessionId) } });
+  s.json(["use", B]);
+  const [one, two] = ["t1", "t2"].map((t) => s.item((i) => i.terminal === t));
+  await until(() => s.queue().every((i) => i.state !== "queued"), WAIT, "both restarts to start", s.queue);
+  // Many polls (the one wait here that has to be a span of time): still held.
+  await sleep(1000);
+  assert.deepEqual(s.queue().map((i) => [i.terminal, i.state]), [["t1", "waitingIdle"], ["t2", "waitingIdle"]]);
+  assert.ok(alive(t1.pid) && alive(t2.pid), "never stopped");
+  assert.deepEqual(s.sends(), []);
+
+  // agent-sleep undoes t1's stop (its record goes) and its /exit lands in t2
+  // (the shell back, the record asleep).
+  s.sleeping({ version: 1, records: { t2: sleepRecord("asleep", t2.sessionId) } });
+  process.kill(t2.pid, "SIGKILL");
+  await until(() => ended(s, [one.id, two.id]), WAIT, "both restarts to end", s.queue);
+  assert.deepEqual(s.queue().map((i) => [i.id, i.state]), [[one.id, "done"]], "t1 restarted, t2 dropped");
+  assert.deepEqual(s.typed().map((x) => [x.terminal, x.dir]), [["t1", s.dirs[B]]]);
+  assert.equal(accountNow(s, "t1"), B);
+});
+
+test("D5: with sleeping.json missing, broken, of another version, or holding only live records, restarts go on as before (an idle Claude, and one that quit by hand)", async () => {
+  const cases = [
+    ["missing", null],
+    ["broken", () => "{ not json"],
+    ["version 2", (t1, t2) => ({ version: 2, records: { t1: sleepRecord("asleep", t1.sessionId), t2: sleepRecord("asleep", t2.sessionId) } })],
+    ["live records", (t1, t2) => ({ version: 1, records: { t1: sleepRecord("live", t1.sessionId), t2: sleepRecord("live", t2.sessionId) } })],
+  ];
+  for (const [name, doc] of cases) {
+    const s = sandbox({ active: B });
+    // t1 idle: the step that stops Claude. t2's Claude quit by hand: the
+    // shell is in front, so the line goes in with no stop.
+    const t1 = s.term("t1", { on: A });
+    const t2 = s.term("t2", { on: A });
+    process.kill(t2.pid, "SIGKILL");
+    await until(() => !alive(t2.pid), WAIT, "t2's Claude to quit");
+    if (doc) s.sleeping(doc(t1, t2));
+    s.writeQueue([t1, t2].map((term, i) => resumeItem({ kind: "switch", id: `sw-t${i + 1}`, terminal: `t${i + 1}`, from: A, to: B, sessionId: term.sessionId })));
+    const r = s.cli(["restart", "--detach"]);
+    assert.equal(r.status, 0, r.stderr);
+    assert.deepEqual(s.queue().map((i) => [i.id, i.state]), [["sw-t1", "done"], ["sw-t2", "done"]], name);
+    assert.deepEqual(s.typed().map((x) => [x.terminal, x.dir]).sort(), [["t1", s.dirs[B]], ["t2", s.dirs[B]]], name);
+  }
 });
 
 // ── The allowlist and the quoting, as functions ────────────────────────────
