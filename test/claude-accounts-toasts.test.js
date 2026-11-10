@@ -215,6 +215,43 @@ test("react: a failure with no line to type says only why; landed elsewhere is a
   ]);
 });
 
+test("react (D4): a new Claude asking a startup question is said once per question, for a switch item and for a resume job alike", () => {
+  const sw = item("sw-q", "starting", { question: "Allow external CLAUDE.md file imports?" });
+  const rs = item("rs-q", "starting", { kind: "resume", terminal: "t14", question: "Accessing workspace:" });
+  const r = run({ restart: queue(sw, rs), pendingSwitch: pending("restart", [session("t12", "onAccount", null, ANA, "claude · herdr-plugins")]) }, {});
+  assert.deepEqual(r.notify.slice(1), [
+    {
+      title: "Claude in claude · herdr-plugins is asking a question",
+      body: "Allow external CLAUDE.md file imports? Answer it there.",
+      level: "warning",
+      action: { name: "pane.focus", args: { terminal: "t12" } },
+    },
+    {
+      title: "Claude in t14 is asking a question",
+      body: "Accessing workspace: Answer it there.",
+      level: "warning",
+      action: { name: "pane.focus", args: { terminal: "t14" } },
+    },
+  ]);
+  assert.deepEqual(run({ restart: queue(sw, rs) }, r.seen).notify, [], "each once");
+  // The same item asking something else is said again.
+  const next = run({ restart: queue({ ...sw, question: "Do you trust the files in this folder?" }) }, r.seen);
+  assert.deepEqual(next.notify.map((n) => n.body), ["Do you trust the files in this folder? Answer it there."]);
+});
+
+test("react (D4): a question on an item that isn't starting, an empty one, or one older than the fresh window says nothing", () => {
+  const r = run({
+    restart: queue(
+      item("sw-a", "sending", { question: "Accessing workspace:" }),
+      item("sw-b", "done", { code: 0, question: "Accessing workspace:" }),
+      item("sw-c", "starting", { question: "" }),
+      item("sw-d", "starting", { question: 7 }),
+      item("rs-e", "starting", { kind: "resume", question: "Accessing workspace:", updatedAt: NOW - 30 * MIN }),
+    ),
+  }, {});
+  assert.deepEqual(r.notify, []);
+});
+
 test("react: items older than the fresh window are marked seen, never shown", () => {
   const r = run({ restart: queue(item("sw-9", "failed", { updatedAt: NOW - 30 * MIN, detail: "runner gone: claude --resume abc" })) }, {});
   assert.deepEqual(r.notify, []);
