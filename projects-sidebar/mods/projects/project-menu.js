@@ -5,7 +5,9 @@
 // ↑/↓ move, Enter (→ on Move to group) runs, Esc closes. Remove from list
 // never touches files, worktrees or spaces itself (D11): it first runs other
 // plugins' project hooks (Spotlight's D43: Spotlight turns the project's root
-// off), then takes the project off the list.
+// off), then takes the project off the list. The menu only asks for it: the
+// keeper's copy runs it (commands, below), because this popup's copy closes
+// on the click and a closing copy's tasks are cancelled.
 
 import { div, svg } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
@@ -14,7 +16,7 @@ import { MOD, icon } from "./config.js";
 import { findProject, moveProject, removeProject } from "./lib.js";
 import * as store from "./store.js";
 import { runRemoveHooks } from "./git.js";
-import { removeProjectWith } from "./remove-workspace-model.js";
+import { drainRemoveAsks } from "./remove-workspace-model.js";
 import { projectMenuItems, openMainAction, withoutProject } from "./tree-model.js";
 import { openNewWorkspace } from "./new-workspace.js";
 import { openBaseMenu } from "./base-menu.js";
@@ -34,6 +36,36 @@ const ICONS = {
   remove: "mods/workspace-chrome/x.svg",
 };
 
+// The copies (keeper.js listen's `copy`) running a drain now: one at a time
+// per copy, since a running drain takes new asks itself.
+const draining = new Set();
+
+// Key commands of this menu (main.js COMMANDS), run in the keeper's copy.
+// `remove-asked`: every Remove from list asked (store.js removeAsks), in a
+// task of the keeper's own view, which lives as long as the window, so a
+// hook that waits (up to 120 s each) never holds up the other commands.
+export const commands = {
+  "remove-asked": ({ cx, copy }) => {
+    if (draining.has(copy)) return;
+    draining.add(copy);
+    cx.spawn(async () => {
+      try {
+        await drainRemoveAsks({
+          asks: store.removeAsks,
+          beforeRemove: (p) => runRemoveHooks(store.removeHooks().project, p),
+          remove: (p) => {
+            store.updateRegistry((r) => removeProject(r, p));
+            store.saveCache(withoutProject(store.cache(), p));
+            store.dropRemoveAsk(p);
+          },
+        });
+      } finally {
+        draining.delete(copy);
+      }
+    });
+  },
+};
+
 export default class ProjectMenu {
   init(p, cx) {
     this.project = p?.project ?? null;
@@ -51,8 +83,7 @@ export default class ProjectMenu {
     closeOverlay(props()?.overlay);
   }
 
-  // `cx`: the click's or the key's, for Remove from list's task.
-  choose(item, cx) {
+  choose(item) {
     if (!item || item.disabled) return;
     const path = this.project;
     this.close();
@@ -74,22 +105,13 @@ export default class ProjectMenu {
       case "move-to":
         store.updateRegistry((r) => moveProject(r, path, item.group));
         break;
-      case "remove": {
-        // The project hooks run first (each up to 120 s), then the project
-        // leaves the list, in a task no view owns: this popup has just
-        // closed, and a closed popup's tasks are cancelled after 250 ms.
-        const hooks = store.removeHooks().project;
-        cx.spawn(async () => {
-          await removeProjectWith({ project: path }, {
-            beforeRemove: (p) => runRemoveHooks(hooks, p),
-            remove: (p) => {
-              store.updateRegistry((r) => removeProject(r, p));
-              store.saveCache(withoutProject(store.cache(), p));
-            },
-          });
-        }, { owner: null });
+      case "remove":
+        // Asked, not run here: this popup's copy has just closed, and Herdr
+        // cancels a closing copy's tasks, owner null too, so the hooks'
+        // exec would never come back. The keeper's copy runs it.
+        store.askRemove(path);
+        run(`${MOD}.remove-asked`);
         break;
-      }
     }
   }
 
@@ -99,7 +121,7 @@ export default class ProjectMenu {
     if (!n) return;
     if (e.key === "down") this.at = (this.at + 1) % n;
     else if (e.key === "up") this.at = (this.at + n - 1) % n;
-    else if (e.key === "enter" || (e.key === "right" && list[this.at]?.id === "move")) return this.choose(list[this.at], cx);
+    else if (e.key === "enter" || (e.key === "right" && list[this.at]?.id === "move")) return this.choose(list[this.at]);
     else return;
     cx.notify();
   }
@@ -132,7 +154,7 @@ export default class ProjectMenu {
             .items_center()
             .text_color(it.disabled ? t.dim : t.foreground)
             .when(i === this.at && !it.disabled, (el) => el.bg(t.selected))
-            .when(!it.disabled, (el) => el.cursor_pointer().hover((s) => s.bg(t.hover)).on_click((_e, cx) => this.choose(it, cx)))
+            .when(!it.disabled, (el) => el.cursor_pointer().hover((s) => s.bg(t.hover)).on_click(() => this.choose(it)))
             .child(svg(ICONS[it.id]).size(14).flex_none().text_color(t.muted))
             .child(div().flex_1().min_w(0).truncate().child(it.label))
             .when(it.id === "move", (el) => el.child(svg("mods/workspace-chrome/chevron-right.svg").size(11).flex_none().text_color(t.dim))))));

@@ -12,7 +12,7 @@ import { shared, setShared } from "herdr";
 import { BADGE_KEYS, MENU_KEYS, REMOVE_HOOK_KEYS } from "./config.js";
 import { parseBadges } from "./badges-model.js";
 import { parseMenus } from "./menus-model.js";
-import { parseRemoveHooks } from "./remove-workspace-model.js";
+import { parseRemoveHooks, parseRemoveAsks, withRemoveAsk, withoutRemoveAsk } from "./remove-workspace-model.js";
 import { parsePrs } from "./pr-model.js";
 import {
   KEYS, changed, normPath,
@@ -176,6 +176,21 @@ export const menus = () => parseMenus(MENU_KEYS.map((k) => shared(k)));
 // Remove from list read it when they run.
 
 export const removeHooks = () => parseRemoveHooks(REMOVE_HOOK_KEYS.map((k) => shared(k)));
+
+// ── projects.remove-ask.v1: Remove from list, asked ────────────────────────
+// The project menu asks (askRemove) and the keeper's copy runs it, dropping
+// each ask once its project has left the list (dropRemoveAsk):
+// remove-workspace-model.js drainRemoveAsks says why the menu can't.
+
+export const removeAsks = () => parseRemoveAsks(shared(KEYS.removeAsk));
+
+export function askRemove(path) {
+  return write(KEYS.removeAsk, withRemoveAsk(removeAsks(), path));
+}
+
+export function dropRemoveAsk(path) {
+  return write(KEYS.removeAsk, withoutRemoveAsk(removeAsks(), path));
+}
 
 // ── projects.inicio.v1: Inicio's space (workspace-sleep D6) ─────────────────
 // Written only by the keeper (keeper.js), from a spawned task: the id it

@@ -1200,7 +1200,10 @@ the contract a publisher codes against.
     plugin was reloaded) runs none.
   - Remove from list: the menu closes, the hooks run, then the project
     leaves the list (its files, worktrees and spaces stay, as before). It
-    stays in the list while they run.
+    stays in the list while they run. They run in the keeper's copy (the
+    status row's cell), not the menu's: Herdr cancels a closing copy's
+    tasks, so the menu leaves the path in `projects.remove-ask.v1` and runs
+    `projects.remove-asked`, and the keeper takes the asks one at a time.
   - A delete can still fail after your hook ran (a space that won't close,
     git refusing): what your hook did isn't undone.
 - **Running:** every plugin's hooks of that kind, in key order, one after

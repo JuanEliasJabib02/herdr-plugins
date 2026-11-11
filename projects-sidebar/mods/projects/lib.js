@@ -31,6 +31,7 @@ export const KEYS = {
   prs: "projects.prs.v1", // { [workspacePath]: { number, state, url } }: the PR of each workspace's branch, state open | draft | merged | closed (pr-model.js parsePrs)
   prsAsk: "projects.prs-ask.v1", // a number, larger at each `projects.refresh-prs`: the tree in the window in front runs a PR round when it grows (store.js askPrs; workspace-sleep D7)
   inicio: "projects.inicio.v1", // { space: id }: the space the keeper made as Inicio (workspace-sleep D6; inicio-model.js parseInicio)
+  removeAsk: "projects.remove-ask.v1", // [projectPath]: Remove from list asked and not yet run, oldest first; the keeper's copy runs them (remove-workspace-model.js drainRemoveAsks)
 };
 
 // Whether writing `next` over `prev` changes anything: values are plain

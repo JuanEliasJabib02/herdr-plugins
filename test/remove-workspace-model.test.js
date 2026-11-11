@@ -18,6 +18,7 @@ import { join, basename } from "node:path";
 import {
   GIT, lockOf, removalCheck, removeWorkspace, removeTask, spacesToClose,
   HOOK_TIMEOUT, parseRemoveHooks, hookArgv, runHooks, removeProjectWith,
+  parseRemoveAsks, withRemoveAsk, withoutRemoveAsk, drainRemoveAsks,
 } from "../projects-sidebar/mods/projects/remove-workspace-model.js";
 import { REMOVE_HOOK_KEYS } from "../projects-sidebar/mods/projects/config.js";
 
@@ -908,7 +909,57 @@ test("15i. removeProjectWith runs the project hooks with its path, one after ano
   assert.deepEqual(order, ["removed", "resolved"]);
 });
 
-test("15j. the wiring node --test can't run: git.js passes beforeRemove to removeWith and removeTaskWith and runs a hook with exec in the home folder for 120 s; the dialogs pass the workspace hooks; project-menu.js runs removeProjectWith in a task no view owns", () => {
+test("15k. Remove from list asked (projects.remove-ask.v1): parseRemoveAsks keeps absolute paths, normalized, each once, oldest first; withRemoveAsk adds at the end; withoutRemoveAsk drops one", () => {
+  assert.deepEqual(parseRemoveAsks(["/code/a/", "/code/b", "/code/a", "rel", "", 7, null, ["/x"]]), ["/code/a", "/code/b"]);
+  for (const raw of [undefined, null, "/code/a", { 0: "/code/a" }, 3]) assert.deepEqual(parseRemoveAsks(raw), [], String(raw));
+
+  const asks = ["/code/a"];
+  assert.deepEqual(withRemoveAsk(asks, "/code/b/"), ["/code/a", "/code/b"]);
+  assert.deepEqual(asks, ["/code/a"], "a new value; the input stays");
+  assert.equal(withRemoveAsk(asks, "/code/a/"), asks, "already asked: the same value");
+  for (const p of ["rel", "", undefined, null, 3]) assert.equal(withRemoveAsk(asks, p), asks, `not a path: ${p}`);
+
+  assert.deepEqual(withoutRemoveAsk(["/code/a", "/code/b"], "/code/a/"), ["/code/b"]);
+  assert.equal(withoutRemoveAsk(asks, "/code/z"), asks, "not asked: the same value");
+});
+
+test("15l. drainRemoveAsks runs every ask oldest first, each through removeProjectWith (its hooks, then remove), takes an ask that comes in meanwhile, and runs a path once per drain", async () => {
+  // A store: remove drops the ask, as project-menu.js's binding does.
+  let stored = ["/code/a", "/code/b"];
+  const calls = [];
+  const io = {
+    asks: () => stored,
+    beforeRemove: async (p) => {
+      calls.push(`hooks ${p}`);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      if (p === "/code/a") stored = withRemoveAsk(stored, "/code/c"); // asked while A's hooks run
+    },
+    remove: (p) => {
+      calls.push(`remove ${p}`);
+      stored = withoutRemoveAsk(stored, p);
+    },
+  };
+  assert.deepEqual(await drainRemoveAsks(io), ["/code/a", "/code/b", "/code/c"]);
+  assert.deepEqual(calls, ["hooks /code/a", "remove /code/a", "hooks /code/b", "remove /code/b", "hooks /code/c", "remove /code/c"]);
+  assert.deepEqual(stored, []);
+
+  // Nothing asked: nothing runs.
+  const none = [];
+  assert.deepEqual(await drainRemoveAsks({ asks: () => [], remove: (p) => none.push(p) }), []);
+  assert.deepEqual(none, []);
+
+  // An ask that stays (remove throws, or doesn't drop it) runs once, and
+  // the next one still runs: never a loop, never a rejection.
+  const once = [];
+  const stuck = { asks: () => ["/code/x", "/code/y"], remove: (p) => {
+    once.push(p);
+    if (p === "/code/x") throw new Error("write failed");
+  } };
+  assert.deepEqual(await drainRemoveAsks(stuck), ["/code/x", "/code/y"]);
+  assert.deepEqual(once, ["/code/x", "/code/y"]);
+});
+
+test("15j. the wiring node --test can't run: git.js passes beforeRemove to removeWith and removeTaskWith and runs a hook with exec in the home folder for 120 s; the dialogs pass the workspace hooks; project-menu.js asks Remove from list and the keeper's copy runs it", () => {
   const src = (f) => readFileSync(new URL(`../projects-sidebar/mods/projects/${f}`, import.meta.url), "utf8");
   assert.equal(HOOK_TIMEOUT, 120_000);
 
@@ -925,17 +976,33 @@ test("15j. the wiring node --test can't run: git.js passes beforeRemove to remov
   assert.match(src("delete-task.js"), /removeTask\(\{ targets \}, \{\n\s+hooks,\n\s+closeSpaces: /);
   assert.match(src("delete-task.js"), /const hooks = store\.removeHooks\(\)\.workspace;/);
 
+  // The menu only asks: its copy closes on the click, and a closing copy's
+  // tasks are cancelled (owner null too), the hooks' exec with them.
   const menu = src("project-menu.js");
-  const spawn = /cx\.spawn\(async \(\) => \{([\s\S]*?)\n\s+\}, \{ owner: null \}\);/.exec(menu);
-  assert.ok(spawn, "a task no view owns");
-  assert.match(spawn[1], /await removeProjectWith\(\{ project: path \}, \{/, "removeProjectWith runs inside it");
-  assert.match(spawn[1], /beforeRemove: \(p\) => runRemoveHooks\(hooks, p\)/);
-  assert.match(spawn[1], /store\.updateRegistry\(\(r\) => removeProject\(r, p\)\);/, "the registry write is removeProjectWith's remove");
-  assert.match(spawn[1], /store\.saveCache\(withoutProject\(store\.cache\(\), p\)\);/);
+  const choice = /case "remove":([\s\S]*?)break;/.exec(menu);
+  assert.ok(choice, "Remove from list's case");
+  assert.match(choice[1], /store\.askRemove\(path\);\n\s+run\(`\$\{MOD\}\.remove-asked`\);/, "asked, then the keeper woken");
+  assert.doesNotMatch(choice[1], /spawn|removeProjectWith|updateRegistry/, "nothing runs in the menu's copy");
+
+  // The keeper's copy runs it, in a task of its own view (it lives as long
+  // as the window), one drain per copy at a time.
+  const command = /"remove-asked": \(\{ cx, copy \}\) => \{([\s\S]*?)\n  \},\n\};/.exec(menu);
+  assert.ok(command, "the remove-asked command");
+  assert.match(command[1], /cx\.spawn\(async \(\) => \{/);
+  assert.doesNotMatch(command[1], /owner: null/, "the keeper's view owns it");
+  assert.match(command[1], /await drainRemoveAsks\(\{/);
+  assert.match(command[1], /asks: store\.removeAsks,/);
+  assert.match(command[1], /beforeRemove: \(p\) => runRemoveHooks\(store\.removeHooks\(\)\.project, p\),/, "the project hooks, read when it runs");
+  assert.match(command[1], /store\.updateRegistry\(\(r\) => removeProject\(r, p\)\);\n\s+store\.saveCache\(withoutProject\(store\.cache\(\), p\)\);\n\s+store\.dropRemoveAsk\(p\);/, "removed and its ask dropped in one go");
+  assert.match(command[1], /if \(draining\.has\(copy\)\) return;/);
   assert.equal(menu.match(/store\.updateRegistry\(\(r\) => removeProject\(/g)?.length, 1, "nowhere else");
-  assert.match(menu, /const hooks = store\.removeHooks\(\)\.project;/);
-  assert.match(menu, /\.on_click\(\(_e, cx\) => this\.choose\(it, cx\)\)/, "a click passes its cx");
-  assert.match(menu, /this\.choose\(list\[this\.at\], cx\)/, "so does Enter");
+  assert.match(src("main.js"), /const COMMANDS = \{[^}]*\.\.\.projectMenuCommands[^}]*\};/, "a mod command, run by the keeper");
+  assert.match(src("main.js"), /^import ProjectMenu, \{ commands as projectMenuCommands \} from "\.\/project-menu\.js";$/m);
+
+  const store = src("store.js");
+  assert.match(store, /^export const removeAsks = \(\) => parseRemoveAsks\(shared\(KEYS\.removeAsk\)\);$/m);
+  assert.match(store, /^export function askRemove\(path\) \{\n\s+return write\(KEYS\.removeAsk, withRemoveAsk\(removeAsks\(\), path\)\);\n\}$/m);
+  assert.match(store, /^export function dropRemoveAsk\(path\) \{\n\s+return write\(KEYS\.removeAsk, withoutRemoveAsk\(removeAsks\(\), path\)\);\n\}$/m);
 });
 
 // ── The git it runs, and what other files import ───────────────────────────
