@@ -10,13 +10,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { emptyRegistry, addProject, addGroup, selectGroup, findProject } from "../projects-sidebar/mods/projects/lib.js";
 import {
-  NAME_MAX, CLAUDE_SETTINGS,
+  NAME_MAX, CLAUDE_SETTINGS, claudeSettingsPath,
   slug, parseInput, pickName, freeName, worktreePath, findBranch,
   pickDefaultBase, baseChoices, baseFor, rememberBase, baseMenuRows,
   agentChoices, defaultAgent, agentArgv,
   projectChoices, companionChoices, initialProject,
   creationPlan, pathClashes, clashError, gitOps, nameTaken, createWorkspace,
 } from "../projects-sidebar/mods/projects/new-workspace-model.js";
+import { resumeFlags } from "../agent-sleep/mods/agent-sleep/resume.js";
 
 // ── Names (D12) ────────────────────────────────────────────────────────────
 
@@ -229,11 +230,29 @@ test("agent choices: the installed agents plus Blank terminal; Claude by default
   assert.equal(defaultAgent(agentChoices([])).name, "Blank terminal");
 });
 
-test("agent argv: claude gets --settings with the env JSON and one --add-dir per companion", () => {
-  const argv = agentArgv(claude, ["/w/api/fix", "/w/web/fix"], true);
-  assert.deepEqual(argv, ["claude", "--add-dir", "/w/api/fix", "--add-dir", "/w/web/fix", "--settings", CLAUDE_SETTINGS]);
-  assert.deepEqual(JSON.parse(argv[argv.indexOf("--settings") + 1]), { env: { CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD: "1" } });
+// Where install.sh puts the mod's claude-settings.json, for appHome
+// /Users/me/.config/herdr-app.
+const SETTINGS = "/Users/me/.config/herdr-app/mods/projects/claude-settings.json";
+
+test("agent argv: claude gets --settings with the settings file and one --add-dir per companion", () => {
+  const argv = agentArgv(claude, ["/w/api/fix", "/w/web/fix"], true, SETTINGS);
+  assert.deepEqual(argv, ["claude", "--add-dir", "/w/api/fix", "--add-dir", "/w/web/fix", "--settings", SETTINGS]);
   assert.equal(argv.filter((a) => a === "--add-dir").length, 2);
+});
+
+test("claude settings: the mod ships CLAUDE_SETTINGS as claude-settings.json, at <appHome>/mods/projects", () => {
+  const shipped = readFileSync(new URL("../projects-sidebar/mods/projects/claude-settings.json", import.meta.url), "utf8");
+  assert.deepEqual(JSON.parse(shipped), JSON.parse(CLAUDE_SETTINGS));
+  assert.deepEqual(JSON.parse(CLAUDE_SETTINGS), { env: { CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD: "1" } });
+  assert.equal(claudeSettingsPath("/Users/me/.config/herdr-app"), SETTINGS);
+  assert.equal(claudeSettingsPath("/Users/me/.config/herdr-app/"), SETTINGS, "no double slash");
+});
+
+test("agent argv: a Claude launched with companions is one agent-sleep can resume (all its flags kept)", () => {
+  const argv = agentArgv(claude, ["/w/api/fix", "/w/web/fix"], true, SETTINGS);
+  assert.deepEqual(resumeFlags(argv), { ok: true, flags: argv.slice(1) });
+  // The JSON itself as the value was what kept it awake ("1 terminal didn't stop").
+  assert.deepEqual(resumeFlags(["claude", "--settings", CLAUDE_SETTINGS]), { ok: false, reason: "bad-value", token: "--settings" });
 });
 
 test("agent argv: no companions, or access off, leaves the agent's run as it is", () => {
@@ -415,7 +434,7 @@ test("create: companions then the primary, each from its base, and one space for
   sh(web.path, ["branch", "Fix-Login"]); // taken in one companion: -2 for all
   const r = await createWorkspace({
     primary: shop, companions: [api, web], text: "Fix Login", base: "origin/release",
-    agent: claude, access: true, root: ws, home: "/nowhere",
+    agent: claude, access: true, root: ws, home: "/nowhere", settings: SETTINGS,
   }, io);
   assert.equal(r.error, undefined);
   assert.equal(r.ok, true);
@@ -436,7 +455,7 @@ test("create: companions then the primary, each from its base, and one space for
   assert.deepEqual(r.launch, {
     folder: paths.shop,
     name: "Fix-Login-2",
-    argv: ["claude", "--add-dir", paths.api, "--add-dir", paths.web, "--settings", CLAUDE_SETTINGS],
+    argv: ["claude", "--add-dir", paths.api, "--add-dir", paths.web, "--settings", SETTINGS],
   });
   assert.deepEqual(r.warnings, []);
 });

@@ -474,8 +474,12 @@ across repos.
     3. The primary's worktree.
     4. One space on the primary, with the agent.
   - With companions and access on, Claude gets `--add-dir <path>` per
-    companion and `--settings {"env":{"CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD":"1"}}`,
-    so it reads their CLAUDE.md. Codex gets only the `--add-dir`s.
+    companion and `--settings <home>/mods/projects/claude-settings.json`
+    (`{"env":{"CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD":"1"}}`), so it
+    reads their CLAUDE.md. The path, never the JSON itself: agent-sleep
+    refuses to resume a Claude whose flags hold `{` or `"`, so it would never
+    sleep ("<workspace>: 1 terminal didn't stop"). Codex gets only the
+    `--add-dir`s.
   - A pasted link also becomes the agent's first message: `Complete <url>`.
   - Create more keeps the project, base and agent, clears the name and stays
     open.
@@ -1250,7 +1254,8 @@ the contract a publisher codes against.
 - **A command sent while the mod reloads is lost** (no error). Wait for the
   reload before scripting `herdr-app do projects.*`.
 - **Never launch the agent as `env VAR=1 claude`:** Herdr then sees `zsh`,
-  not an agent, and shows no status. Use `claude --settings '{"env":{…}}'`.
+  not an agent, and shows no status. Use `claude --settings <file>`, a
+  file rather than inline JSON, so agent-sleep can resume it.
 - **Merging `keys.json`:** F1–F3 and the space keys need the plugin's
   `keys.json` merged into yours. Once edited, your keys.json no longer
   receives Herdr's new default shortcuts. In this layout, F2 replaces

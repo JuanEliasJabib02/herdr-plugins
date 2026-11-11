@@ -9,7 +9,7 @@
 
 import { div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input } from "gpui-base";
-import { theme, props, run, openOverlay, closeOverlay, spaces, panes, home, knownAgents, exec, notify, pickFolder } from "herdr";
+import { theme, props, run, openOverlay, closeOverlay, spaces, panes, home, appHome, knownAgents, exec, notify, pickFolder } from "herdr";
 import { MOD, WORKTREE_ROOT, icon } from "./config.js";
 import { matchSpaces, findProject, normPath, addProject } from "./lib.js";
 import * as store from "./store.js";
@@ -17,6 +17,7 @@ import * as G from "./git.js";
 import {
   parseInput, freeName, nameTaken, worktreePath, repoName, baseChoices, baseFor, rememberBase,
   agentChoices, defaultAgent, takesDirs, projectChoices, companionChoices, initialProject, clashError, createWorkspace,
+  claudeSettingsPath,
 } from "./new-workspace-model.js";
 
 // The most rows an open select shows before it scrolls; the Default
@@ -250,7 +251,7 @@ export default class NewWorkspace {
     if (this.busy || this.blocker()) return;
     const req = {
       primary: this.primary(), companions: this.companionProjects(), text: this.text, base: this.base,
-      agent: this.agent(), access: this.access, root: WORKTREE_ROOT, home: home(),
+      agent: this.agent(), access: this.access, root: WORKTREE_ROOT, home: home(), settings: claudeSettingsPath(appHome()),
     };
     this.busy = true;
     this.error = "";
