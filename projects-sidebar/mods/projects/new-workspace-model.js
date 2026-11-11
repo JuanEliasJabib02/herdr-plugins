@@ -296,8 +296,15 @@ export const BLANK = Object.freeze({ key: "", name: "Blank terminal", icon: "ico
 
 // Read by Claude Code: load the CLAUDE.md and rules of every --add-dir too.
 // Passed through --settings, never an `env` prefix: Herdr only recognizes an
-// agent launched as itself (T1 probe).
+// agent launched as itself (T1 probe). The mod ships it as
+// claude-settings.json and Claude gets that file's path, never the JSON:
+// agent-sleep re-types a Claude's flags to resume it and refuses a value
+// with `{` or `"` (Claude's own rule), so a Claude given the JSON never slept
+// ("<workspace>: 1 terminal didn't stop", flags: bad-value --settings).
 export const CLAUDE_SETTINGS = JSON.stringify({ env: { CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD: "1" } });
+
+// Where install.sh puts the mod's claude-settings.json: <appHome>/mods/projects.
+export const claudeSettingsPath = (appHome) => `${String(appHome).replace(/\/+$/, "")}/mods/projects/claude-settings.json`;
 
 // knownAgents() (or its cached copy) as the Agent list: the installed ones,
 // then Blank terminal.
@@ -315,14 +322,15 @@ export const takesDirs = (agent) => agent?.key === "claude" || agent?.key === "c
 
 // The primary's launch argv (null: a blank terminal). With companions and
 // access on, Claude gets one --add-dir per companion plus --settings with
-// CLAUDE_SETTINGS, Codex the --add-dirs only, others nothing extra. The
-// --add-dirs come before --settings: Claude's --add-dir takes several
-// values, so it never ends the argv where a first message could follow.
-export function agentArgv(agent, companionPaths, access) {
+// the settings file (claudeSettingsPath), Codex the --add-dirs only, others
+// nothing extra. The --add-dirs come before --settings: Claude's --add-dir
+// takes several values, so it never ends the argv where a first message
+// could follow.
+export function agentArgv(agent, companionPaths, access, settingsPath) {
   if (!Array.isArray(agent?.run) || agent.run.length === 0) return null;
   const dirs = access && takesDirs(agent) ? (companionPaths ?? []).flatMap((d) => ["--add-dir", d]) : [];
   if (dirs.length === 0) return [...agent.run];
-  return agent.key === "claude" ? [...agent.run, ...dirs, "--settings", CLAUDE_SETTINGS] : [...agent.run, ...dirs];
+  return agent.key === "claude" ? [...agent.run, ...dirs, "--settings", settingsPath] : [...agent.run, ...dirs];
 }
 
 // ── Creation (D14) ─────────────────────────────────────────────────────────
@@ -367,7 +375,8 @@ export function clashError(projects, show = (path) => path) {
 const firstLine = (s) => String(s ?? "").split("\n").map((l) => l.trim()).find(Boolean) ?? "";
 
 // Creates a workspace in the primary and every companion:
-//   req = { primary, companions, text, base, agent, access, root, home }
+//   req = { primary, companions, text, base, agent, access, root, home, settings }
+//         (settings: claudeSettingsPath(appHome()), for agentArgv)
 //   io  = { fetch, defaultBase, baseExists, branchExists, addWorktree, exists }
 //         (gitOps plus a file check)
 // Refuses, before any git runs, projects whose workspaces would share a path
@@ -382,7 +391,7 @@ const firstLine = (s) => String(s ?? "").split("\n").map((l) => l.trim()).find(B
 //     originDefault: the primary's origin default, for rememberBase
 //   { ok: false, error, name?, created, warnings }
 export async function createWorkspace(req, io) {
-  const { primary, companions = [], text, base, agent, access, root, home } = req;
+  const { primary, companions = [], text, base, agent, access, root, home, settings } = req;
   const { name: wanted, task } = parseInput(text);
   const warnings = [];
   if (!wanted) return { ok: false, error: "Type a name, a branch, #issue or a link.", created: [], warnings };
@@ -422,7 +431,7 @@ export async function createWorkspace(req, io) {
     }
     created.push(step);
   }
-  const argv = agentArgv(agent, plan.filter((s) => !s.primary).map((s) => s.path), access);
+  const argv = agentArgv(agent, plan.filter((s) => !s.primary).map((s) => s.path), access, settings);
   const launch = { folder: plan.at(-1).path, name, ...(argv ? { argv } : {}), ...(argv && task ? { task } : {}) };
   return { ok: true, name, created, warnings, launch, originDefault };
 }
