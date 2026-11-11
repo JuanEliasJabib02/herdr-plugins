@@ -32,7 +32,7 @@ const pathsOf = (r, i) => r.groups[i].projects.map((p) => p.path);
 
 // ── Persisted keys ─────────────────────────────────────────────────────────
 
-test("persisted keys: the four versioned names of D3, plus the registry's backup, the task notes with theirs (D34), the PRs and their asked rounds, and Inicio's space (workspace-sleep D6, D7)", () => {
+test("persisted keys: the four versioned names of D3, plus the registry's backup, the task notes with theirs (D34), the PRs and their asked rounds, Inicio's space (workspace-sleep D6, D7) and the asked Remove from list", () => {
   assert.deepEqual(KEYS, {
     registry: "projects.v1",
     registryBackup: "projects.v1.backup",
@@ -44,6 +44,7 @@ test("persisted keys: the four versioned names of D3, plus the registry's backup
     prs: "projects.prs.v1",
     prsAsk: "projects.prs-ask.v1",
     inicio: "projects.inicio.v1",
+    removeAsk: "projects.remove-ask.v1",
   });
 });
 

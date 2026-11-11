@@ -407,3 +407,58 @@ export async function removeProjectWith({ project }, io) {
   }
   await io.remove(path);
 }
+
+// ── Remove from list, asked (projects.remove-ask.v1) ───────────────────────
+// A closing copy gets 250 ms, then Herdr cancels its unfinished tasks, owner
+// null or not. The project menu's copy closes on the click, so a removal it
+// ran itself died in the hooks' exec and the project stayed in the list. The
+// menu asks instead (store.js askRemove, then `projects.remove-asked`), and
+// the keeper's copy, which lives as long as the window, runs every ask
+// (drainRemoveAsks, bound in project-menu.js commands).
+
+// The asked project paths, oldest first: absolute, normalized, each once.
+// Anything else reads as nothing asked.
+export function parseRemoveAsks(raw) {
+  if (!Array.isArray(raw)) return [];
+  const asks = [];
+  for (const value of raw) {
+    const path = normPath(value);
+    if (isAbsolute(path) && !asks.includes(path)) asks.push(path);
+  }
+  return asks;
+}
+
+// `asks` with `path` at the end; the same value when it is already asked or
+// isn't an absolute path.
+export function withRemoveAsk(asks, path) {
+  const p = normPath(path);
+  return !isAbsolute(p) || asks.includes(p) ? asks : [...asks, p];
+}
+
+// `asks` without `path`; the same value when it wasn't asked.
+export function withoutRemoveAsk(asks, path) {
+  const p = normPath(path);
+  return asks.includes(p) ? asks.filter((a) => a !== p) : asks;
+}
+
+// Runs every asked removal, oldest first, one at a time, each through
+// removeProjectWith: the project hooks, then io.remove, which drops the ask
+// in the same go, so a project never leaves the list with its ask behind.
+// io.asks() is read again after each, so an ask that comes in meanwhile runs
+// in this drain too; a path runs once per drain, even when its ask stays (a
+// remove that threw): never a loop.
+// io = { asks(), beforeRemove?(path), remove(path) }. Resolves the paths it
+// ran; never rejects.
+export async function drainRemoveAsks(io) {
+  const ran = [];
+  for (;;) {
+    const path = io.asks().find((p) => !ran.includes(p));
+    if (!path) return ran;
+    ran.push(path);
+    try {
+      await removeProjectWith({ project: path }, io);
+    } catch {
+      // its remove threw: the next ask runs all the same
+    }
+  }
+}

@@ -35,7 +35,7 @@
 import { View, div } from "gpui-kit";
 import { props } from "herdr";
 import Tree, { commands as treeCommands } from "./tree.js";
-import ProjectMenu from "./project-menu.js";
+import ProjectMenu, { commands as projectMenuCommands } from "./project-menu.js";
 import BaseMenu from "./base-menu.js";
 import WorkspaceMenu, { WorkspaceMenuAt } from "./workspace-menu.js";
 import DeleteWorkspace from "./delete-workspace.js";
@@ -87,7 +87,7 @@ const VIEWS = {
 // { cx, copy }. They all run in the keeper's copy (keeper.js listen), so none
 // may rely on the state of the copy that defines it: only the shared keys
 // and herdr.
-const COMMANDS = { ...treeCommands, ...groupsCommands, ...newWorkspaceCommands, ...keeperCommands };
+const COMMANDS = { ...treeCommands, ...groupsCommands, ...newWorkspaceCommands, ...keeperCommands, ...projectMenuCommands };
 
 export default class Projects extends View {
   init(p, cx) {
