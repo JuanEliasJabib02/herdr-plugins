@@ -8,7 +8,7 @@
 // targets, what its dialog says and what its outcome does (D36). tree.js,
 // group-menu.js, task-menu.js and delete-task.js draw and act on it.
 
-import { normPath, baseName, activeGroup, noteKeyOf } from "./lib.js";
+import { normPath, baseName, activeGroup, findProject, noteKeyOf } from "./lib.js";
 import { buildTree, mostUrgent, workspaceLabel, deletePrompt, hiddenAsleep } from "./tree-model.js";
 
 // ── Task keys (D30) ────────────────────────────────────────────────────────
@@ -228,11 +228,16 @@ export function taskMenuItems(lane, { note = null, targets = [] } = {}) {
 // projectName }], label as the row says it (workspaceLabel). Folds and
 // spaces play no part: a folded lane keeps its targets (Orca deletes a
 // lane's worktrees "hidden by sidebar filters or not"). Servers and anything
-// that isn't a lane: [].
-export function laneTargets(registry, cache, lane) {
+// that isn't a lane: []. `groupId` names another group to take them from
+// (the Agents list deletes a task in its workspace's own group, which may
+// not be the active one); null, the active group; a group that isn't there
+// has none.
+export function laneTargets(registry, cache, lane, groupId = null) {
   if (typeof lane !== "string" || !registry) return [];
+  const group = groupId === null ? activeGroup(registry) : registry.groups.find((g) => g.id === groupId);
+  if (!group) return [];
   const out = [];
-  for (const p of activeGroup(registry).projects) {
+  for (const p of group.projects) {
     for (const c of cache?.[p.path] ?? []) {
       const w = { path: normPath(c.path), branch: c.branch ?? null, main: Boolean(c.main) };
       if (w.main || laneKey(w).lane !== lane) continue;
@@ -240,6 +245,41 @@ export function laneTargets(registry, cache, lane) {
     }
   }
   return out;
+}
+
+// ── An agent's Delete… (the Agents list) ──────────────────────────────────
+
+// The task the Agents list's Delete… deletes whole: a right-click on an
+// agent's row opens its workspace's menu (projects-agents AGENT_MENU), and
+// when that workspace, `path` of `project`, is a worktree in a group
+// organized by Task, in a ticket or name lane that has more workspaces in
+// that group, Delete… deletes them all (the Delete task dialog) instead of
+// it alone. { lane, label, group, count }: the lane, as the tree labels it
+// with this checkout ("AX-3743"), the group's id and its workspaces (what
+// laneTargets takes for it). null for everything else, where Delete… is the
+// workspace's own: alone in its task, No task, a main checkout, a group
+// organized by Project, a path the cache or a project the registry doesn't
+// hold.
+export function agentTaskDelete(registry, cache, project, path) {
+  const found = registry ? findProject(registry, project) : null;
+  if (found?.group.organize !== "task") return null;
+  const at = normPath(path);
+  const c = (cache?.[found.project.path] ?? []).find((x) => normPath(x?.path) === at);
+  if (!c || c.main) return null;
+  const { lane, label } = laneKey({ path: at, branch: c.branch ?? null, main: false });
+  if (noteKeyOf(lane) === null) return null;
+  const count = laneTargets(registry, cache, lane, found.group.id).length;
+  return count > 1 ? { lane, label, group: found.group.id, count } : null;
+}
+
+// The workspace menu's items with the Delete… of `task` (agentTaskDelete):
+// it reads "Delete task AX-3743 (2)…" and carries { lane, label, group },
+// what workspace-menu.js opens the Delete task dialog with. No task: the
+// items as they are.
+export function withTaskDelete(items, task) {
+  if (!task) return items;
+  const { lane, label, group, count } = task;
+  return items.map((it) => (it.id === "delete" ? { ...it, label: `Delete task ${label} (${count})…`, task: { lane, label, group } } : it));
 }
 
 const plural = (n, one, many) => (n === 1 ? one : many);
