@@ -1,7 +1,9 @@
 // The Delete task dialog (S30, D36), opened from a task lane's menu with
 // props { lane, label }: it deletes every workspace of the lane in the
 // active group (Orca: the lane's worktrees, main checkouts excluded), one at
-// a time.
+// a time. Opened from an agent's Delete… in the Agents list (workspace-
+// menu.js), props carry `group` too: the lane in the workspace's own group,
+// which may not be the active one.
 //   - On open it takes the lane's workspaces once (task-model.js
 //     laneTargets), so one created after it opened is never deleted, and
 //     asks git about each (removalCheck, a few at once).
@@ -22,7 +24,7 @@
 //     workspace, in any group, has the task (taskStillUsed). Otherwise each
 //     row keeps its outcome and the dialog waits for Close; closed by then,
 //     one toast says how many went and the first failure.
-//   props: { view: "delete-task", lane: "task:AX-3653", label: "AX-3653" }
+//   props: { view: "delete-task", lane: "task:AX-3653", label: "AX-3653", group?: "g2" }
 
 import { div } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
@@ -40,18 +42,19 @@ import { laneTargets, deleteTaskPrompt, deleteTaskOutcome, taskRowOutcome, taskS
 const CHECKS = 4;
 
 // The only place that opens the dialog. modal: a click beside it doesn't
-// close it.
-export function openDeleteTask(lane, label) {
-  return openOverlay({ mod: MOD, kind: "dialog", modal: true, width: 400, height: 380, props: { view: "delete-task", lane, label } });
+// close it. `group`: the group whose lane it deletes; null, the active one.
+export function openDeleteTask(lane, label, group = null) {
+  return openOverlay({ mod: MOD, kind: "dialog", modal: true, width: 400, height: 380, props: { view: "delete-task", lane, label, ...(group ? { group } : {}) } });
 }
 
 export default class DeleteTask {
   init(p, cx) {
     this.lane = p?.lane ?? null;
     this.label = p?.label || noteKeyOf(this.lane) || "";
+    this.group = typeof p?.group === "string" && p.group ? p.group : null; // null: the active group
     this.overlay = props()?.overlay ?? p?.overlay ?? null; // kept: the run may outlive this copy's props
     // Taken once: a workspace created after the dialog opened is never deleted.
-    this.targets = this.lane ? laneTargets(store.registry(), store.cache(), this.lane) : [];
+    this.targets = this.lane ? laneTargets(store.registry(), store.cache(), this.lane, this.group) : [];
     this.checks = this.targets.map(() => null); // removalCheck per target; null while git is asked
     this.outcomes = this.targets.map(() => null); // taskRowOutcome per target, once it ran
     this.running = new Set(); // targets handed to the run that haven't finished

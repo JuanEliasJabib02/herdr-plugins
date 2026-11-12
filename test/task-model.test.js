@@ -9,7 +9,7 @@ import { emptyRegistry, addProject, addGroup, setOrganize, selectGroup } from ".
 import { buildTree } from "../projects-sidebar/mods/projects/tree-model.js";
 import {
   findTicket, taskKeyOf, buildTaskTree, groupMenuItems, taskMenuItems, SERVERS_LANE, NO_TASK_LANE,
-  laneTargets, deleteTaskPrompt, deleteTaskOutcome, taskStillUsed,
+  laneTargets, deleteTaskPrompt, deleteTaskOutcome, taskStillUsed, agentTaskDelete, withTaskDelete,
 } from "../projects-sidebar/mods/projects/task-model.js";
 
 const HOME = "/Users/demo";
@@ -284,6 +284,67 @@ test("laneTargets: a lane's non-main workspaces in the active group, the same as
   assert.deepEqual(laneTargets(selectGroup(r, "g2"), cache, "task:login").map((t) => t.project), ["/code/other"], "the active group's only");
   assert.deepEqual(laneTargets(r, cache, "task:nothing"), []);
   assert.deepEqual(laneTargets(r, cache, null), []);
+});
+
+test("laneTargets: with a group id, that group's lane, active or not; an unknown group has none", () => {
+  const cache = { ...CACHE, "/code/other": [main("/code/other"), wt("other", "login", "feat/login")] };
+  let r = addGroup(registry(), "Clients");
+  r = addProject(r, { path: "/code/other" }, "g2");
+  assert.equal(r.activeGroup, "g1");
+  assert.deepEqual(laneTargets(r, cache, "task:login", "g2").map((t) => t.path), [`${W}/other/login`]);
+  assert.deepEqual(laneTargets(r, cache, "task:login", "g1"), laneTargets(r, cache, "task:login"));
+  assert.deepEqual(laneTargets(r, cache, "task:login", null), laneTargets(r, cache, "task:login"), "null: the active group");
+  assert.deepEqual(laneTargets(r, cache, "task:login", "nope"), []);
+});
+
+// ── An agent's Delete… (the Agents list) ──────────────────────────────────
+
+test("agentTaskDelete: a worktree whose task lane, in its Task-mode group, has more workspaces", () => {
+  const r = registry();
+  const login = { lane: "task:login", label: "login", group: "g1", count: 2 };
+  assert.deepEqual(agentTaskDelete(r, CACHE, "/code/app", `${W}/app/login`), login);
+  assert.deepEqual(agentTaskDelete(r, CACHE, "/code/api/", `${W}/api/login/`), login, "paths as the Agents list may send them");
+  const ax = { ...CACHE, "/code/web": [main("/code/web"), wt("web", "ax-1000-copy", "feat/AX-1000-copy")] };
+  assert.deepEqual(agentTaskDelete(r, ax, "/code/web", `${W}/web/ax-1000-copy`), { lane: "task:AX-1000", label: "AX-1000", group: "g1", count: 2 });
+});
+
+test("agentTaskDelete: null, so Delete… deletes the workspace alone", () => {
+  const r = registry();
+  assert.equal(agentTaskDelete(r, CACHE, "/code/app", `${W}/app/ax-99`), null, "alone in its task");
+  assert.equal(agentTaskDelete(r, CACHE, "/code/app", "/code/app"), null, "the main checkout");
+  assert.equal(agentTaskDelete(setOrganize(r, "g1", "project"), CACHE, "/code/app", `${W}/app/login`), null, "a group organized by Project");
+  const none = { ...CACHE, "/code/app": [main("/code/app"), wt("app", "none", "feat/none")], "/code/api": [main("/code/api"), wt("api", "none", "x/none")] };
+  assert.equal(agentTaskDelete(r, none, "/code/app", `${W}/app/none`), null, "No task is no task");
+  assert.equal(agentTaskDelete(r, CACHE, "/code/app", `${W}/app/gone`), null, "a path the cache doesn't hold");
+  assert.equal(agentTaskDelete(r, CACHE, "/code/nowhere", `${W}/app/login`), null, "a project no group has");
+  assert.equal(agentTaskDelete(null, CACHE, "/code/app", `${W}/app/login`), null);
+});
+
+test("agentTaskDelete: the workspace's own group, not the active one", () => {
+  const cache = {
+    ...CACHE,
+    "/code/other": [main("/code/other"), wt("other", "login", "feat/login")],
+    "/code/more": [main("/code/more"), wt("more", "login", "feat/login")],
+  };
+  let r = addGroup(registry(), "Clients");
+  r = addProject(r, { path: "/code/other" }, "g2");
+  assert.equal(agentTaskDelete(setOrganize(r, "g2", "task"), cache, "/code/other", `${W}/other/login`), null, "g2's login lane has one");
+  r = setOrganize(addProject(r, { path: "/code/more" }, "g2"), "g2", "task");
+  assert.equal(r.activeGroup, "g1");
+  assert.deepEqual(agentTaskDelete(r, cache, "/code/other", `${W}/other/login`), { lane: "task:login", label: "login", group: "g2", count: 2 });
+  assert.deepEqual(agentTaskDelete(r, cache, "/code/app", `${W}/app/login`), { lane: "task:login", label: "login", group: "g1", count: 2 });
+});
+
+test("withTaskDelete: Delete… names the task and carries it; without one, the items as they are", () => {
+  const items = [{ id: "sleep", label: "Sleep" }, { id: "rename", label: "Rename…" }, { id: "delete", label: "Delete…", separator: true, danger: true }];
+  const task = { lane: "task:AX-3743", label: "AX-3743", group: "g1", count: 2 };
+  assert.deepEqual(withTaskDelete(items, task), [
+    items[0],
+    items[1],
+    { id: "delete", label: "Delete task AX-3743 (2)…", separator: true, danger: true, task: { lane: "task:AX-3743", label: "AX-3743", group: "g1" } },
+  ]);
+  assert.equal(withTaskDelete(items, null), items);
+  assert.deepEqual(withTaskDelete(items.slice(0, 2), task), items.slice(0, 2), "no Delete…, nothing to name");
 });
 
 const APP_LOGIN = `${W}/app/login`;
