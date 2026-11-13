@@ -5,10 +5,9 @@
 // orange (status() below) instead of Herdr's spinner; a last "Sleeping"
 // section with the Claudes agent-sleep put to sleep (sleeping-model.js); and,
 // by projects-sidebar's rule (workspace-model.js), a row in Priority names
-// its project with its title in the tooltip, a row's tooltip starts with its
-// task's note (the one the sidebar shows on the task's lane), and a
-// right-click on a row opens its workspace's menu. Herdr never updates this
-// copy.
+// its project, a row's tooltip is its task's note (the one the sidebar shows
+// on the task's lane) and nothing else, and a right-click on a row opens its
+// workspace's menu. Herdr never updates this copy.
 
 // Agents in grouped or priority views; parents take their most urgent sub-agent's place.
 // A viewed done agent stays in Done until left.
@@ -315,11 +314,10 @@ export default class Agents extends View {
       const w = where.get(spaceId);
       return w && w.name !== spaceName ? w.name : null;
     };
-    // The note of the space's task, as the sidebar shows it on the task's
-    // lane, first in the row's tooltip; null when it has none.
+    // A row's tooltip: the note of its space's task, as the sidebar shows it
+    // on the task's lane, and nothing else; no note, no tooltip.
     const notes = parseNotes(shared(NOTES_KEY));
     const noteOfSpace = (spaceId) => noteOf(notes, where.get(spaceId)?.task);
-    const withNote = (spaceId, tip) => [noteOfSpace(spaceId), tip].filter(Boolean).join(" \u00b7 ") || null;
     // Stopped either way: a right press would also reach on_click (its event carries no button).
     const openMenu = (spaceId) => (_e, cx) => {
       cx.stop_propagation();
@@ -375,10 +373,10 @@ export default class Agents extends View {
       // Under a space header the space goes without saying; an automatic tab number says nothing.
       // Without a space header above (priority, pinned) the row names its space.
       const full = byPriority || isPinned;
-      // There the project goes after the space, and the title to the tooltip.
+      // There the project goes after the space, in the title's place.
       const project = full ? projectOf(a.space, a.space_name) : null;
       const more = project ?? detail.get(a.address);
-      const tip = withNote(a.space, project ? detail.get(a.address) : null);
+      const tip = noteOfSpace(a.space);
       const name = full ? a.space_name || label(a) : more ?? (/^\d+$/.test(label(a)) ? a.program?.name || label(a) : label(a));
       return h_flex()
         .id(`ag-${a.address}`)
@@ -422,8 +420,7 @@ export default class Agents extends View {
     const sleepRow = (s) => {
       const project = projectOf(s.spaceId, s.space);
       const more = project ?? s.detail;
-      // As an agent's: the note, then the title when the project took its place.
-      const tip = withNote(s.spaceId, project ? s.detail : null);
+      const tip = noteOfSpace(s.spaceId);
       return h_flex()
         .id(`zz-${s.address}`)
         .px(8)
