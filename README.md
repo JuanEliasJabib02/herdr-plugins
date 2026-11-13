@@ -60,7 +60,7 @@ herdr-app do layout.switch '{"name":"projects"}'  # ctrl-shift-l switches back
   first (`keys.json.bak-<time>`). Once your keys.json is edited, Herdr stops
   adding its new default shortcuts to it. In the projects layout, F2 selects
   group 2 instead of renaming the tab, `cmd-l` opens and closes the right
-  panel, and `ctrl-s` closes and opens the projects tree (the agents list
+  panel, and `cmd-s` closes and opens the projects tree (the agents list
   takes its place; F1–F3 open it again). `scripts/install.sh --no-keys`
   skips the merge; then switch groups by clicking, or with
   `herdr-app do projects.group1`.

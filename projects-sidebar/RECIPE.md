@@ -17,9 +17,9 @@ across repos.
   (Herdr's, with the tree's working mark),
   the groups bar (44 px), then the footer. Background `chrome`, text 13 px
   in the person's UI font.
-- **Closing the projects tree:** `ctrl-s` hides the tree's block
+- **Closing the projects tree:** `cmd-s` hides the tree's block
   (`spaces`) and the agents list takes the whole column, from under the
-  brand block down to the groups bar; `ctrl-s` again shows it, and the two
+  brand block down to the groups bar; `cmd-s` again shows it, and the two
   split the column in half, whatever the divider between them had before.
   Picking a group (F1–F3 or a chip) shows a hidden tree the same way, since
   that is wanting to see its projects; a tree already shown keeps its
@@ -719,10 +719,10 @@ across repos.
   (Hide sleeping on or off, Orca's "Toggle Sleeping Workspaces", with no
   default key), `projects.toggle-tree` (close or open the projects tree).
   `keys.json` binds, in section
-  `layout:projects`, F1–F3 to the groups, `ctrl-s` to
+  `layout:projects`, F1–F3 to the groups, `cmd-s` to
   `projects.toggle-tree`, and `cmd-alt-]`, `cmd-alt-[` and
   `ctrl-1`…`ctrl-9` to the space commands. All of them run in the keeper's
-  copy. `projects.toggle-tree` (`ctrl-s`) runs `layout.hide` of the
+  copy. `projects.toggle-tree` (`cmd-s`) runs `layout.hide` of the
   tree's block `spaces` while it shows; while hidden, `layout.resize` of
   `spaces` and `agents` to weight 1 and `layout.show`. The group commands
   run that same show when the tree is hidden.
@@ -1286,9 +1286,10 @@ the contract a publisher codes against.
   `keys.json` merged into yours. Once edited, your keys.json no longer
   receives Herdr's new default shortcuts. In this layout, F2 replaces
   Herdr's `tab.rename`, and `cmd-alt-]`, `cmd-alt-[` and `ctrl-1`…`ctrl-9`
-  replace `space.next`, `space.prev` and `space.select:N`; `ctrl-s` no
-  longer reaches the terminal (a program that uses it, such as a shell's
-  forward search, doesn't get it); the installer
+  replace `space.next`, `space.prev` and `space.select:N`; `cmd-s`
+  closes the projects tree, except in a file of the code editor, whose
+  `mod:code-file` `cmd-s` saves (a ctrl+letter would go to a terminal
+  program that negotiated Kitty mode, Claude Code among them); the installer
   names each global key the layout's binding shadows. A key you already
   bind in `layout:projects` keeps your binding.
 - **Delete deletes.** It removes the worktree's folder, its uncommitted
@@ -1408,8 +1409,9 @@ the contract a publisher codes against.
   smaller, centered chips in the groups bar.
 - With keys.json merged, F1–F3 select groups 1–3 while a terminal has focus,
   and F2 no longer opens Rename tab in this layout.
-- With keys.json merged, `ctrl-s` hides the projects tree and the agents
-  list reaches up to the brand block; `ctrl-s` again, or F1–F3, brings the
+- With keys.json merged, `cmd-s` hides the projects tree and the agents
+  list reaches up to the brand block, also with Claude Code focused; `cmd-s`
+  again, or F1–F3, brings the
   tree back over half the column.
 - With keys.json merged and Inicio right after the shown space,
   `cmd-alt-]` and `cmd-alt-[` step through the spaces without ever showing

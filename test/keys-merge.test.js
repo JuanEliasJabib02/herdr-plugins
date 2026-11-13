@@ -21,8 +21,8 @@ const plugin = () => JSON.parse(readFileSync(PLUGIN_KEYS, "utf8"));
 
 // What the plugin binds in layout:projects, in its file's order.
 const GROUP_KEYS = { f1: "projects.group1", f2: "projects.group2", f3: "projects.group3" };
-// ctrl-s closes and opens the projects tree.
-const TREE_KEYS = { "ctrl-s": "projects.toggle-tree" };
+// cmd-s closes and opens the projects tree.
+const TREE_KEYS = { "cmd-s": "projects.toggle-tree" };
 const SPACE_KEYS = {
   "cmd-alt-]": "projects.space-next",
   "cmd-alt-[": "projects.space-prev",
@@ -60,9 +60,9 @@ const merge = (pluginPath, personPath) => spawnSync(process.execPath, [MERGE, pl
 
 // ── The plugin's keys ──────────────────────────────────────────────────────
 
-test("plugin keys.json: F1–F3 run projects.group1..3, ctrl-s projects.toggle-tree and the space keys projects.space-*, only in layout:projects", () => {
+test("plugin keys.json: F1–F3 run projects.group1..3, cmd-s projects.toggle-tree and the space keys projects.space-*, only in layout:projects", () => {
   assert.deepEqual(plugin(), { "layout:projects": PLUGIN_BINDINGS });
-  assert.deepEqual(Object.keys(plugin()["layout:projects"]), Object.keys(PLUGIN_BINDINGS), "F1–F3 first, then ctrl-s, then the space keys");
+  assert.deepEqual(Object.keys(plugin()["layout:projects"]), Object.keys(PLUGIN_BINDINGS), "F1–F3 first, then cmd-s, then the space keys");
 });
 
 // ── mergeKeys (pure) ───────────────────────────────────────────────────────
@@ -73,7 +73,7 @@ test("merge adds only the layout:projects section, after the person's sections",
   assert.deepEqual(Object.keys(keys), [...Object.keys(HERDR), "layout:projects"]);
   for (const section of Object.keys(HERDR)) assert.deepEqual(keys[section], HERDR[section], section);
   assert.deepEqual(keys["layout:projects"], PLUGIN_BINDINGS);
-  assert.deepEqual(added, addedAll(PLUGIN_BINDINGS), "F1–F3, ctrl-s and the 11 space keys");
+  assert.deepEqual(added, addedAll(PLUGIN_BINDINGS), "F1–F3, cmd-s and the 11 space keys");
 });
 
 test("merge keeps every other key: F2 still renames tabs outside the projects layout", () => {
