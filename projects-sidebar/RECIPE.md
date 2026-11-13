@@ -99,6 +99,8 @@ across repos.
     have no menu.
   - "Delete task…" deletes every workspace of the lane in this group (main
     checkouts never count), each the way Delete… does, one after another.
+    An agent's Delete… in the Agents list opens the same dialog when its
+    workspace's lane has more than one ("Delete task AX-3743 (2)…").
     The dialog takes the lane's workspaces when it opens, so one created
     after that is never deleted, and asks git about each. Only the rows git
     allows run: a locked one, one git couldn't check, or one that is no
@@ -622,11 +624,22 @@ across repos.
     "AX-3704 · backend-nimbus"), with the agent's title in its tooltip. When
     the space reads the same as its project, or it is in none, the row keeps
     the title. Grouped by space keeps the title: the header names the space;
+  - a row (an agent's or a Sleeping one) whose workspace's task has a note
+    shows that note first in its tooltip, the same note the task's lane
+    shows in Task mode ("cncelaciones · Issue AX-3697 del backend"); the
+    panel reads it from `projects.notes.v1` by the task Task mode gives the
+    workspace (`workspace-model.js`, held to `task-model.js` and `lib.js`);
   - a right-click on a row (an agent's or a Sleeping one) opens its
     workspace's menu, the sidebar's own with only Sleep, Rename… and Delete…
     (`AGENT_MENU`; the sidebar's keeps everything). The main checkout's has
     Sleep alone: it is never renamed or deleted. Sleep puts the whole
-    workspace to sleep, every agent in it, as the sidebar's does. A mod can't import another mod's
+    workspace to sleep, every agent in it, as the sidebar's does. Delete…
+    removes the worktree, its branch and its spaces, the agent with them;
+    when the workspace is in a group organized by Task and its lane (a
+    ticket or a name) has more workspaces in that group, it reads "Delete
+    task AX-3743 (2)…" and opens the Delete task dialog for that lane in
+    that group, even when it isn't the active one: every workspace of the
+    task goes (`task-model.js` `agentTaskDelete`). A mod can't import another mod's
     files, so the row opens the projects mod's `workspace-menu-at` view
     (props `{ project, path, only }`), a 1 px popup at the pointer that opens
     the real menu with just those items and closes itself; the space's
@@ -1398,6 +1411,10 @@ the contract a publisher codes against.
   a Task-mode group, one holding an untracked file), right-click its lane →
   Delete task…: the button reads "Delete anyway", and afterwards both
   folders, both merged branches and the lane are gone, and so is its note.
+- The same throwaway task, its group not the active one: right-click the
+  Claude of one of its worktrees in the Agents list → "Delete task odd-t14
+  (2)…" opens the same dialog with both rows. A worktree alone in its task,
+  or in a Project-mode group, still reads "Delete…".
 - Right-click a throwaway worktree → Rename… → a new name → Enter: with no
   terminal in it, its branch and its folder take the name. With a space
   open there, the folder stays and the row shows the new name. A branch

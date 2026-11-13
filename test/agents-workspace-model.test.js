@@ -5,10 +5,11 @@
 // worlds, and check the menu it opens.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { REGISTRY_KEY, CACHE_KEY, AGENT_MENU, workspacesBySpace, workspaceMenuSpec } from "../projects-sidebar/mods/projects-agents/workspace-model.js";
+import { REGISTRY_KEY, CACHE_KEY, NOTES_KEY, AGENT_MENU, workspacesBySpace, workspaceMenuSpec, noteKeyOfCheckout, parseNotes, noteOf } from "../projects-sidebar/mods/projects-agents/workspace-model.js";
 import { sleepCommand } from "../projects-sidebar/mods/projects/tree-model.js";
 import { sleepWorkspaceCommand, parseWorkspaceCommand } from "../agent-sleep/mods/agent-sleep/workspace-sleep.js";
-import { matchSpaces, KEYS } from "../projects-sidebar/mods/projects/lib.js";
+import { matchSpaces, KEYS, noteKeyOf, parseNotes as sidebarParseNotes, noteOf as sidebarNoteOf, NOTES_MAX } from "../projects-sidebar/mods/projects/lib.js";
+import { taskKeyOf } from "../projects-sidebar/mods/projects/task-model.js";
 import { MOD } from "../projects-sidebar/mods/projects/config.js";
 
 const HOME = "/Users/demo";
@@ -59,6 +60,7 @@ const where = () => workspacesBySpace({ registry: REGISTRY, cache: CACHE, spaces
 test("the shared keys are projects-sidebar's", () => {
   assert.equal(REGISTRY_KEY, KEYS.registry);
   assert.equal(CACHE_KEY, KEYS.cache);
+  assert.equal(NOTES_KEY, KEYS.notes);
 });
 
 test("each space gets the workspace and project projects-sidebar's matchSpaces gives it", () => {
@@ -69,8 +71,8 @@ test("each space gets the workspace and project projects-sidebar's matchSpaces g
 
 test("the project's name is the sidebar's, else its folder's; the main checkout says so", () => {
   const w = where();
-  assert.deepEqual(w.get("s1"), { project: "/code/budget-app", path: "/code/budget-app", main: true, name: "budget-app" });
-  assert.deepEqual(w.get("s2"), { project: `${HOME}/code/herdr-plugins`, path: "/ws/herdr-plugins/wahoo", main: false, name: "herdr-plugins" });
+  assert.deepEqual(w.get("s1"), { project: "/code/budget-app", path: "/code/budget-app", main: true, name: "budget-app", task: null });
+  assert.deepEqual(w.get("s2"), { project: `${HOME}/code/herdr-plugins`, path: "/ws/herdr-plugins/wahoo", main: false, name: "herdr-plugins", task: "agent-sleep" });
   assert.equal(w.get("s3").name, "backend-nimbus", "the sidebar's name, not the repo folder's");
   assert.equal(w.get("s8").name, "no-name", "a project the registry doesn't name");
   for (const id of ["s6", "s7", "s9"]) assert.equal(w.has(id), false, `${id}: remote, outside every project, or no terminal and no folder`);
@@ -104,4 +106,50 @@ test("the Sleep command projects-sidebar runs is the one agent-sleep reads (two 
     assert.equal(sleepCommand(path), `agent-sleep.${sleepWorkspaceCommand(path)}`, path);
     assert.deepEqual(parseWorkspaceCommand(sleepCommand(path).slice("agent-sleep.".length)), { kind: "sleep", path });
   }
+});
+
+// A row's tooltip starts with its task's note, the one the sidebar shows on
+// the task's lane: the workspace's task key, as Task mode keys its lane
+// (task-model.js taskKeyOf, lib.js noteKeyOf), looked up in projects.notes.v1.
+const sidebarNoteKey = (c) => {
+  const t = taskKeyOf(c);
+  return noteKeyOf(t ? `task:${t.kind === "ticket" ? t.key : t.key.toLowerCase()}` : null);
+};
+
+test("a workspace's task is the key the sidebar files its note under", () => {
+  const checkouts = [
+    { path: "/ws/backend/AX-3797", branch: "AX-3797", main: false },
+    { path: "/ws/backend/whatever", branch: "refs/heads/feat/ax-3697-cancel", main: false },
+    { path: "/ws/backend/AX-3653", branch: null, main: false },
+    { path: "/ws/backend/team_12", branch: "alex/team_12", main: false },
+    { path: "/ws/herdr-plugins/feedback-agentbar", branch: "Feedback-AgentBar", main: false },
+    { path: "/ws/herdr-plugins/x", branch: "feat/vue3", main: false },
+    { path: "/ws/x/Constructor", branch: "Constructor", main: false },
+    { path: "/ws/x/none", branch: "none", main: false },
+    { path: "/ws/x/__proto__", branch: null, main: false },
+    { path: "/code/budget-app", branch: "AX-1234", main: true },
+    { path: "/", branch: null, main: false },
+  ];
+  for (const c of checkouts) assert.equal(noteKeyOfCheckout(c), sidebarNoteKey(c), JSON.stringify(c));
+  assert.equal(noteKeyOfCheckout(checkouts[0]), "AX-3797");
+  assert.equal(noteKeyOfCheckout(checkouts[4]), "feedback-agentbar");
+  assert.equal(noteKeyOfCheckout(checkouts[9]), null, "a main checkout has no task");
+  assert.equal(where().get("s3").task, "AX-3704");
+});
+
+test("the note read is the one the sidebar reads", () => {
+  const many = Object.fromEntries(Array.from({ length: NOTES_MAX + 2 }, (_, i) => [`T-${i}`, `n${i}`]));
+  const values = [
+    undefined, null, "x", ["a"],
+    { "AX-3797": "cncelaciones", "AX-3653": "  two\n  lines  ", "feedback-agentbar": "a".repeat(40), "AX-1": "", "AX-2": 7, constructor: "no", none: "no" },
+    many,
+  ];
+  const keys = ["AX-3797", "AX-3653", "feedback-agentbar", "AX-1", "AX-2", "constructor", "none", "T-0", `T-${NOTES_MAX}`, null, undefined];
+  for (const v of values) {
+    for (const k of keys) assert.equal(noteOf(parseNotes(v), k), sidebarNoteOf(sidebarParseNotes(v), k), `${JSON.stringify(v)?.slice(0, 40)} ${k}`);
+  }
+  const notes = parseNotes(values[4]);
+  assert.equal(noteOf(notes, "AX-3797"), "cncelaciones");
+  assert.equal(noteOf(notes, "AX-3653"), "two lines");
+  assert.equal(noteOf(notes, "AX-9999"), null);
 });

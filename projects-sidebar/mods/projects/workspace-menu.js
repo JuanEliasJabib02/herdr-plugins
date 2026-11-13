@@ -12,7 +12,11 @@
 // uses gpui's clipboard (D21), then a toast says what was copied. With
 // `only` (props.only, a list of own item ids) it draws just those of its own
 // items and no plugin's: the Agents list's rows ask for Sleep, Rename… and
-// Delete….
+// Delete…. There, when the workspace's task has more workspaces in a group
+// organized by Task (task-model.js agentTaskDelete), Delete… reads "Delete
+// task AX-3743 (2)…" and opens the Delete task dialog for that task in that
+// group, the one a lane's right-click opens: every workspace of the task
+// goes, not just this one.
 
 import { div, svg } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
@@ -22,8 +26,10 @@ import { normPath, baseName, matchSpaces } from "./lib.js";
 import * as store from "./store.js";
 import { workspaceMenuItems, workspaceLabel, workspacesOf, sleepCommand } from "./tree-model.js";
 import { workspaceMenuList, subMenuOf, menuChoice, menuRowKey, menuHeight } from "./menus-model.js";
+import { agentTaskDelete, withTaskDelete } from "./task-model.js";
 import { execFailure, startFailure } from "./badges-model.js";
 import { openDeleteWorkspace } from "./delete-workspace.js";
+import { openDeleteTask } from "./delete-task.js";
 import { openRenameWorkspace } from "./rename-workspace.js";
 
 // props.only: a list of own item ids, or null for the whole menu.
@@ -48,12 +54,15 @@ function sleepOf(row) {
 
 // What the menu draws: { title, items, empty }. The workspace's own items,
 // then the plugins' (store.menus, by its path); with `sub`, the items of that
-// plugin item's submenu; with `only`, just those own items. The opener and
+// plugin item's submenu; with `only`, just those own items, Delete… the
+// whole task's when it has more workspaces (withTaskDelete). The opener and
 // the view both build it here, so the popup's height fits the list drawn.
 export function menuOf(project, path, sub, only = null) {
   if (only) {
     const row = rowOf(project, path);
-    return { title: row ? workspaceLabel(row) : "", items: workspaceMenuItems(row, sleepOf(row)).filter((it) => only.includes(it.id)), empty: "Nothing to do here." };
+    const items = workspaceMenuItems(row, sleepOf(row)).filter((it) => only.includes(it.id));
+    const task = only.includes("delete") ? agentTaskDelete(store.registry(), store.cache(), project, path) : null;
+    return { title: row ? workspaceLabel(row) : "", items: withTaskDelete(items, task), empty: "Nothing to do here." };
   }
   const plugin = path ? store.menus()[normPath(path)] ?? [] : [];
   if (sub) {
@@ -115,7 +124,8 @@ export default class WorkspaceMenu {
     } else if (c.exec) this.act(item, c.exec, cx);
   }
 
-  // This plugin's own items: Sleep, a copy, or the Rename / Delete dialog.
+  // This plugin's own items: Sleep, a copy, or the Rename / Delete dialog
+  // (the Delete task dialog when Delete… carries a task, withTaskDelete).
   chooseOwn(item, cx) {
     if (item.text !== undefined) {
       cx.write_to_clipboard(item.text);
@@ -124,7 +134,8 @@ export default class WorkspaceMenu {
     this.close();
     if (item.id === "sleep") this.sleep();
     if (item.id === "rename") openRenameWorkspace(this.project, this.path);
-    if (item.id === "delete") openDeleteWorkspace(this.project, this.path);
+    if (item.id === "delete" && item.task) openDeleteTask(item.task.lane, item.task.label, item.task.group);
+    else if (item.id === "delete") openDeleteWorkspace(this.project, this.path);
   }
 
   // Sleep (T6): agent-sleep's `sleep-workspace.<hex>` with this workspace's
