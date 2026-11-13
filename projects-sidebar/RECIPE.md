@@ -17,6 +17,14 @@ across repos.
   (Herdr's, with the tree's working mark),
   the groups bar (44 px), then the footer. Background `chrome`, text 13 px
   in the person's UI font.
+- **Closing the projects tree:** `ctrl-s` hides the tree's block
+  (`spaces`) and the agents list takes the whole column, from under the
+  brand block down to the groups bar; `ctrl-s` again shows it, and the two
+  split the column in half, whatever the divider between them had before.
+  Picking a group (F1–F3 or a chip) shows a hidden tree the same way, since
+  that is wanting to see its projects; a tree already shown keeps its
+  divider. Herdr keeps the tree hidden across a reload
+  (`layouts/.state/projects.json`).
 - **Projects tree:**
   - Header: 31 px, 11.5 px `dim` text. It reads "Projects · <group>", or
     "Projects" for the default group, with a filter button ("Filter
@@ -709,10 +717,15 @@ across repos.
   `projects.space-next`, `projects.space-prev`,
   `projects.space-1`..`projects.space-9`, `projects.toggle-sleeping`
   (Hide sleeping on or off, Orca's "Toggle Sleeping Workspaces", with no
-  default key). `keys.json` binds, in section
-  `layout:projects`, F1–F3 to the groups, and `cmd-alt-]`, `cmd-alt-[` and
+  default key), `projects.toggle-tree` (close or open the projects tree).
+  `keys.json` binds, in section
+  `layout:projects`, F1–F3 to the groups, `ctrl-s` to
+  `projects.toggle-tree`, and `cmd-alt-]`, `cmd-alt-[` and
   `ctrl-1`…`ctrl-9` to the space commands. All of them run in the keeper's
-  copy.
+  copy. `projects.toggle-tree` (`ctrl-s`) runs `layout.hide` of the
+  tree's block `spaces` while it shows; while hidden, `layout.resize` of
+  `spaces` and `agents` to weight 1 and `layout.show`. The group commands
+  run that same show when the tree is hidden.
 - **Herdr functions:** `spaces`, `panes`, `agents`, `focused`,
   `knownAgents`, `layout`, `window`, `machines`, `keys`, `home`,
   `pickFolder`, `watchFolder`, `exec`, `run` (`space.select`, `space.new`,
@@ -1273,7 +1286,9 @@ the contract a publisher codes against.
   `keys.json` merged into yours. Once edited, your keys.json no longer
   receives Herdr's new default shortcuts. In this layout, F2 replaces
   Herdr's `tab.rename`, and `cmd-alt-]`, `cmd-alt-[` and `ctrl-1`…`ctrl-9`
-  replace `space.next`, `space.prev` and `space.select:N`; the installer
+  replace `space.next`, `space.prev` and `space.select:N`; `ctrl-s` no
+  longer reaches the terminal (a program that uses it, such as a shell's
+  forward search, doesn't get it); the installer
   names each global key the layout's binding shadows. A key you already
   bind in `layout:projects` keeps your binding.
 - **Delete deletes.** It removes the worktree's folder, its uncommitted
@@ -1393,6 +1408,9 @@ the contract a publisher codes against.
   smaller, centered chips in the groups bar.
 - With keys.json merged, F1–F3 select groups 1–3 while a terminal has focus,
   and F2 no longer opens Rename tab in this layout.
+- With keys.json merged, `ctrl-s` hides the projects tree and the agents
+  list reaches up to the brand block; `ctrl-s` again, or F1–F3, brings the
+  tree back over half the column.
 - With keys.json merged and Inicio right after the shown space,
   `cmd-alt-]` and `cmd-alt-[` step through the spaces without ever showing
   Inicio, and wrap at the ends; `ctrl-1`…`ctrl-9` select the spaces they
