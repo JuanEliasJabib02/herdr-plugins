@@ -621,12 +621,12 @@ across repos.
     shows.
   - a row in Priority (and a pinned one, and a Sleeping one) reads "space ·
     project", the project as the sidebar names it ("main · budget-app",
-    "AX-3704 · backend-nimbus"), with the agent's title in its tooltip. When
+    "AX-3704 · backend-nimbus"). When
     the space reads the same as its project, or it is in none, the row keeps
     the title. Grouped by space keeps the title: the header names the space;
-  - a row (an agent's or a Sleeping one) whose workspace's task has a note
-    shows that note first in its tooltip, the same note the task's lane
-    shows in Task mode ("cncelaciones · Issue AX-3697 del backend"); the
+  - a row's tooltip (an agent's or a Sleeping one) is its workspace's task
+    note and nothing else, the same note the task's lane shows in Task mode
+    ("cncelaciones"); a row whose task has no note has no tooltip. The
     panel reads it from `projects.notes.v1` by the task Task mode gives the
     workspace (`workspace-model.js`, held to `task-model.js` and `lib.js`);
   - a right-click on a row (an agent's or a Sleeping one) opens its
