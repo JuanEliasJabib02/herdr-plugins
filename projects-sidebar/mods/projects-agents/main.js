@@ -422,7 +422,8 @@ export default class Agents extends View {
     const sleepRow = (s) => {
       const project = projectOf(s.spaceId, s.space);
       const more = project ?? s.detail;
-      const tip = withNote(s.spaceId, project && s.detail ? `${s.detail} \u00b7 asleep, opening it wakes Claude` : "Asleep \u00b7 opening it wakes Claude");
+      // As an agent's: the note, then the title when the project took its place.
+      const tip = withNote(s.spaceId, project ? s.detail : null);
       return h_flex()
         .id(`zz-${s.address}`)
         .px(8)
@@ -433,7 +434,7 @@ export default class Agents extends View {
         .gap(9)
         .cursor_pointer()
         .hover((st) => st.bg(t.hover))
-        .tooltip(tip)
+        .when(Boolean(tip), (el) => el.tooltip(tip))
         .on_mouse_down("right", openMenu(s.spaceId))
         .on_click(() => run("pane.focus", { pane: s.pane }))
         .when(Boolean(s.icon), (el) => el.child(svg(s.icon).size(16).flex_none().text_color(t.dim)))
