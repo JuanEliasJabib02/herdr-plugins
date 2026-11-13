@@ -786,6 +786,64 @@ test("every existing projects.* command runs from the keeper copy, the tree copy
   assert.equal(w.toasts.filter((n) => n.title === "projects: ping").length, 2, "the loop goes on after it");
 });
 
+// ctrl-s hides the projects tree and the agents list takes the whole column;
+// shown again, the two split it in half, whatever the divider had. F1–F3
+// picking a group is wanting to see its projects, so they show a hidden tree
+// the same way; a shown tree keeps its divider, and a key with no group does
+// nothing.
+const SIDEBAR = JSON.parse(readFileSync(new URL("../projects-sidebar/layouts/projects.json", import.meta.url), "utf8"));
+const nodeOf = (n, id) => (n.id === id ? n : (n.children ?? []).map((c) => nodeOf(c, id)).find(Boolean));
+// The shipped layout with the tree hidden or shown, as layout() gives it.
+function sidebarWith(hidden) {
+  const copy = structuredClone(SIDEBAR);
+  nodeOf(copy, "spaces").hidden = hidden;
+  return copy;
+}
+const SHOW_HALF = [
+  ["layout.resize", { id: "spaces", weight: 1 }],
+  ["layout.resize", { id: "agents", weight: 1 }],
+  ["layout.show", { id: "spaces" }],
+];
+
+test("ctrl-s runs projects.toggle-tree, over the tree's block and the agents list beside it, half each in the shipped layout", () => {
+  const keys = JSON.parse(readFileSync(new URL("../projects-sidebar/keys.json", import.meta.url), "utf8"));
+  assert.equal(keys["layout:projects"]["ctrl-s"], "projects.toggle-tree");
+  assert.deepEqual(nodeOf(SIDEBAR, "sidebar-lists").children.map((c) => [c.id, c.content.mod, c.size]), [
+    ["spaces", "projects", { weight: 1 }],
+    ["agents", "projects-agents", { weight: 1 }],
+  ]);
+});
+
+test("toggle-tree hides a shown tree, and shows a hidden one over half the column", async () => {
+  const w = world();
+  await copyOf(w, "keeper");
+  let tree = sidebarWith(false);
+  fake.layout = () => tree;
+  await send(w, "toggle-tree");
+  assert.deepEqual(w.runs, [["layout.hide", { id: "spaces" }]]);
+  w.runs.length = 0;
+  tree = sidebarWith(true);
+  await send(w, "toggle-tree");
+  assert.deepEqual(w.runs, SHOW_HALF);
+});
+
+test("F1–F3 show a hidden tree over half the column; a shown tree keeps its divider; a key with no group does nothing", async () => {
+  const w = world();
+  await copyOf(w, "keeper");
+  let tree = sidebarWith(true);
+  fake.layout = () => tree;
+  const moves = () => w.runs.filter(([n]) => n.startsWith("layout."));
+  await send(w, "group2");
+  assert.equal(w.shared["projects.v1"].activeGroup, "g2");
+  assert.deepEqual(moves(), SHOW_HALF);
+  await send(w, "group3");
+  assert.deepEqual(moves(), SHOW_HALF, "no third group: the tree stays as it was");
+  tree = sidebarWith(false);
+  await send(w, "group1");
+  assert.equal(w.shared["projects.v1"].activeGroup, "g1");
+  assert.deepEqual(moves(), SHOW_HALF, "shown already: no resize, no show");
+});
+
 test("the space keys run from the keeper copy over the order without Inicio", async () => {
   const w = world(); // a, b (shown), Inicio, c
   await copyOf(w, "keeper");

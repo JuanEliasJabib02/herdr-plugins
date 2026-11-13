@@ -4,12 +4,14 @@
 // holds a workspace whose agent is blocked or done, and "+" for a new group.
 // The name, what needs a look and the key (F1–F3 on the first three:
 // keys.json, section layout:projects) are in the chip's tooltip. Click a chip
-// to show its projects; right-click it for Rename and Delete. Below 160 px the
-// sidebar is a rail: the chips are smaller and centered, without "+".
+// to show its projects; right-click it for Rename and Delete. Picking a group
+// (a click or F1–F3) also shows the projects tree if ctrl-s had hidden it.
+// Below 160 px the sidebar is a rail: the chips are smaller and centered,
+// without "+".
 
 import { div, svg } from "gpui-kit";
 import { h_flex } from "gpui-base";
-import { theme, layout, spaces, panes, home } from "herdr";
+import { theme, layout, spaces, panes, home, run } from "herdr";
 import { icon } from "./config.js";
 import { activeGroup, selectGroup, matchSpaces, attentionByGroup } from "./lib.js";
 import { registry, updateRegistry, cache } from "./store.js";
@@ -31,9 +33,34 @@ function find(node, id) {
 // The sidebar's width; below 160 px it is a rail (mods/spaces/main.js).
 const sidebarPx = () => find(layout(), "sidebar")?.size?.px ?? Infinity;
 
+// The blocks of the projects tree and of the agents list below it
+// (layouts/projects.json). ctrl-s (projects.toggle-tree) hides the tree and
+// the agents list takes the whole column; it shows it again over half the
+// column, whatever the divider between them had before.
+const TREE = "spaces";
+const AGENTS = "agents";
+const treeHidden = () => Boolean(find(layout(), TREE)?.hidden);
+
+function showTree() {
+  run("layout.resize", { id: TREE, weight: 1 });
+  run("layout.resize", { id: AGENTS, weight: 1 });
+  run("layout.show", { id: TREE });
+}
+
+const toggleTree = () => (treeHidden() ? showTree() : run("layout.hide", { id: TREE }));
+
+// Picking a group is wanting to see its projects: it becomes the active one,
+// and the tree shows if ctrl-s had hidden it. A tree already shown keeps its
+// divider.
+function pick(id) {
+  updateRegistry((r) => selectGroup(r, id));
+  if (treeHidden()) showTree();
+}
+
 // Shows the n-th group (from 1), as F1–F3 do; nothing when there is none.
 function selectNth(n) {
-  updateRegistry((r) => (r.groups[n - 1] ? selectGroup(r, r.groups[n - 1].id) : r));
+  const g = registry().groups[n - 1];
+  if (g) pick(g.id);
 }
 
 // The dot of each group, or null: { color, label }, the blocked color while
@@ -69,7 +96,7 @@ export default class Groups {
       .when(on, (el) => el.bg(t.selected))
       .when(!on, (el) => el.hover((s) => s.bg(t.hover).text_color(t.foreground)))
       .tooltip([g.name, dot?.label, key].filter(Boolean).join(" · "))
-      .on_click(() => updateRegistry((r) => selectGroup(r, g.id)))
+      .on_click(() => pick(g.id))
       .on_mouse_down("right", (_e, cx) => {
         cx.stop_propagation();
         openGroupMenu(g.id);
@@ -111,9 +138,11 @@ export default class Groups {
   }
 }
 
-// Key commands (projects.group1..3): F1–F3 in the projects layout.
+// Key commands (projects.group1..3, projects.toggle-tree): F1–F3 and ctrl-s
+// in the projects layout.
 export const commands = {
   group1: () => selectNth(1),
   group2: () => selectNth(2),
   group3: () => selectNth(3),
+  "toggle-tree": toggleTree,
 };
