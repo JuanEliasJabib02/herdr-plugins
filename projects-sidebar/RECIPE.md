@@ -622,6 +622,11 @@ across repos.
     "AX-3704 · backend-nimbus"), with the agent's title in its tooltip. When
     the space reads the same as its project, or it is in none, the row keeps
     the title. Grouped by space keeps the title: the header names the space;
+  - a row (an agent's or a Sleeping one) whose workspace's task has a note
+    shows that note first in its tooltip, the same note the task's lane
+    shows in Task mode ("cncelaciones · Issue AX-3697 del backend"); the
+    panel reads it from `projects.notes.v1` by the task Task mode gives the
+    workspace (`workspace-model.js`, held to `task-model.js` and `lib.js`);
   - a right-click on a row (an agent's or a Sleeping one) opens its
     workspace's menu, the sidebar's own with only Sleep, Rename… and Delete…
     (`AGENT_MENU`; the sidebar's keeps everything). The main checkout's has
