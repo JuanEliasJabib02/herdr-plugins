@@ -5,7 +5,7 @@
 // The name, what needs a look and the key (F1–F3 on the first three:
 // keys.json, section layout:projects) are in the chip's tooltip. Click a chip
 // to show its projects; right-click it for Rename and Delete. Picking a group
-// (a click or F1–F3) also shows the projects tree if ctrl-s had hidden it.
+// (a click or F1–F3) also shows the projects tree if cmd-s had hidden it.
 // Below 160 px the sidebar is a rail: the chips are smaller and centered,
 // without "+".
 
@@ -34,7 +34,7 @@ function find(node, id) {
 const sidebarPx = () => find(layout(), "sidebar")?.size?.px ?? Infinity;
 
 // The blocks of the projects tree and of the agents list below it
-// (layouts/projects.json). ctrl-s (projects.toggle-tree) hides the tree and
+// (layouts/projects.json). cmd-s (projects.toggle-tree) hides the tree and
 // the agents list takes the whole column; it shows it again over half the
 // column, whatever the divider between them had before.
 const TREE = "spaces";
@@ -50,7 +50,7 @@ function showTree() {
 const toggleTree = () => (treeHidden() ? showTree() : run("layout.hide", { id: TREE }));
 
 // Picking a group is wanting to see its projects: it becomes the active one,
-// and the tree shows if ctrl-s had hidden it. A tree already shown keeps its
+// and the tree shows if cmd-s had hidden it. A tree already shown keeps its
 // divider.
 function pick(id) {
   updateRegistry((r) => selectGroup(r, id));
@@ -138,7 +138,7 @@ export default class Groups {
   }
 }
 
-// Key commands (projects.group1..3, projects.toggle-tree): F1–F3 and ctrl-s
+// Key commands (projects.group1..3, projects.toggle-tree): F1–F3 and cmd-s
 // in the projects layout.
 export const commands = {
   group1: () => selectNth(1),

@@ -786,7 +786,7 @@ test("every existing projects.* command runs from the keeper copy, the tree copy
   assert.equal(w.toasts.filter((n) => n.title === "projects: ping").length, 2, "the loop goes on after it");
 });
 
-// ctrl-s hides the projects tree and the agents list takes the whole column;
+// cmd-s hides the projects tree and the agents list takes the whole column;
 // shown again, the two split it in half, whatever the divider had. F1–F3
 // picking a group is wanting to see its projects, so they show a hidden tree
 // the same way; a shown tree keeps its divider, and a key with no group does
@@ -805,9 +805,12 @@ const SHOW_HALF = [
   ["layout.show", { id: "spaces" }],
 ];
 
-test("ctrl-s runs projects.toggle-tree, over the tree's block and the agents list beside it, half each in the shipped layout", () => {
+test("cmd-s runs projects.toggle-tree, over the tree's block and the agents list beside it, half each in the shipped layout", () => {
   const keys = JSON.parse(readFileSync(new URL("../projects-sidebar/keys.json", import.meta.url), "utf8"));
-  assert.equal(keys["layout:projects"]["ctrl-s"], "projects.toggle-tree");
+  assert.equal(keys["layout:projects"]["cmd-s"], "projects.toggle-tree");
+  // ctrl+letters go to a terminal program that negotiated Kitty mode (Claude
+  // Code types an "s"), so the toggle never takes one.
+  assert.equal(keys["layout:projects"]["ctrl-s"], undefined);
   assert.deepEqual(nodeOf(SIDEBAR, "sidebar-lists").children.map((c) => [c.id, c.content.mod, c.size]), [
     ["spaces", "projects", { weight: 1 }],
     ["agents", "projects-agents", { weight: 1 }],
