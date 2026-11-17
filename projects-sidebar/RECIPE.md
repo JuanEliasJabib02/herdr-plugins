@@ -514,8 +514,8 @@ across repos.
     project, a project's main checkout, or an origin that isn't GitHub
     (Bitbucket's, for now). It shows again on the next workspace with
     something to say.
-  - "Abrir en GitHub" runs `open <url>`, so with the arc-spaces plugin the
-    PR opens in the Arc space of the workspace's group, where that group's
+  - "Abrir en GitHub" runs `open <url>`, so with the dia-profiles plugin the
+    PR opens in the Dia profile of the workspace's group, where that group's
     GitHub account is signed in. Only a `https://github.com/` URL is
     opened; a failure is a toast.
 - **Mergear** (the card's "Mergear ▾"):

@@ -1,4 +1,4 @@
-// T2: what the settings dialog stores (D5) and what the plugin's folder must
+// What the settings dialog stores and what the plugin's folder must
 // be: a dialog that docks nowhere, with no `requires` and no keys, so
 // installing it never reinstalls projects-sidebar.
 import { test } from "node:test";
@@ -7,14 +7,24 @@ import { spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { KEY, GROUPS_KEY, parseConfig, withEnabled, withName, groupsOf, isLinked } from "../arc-spaces/mods/arc-spaces/model.js";
+import { KEY, ARC_KEY, GROUPS_KEY, parseConfig, storedConfig, withEnabled, withName, groupsOf, isLinked } from "../dia-profiles/mods/dia-profiles/model.js";
 
-const plugin = (path) => new URL(`../arc-spaces/${path}`, import.meta.url);
+const plugin = (path) => new URL(`../dia-profiles/${path}`, import.meta.url);
 
 test("the keys are the ones the wrapper reads", () => {
-  const wrapper = readFileSync(plugin("mods/arc-spaces/bin/open"), "utf8");
-  assert.ok(wrapper.includes(`$s["${KEY}"]`));
+  const wrapper = readFileSync(plugin("mods/dia-profiles/bin/open"), "utf8");
+  assert.ok(wrapper.includes(`$s["${KEY}"] // $s["${ARC_KEY}"]`));
+  assert.ok(wrapper.includes(`.["${KEY}"] // .["${ARC_KEY}"]`));
   assert.ok(wrapper.includes(`$s["${GROUPS_KEY}"]`));
+});
+
+test("the stored config is this plugin's, else the one arc-spaces left", () => {
+  const ours = { enabled: false, names: { g1: "Work" } };
+  const arc = { enabled: true, names: { g1: "Action" } };
+  const reader = (stored) => (key) => stored[key];
+  assert.deepEqual(storedConfig(reader({ [KEY]: ours, [ARC_KEY]: arc })), ours);
+  assert.deepEqual(storedConfig(reader({ [ARC_KEY]: arc })), arc);
+  assert.deepEqual(storedConfig(reader({})), { enabled: false, names: {} });
 });
 
 test("nothing stored, or a value of the wrong shape: off, no names", () => {
@@ -72,8 +82,8 @@ test("no registry, or a bad one: no groups", () => {
 });
 
 test("the link counts only when it points at this home's installed wrapper", () => {
-  assert.equal(isLinked("/h/mods/arc-spaces/bin/open\n", "/h"), true);
-  assert.equal(isLinked("/other/mods/arc-spaces/bin/open\n", "/h"), false);
+  assert.equal(isLinked("/h/mods/dia-profiles/bin/open\n", "/h"), true);
+  assert.equal(isLinked("/other/mods/dia-profiles/bin/open\n", "/h"), false);
   assert.equal(isLinked("", "/h"), false);
 });
 
@@ -81,13 +91,13 @@ test("the link counts only when it points at this home's installed wrapper", () 
 // fields. Herdr refuses InputState.new during render, and only this one sees it.
 const herdr = spawnSync("herdr-app", ["--version"]).status === 0;
 test("the dialog draws with the switch on", { skip: herdr ? false : "herdr-app isn't installed" }, () => {
-  const home = mkdtempSync("/tmp/arc-check-");
+  const home = mkdtempSync("/tmp/dia-check-");
   try {
     writeFileSync(join(home, "shared.json"), JSON.stringify({
       [KEY]: { enabled: true, names: { g1: "Nimbus" } },
       [GROUPS_KEY]: { groups: [{ id: "g1", name: "Work", projects: [] }, { id: "g2", name: "Personal", projects: [] }], activeGroup: "g1" },
     }));
-    const result = spawnSync("herdr-app", ["check", fileURLToPath(plugin("mods/arc-spaces"))], {
+    const result = spawnSync("herdr-app", ["check", fileURLToPath(plugin("mods/dia-profiles"))], {
       encoding: "utf8",
       env: { ...process.env, HOME: home, HERDR_APP_HOME: home },
     });
@@ -98,7 +108,7 @@ test("the dialog draws with the switch on", { skip: herdr ? false : "herdr-app i
 });
 
 test("the plugin is a dialog that docks nowhere, with no requires and no keys", () => {
-  const mod = JSON.parse(readFileSync(plugin("mods/arc-spaces/mod.json"), "utf8"));
+  const mod = JSON.parse(readFileSync(plugin("mods/dia-profiles/mod.json"), "utf8"));
   assert.equal(mod.place, "none");
   assert.equal(mod.overlay.kind, "dialog");
   assert.equal(existsSync(plugin("requires")), false);

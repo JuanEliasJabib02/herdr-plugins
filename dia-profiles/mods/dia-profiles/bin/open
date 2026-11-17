@@ -1,14 +1,14 @@
 #!/bin/sh
-# open: macOS's open, except for a link clicked in Herdr, which opens in the Arc
-# space of its group (the arc-spaces plugin). Herdr runs `open <url>` by name,
+# open: macOS's open, except for a link clicked in Herdr, which opens in the Dia
+# profile of its group (the dia-profiles plugin). Herdr runs `open <url>` by name,
 # and /usr/local/bin comes before /usr/bin on its PATH, so a link there gets here.
 # Everything else on this Mac that runs `open`, and anything that goes wrong,
 # ends in the real one.
 #
-# ARC_SPACES_OPEN, _OSASCRIPT, _HERDR, _HC, _APP, _TIMEOUT, _LS_TIMEOUT and
+# DIA_PROFILES_OPEN, _OSASCRIPT, _HERDR, _HC, _APP, _TIMEOUT, _LS_TIMEOUT and
 # _HC_TIMEOUT are for the tests.
 
-real=${ARC_SPACES_OPEN:-/usr/bin/open}
+real=${DIA_PROFILES_OPEN:-/usr/bin/open}
 
 # A link is one http(s) URL. Every other call goes through before any work.
 [ $# -eq 1 ] || exec "$real" "$@"
@@ -27,8 +27,9 @@ esac
 
 home=${HERDR_APP_HOME:-"$HOME/.config/herdr-app"}
 
-# Off, or no group has a name: nothing to ask Herdr.
-jq -e '(.["arc-spaces.v1"] // {}) | .enabled == true and any((.names // {})[]?; type == "string" and test("\\S"))' \
+# Off, or no group has a name: nothing to ask Herdr. Until this plugin saves its
+# own config, the one its Arc version (arc-spaces) saved counts.
+jq -e '(.["dia-profiles.v1"] // .["arc-spaces.v1"] // {}) | .enabled == true and any((.names // {})[]?; type == "string" and test("\\S"))' \
   "$home/shared.json" >/dev/null 2>&1 || exec "$real" "$@"
 
 # Runs a command for at most $1 whole seconds (at most a day; a bad value: 1). The
@@ -39,7 +40,7 @@ jq -e '(.["arc-spaces.v1"] // {}) | .enabled == true and any((.names // {})[]?; 
 limit_pl='my $s = int(shift); $s = 86400 if $s > 86400; $s = 1 unless $s >= 1; $SIG{ALRM} = "DEFAULT"; alarm $s; exec { $ARGV[0] } @ARGV or exit 127'
 limit() { /usr/bin/perl -e "$limit_pl" "$@"; }
 
-listing=$(limit "${ARC_SPACES_LS_TIMEOUT:-3}" "${ARC_SPACES_HERDR:-$parent}" ls 2>/dev/null) || exec "$real" "$@"
+listing=$(limit "${DIA_PROFILES_LS_TIMEOUT:-3}" "${DIA_PROFILES_HERDR:-$parent}" ls 2>/dev/null) || exec "$real" "$@"
 
 # Where the shown space is now, as projects-sidebar's placeOf: its first
 # terminal with a live folder (herdr-core's record, which Herdr reads), else the
@@ -47,7 +48,7 @@ listing=$(limit "${ARC_SPACES_LS_TIMEOUT:-3}" "${ARC_SPACES_HERDR:-$parent}" ls 
 # runs under one limit; when it runs out, the folder it was made in. Each hc get
 # carries the same limit, so one left running when the search is cut ends by
 # itself. A space on another machine has no terminal looked at.
-hc_timeout=${ARC_SPACES_HC_TIMEOUT:-3}
+hc_timeout=${DIA_PROFILES_HC_TIMEOUT:-3}
 live=$(printf '%s\n' "$listing" | limit "$hc_timeout" /bin/sh -c '
   set -f
   IFS="
@@ -57,15 +58,15 @@ live=$(printf '%s\n' "$listing" | limit "$hc_timeout" /bin/sh -c '
     record=$(/usr/bin/perl -e "$3" "$2" "$1" get "$terminal" 2>/dev/null) || continue
     live=$(printf "%s\n" "$record" | jq -r ".foreground.cwd // .cwd // empty | strings" 2>/dev/null)
     [ -n "$live" ] && { printf "%s\n" "$live"; exit 0; }
-  done' sh "${ARC_SPACES_HC:-hc}" "$hc_timeout" "$limit_pl" 2>/dev/null)
+  done' sh "${DIA_PROFILES_HC:-hc}" "$hc_timeout" "$limit_pl" 2>/dev/null)
 
-# The Arc space, or nothing when the group has no name or anything here fails.
+# The Dia profile, or nothing when the group has no name or anything here fails.
 # Asked at the click, so it can't be stale: the place gives the project (the
 # longest checkout holding it, as projects-sidebar's matchSpaces), the project
 # gives the group. A space outside every group, or on another machine, uses the
 # active group, as Orca does. The switch is checked again: the file may have
 # changed since the first look.
-space=$(printf '%s\n' "$listing" | jq -r --arg live "$live" --arg userhome "$HOME" --slurpfile shared "$home/shared.json" '
+profile=$(printf '%s\n' "$listing" | jq -r --arg live "$live" --arg userhome "$HOME" --slurpfile shared "$home/shared.json" '
   # projects-sidebar normPath: forward slashes, no trailing slash ("/" stays).
   def slashes: if type == "string" then gsub("\\\\"; "/") else . end;
   def norm: slashes | if type == "string" and . != "" then (sub("/+$"; "") | if . == "" then "/" else . end) else "" end;
@@ -81,7 +82,7 @@ space=$(printf '%s\n' "$listing" | jq -r --arg live "$live" --arg userhome "$HOM
   # first group of an id wins; no group left reads as emptyRegistry (g1); an
   # unknown active group is the first. (Its first-claim-of-a-path rule needs no
   # copy: the first group listing a project is the one found below anyway.)
-  # test/arc-spaces-open.test.js runs lib.js and this on the same cases.
+  # test/dia-profiles-open.test.js runs lib.js and this on the same cases.
   def registry:
     . as $raw
     | (if type == "object" and .version == 1 and (.groups | type == "array") then
@@ -95,7 +96,7 @@ space=$(printf '%s\n' "$listing" | jq -r --arg live "$live" --arg userhome "$HOM
     | if $groups == [] then {groups: [{id: "g1", paths: []}], active: "g1"}
       else {groups: $groups, active: (if any($groups[]; .id == $raw.activeGroup) then $raw.activeGroup else $groups[0].id end)} end;
   $shared[0] as $s
-  | ($s["arc-spaces.v1"] // {}) as $config
+  | ($s["dia-profiles.v1"] // $s["arc-spaces.v1"] // {}) as $config
   | select($config.enabled == true)
   | ($s["projects.v1"] | registry) as $registry
   | ([.spaces[] | select(.active == true)][0]) as $shown
@@ -115,31 +116,33 @@ space=$(printf '%s\n' "$listing" | jq -r --arg live "$live" --arg userhome "$HOM
   | ($own // $registry.active) as $group
   | ($config.names[$group] // "") | gsub("^\\s+|\\s+$"; "")
 ' 2>/dev/null)
-[ -n "$space" ] || exec "$real" "$@"
+[ -n "$profile" ] || exec "$real" "$@"
 
-# A missing app can stop AppleScript on a "Where is Arc?" dialog.
-if [ ! -d "${ARC_SPACES_APP:-/Applications/Arc.app}" ] && [ ! -d "$HOME/Applications/Arc.app" ]; then
+# A missing app can stop AppleScript on a "Where is Dia?" dialog.
+if [ ! -d "${DIA_PROFILES_APP:-/Applications/Dia.app}" ] && [ ! -d "$HOME/Applications/Dia.app" ]; then
   exec "$real" "$@"
 fi
 
-# Orca's script (src/main/arc-space-url-open.ts). The URL and the name go as
-# arguments, so neither can become script text. The limit: the first use waits
-# on macOS's Automation prompt, and a hung Arc must not eat the click. As in
-# Orca, a click that runs out of time also goes to the real open.
-limit "${ARC_SPACES_TIMEOUT:-10}" "${ARC_SPACES_OSASCRIPT:-/usr/bin/osascript}" \
+# Orca's Arc script (src/main/arc-space-url-open.ts) in Dia's words: a profile
+# is what Dia's dictionary has for an Arc space. A name Dia doesn't have fails
+# ("Can't get profile"), and that goes to the real open. The URL and the name go
+# as arguments, so neither can become script text. The limit: the first use
+# waits on macOS's Automation prompt, and a hung Dia must not eat the click. As
+# in Orca, a click that runs out of time also goes to the real open.
+limit "${DIA_PROFILES_TIMEOUT:-10}" "${DIA_PROFILES_OSASCRIPT:-/usr/bin/osascript}" \
   -e 'on run argv' \
   -e 'set targetUrl to item 1 of argv' \
-  -e 'set spaceName to item 2 of argv' \
-  -e 'tell application id "company.thebrowser.Browser"' \
+  -e 'set profileName to item 2 of argv' \
+  -e 'tell application id "company.thebrowser.dia"' \
   -e 'activate' \
   -e 'tell front window' \
-  -e 'tell space spaceName' \
+  -e 'tell profile profileName' \
   -e 'focus' \
   -e 'make new tab with properties {URL:targetUrl}' \
   -e 'end tell' \
   -e 'end tell' \
   -e 'end tell' \
   -e 'end run' \
-  "$1" "$space" >/dev/null 2>&1 && exit 0
+  "$1" "$profile" >/dev/null 2>&1 && exit 0
 
 exec "$real" "$@"
