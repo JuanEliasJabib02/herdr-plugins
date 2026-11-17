@@ -39,7 +39,9 @@ for Herdr to control Dia; that click may open in Dia as usual while you answer.
 This plugin is arc-spaces moved to Dia. The switch and the names you saved
 there carry over, until you change them here: name your Dia profiles like your
 Arc spaces and there's nothing to type. Swap the plugin and point the link at
-the new wrapper:
+the new wrapper (`--uninstall arc-spaces` needs a checkout that still has the
+`arc-spaces/` folder; without one, `rm -r` its two entries in Herdr's home:
+`mods/arc-spaces` and `.herdr-plugins/arc-spaces.txt`):
 
 ```sh
 scripts/install.sh --uninstall arc-spaces
