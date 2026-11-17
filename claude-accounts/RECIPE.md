@@ -65,8 +65,15 @@ the same files and run the same commands: see [CONTRACT.md](CONTRACT.md).
   weren't moved." with **Review**, a terminal waiting for idle, a restart
   that failed with the `claude --resume <session>` command to run by hand,
   "Claude in … is asking a question" with the question a restarted Claude
-  stopped at, and "Sign-in link copied. Open it in a private window to sign
-  in with a different account."
+  stopped at, "Claude in … isn't in Agents" when a Claude the switch
+  restarted still isn't in Herdr's Agents list 20 s later, with "Run /exit
+  there, then claude -c." (`claude -c` continues that folder's latest
+  conversation, the one just exited; `hc get`'s view of that terminal goes
+  to Herdr's log and, stamped, to `agents-check.log` in the state folder),
+  and "Sign-in link copied. Open it in a private window to sign in with a
+  different account." A toast names a terminal by its title in the switch's
+  list, else by its space (an Ask's list is gone once answered), else by its
+  id.
 - **Usage details & history** (a window): 7, 30 or 90 days or all time.
   Orca's eight cards: input and output tokens, cache read, cache write, cache
   reuse rate, zero-cache-read turns, sessions / turns, and the estimated

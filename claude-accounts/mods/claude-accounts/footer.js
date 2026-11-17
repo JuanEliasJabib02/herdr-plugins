@@ -12,7 +12,14 @@
 //   waits SETTLE first, so one write's events come as one batch;
 // - on each re-read, toasts.react and its result: notify, the confirm view,
 //   the sign-in link on the clipboard. What was shown is in
-//   shared("claude-accounts.seen").
+//   shared("claude-accounts.seen");
+// - for toasts.react's Agents check, what Herdr's Agents list shows, read
+//   only once AGENTS_WARMUP has passed since the start (right after one the
+//   list is empty), a re-read then, another when react asks for one
+//   (recheckIn), and a log line with hc's view of each restarted Claude the
+//   list doesn't show, so the cause can be told apart next time: on stdout
+//   and, stamped, in the state folder's AGENTS_LOG (Herdr under launchd
+//   drops its stdout).
 // A click on it opens the popover above it; the mode (Detailed | Compact) is
 // the shared UI value the popover sets (D12).
 //
@@ -24,7 +31,7 @@
 
 import { div, image, PathBuilder } from "gpui-kit";
 import { h_flex } from "gpui-base";
-import { theme, exec, run, notify, openOverlay, closeOverlay, readTextFile, watchFolder, shared, setShared, settings, props, home, appHome, window as appWindow } from "herdr";
+import { theme, exec, run, notify, openOverlay, closeOverlay, readTextFile, watchFolder, shared, setShared, settings, props, home, appHome, window as appWindow, agents, panes, spaces } from "herdr";
 import { FILES, stateDir, cliPath, readAccounts, classifyWatchPaths } from "./store.js";
 import { react } from "./toasts.js";
 import { openConfirm } from "./confirm.js";
@@ -43,6 +50,10 @@ const TICK = 60_000;
 const SETTLE = 150;
 // Without a state folder to watch, it looks again this often.
 const RETRY = 2000;
+// Herdr's Agents list is empty right after a start; it's read after this.
+const AGENTS_WARMUP = 20_000;
+// The state folder's log of restarted Claudes Agents didn't list.
+const AGENTS_LOG = "agents-check.log";
 // The usage's hover area reaches this far past its text.
 const TRIGGER_PAD = 4;
 // The refresh spinner, drawn natively (frames()).
@@ -56,6 +67,43 @@ export async function refreshUsage() {
   const r = await exec(cliPath(appHome()), [...REFRESH_ARGS]);
   if (r.code !== 0) console.log(`claude-accounts: usage --refresh exited ${r.code}: ${r.stderr.trim()}`);
   return r;
+}
+
+// What Herdr's Agents list shows, for toasts.react: the terminals agents()
+// lists, those with a pane, and each paned terminal's space name (its pane's
+// tab, in spaces()); null when Herdr can't say.
+function agentsShown() {
+  try {
+    const paned = panes();
+    const spaceName = new Map();
+    for (const s of spaces()) for (const tab of Array.isArray(s?.tabs) ? s.tabs : []) if (typeof tab?.id === "string") spaceName.set(tab.id, s.name);
+    const names = {};
+    for (const p of paned) {
+      const name = spaceName.get(p?.tab);
+      if (typeof p?.terminal === "string" && typeof name === "string" && !Object.hasOwn(names, p.terminal)) names[p.terminal] = name;
+    }
+    return { listed: agents().map((a) => a?.address), panes: paned.map((p) => p?.terminal), names };
+  } catch {
+    return null;
+  }
+}
+
+// A restarted Claude Agents doesn't list, logged with hc's view of its
+// terminal: a null status with `reported` means Claude stopped reporting,
+// a status there means the window lost it. The line also goes, after an
+// ISO timestamp, to the end of `dir`'s AGENTS_LOG.
+async function logUnlisted({ terminal, sessionId }, dir) {
+  const r = await exec("hc", ["get", terminal, "--json"]).catch((e) => ({ code: -1, stdout: "", stderr: String(e) }));
+  let view = (r.stderr ?? "").trim() || `hc exited ${r.code}`;
+  try {
+    const t = JSON.parse(r.stdout);
+    view = JSON.stringify({ status: t.status ?? null, status_ms: t.status_ms ?? null, reported: t.reported ?? false, pid: t.foreground?.pid ?? null });
+  } catch {
+    // Not hc's JSON: what it said stays.
+  }
+  const line = `claude-accounts: ${terminal} (session ${sessionId}) was restarted, but Agents doesn't list it; hc get: ${view}`;
+  console.log(line);
+  await exec("sh", ["-c", 'printf "%s\\n" "$1" >> "$2"', "sh", `${new Date().toISOString()} ${line}`, `${dir}/${AGENTS_LOG}`]);
 }
 
 // A Herdr tab runs the CLI's login, which runs `claude auth login` there (D3).
@@ -242,6 +290,15 @@ export default class Footer extends UsageView {
       await this.reread(cx);
       this.merge(cx);
     });
+    cx.spawn(async (cx) => {
+      await cx.sleep(AGENTS_WARMUP);
+      this.warm = true;
+      try {
+        await this.reread(cx);
+      } catch {
+        // This build was reloaded.
+      }
+    });
     this.watch(cx);
     cx.timer.every(POLL, (cx) => this.merge(cx));
     cx.timer.every(TICK, (cx) => cx.notify());
@@ -307,11 +364,32 @@ export default class Footer extends UsageView {
   async reread(cx) {
     const [restart, pending, link] = await Promise.all([FILES.restart, FILES.pendingSwitch, FILES.loginLink].map(readState));
     if (await this.reload()) cx.notify();
-    const r = applyReact(react, reactState({ doc: this.doc, restart, pending, link, now: Date.now() }), shared(SEEN_KEY));
+    const agentsNow = this.warm ? agentsShown() : null;
+    const r = applyReact(react, reactState({ doc: this.doc, restart, pending, link, now: Date.now(), agents: agentsNow }), shared(SEEN_KEY));
     if (r.seen) setShared(SEEN_KEY, r.seen);
     for (const n of r.notify) notify(n);
     if (r.openConfirm) openConfirm();
     if (r.copyLink) cx.write_to_clipboard(r.copyLink);
+    for (const u of r.unlisted) logUnlisted(u, this.dir).catch(() => {});
+    if (r.recheckIn !== null) this.recheck(cx, r.recheckIn);
+  }
+
+  // One re-read in `ms`, for an item toasts.react can't decide yet; an
+  // earlier one already waiting covers it.
+  recheck(cx, ms) {
+    const at = Date.now() + ms;
+    if (this.recheckAt && this.recheckAt <= at) return;
+    this.recheckAt = at;
+    cx.spawn(async (cx) => {
+      await cx.sleep(ms);
+      if (this.recheckAt !== at) return;
+      this.recheckAt = null;
+      try {
+        await this.reread(cx);
+      } catch {
+        // This build was reloaded.
+      }
+    });
   }
 
   // ── Actions ────────────────────────────────────────────────────────────────

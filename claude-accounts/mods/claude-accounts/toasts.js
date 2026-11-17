@@ -46,6 +46,24 @@
 //   doesn't carry it, so a caller such as Spotlight couldn't say it. Not in
 //   Orca, which says nothing about a dialog after it restarts a pane.
 //   login-link: copied, with Orca's "Sign-in link copied…" toast.
+//   A done switch item whose terminal Herdr's Agents list still doesn't
+//   show UNLISTED_AFTER on: "Claude in … isn't in Agents", with the way
+//   out by hand, "Run /exit there, then claude -c." (`claude -c` continues
+//   that folder's latest conversation: the one just exited). Herdr lists a
+//   terminal only once its Claude reports its status, and on 2026-11-16 one
+//   Claude a switch restarted never did, for minutes, while it worked. Not
+//   in Orca, which has no such list. `agents`: what the footer reads from
+//   Herdr, { listed, panes, names } (the terminals agents() lists, those
+//   with a pane: one without is never in the list, and each paned
+//   terminal's space name, { "<terminal>": "<space>" }), or null when it
+//   can't tell yet; with null nothing is decided. Each item is decided
+//   once, so a later /exit by hand never reads as the restart's doing.
+//   `unlisted` says which ones, for the footer's log; `recheckIn`, the ms
+//   until an item younger than UNLISTED_AFTER can be decided (null: none
+//   waits).
+// "Claude in …" names the terminal by pending-switch.json's title for it,
+// else by its space's name (an answered Ask's file is gone by the time its
+// restarts are told), else by its id.
 // Herdr's toast draws a title and one line of body, and runs its action
 // when clicked, so Orca's long one-sentence toasts are split at their
 // sentence break, and Review reads "Click to review." Things older than
@@ -61,6 +79,8 @@ export const SEEN_KEY = "claude-accounts.seen";
 const MINUTE = 60_000;
 const FRESH_MS = 10 * MINUTE;
 const KEEP_SEEN_MS = 2 * 24 * 60 * MINUTE;
+// A started Claude reports its status within seconds; this is the slack.
+const UNLISTED_AFTER = 20_000;
 
 const isObject = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
 const isNumber = (v) => typeof v === "number" && Number.isFinite(v);
@@ -110,6 +130,15 @@ function sentence(text) {
 // idempotent); anything else is null.
 const readWith = (value, reader) => (typeof value === "string" || isObject(value) ? reader(value) : null);
 
+// The footer's reading of Herdr as two sets of terminal ids and a terminal →
+// space name map (empty when `names` is missing or not an object), or null.
+function readAgents(value) {
+  if (!isObject(value) || !Array.isArray(value.listed) || !Array.isArray(value.panes)) return null;
+  const ids = (list) => new Set(list.filter((t) => typeof t === "string" && t !== ""));
+  const names = new Map(Object.entries(isObject(value.names) ? value.names : {}).filter(([, n]) => typeof n === "string" && n !== ""));
+  return { listed: ids(value.listed), panes: ids(value.panes), names };
+}
+
 export function react(state, seen) {
   const s = isObject(state) ? state : {};
   const now = isNumber(s.now) ? s.now : Date.now();
@@ -117,6 +146,7 @@ export function react(state, seen) {
   const pending = readWith(s.pendingSwitch, readPendingSwitch);
   const restart = readWith(s.restart, readRestart);
   const link = readLoginLink(s.loginLink ?? null);
+  const agents = readAgents(s.agents);
   const label = (id) => accountLabel(accounts, id);
 
   // What was seen, without what's too old to matter.
@@ -187,14 +217,26 @@ export function react(state, seen) {
   }
 
   // ── The restarts' progress ──────────────────────────────────────────────
-  const where = (item) => titles.get(item.terminal) ?? item.terminal ?? "a terminal";
+  const where = (item) => titles.get(item.terminal) ?? agents?.names.get(item.terminal) ?? item.terminal ?? "a terminal";
   const waiting = [];
   const questions = [];
   const failures = [];
+  const missing = [];
+  const unlisted = [];
+  let recheckIn = Infinity;
   for (const item of restart?.items ?? []) {
     if (item.state === "starting" && typeof item.question === "string" && item.question !== "") {
       if (first(`item:${item.id}:question:${item.question}`) && fresh(item.updatedAt)) {
         questions.push(toast(`Claude in ${where(item)} is asking a question`, `${item.question} Answer it there.`, "warning", item.terminal ? focus(item.terminal) : null));
+      }
+    }
+    if (agents && item.kind === "switch" && item.state === "done" && typeof item.terminal === "string" && !Object.hasOwn(next, `item:${item.id}:agents`)) {
+      const age = isNumber(item.updatedAt) ? now - item.updatedAt : Infinity;
+      if (age < UNLISTED_AFTER) recheckIn = Math.min(recheckIn, UNLISTED_AFTER - age);
+      else if (first(`item:${item.id}:agents`) && fresh(item.updatedAt) && agents.panes.has(item.terminal) && !agents.listed.has(item.terminal)) {
+        const sid = typeof item.sessionId === "string" && item.sessionId !== "" ? item.sessionId : null;
+        unlisted.push({ terminal: item.terminal, sessionId: sid });
+        missing.push(toast(`Claude in ${where(item)} isn't in Agents`, "Run /exit there, then claude -c.", "warning", focus(item.terminal)));
       }
     }
     if (item.kind !== "switch" || !item.state) continue;
@@ -209,7 +251,7 @@ export function react(state, seen) {
   } else if (waiting.length > 1) {
     notify.push(toast(`${waiting.length} Claude sessions are busy`, `Each one restarts on ${label(waiting[0].to)} once it's idle.`, "info"));
   }
-  notify.push(...questions, ...failures);
+  notify.push(...questions, ...failures, ...missing);
 
   // ── The sign-in link ────────────────────────────────────────────────────
   if (link && first(`link:${link}`)) {
@@ -217,7 +259,7 @@ export function react(state, seen) {
     notify.push(toast("Sign-in link copied.", "Open it in a private window to sign in with a different account.", "success"));
   }
 
-  return { notify, openConfirm, copyLink, seen: changed ? next : null };
+  return { notify, openConfirm, copyLink, seen: changed ? next : null, unlisted, recheckIn: Number.isFinite(recheckIn) ? Math.ceil(recheckIn) : null };
 }
 
 // A failed, timed-out or misplaced restart (D8): what happened, and the

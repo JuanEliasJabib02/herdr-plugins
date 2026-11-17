@@ -215,6 +215,89 @@ test("react: a failure with no line to type says only why; landed elsewhere is a
   ]);
 });
 
+// ── react: a restarted Claude the Agents list doesn't show ─────────────────
+// Herdr lists a terminal in Agents only once its Claude reports its status;
+// on 2026-11-16 one Claude the switch restarted never did (05-plans-billing).
+
+const SID = "3f1c2b7e-8a4d-4e55-9a51-0c2d6f1b7a10";
+// What the footer reads from Herdr: the terminals agents() lists, and those with a pane.
+const shown = (listed, panes = ["t12"]) => ({ listed, panes });
+
+test("react: a done switch item Agents still doesn't list 20 s on is a warning once, with the way out by hand", () => {
+  const restart = queue(item("sw-9", "done", { code: 0, updatedAt: NOW - 30_000 }));
+  const r = run({ restart, agents: shown([]) }, {});
+  assert.deepEqual(r.notify, [{
+    title: "Claude in t12 isn't in Agents",
+    // Herdr's toast draws one line of body: only the way out fits.
+    body: "Run /exit there, then claude -c.",
+    level: "warning",
+    action: { name: "pane.focus", args: { terminal: "t12" } },
+  }]);
+  assert.deepEqual(r.unlisted, [{ terminal: "t12", sessionId: SID }]);
+  assert.equal(r.recheckIn, null);
+  const again = run({ restart, agents: shown([]) }, r.seen);
+  assert.deepEqual(again.notify, []);
+  assert.deepEqual(again.unlisted, []);
+});
+
+test("react: a done switch item Agents lists is decided once and says nothing, even when it leaves the list later", () => {
+  const restart = queue(item("sw-9", "done", { code: 0, updatedAt: NOW - 30_000 }));
+  const r = run({ restart, agents: shown(["t12"]) }, {});
+  assert.deepEqual(r.notify, []);
+  assert.deepEqual(r.unlisted, []);
+  assert.ok(r.seen, "the decision is kept");
+  // A /exit by hand takes it off the list later: not the restart's doing.
+  assert.deepEqual(run({ restart, agents: shown([]) }, r.seen).notify, []);
+});
+
+test("react: a done item younger than 20 s waits, says when to look again, and is decided then", () => {
+  const restart = queue(
+    item("sw-9", "done", { code: 0, updatedAt: NOW - 5_000 }),
+    item("sw-10", "done", { terminal: "t14", code: 0, updatedAt: NOW - 12_000 }),
+  );
+  const r = run({ restart, agents: shown([], ["t12", "t14"]) }, {});
+  assert.deepEqual(r.notify, []);
+  assert.equal(r.recheckIn, 8_000);
+  const later = run({ restart, agents: shown(["t14"], ["t12", "t14"]), now: NOW + 15_000 }, r.seen ?? {});
+  assert.deepEqual(later.notify.map((n) => n.title), ["Claude in t12 isn't in Agents"]);
+  assert.equal(later.recheckIn, null);
+});
+
+test("react: without pending-switch.json (an Ask once answered) a toast names the terminal by its space; pending's title still wins", () => {
+  const names = { t12: "05-plans-billing" };
+  const restart = queue(item("sw-9", "done", { code: 0, updatedAt: NOW - 30_000 }));
+  assert.deepEqual(run({ restart, agents: { ...shown([]), names } }, {}).notify.map((n) => n.title), ["Claude in 05-plans-billing isn't in Agents"]);
+  // Every toast that names the terminal, not only this one.
+  const busy = run({ restart: queue(item("sw-1", "waitingIdle")), agents: { ...shown([]), names } }, {});
+  assert.deepEqual(busy.notify.map((n) => n.title), ["Claude in 05-plans-billing is busy"]);
+  const titled = run({ restart, agents: { ...shown([]), names }, pendingSwitch: pending("restart", [session("t12", "onAccount", null, ANA, "claude · herdr-plugins")]) }, {});
+  assert.deepEqual(titled.notify.filter((n) => /isn't in Agents$/.test(n.title)).map((n) => n.title), ["Claude in claude · herdr-plugins isn't in Agents"]);
+  // Names missing, not an object, or without a name for t12: the terminal id.
+  for (const bad of [undefined, null, "05-plans-billing", ["05-plans-billing"], { t12: 5 }, { t12: "" }, { t14: "other" }]) {
+    assert.deepEqual(run({ restart, agents: { ...shown([]), names: bad } }, {}).notify.map((n) => n.title), ["Claude in t12 isn't in Agents"], JSON.stringify(bad));
+  }
+});
+
+test("react: no Agents reading, no pane, past the fresh window, a resume job or an item not done say nothing about Agents", () => {
+  const done = queue(item("sw-9", "done", { code: 0, updatedAt: NOW - 30_000 }));
+  const none = run({ restart: done }, {});
+  assert.deepEqual(none.notify, []);
+  assert.equal(none.recheckIn, null);
+  assert.deepEqual(none.unlisted, []);
+  // Without a reading nothing is decided: a later one still can.
+  assert.equal(run({ restart: done, agents: shown([]) }, none.seen ?? {}).notify.length, 1);
+  assert.deepEqual(run({ restart: done, agents: shown([], []) }, {}).notify, [], "a terminal with no pane is never in Agents");
+  const old = run({ restart: queue(item("sw-9", "done", { code: 0, updatedAt: NOW - 11 * MIN })), agents: shown([]) }, {});
+  assert.deepEqual(old.notify, []);
+  assert.ok(old.seen, "an old one is marked seen without a word");
+  const others = queue(
+    item("rs-1", "done", { kind: "resume", code: 0, updatedAt: NOW - 30_000 }),
+    item("sw-11", "starting", { updatedAt: NOW - 30_000 }),
+    item("sw-12", "cancelled", { code: 10, updatedAt: NOW - 30_000 }),
+  );
+  assert.deepEqual(run({ restart: others, agents: shown([]) }, {}).notify, []);
+});
+
 test("react (D4): a new Claude asking a startup question is said once per question, for a switch item and for a resume job alike", () => {
   const sw = item("sw-q", "starting", { question: "Allow external CLAUDE.md file imports?" });
   const rs = item("rs-q", "starting", { kind: "resume", terminal: "t14", question: "Accessing workspace:" });
@@ -278,8 +361,8 @@ test("react: a captured sign-in link is copied once, with Orca's toast", () => {
 // ── react: shape, the seen map, raw texts ──────────────────────────────────
 
 test("react: nothing at all says nothing; the seen map is pruned after two days and returned only when it changed", () => {
-  assert.deepEqual(react({}, undefined), { notify: [], openConfirm: false, copyLink: null, seen: null });
-  assert.deepEqual(react(undefined, null), { notify: [], openConfirm: false, copyLink: null, seen: null });
+  assert.deepEqual(react({}, undefined), { notify: [], openConfirm: false, copyLink: null, seen: null, unlisted: [], recheckIn: null });
+  assert.deepEqual(react(undefined, null), { notify: [], openConfirm: false, copyLink: null, seen: null, unlisted: [], recheckIn: null });
   const old = { "item:gone:failed": NOW - 3 * DAY, "item:kept:failed": NOW - DAY, junk: true };
   assert.deepEqual(react({ now: NOW }, old).seen, { "item:kept:failed": NOW - DAY });
   assert.equal(SEEN_KEY, "claude-accounts.seen");

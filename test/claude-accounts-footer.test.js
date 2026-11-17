@@ -15,10 +15,14 @@
 //
 // Nothing here reaches the person's ~/.config/herdr-app: the model is pure,
 // the fixture state folder is read as text, and the views' files, exec,
-// clipboard and overlays are the fake's, in memory.
+// clipboard and overlays are the fake's, in memory (the footer's one shell
+// command, its log append, is also run on a temporary file).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { registerHooks } from "node:module";
 import { readAccounts } from "../claude-accounts/mods/claude-accounts/store.js";
 import {
@@ -586,6 +590,9 @@ test("reactState: what a re-read hands toasts.react, from the files' text", () =
   assert.deepEqual(none.restart.items, []);
   assert.equal(none.pendingSwitch, null);
   assert.equal(none.loginLink, null);
+  assert.equal(none.agents, null, "no Agents reading unless the footer passes one");
+  const agents = { listed: ["t1"], panes: ["t1", "t2"] };
+  assert.equal(reactState({ doc: DOC, restart: null, pending: null, link: null, now: NOW, agents }).agents, agents);
 });
 
 test("the real toasts.react through applyReact: an Ask opens confirm once, the link is copied once, each toast posts once", () => {
@@ -596,7 +603,7 @@ test("the real toasts.react through applyReact: an Ask opens confirm once, the l
   assert.ok(first.notify.some((n) => n.title === "Sign-in link copied."), JSON.stringify(first.notify));
   assert.ok(first.seen, "what it showed is kept");
   const again = applyReact(react, state, first.seen);
-  assert.deepEqual(again, { notify: [], openConfirm: false, copyLink: null, seen: null });
+  assert.deepEqual(again, { notify: [], openConfirm: false, copyLink: null, seen: null, unlisted: [], recheckIn: null });
 });
 
 test("applyReact: posts react's toasts, and keeps what it marked seen, returned or written in place", () => {
@@ -622,8 +629,13 @@ test("applyReact: posts react's toasts, and keeps what it marked seen, returned 
   assert.equal(applyReact(() => ({ notify: [], openConfirm: false, copyLink: null }), state, before).seen, null);
   // T1's stub, a react that throws, and one that returns nothing.
   for (const react of [() => ({ notify: [], openConfirm: false, copyLink: null }), () => { throw new Error("x"); }, () => undefined]) {
-    assert.deepEqual(applyReact(react, state, undefined), { notify: [], openConfirm: false, copyLink: null, seen: null });
+    assert.deepEqual(applyReact(react, state, undefined), { notify: [], openConfirm: false, copyLink: null, seen: null, unlisted: [], recheckIn: null });
   }
+  // The restarted Claudes Agents doesn't list, and when to look again: only well-formed ones.
+  const agents = applyReact(() => ({ notify: [], unlisted: [{ terminal: "t12", sessionId: "s" }, { terminal: 3 }, null], recheckIn: 8000 }), state, undefined);
+  assert.deepEqual(agents.unlisted, [{ terminal: "t12", sessionId: "s" }]);
+  assert.equal(agents.recheckIn, 8000);
+  for (const recheckIn of [0, -1, NaN, "8000", null]) assert.equal(applyReact(() => ({ recheckIn }), state, undefined).recheckIn, null);
 });
 
 test("pickNotify: only herdr's notify fields, and only with a title", () => {
@@ -638,7 +650,7 @@ test("pickNotify: only herdr's notify fields, and only with a title", () => {
 // its calls, a click is its handler called by hand, cx's sleeps return at once
 // and a watch wakes when a test says so.
 
-const HERDR = ["theme", "props", "run", "notify", "openOverlay", "closeOverlay", "exec", "readTextFile", "watchFolder", "shared", "setShared", "settings", "home", "appHome", "window", "nextCommand"];
+const HERDR = ["theme", "props", "run", "notify", "openOverlay", "closeOverlay", "exec", "readTextFile", "watchFolder", "shared", "setShared", "settings", "home", "appHome", "window", "nextCommand", "agents", "panes", "spaces"];
 const FAKES = {
   herdr: HERDR.map((n) => `export const ${n} = (...a) => globalThis.__caFake.${n}(...a);`).join("\n"),
   "gpui-kit": `const k = (n) => (...a) => globalThis.__caFake.el(n, ...a);
@@ -706,6 +718,8 @@ const flush = async () => {
 };
 
 const STATE = "/fake/home/.config/herdr-app/claude-accounts";
+// The footer's append to its Agents check log: sh's printf, the line and the file.
+const APPEND = 'printf "%s\\n" "$1" >> "$2"';
 const CLI = "/fake/app/mods/claude-accounts/bin/claude-accounts";
 
 // One world per test: files, what the views ran, and a cx.
@@ -725,6 +739,12 @@ function newWorld({ files = {}, props = null, hasWindow = true } = {}) {
     nextId: 0,
     execFn: () => ({ code: 0, stdout: "{}", stderr: "" }),
     hasWindow,
+    agents: [],
+    panes: [],
+    spaces: [],
+    hcCalls: [],
+    hcFn: () => ({ code: 0, stdout: "{}", stderr: "" }),
+    shCalls: [],
   };
   w.opened = () => w.log.filter((x) => x.open).map((x) => x.open);
   w.closed = () => w.log.filter((x) => x.close).map((x) => x.close);
@@ -773,6 +793,17 @@ function newWorld({ files = {}, props = null, hasWindow = true } = {}) {
     },
     closeOverlay: (id) => w.log.push({ close: id }),
     exec: async (cmd, args) => {
+      if (cmd === "hc") {
+        w.hcCalls.push(args);
+        return w.hcFn(args);
+      }
+      // The footer's one shell: a line appended to a file, kept in w.files.
+      if (cmd === "sh") {
+        w.shCalls.push(args);
+        assert.deepEqual(args.slice(0, 3), ["-c", APPEND, "sh"]);
+        w.files[args[4]] = `${w.files[args[4]] ?? ""}${args[3]}\n`;
+        return { code: 0, stdout: "", stderr: "" };
+      }
       assert.equal(cmd, CLI);
       w.execs.push(args);
       const r = await w.execFn(args);
@@ -791,6 +822,9 @@ function newWorld({ files = {}, props = null, hasWindow = true } = {}) {
     appHome: () => "/fake/app",
     window: () => (w.hasWindow ? { platform: "macos" } : null),
     nextCommand: () => new Promise(() => {}),
+    agents: () => w.agents,
+    panes: () => w.panes,
+    spaces: () => w.spaces,
   };
   return w;
 }
@@ -938,7 +972,50 @@ test("footer view (D1): a re-read applies toasts.react: notify, the confirm view
 
 test("footer view (D1): works with T1's stub of toasts.react, whose result is empty", () => {
   const stub = () => ({ notify: [], openConfirm: false, copyLink: null });
-  assert.deepEqual(applyReact(stub, reactState({ doc: DOC, restart: null, pending: null, link: null, now: NOW }), {}), { notify: [], openConfirm: false, copyLink: null, seen: null });
+  assert.deepEqual(applyReact(stub, reactState({ doc: DOC, restart: null, pending: null, link: null, now: NOW }), {}), { notify: [], openConfirm: false, copyLink: null, seen: null, unlisted: [], recheckIn: null });
+});
+
+test("footer view: a Claude the switch restarted that Agents doesn't list is said once, by its space, after the warm-up, and hc's view of it is logged and kept in agents-check.log", async () => {
+  const item = { id: "sw-9", kind: "switch", terminal: "t12", from: ANA, to: BEN, sessionId: "3f1c", args: [], message: null, state: "done", code: 0, detail: null, claimedBy: null, updatedAt: Date.now() - 30_000 };
+  const queued = JSON.stringify({ items: [item] });
+  const logged = [];
+  const log = console.log;
+  console.log = (line) => logged.push(String(line));
+  try {
+    const { world } = await footer({
+      files: { "restart.json": queued },
+      setup: (w) => {
+        w.agents = [{ address: "t3" }];
+        // pending-switch.json is gone (an answered Ask): t12's space names it.
+        w.panes = [{ terminal: "t12", tab: "tb-2" }, { terminal: "t3", tab: "tb-1" }, { terminal: null, tab: "tb-1", mod: "code-file" }];
+        w.spaces = [{ id: "sp-1", name: "herdr-plugins", tabs: [{ id: "tb-1" }] }, { id: "sp-2", name: "05-plans-billing", tabs: [{ id: "tb-2" }] }];
+        w.hcFn = () => ({ code: 0, stdout: JSON.stringify({ status: null, reported: true, foreground: { pid: 7 } }), stderr: "" });
+      },
+    });
+    assert.ok(world.sleeps.includes(20_000), "Agents is read only after the warm-up");
+    assert.deepEqual(world.notified.filter((n) => /isn't in Agents$/.test(n.title)).map((n) => n.title), ["Claude in 05-plans-billing isn't in Agents"]);
+    assert.deepEqual(world.hcCalls, [["get", "t12", "--json"]]);
+    const line = logged.find((l) => /t12/.test(l) && /"status":null/.test(l) && /"reported":true/.test(l));
+    assert.ok(line, logged.join("\n"));
+    // Herdr under launchd drops stdout: the same line, stamped, goes to the state folder.
+    const file = `${STATE}/agents-check.log`;
+    assert.deepEqual(world.shCalls.map((a) => a[4]), [file]);
+    const [, at, rest] = /^(\S+) (.*)\n$/.exec(world.files[file]) ?? [];
+    assert.equal(new Date(at).toISOString(), at, "an ISO timestamp first");
+    assert.equal(rest, line);
+    assert.equal(world.files[`${STATE}/restart.json`], queued, "restart.json is never written");
+    // The command appends for real, quotes and all.
+    const dir = mkdtempSync(join(tmpdir(), "claude-accounts-agents-check-"));
+    try {
+      const real = join(dir, "agents-check.log");
+      for (let i = 0; i < 2; i++) execFileSync("sh", [...world.shCalls[0].slice(0, 4), real]);
+      assert.equal(readFileSync(real, "utf8"), `${world.shCalls[0][3]}\n`.repeat(2));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  } finally {
+    console.log = log;
+  }
 });
 
 test("footer view (D1, D4): starts with one merge, and its timers are the 15 minutes and the countdown's minute", async () => {
