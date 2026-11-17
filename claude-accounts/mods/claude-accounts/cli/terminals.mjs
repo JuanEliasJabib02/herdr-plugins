@@ -228,19 +228,21 @@ export async function hasTranscript(configDir, sessionId) {
 // turn's end are short, so its end-of-turn line lies well inside.
 const TURN_CHUNK = 256 * 1024;
 
-// The lines Claude writes while it waits rather than in a turn: about the
-// session (its title, mode, cost, a PR link, an away summary), a notice
-// (informational), a local command (`/model`, `!ls`: its system line and its
-// user lines), an idle compaction (its boundary and summary). They follow a
-// turn's end, so lastTurn looks past them. Seen in 200 transcripts of
-// Claude Code 2.1.x between a turn's end and the next turn. A turn's own
-// lines (a prompt, an API request, an attachment, a file snapshot) aren't
-// here, and neither is any kind this list doesn't know.
-const QUIET_TYPES = new Set([
-  "last-prompt", "ai-title", "custom-title", "mode", "permission-mode", "session-owner", "atis-latch",
-  "frame-link", "cost-state", "pr-link", "bridge-session", "history-suppression",
-  "artifact-autoreact-ledger", "artifact-comment-monitor",
-]);
+// The lines a turn writes: the conversation's own (a prompt, a reply, an
+// attachment, a system line: each carries a uuid, and so would a later
+// Claude Code's new conversation kind), a queued message, an API request
+// and a file-history line. Every other kind is Claude writing about the
+// session while it waits (its title, mode, cost, a PR link, a latch, the
+// tools it used, a worktree), so lastTurn looks past it, kinds a later
+// Claude Code adds included: a list of the quiet ones fell behind (2.1.x
+// added tools-used and isolation-latch) and kept a switch waiting forever.
+const TURN_TYPES = new Set(["user", "assistant", "attachment", "system", "progress", "queue-operation"]);
+const TURN_PREFIXES = ["api-request", "file-history"];
+const turnKind = (row) =>
+  TURN_TYPES.has(row.type) || "uuid" in row || TURN_PREFIXES.some((p) => typeof row.type === "string" && row.type.startsWith(p));
+// Within a turn's kinds, the system lines Claude writes while it waits: a
+// notice (informational), a local command (`/model`, `!ls`: its system line
+// and its user lines), an idle compaction (its boundary and summary).
 const QUIET_SYSTEM = new Set(["stop_hook_summary", "away_summary", "informational", "local_command", "compact_boundary"]);
 function userText(row) {
   const content = row.message?.content;
@@ -249,7 +251,7 @@ function userText(row) {
   return content.filter((part) => part?.type === "text" && typeof part.text === "string").map((part) => part.text).join(" ");
 }
 const quiet = (row) =>
-  QUIET_TYPES.has(row.type) ||
+  !turnKind(row) ||
   (row.type === "system" && QUIET_SYSTEM.has(row.subtype)) ||
   (row.type === "user" && (row.isCompactSummary === true || COMMAND_TEXT.test(userText(row).trimStart())));
 
