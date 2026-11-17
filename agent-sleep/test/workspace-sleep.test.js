@@ -17,7 +17,7 @@ import { isShellRoot } from "../mods/agent-sleep/rules.js";
 import {
   NOW, HOME, COPY, SID1, SID2, SUGGESTION, IDLE_319, DRAFT_319, MULTI_319, CLEARED_319, INTERRUPTED, WORKSPACES, SLEEPING,
   claude, shellOf, deps, addClaude, exitClaude, records, exits, at, spacesWorld, showSpace, settledTabs, addShell,
-  addProgram, entries, workspaceSetup,
+  addProgram, entries, workspaceSetup, NATIVE,
 } from "./harness.js";
 
 const SID3 = "00000000-0000-4000-8000-000000000003";
@@ -66,6 +66,7 @@ test("D2: a terminal is a Claude, another program, or left alone, and why", () =
   const t = claude("t1", { pid: 100, fgPid: 200 });
   assert.equal(isShellRoot(["/bin/zsh", "-l"]), true, "rules.js exports its shell check");
   assert.equal(kindOf(t, { claude: true }), "claude");
+  assert.equal(kindOf(claude("t1", { pid: 100, fgPid: 200, ...NATIVE }), { claude: false }), "claude", "the native installer's, by argv[0]");
   assert.equal(kindOf({ ...t, foreground: { name: "node", pid: 200 } }, { claude: true }), "claude", "Claude Code by Core's report, whatever its process is called");
   assert.equal(kindOf({ ...t, foreground: { name: "less", pid: 300 } }, { claude: false }), "program");
   assert.equal(kindOf(shellOf(t), { claude: false }), "shell");
@@ -335,6 +336,20 @@ test("Claudes: an idle one gets `hc send --if idle … /exit` and ends with an a
   assert.equal(exits(w).length, 1);
   assert.deepEqual(w.notes, [], "every terminal stopped: no toast");
   assert.equal(co.view().last, "app asleep");
+});
+
+test("Claudes: the native installer's (named after its version) stops like any other, never left running", async () => {
+  const { w, co } = await ready((w) => {
+    addClaude(w, "t1", { pid: 100, fgPid: 200, sid: SID1, screen: IDLE_319, status: IDLE, ...NATIVE });
+  });
+  await sleepShown(co, w);
+  await step(co, w);
+  assert.deepEqual(exits(w).map((s) => [s.address, s.opts]), [["t1", ["--if", "idle"]]]);
+  exitClaude(w, "t1");
+  await steps(co, w, 5);
+  assert.equal(records(w).t1.state, "asleep");
+  assert.equal(entries(w)["/code/app"].state, "asleep");
+  assert.deepEqual(w.notes, [], "nothing left running");
 });
 
 test("Claudes: a done one gets a plain /exit, as agent-sleep's stop does when Core says done", async () => {

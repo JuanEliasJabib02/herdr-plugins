@@ -17,7 +17,7 @@ import { BADGE_KEY, ASLEEP_KEY } from "../mods/agent-sleep/badges.js";
 import {
   fixture, MIN, NOW, HOME, APP, SLEEPING, SETTINGS, SID1, SID2, NVM_CLAUDE, PROC_START, EMPTY, SUGGESTION, DRAFT, EXIT, SHELL_BARE, SHELL_TYPED, claude, shellOf, ok, fail, makeWorld, addClaude, putSession, exitClaude, show, liveTerminals, deps, records, exits, resumes, at, sleepT1, setup, storeRecord,
   ORCA_DEV_PROFILES, HERDR_PROFILES, PROFILE, SAVED, addProfile, putAccounts,
-  ACTIVE, ACCOUNTS_V1, WORKSPACES, workspaceSetup, spacesWorld, showSpace, addShell,
+  ACTIVE, ACCOUNTS_V1, WORKSPACES, workspaceSetup, spacesWorld, showSpace, addShell, NATIVE,
 } from "./harness.js";
 
 // ── Which copy runs the loop (D11) ────────────────────────────────────────
@@ -480,6 +480,23 @@ test("the resume cds into the session's folder when the shell sits elsewhere", a
   show(w, "back");
   await at(co, w, NOW);
   assert.equal(resumes(w)[0].text, `cd '/code/it'"'"'s here' && CLAUDE_ACCOUNTS_DIR='' claude --dangerously-skip-permissions --resume ${SID1}`);
+});
+
+test("the native installer's Claude (process named after its version) sleeps and is resumed like any other", async () => {
+  const w = makeWorld();
+  w.files[SETTINGS] = JSON.stringify({ enabled: true, idleMinutes: 30 });
+  addClaude(w, "t1", { pid: 100, fgPid: 200, sid: SID1, ...NATIVE });
+  const co = new Coordinator(deps(w));
+  const t = await sleepT1(co, w);
+  assert.deepEqual(exits(w).map((s) => s.address), ["t1"]);
+  assert.equal(records(w).t1.sessionId, SID1);
+  assert.deepEqual(records(w).t1.flags, ["--dangerously-skip-permissions"]);
+  exitClaude(w, "t1");
+  await at(co, w, t + 6_000);
+  assert.equal(records(w).t1.state, "asleep");
+  show(w, "back");
+  await at(co, w, t + 1 * MIN);
+  assert.equal(resumes(w)[0].text, `CLAUDE_ACCOUNTS_DIR='' claude --dangerously-skip-permissions --resume ${SID1}`);
 });
 
 test("revealed while stopping: kept, then resumed once when the shell is back, without leaving the tab", async () => {
@@ -1249,6 +1266,7 @@ test("Claude Code is recognised in every terminal shape", () => {
   assert.equal(isClaudeCodeTerminal({ address: "t1", report: { app: "claude-code" } }), true); // terminals()
   assert.equal(isClaudeCodeTerminal({ address: "t1", program: { key: "claude" } }), true);
   assert.equal(isClaudeCodeTerminal({ address: "t1", foreground: { name: "claude.exe" } }), true);
+  assert.equal(isClaudeCodeTerminal({ address: "t1", foreground: { name: "2.1.326", argv: ["/Users/demo/.local/bin/claude"] } }), true); // the native installer's
   assert.equal(isClaudeCodeTerminal({ address: "t1", agent: "zsh", status: "idle" }), false);
 });
 

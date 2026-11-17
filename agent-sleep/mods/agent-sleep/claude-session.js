@@ -8,8 +8,9 @@
 // config dir is `~/.claude` (System default) or the CLAUDE_CONFIG_DIR it runs
 // with: a claude-accounts account or an Orca profile (D15). It is trusted only
 // when:
-//   - Core's foreground.name says Claude (claude, or claude.exe as the OS
-//     names the native binary);
+//   - Core's foreground says Claude (isClaudeForeground: its name is claude
+//     or claude.exe, or its argv[0] is a claude executable, as for the
+//     native installer's binary, which the OS names after its version);
 //   - its procStart equals `TZ=UTC ps -o lstart= -p <pid>` (runs of spaces
 //     collapsed), so a pid the OS reused never borrows a dead session;
 //   - kind is "interactive";
@@ -27,14 +28,12 @@
 // line shaped `^(\w+=\S+ )?claude( \S+)* (--resume|-r) (\S+)$`. Any other
 // shape keeps the file's id and says why.
 
+import { isClaudeName, isClaudeExecutable, programName, isClaudeForeground } from "./rules.js";
+
 export const RESUME_HINT = "Resume this session with:";
 
-// Core's foreground.name as the OS has it (`hc get t1p --json`: "claude.exe").
-const CLAUDE_NAMES = new Set(["claude", "claude.exe"]);
-
-export function isClaudeName(name) {
-  return typeof name === "string" && CLAUDE_NAMES.has(name);
-}
+// Which foreground is Claude lives in rules.js, which imports nothing.
+export { isClaudeName, isClaudeExecutable, programName, isClaudeForeground };
 
 // ── The id check, Orca agent-session-resume.ts:105-131 ─────────────────────
 
@@ -132,7 +131,7 @@ function parseFile(file) {
 
 // One check of a session file against the process Core shows:
 //   pid             foreground.pid
-//   foregroundName  foreground.name
+//   foregroundName  programName(foreground)
 //   file            the file's text (or the object already parsed); null
 //                   or undefined when it couldn't be read
 //   procStart       what procStartCommand(pid) printed

@@ -69,8 +69,6 @@ const SHELLS = new Set([
   "sh", "bash", "zsh", "fish", "dash", "ksh", "mksh", "oksh", "pdksh", "yash", "ash",
   "csh", "tcsh", "nu", "elvish", "xonsh", "pwsh", "powershell",
 ]);
-// Core's foreground.name as the OS has it (`hc get t1p --json`: "claude.exe").
-const CLAUDE_NAMES = new Set(["claude", "claude.exe"]);
 const STOPPED_BY = new Set(["working", "blocked", "error"]);
 
 const isObject = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
@@ -177,6 +175,37 @@ function statusWord(status) {
   return typeof word === "string" && word !== "" ? word : null;
 }
 
+// Core's foreground.name as the OS has it (`hc get t1p --json`: "claude.exe").
+const CLAUDE_NAMES = new Set(["claude", "claude.exe"]);
+
+export function isClaudeName(name) {
+  return typeof name === "string" && CLAUDE_NAMES.has(name);
+}
+
+// Orca agent-resume-launch-command.ts:20-23.
+export function isClaudeExecutable(token) {
+  if (typeof token !== "string") return false;
+  const base = token.split(/[\\/]/).pop() ?? "";
+  return /^claude(\.(exe|cmd|bat|ps1))?$/i.test(base);
+}
+
+// The program in front of a terminal, by Core's foreground: its name, or
+// "claude" when argv[0] is a claude executable. The native installer's
+// ~/.local/bin/claude links to ~/.local/share/claude/versions/<version>, and
+// the OS names the process after that file (`hc get t8h --json`, 2026-11-16:
+// name "2.1.326", argv[0] "/Users/…/.local/bin/claude"). null without one.
+// Every Claude check and prompt read goes through it, never through
+// foreground.name alone; claude-session.js re-exports these.
+export function programName(foreground) {
+  if (!isObject(foreground)) return null;
+  const name = typeof foreground.name === "string" ? foreground.name : null;
+  if (isClaudeName(name)) return name;
+  const argv0 = Array.isArray(foreground.argv) ? foreground.argv[0] : undefined;
+  return isClaudeExecutable(argv0) ? "claude" : name;
+}
+
+export const isClaudeForeground = (foreground) => isClaudeName(programName(foreground));
+
 // The terminal's own program (argv[0]) is a shell: `/bin/zsh`, `-zsh` (a
 // login shell), `fish`, `pwsh.exe`... Exported for a workspace's sleep
 // (workspace-sleep D2), which leaves any other terminal alone.
@@ -211,7 +240,7 @@ function judge(terminal, ctx) {
   // Core's default for parent is null: only a set one makes a sub-agent.
   if (terminal.parent !== null && terminal.parent !== undefined) return { reason: "sub-agent" };
   if (!isShellRoot(terminal.argv)) return { reason: "root-not-shell" };
-  if (!isObject(terminal.foreground) || !CLAUDE_NAMES.has(terminal.foreground.name)) return { reason: "not-claude" };
+  if (!isClaudeForeground(terminal.foreground)) return { reason: "not-claude" };
   const state = statusWord(terminal.status);
   if (state === null) return { reason: "no-status" };
   if (STOPPED_BY.has(state)) return { reason: state };

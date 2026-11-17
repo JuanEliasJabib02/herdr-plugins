@@ -9,7 +9,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import {
   RESUME_HINT,
-  isClaudeName, normalizeSessionId, normalizeProcStart, sessionFilePath, procStartCommand,
+  isClaudeName, isClaudeExecutable, programName, isClaudeForeground, normalizeSessionId, normalizeProcStart, sessionFilePath, procStartCommand,
   checkSession, transcriptLookupCommand, parseTranscriptLookup, loadSession,
   parseExitScreen, exitSessionId,
   isConfigDir, accountsPath, profileRoots, profileListCommand, parseProfileList, parseAccounts, loadConfigDirs,
@@ -70,6 +70,27 @@ test("isClaudeName takes Core's foreground.name: claude or claude.exe, nothing e
   assert.equal(isClaudeName("node"), false);
   assert.equal(isClaudeName("claude-code"), false);
   assert.equal(isClaudeName(undefined), false);
+});
+
+// `hc get t8h --json`, 2026-11-16: the native installer's Claude, named by
+// the OS after its version (~/.local/bin/claude → versions/2.1.326).
+const NATIVE_FG = { argv: ["/Users/demo/.local/bin/claude", "--resume", "03a25559-10e0-46a9-ae7d-6a88ce83773f"], cwd: "/code/app", name: "2.1.326", pid: 2018 };
+
+test("a foreground is Claude by its name or by argv[0]: the native installer's process is named after its version", () => {
+  assert.equal(programName(NATIVE_FG), "claude");
+  assert.equal(isClaudeForeground(NATIVE_FG), true);
+  assert.equal(programName({ ...NATIVE_FG, argv: ["claude"] }), "claude", "argv[0] as typed");
+  assert.equal(programName({ argv: ["/x/bin/claude"], name: "claude.exe" }), "claude.exe", "a Claude name is kept as Core has it");
+  assert.equal(programName({ argv: ["/bin/zsh", "-l"], name: "zsh" }), "zsh");
+  assert.equal(isClaudeForeground({ argv: ["/bin/zsh", "-l"], name: "zsh" }), false);
+  assert.equal(isClaudeForeground({ argv: ["/usr/bin/vim", "/x/claude"], name: "vim" }), false, "only argv[0] names the program");
+  assert.equal(isClaudeForeground({ argv: ["/opt/tool/2.1.326"], name: "2.1.326" }), false, "a version-shaped name alone isn't Claude");
+  assert.equal(programName({ name: "zsh" }), "zsh", "no argv: the name decides");
+  assert.equal(programName({ argv: "claude", name: "zsh" }), "zsh");
+  assert.equal(programName(null), null);
+  assert.equal(programName({ argv: ["/bin/zsh"] }), null);
+  assert.equal(isClaudeForeground(undefined), false);
+  assert.equal(isClaudeExecutable("/Users/demo/.local/bin/claude"), true, "moved here from resume.js");
 });
 
 // ── Paths and commands, never run here ─────────────────────────────────────

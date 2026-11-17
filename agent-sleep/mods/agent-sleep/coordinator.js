@@ -56,7 +56,7 @@ import {
 } from "./store.js";
 import { BADGE_KEY, ASLEEP_KEY, badgeValue, asleepValue, sameValue, workspaceOf, parseWorktreeList } from "./badges.js";
 import {
-  loadSession, loadConfigDirs, loadWakeAccount, isClaudeName, parseExitScreen, exitSessionId, sessionFilePath,
+  loadSession, loadConfigDirs, loadWakeAccount, isClaudeForeground, programName, parseExitScreen, exitSessionId, sessionFilePath,
 } from "./claude-session.js";
 import { readPrompt, classifyProbe, promptRestored, PROBE_KEY, ERASE_KEY } from "./prompt.js";
 import { resumeFlags, resumeCommand, canResumeIn, hintDifference, REPLAYABLE_ENV } from "./resume.js";
@@ -172,7 +172,7 @@ export function isClaudeCodeTerminal(t) {
     appOf(t.status) === "claude-code" ||
     appOf(t.report) === "claude-code" ||
     (isObject(t.program) && t.program.key === "claude") ||
-    (isObject(t.foreground) && isClaudeName(t.foreground.name))
+    isClaudeForeground(t.foreground)
   );
 }
 
@@ -780,7 +780,7 @@ export class Coordinator {
     if (!res.ok) return false;
 
     // D5: Claude's prompt is empty, or held only a suggestion.
-    const prompt = readPrompt(screen, t.foreground.name);
+    const prompt = readPrompt(screen, programName(t.foreground));
     if (prompt.program !== "claude") return false;
     if (prompt.state === "text") {
       const verdict = await this.probe(address, screen);
@@ -930,7 +930,7 @@ export class Coordinator {
       if (!isLocal(t) || t.state !== "live") continue;
       const r = own(next, t.address);
       if (r && r.state !== "live") continue;
-      if (!isObject(t.foreground) || !isClaudeName(t.foreground.name)) {
+      if (!isClaudeForeground(t.foreground)) {
         if (r && isObject(t.foreground) && Number.isInteger(t.pid) && t.pid === r.rootPid) {
           next = withoutRecord(next, t.address);
         } else if (r && lostTerminal(t, r)) {
@@ -987,7 +987,7 @@ export class Coordinator {
     if (!t || t.state !== "live") return false; // gone: the next tick drops it
     if (!foregroundIsShell(t)) {
       // You took over (D8): your own program is in front of its shell.
-      const program = t.foreground?.name ?? "another program";
+      const program = programName(t.foreground) ?? "another program";
       this.waitLog(address, `not resumed (${via}): ${program} is in front of its shell${via === "reveal" ? "; taken over, its record goes" : ""}`);
       if (via === "reveal") {
         if (await this.save(withoutRecord(this.records, address))) this.lastEvent = `${label}: taken over, not resumed`;
@@ -995,7 +995,7 @@ export class Coordinator {
       return false;
     }
     const screen = await this.read(address);
-    const prompt = readPrompt(screen, t.foreground.name);
+    const prompt = readPrompt(screen, programName(t.foreground));
     if (prompt.program !== "shell" || prompt.state !== "bare") {
       this.retryAt[address] = now + RETRY_MS; // a typed line: wait for it
       this.waitLog(address, `not resumed (${via}): its shell line isn't a bare prompt (${prompt.program}, ${prompt.state})`);
@@ -1217,7 +1217,7 @@ export class Coordinator {
       if (kind !== "claude") continue;
       if (!(await this.gateClaude(t)).ok) continue;
       const screen = await this.read(t.address);
-      const flight = flightOf({ kind, status: statusWord(t.status), prompt: readPrompt(screen, t.foreground.name), visible: this.isVisible(t.address) });
+      const flight = flightOf({ kind, status: statusWord(t.status), prompt: readPrompt(screen, programName(t.foreground)), visible: this.isVisible(t.address) });
       if (flight === "clear") continue;
       if (flight === "probe" && (await this.probe(t.address, screen)) === "suggestion") continue;
       count += 1;
@@ -1229,7 +1229,7 @@ export class Coordinator {
   // session file it trusts, its transcript, and resumable() (its flags, its
   // shell, its cwd, its account). → { ok, session, res } or { ok: false, why }.
   async gateClaude(t) {
-    if (!isClaudeName(t.foreground?.name)) return { ok: false, why: "a Claude whose session it can't find" };
+    if (!isClaudeForeground(t.foreground)) return { ok: false, why: `the program in front, ${programName(t.foreground) ?? "none"}, isn't Claude` };
     const session = (await this.sessionsOf([t]))[t.address];
     if (!session) return { ok: false, why: "no session file it can trust" };
     if (session.transcript !== true) return { ok: false, why: "no transcript to resume" };
@@ -1398,7 +1398,7 @@ export class Coordinator {
   // when Core says idle), whose tail writes asleep once the shell is back.
   async claudeExit(t, gate, cur, fail) {
     const address = t.address;
-    const name = t.foreground.name;
+    const name = programName(t.foreground);
     let screen = await this.read(address);
     let next = promptStep(readPrompt(screen, name), { visible: this.isVisible(address), cleared: false });
     if (next === "refuse") return fail("its prompt line couldn't be read");
@@ -1567,10 +1567,10 @@ export class Coordinator {
     const sessions = {};
     let configDirs = this.configDirs;
     for (const t of terminals) {
-      if (!isLocal(t) || t.state !== "live" || !isObject(t.foreground) || !isClaudeName(t.foreground.name)) continue;
+      if (!isLocal(t) || t.state !== "live" || !isClaudeForeground(t.foreground)) continue;
       if (configDirs === null) configDirs = await this.listConfigDirs();
       const s = await loadSession(
-        { home: this.d.home, pid: t.foreground.pid, foregroundName: t.foreground.name, configDirs },
+        { home: this.d.home, pid: t.foreground.pid, foregroundName: programName(t.foreground), configDirs },
         { readText: (path) => this.d.files.read(path), exec: (cmd, args) => this.execFind(cmd, args) },
       );
       if (s.ok) {

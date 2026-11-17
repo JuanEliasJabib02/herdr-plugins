@@ -29,7 +29,7 @@
 
 import { isShellRoot } from "./rules.js";
 import { foregroundIsShell } from "./store.js";
-import { isClaudeName } from "./claude-session.js";
+import { isClaudeForeground } from "./claude-session.js";
 import { listedTabs } from "./workspaces-store.js";
 
 // The bare command: it sleeps the shown workspace (D5 b).
@@ -136,7 +136,7 @@ export function kindOf(t, { record, claude = false } = {}) {
   if (state === "asleep" || state === "stopping") return "asleep";
   if (!isObject(t.foreground)) return "no-foreground";
   if (foregroundIsShell(t)) return "shell";
-  if (claude || isClaudeName(t.foreground.name)) return "claude";
+  if (claude || isClaudeForeground(t.foreground)) return "claude";
   return "program";
 }
 
