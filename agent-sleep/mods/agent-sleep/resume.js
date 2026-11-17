@@ -35,7 +35,7 @@
 //   binary); any other assignment refuses, so that Claude is never resumed
 //   without it (Log L10).
 
-import { normalizeSessionId, isConfigDir } from "./claude-session.js";
+import { normalizeSessionId, isConfigDir, isClaudeExecutable } from "./claude-session.js";
 import { shellName } from "./prompt.js";
 
 // ── Claude Code 2.1.318 rjo() ──────────────────────────────────────────────
@@ -198,12 +198,9 @@ export function filterFlags(args, drop = () => false) {
 
 // ── From Core's foreground.argv to the flags a record stores ──────────────
 
-// Orca agent-resume-launch-command.ts:20-23.
-export function isClaudeExecutable(token) {
-  if (typeof token !== "string") return false;
-  const base = token.split(/[\\/]/).pop() ?? "";
-  return /^claude(\.(exe|cmd|bat|ps1))?$/i.test(base);
-}
+// Orca agent-resume-launch-command.ts:20-23; it lives in rules.js, beside
+// programName, which uses it too.
+export { isClaudeExecutable };
 
 // What the claude launcher adds itself (joined, so a prompt after them is
 // never eaten as a value).

@@ -36,6 +36,11 @@ export const SAVED = "/Volumes/Work Claude/home/";
 export const SID1 = "00000000-0000-4000-8000-000000000001";
 export const SID2 = "00000000-0000-4000-8000-000000000002";
 export const NVM_CLAUDE = "/Users/demo/.nvm/versions/node/v24.14.0/bin/claude";
+// The native installer's Claude: ~/.local/bin/claude links to
+// ~/.local/share/claude/versions/<version>, so the OS names the process after
+// the version (`hc get t8h --json`, 2026-11-16: name "2.1.326").
+export const NATIVE_CLAUDE = "/Users/demo/.local/bin/claude";
+export const NATIVE = { name: "2.1.326", bin: NATIVE_CLAUDE };
 export const PROC_START = "Fri Nov  6 08:00:00 2026";
 
 export const EMPTY = fixture("claude-after-turn1.txt");
@@ -57,14 +62,16 @@ export const WORKSPACES = `${APP}/agent-sleep/workspaces.json`;
 
 // A Claude in a zsh root, as `hc get <t> --json` shows one: finished an
 // hour ago, three turns in.
-export function claude(address, { pid, fgPid, cwd = "/code/app", flags = ["--dangerously-skip-permissions"], ...over } = {}) {
+// `name` and `bin`: the process name and argv[0] (NATIVE for the native
+// installer's).
+export function claude(address, { pid, fgPid, cwd = "/code/app", flags = ["--dangerously-skip-permissions"], name = "claude.exe", bin = NVM_CLAUDE, ...over } = {}) {
   return {
     address,
     argv: ["/bin/zsh", "-l"],
     state: "live",
     parent: null,
     pid,
-    foreground: { argv: [NVM_CLAUDE, ...flags], cwd, name: "claude.exe", pid: fgPid },
+    foreground: { argv: [bin, ...flags], cwd, name, pid: fgPid },
     status: { app: "claude-code", state: "done" },
     status_ms: NOW - 60 * MIN,
     turn: 3,

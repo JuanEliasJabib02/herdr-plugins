@@ -258,6 +258,12 @@ test("not-live and not-claude: a finished terminal, and a foreground that isn't 
   assert.deepEqual(candidateIds(withT1({ foreground: { ...claudeTerminal("t1").foreground, name: "claude" } })), ["t1"]);
 });
 
+test("the native installer's Claude, named after its version, is a candidate by its argv[0]", () => {
+  const native = { ...claudeTerminal("t1").foreground, name: "2.1.326", argv: ["/Users/demo/.local/bin/claude", "--dangerously-skip-permissions"] };
+  assert.deepEqual(candidateIds(withT1({ foreground: native })), ["t1"]);
+  assert.equal(reasonOf(withT1({ foreground: { ...native, argv: ["/opt/tool/2.1.326"] } })), "not-claude");
+});
+
 test("records: already asleep, or mid-stop, never planned again; a live record doesn't block", () => {
   const rec = (state) => ({ t1: { state, sessionId: SID } });
   assert.equal(reasonOf({ records: rec("asleep") }), "asleep");
