@@ -317,8 +317,8 @@ function line(label, { text, color }, t) {
     .child(div().flex_1().min_w(0).truncate().text_color(t[color] ?? t.dim).child(text));
 }
 
-// [Abrir en GitHub] (D10): `open <url>`, not cx.open_url, so arc-spaces'
-// wrapper can send it to the Arc space of the workspace's group, where that
+// [Abrir en GitHub] (D10): `open <url>`, not cx.open_url, so dia-profiles'
+// wrapper can send it to the Dia profile of the workspace's group, where that
 // group's GitHub account is signed in (S2). Only a GitHub URL reaches it
 // (cardState's url passed prOf's check; this keeps anything else, a "-…"
 // flag included, from ever being handed to open). A failure is a toast.

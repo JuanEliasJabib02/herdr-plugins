@@ -1,6 +1,6 @@
-// T1: the `open` wrapper. It runs from a fake Herdr (a symlink to bash at the
+// The `open` wrapper. It runs from a fake Herdr (a symlink to bash at the
 // app's path, which is what `ps -o comm=` shows) with fake tools that record
-// their arguments, so nothing here opens a browser or talks to Arc.
+// their arguments, so nothing here opens a browser or talks to Dia.
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
@@ -10,7 +10,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseRegistry, parseCache, matchSpaces, findProject, activeGroup } from "../projects-sidebar/mods/projects/lib.js";
 
-const WRAPPER = fileURLToPath(new URL("../arc-spaces/mods/arc-spaces/bin/open", import.meta.url));
+const WRAPPER = fileURLToPath(new URL("../dia-profiles/mods/dia-profiles/bin/open", import.meta.url));
 const URL_A = "https://example.com/a?x=1&y=2";
 
 let dir, home, herdrParent, otherParent;
@@ -71,7 +71,7 @@ const writeShared = (value) => writeFileSync(join(home, "shared.json"), typeof v
 const shared = (config = { enabled: true, names: NAMES }, more = {}) => ({
   "projects.v1": GROUPS,
   "projects.cache.v1": CACHE,
-  "arc-spaces.v1": config,
+  "dia-profiles.v1": config,
   ...more,
 });
 
@@ -88,42 +88,42 @@ function run(args, { parent = herdrParent, env = {}, capMs, prelude = "" } = {})
       PATH: process.env.PATH,
       HOME: dir,
       HERDR_APP_HOME: home,
-      ARC_SPACES_OPEN: join(dir, "real-open"),
-      ARC_SPACES_OSASCRIPT: join(dir, "osascript"),
-      ARC_SPACES_HERDR: join(dir, "herdr"),
-      ARC_SPACES_HC: join(dir, "hc"),
-      ARC_SPACES_APP: join(dir, "Arc.app"),
+      DIA_PROFILES_OPEN: join(dir, "real-open"),
+      DIA_PROFILES_OSASCRIPT: join(dir, "osascript"),
+      DIA_PROFILES_HERDR: join(dir, "herdr"),
+      DIA_PROFILES_HC: join(dir, "hc"),
+      DIA_PROFILES_APP: join(dir, "Dia.app"),
       // Under the whole suite macOS can take over 10 s to run a new script, so
       // the real limits would stop the fakes and fail the test.
-      ARC_SPACES_TIMEOUT: "300",
-      ARC_SPACES_LS_TIMEOUT: "300",
-      ARC_SPACES_HC_TIMEOUT: "300",
+      DIA_PROFILES_TIMEOUT: "300",
+      DIA_PROFILES_LS_TIMEOUT: "300",
+      DIA_PROFILES_HC_TIMEOUT: "300",
       ...env,
     },
   });
 }
 
-// The space name and URL the fake osascript got, after the script's -e lines.
+// The profile name and URL the fake osascript got, after the script's -e lines.
 function routed() {
   const args = logOf("osascript");
   if (!args) return null;
-  return { url: args.at(-2), space: args.at(-1) };
+  return { url: args.at(-2), profile: args.at(-1) };
 }
 
-const assertRouted = (spaceName, url = URL_A) => {
-  assert.deepEqual(routed(), { url, space: spaceName });
+const assertRouted = (profileName, url = URL_A) => {
+  assert.deepEqual(routed(), { url, profile: profileName });
   assert.equal(logOf("real-open"), null, "the real open must not run too");
 };
 const assertPassedThrough = (args) => {
   assert.deepEqual(logOf("real-open"), args);
-  assert.equal(logOf("osascript"), null, "Arc must not be scripted");
+  assert.equal(logOf("osascript"), null, "Dia must not be scripted");
 };
 
 beforeEach(() => {
-  dir = mkdtempSync(join(tmpdir(), "arc-spaces-"));
+  dir = mkdtempSync(join(tmpdir(), "dia-profiles-"));
   home = join(dir, "home");
   mkdirSync(home);
-  mkdirSync(join(dir, "Arc.app"));
+  mkdirSync(join(dir, "Dia.app"));
   const macos = join(dir, "Herdr.app/Contents/MacOS");
   mkdirSync(macos, { recursive: true });
   herdrParent = join(macos, "Herdr");
@@ -210,6 +210,36 @@ test("a group with no name doesn't route", () => {
   writeShared(shared({ enabled: true, names: { g2: "Personal" } }));
   run([URL_A]);
   assertPassedThrough([URL_A]);
+});
+
+// ── Carried over from arc-spaces ───────────────────────────────────────────
+
+const arcOnly = (config) => {
+  const { "dia-profiles.v1": _, ...rest } = shared();
+  return { ...rest, "arc-spaces.v1": config };
+};
+
+test("only the Arc plugin's config saved: it routes with it", () => {
+  writeShared(arcOnly({ enabled: true, names: NAMES }));
+  run([URL_A]);
+  assertRouted("Nimbus");
+});
+
+test("only the Arc plugin's config saved, switched off: off, and Herdr isn't asked", () => {
+  writeShared(arcOnly({ enabled: false, names: NAMES }));
+  run([URL_A]);
+  assertPassedThrough([URL_A]);
+  assert.equal(logOf("herdr"), null);
+});
+
+test("once this plugin saves its own config, the Arc one counts for nothing", () => {
+  writeShared(shared({ enabled: false, names: {} }, { "arc-spaces.v1": { enabled: true, names: NAMES } }));
+  run([URL_A]);
+  assertPassedThrough([URL_A]);
+  for (const log of ["osascript.log", "real-open.log"]) rmSync(join(dir, log), { force: true });
+  writeShared(shared({ enabled: true, names: { g1: "Work" } }, { "arc-spaces.v1": { enabled: true, names: NAMES } }));
+  run([URL_A]);
+  assertRouted("Work");
 });
 
 // ── Which space ────────────────────────────────────────────────────────────
@@ -341,7 +371,7 @@ test("a hung hc: stopped at the limit with what it started, then the folder the 
   // A number no other command line holds, so pgrep finds only this sleep.
   const marker = `sleep ${700_000 + Math.floor(Math.random() * 100_000)}`;
   slowHc(`exec ${marker}`);
-  const result = run([URL_A], { env: { ARC_SPACES_HC_TIMEOUT: "3" }, capMs: 120_000 });
+  const result = run([URL_A], { env: { DIA_PROFILES_HC_TIMEOUT: "3" }, capMs: 120_000 });
   assert.equal(result.signal, null, "the click must not wait for the sleep to end");
   assertRouted("Studio");
   assert.deepEqual(logOf("hc"), ["t1"], "t1 is asked, and nothing after the limit");
@@ -364,18 +394,18 @@ test("a zero or bad limit is 1 s, and a huge one a day, never none", () => {
     const marker = `sleep ${700_000 + Math.floor(Math.random() * 100_000)}`;
     slowHc(`exec ${marker}`);
     for (const log of ["osascript.log", "hc.log"]) rmSync(join(dir, log), { force: true });
-    const result = run([URL_A], { env: { ARC_SPACES_HC_TIMEOUT: value }, capMs: 120_000 });
-    assert.equal(result.signal, null, `ARC_SPACES_HC_TIMEOUT=${value} must still stop the search`);
+    const result = run([URL_A], { env: { DIA_PROFILES_HC_TIMEOUT: value }, capMs: 120_000 });
+    assert.equal(result.signal, null, `DIA_PROFILES_HC_TIMEOUT=${value} must still stop the search`);
     assertRouted("Studio");
-    assert.deepEqual(logOf("hc"), ["t1"], `ARC_SPACES_HC_TIMEOUT=${value}: hc was asked`);
-    assert.ok(endsSoon(marker), `ARC_SPACES_HC_TIMEOUT=${value}: the hung hc ends by itself`);
+    assert.deepEqual(logOf("hc"), ["t1"], `DIA_PROFILES_HC_TIMEOUT=${value}: hc was asked`);
+    assert.ok(endsSoon(marker), `DIA_PROFILES_HC_TIMEOUT=${value}: the hung hc ends by itself`);
   }
 });
 
 test("a huge limit is a day, not the 1 s of a bad value", () => {
   lsAnswer([space("/repos/ag", withTerminals("t1"))]);
   slowHc(`sleep 2\ncat <<'EOF'\n${JSON.stringify({ cwd: "/repos/action" })}\nEOF`);
-  run([URL_A], { env: { ARC_SPACES_HC_TIMEOUT: "200000000" }, capMs: 120_000 });
+  run([URL_A], { env: { DIA_PROFILES_HC_TIMEOUT: "200000000" }, capMs: 120_000 });
   assertRouted("Nimbus");
 });
 
@@ -383,7 +413,7 @@ test("an ignored SIGALRM, inherited from Herdr, doesn't turn the limits off", ()
   lsAnswer([space("/repos/ag", withTerminals("t1"))]);
   const marker = `sleep ${700_000 + Math.floor(Math.random() * 100_000)}`;
   slowHc(`exec ${marker}`);
-  const result = run([URL_A], { env: { ARC_SPACES_HC_TIMEOUT: "3" }, capMs: 120_000, prelude: "trap '' ALRM; " });
+  const result = run([URL_A], { env: { DIA_PROFILES_HC_TIMEOUT: "3" }, capMs: 120_000, prelude: "trap '' ALRM; " });
   assert.equal(result.signal, null, "the search must still stop");
   assertRouted("Studio");
   assert.deepEqual(logOf("hc"), ["t1"], "hc was asked");
@@ -394,7 +424,7 @@ test("many terminals hc can't read share one limit", () => {
   const terminals = Array.from({ length: 10 }, (_, i) => `t${i + 1}`);
   lsAnswer([space("/repos/ag", withTerminals(...terminals))]);
   slowHc("sleep 1\nexit 1");
-  run([URL_A], { env: { ARC_SPACES_HC_TIMEOUT: "3" }, capMs: 120_000 });
+  run([URL_A], { env: { DIA_PROFILES_HC_TIMEOUT: "3" }, capMs: 120_000 });
   assertRouted("Studio");
   const asked = logOf("hc") ?? [];
   assert.ok(asked.length >= 1 && asked.length < terminals.length, `asked ${asked.length} terminals`);
@@ -473,11 +503,11 @@ test("the name is trimmed", () => {
 
 // ── The same group as the sidebar ──────────────────────────────────────────
 // Each case runs through projects-sidebar's own lib.js and through the wrapper:
-// the Arc space that opens must be the one of the group the sidebar puts the
+// the Dia profile that opens must be the one of the group the sidebar puts the
 // space in. The wrapper copies those rules into jq, so this is what keeps the
 // two from drifting apart.
 
-const ALL_NAMES = Object.fromEntries(["g1", "g2", "g3", "g4"].map((id) => [id, `Space-${id}`]));
+const ALL_NAMES = Object.fromEntries(["g1", "g2", "g3", "g4"].map((id) => [id, `Profile-${id}`]));
 
 function sidebarGroup({ registry, cache, folder, live, machine = null }) {
   const sp = space(folder, { machine, ...withTerminals("t1") });
@@ -524,14 +554,14 @@ test("every case lands in the group projects-sidebar's lib.js picks", () => {
       registry: "registry" in c ? withDir(c.registry) : GROUPS,
       cache: "cache" in c ? withDir(c.cache) : CACHE,
     };
-    const stored = { "arc-spaces.v1": { enabled: true, names: ALL_NAMES }, "projects.cache.v1": kase.cache };
+    const stored = { "dia-profiles.v1": { enabled: true, names: ALL_NAMES }, "projects.cache.v1": kase.cache };
     if (kase.registry !== undefined) stored["projects.v1"] = kase.registry;
     writeShared(stored);
     lsAnswer([space(kase.folder, { machine: kase.machine ?? null, ...withTerminals("t1") })]);
     hcAnswer(kase.live ? { t1: { cwd: kase.live } } : {});
     for (const log of ["osascript.log", "real-open.log"]) rmSync(join(dir, log), { force: true });
     run([URL_A]);
-    assert.deepEqual(routed()?.space, `Space-${sidebarGroup(kase)}`, c.name);
+    assert.deepEqual(routed()?.profile, `Profile-${sidebarGroup(kase)}`, c.name);
   }
 });
 
@@ -545,43 +575,43 @@ test("the URL and the name reach AppleScript as arguments, never as script text"
   const script = logOf("osascript").slice(0, -2).join("\n");
   assert.ok(!script.includes("example.com"));
   assert.ok(!script.includes('Sp"ace'), "the name stays out of the script");
-  for (const line of ["on run argv", "set targetUrl to item 1 of argv", "set spaceName to item 2 of argv", "focus", "make new tab with properties {URL:targetUrl}"]) {
+  for (const line of ["on run argv", "set targetUrl to item 1 of argv", "set profileName to item 2 of argv", "tell profile profileName", "focus", "make new tab with properties {URL:targetUrl}"]) {
     assert.ok(script.includes(line), line);
   }
-  assert.ok(script.includes('tell application id "company.thebrowser.Browser"'));
+  assert.ok(script.includes('tell application id "company.thebrowser.dia"'));
 });
 
 // ── Failing back to the real open ──────────────────────────────────────────
 
-test("Arc not installed: the real open", () => {
-  run([URL_A], { env: { ARC_SPACES_APP: join(dir, "no-such.app") } });
+test("Dia not installed: the real open", () => {
+  run([URL_A], { env: { DIA_PROFILES_APP: join(dir, "no-such.app") } });
   assertPassedThrough([URL_A]);
 });
 
-test("a script failure (a space Arc doesn't have): the real open", () => {
+test("a script failure (a profile Dia doesn't have): the real open", () => {
   recorder("osascript", "exit 1");
   run([URL_A]);
   assert.deepEqual(logOf("real-open"), [URL_A]);
 });
 
-test("a hung Arc: stopped at the limit, then the real open", () => {
+test("a hung Dia: stopped at the limit, then the real open", () => {
   tool("osascript", `echo started > "${join(dir, "osascript.log")}"\nexec sleep 600`);
   const started = Date.now();
-  run([URL_A], { env: { ARC_SPACES_TIMEOUT: "1" } });
+  run([URL_A], { env: { DIA_PROFILES_TIMEOUT: "1" } });
   assert.ok(Date.now() - started < 300_000, "it must not wait for the sleep to end");
-  assert.deepEqual(logOf("osascript"), ["started"], "Arc was asked");
+  assert.deepEqual(logOf("osascript"), ["started"], "Dia was asked");
   assert.deepEqual(logOf("real-open"), [URL_A]);
 });
 
 test("an osascript that can't start: the real open", () => {
-  run([URL_A], { env: { ARC_SPACES_OSASCRIPT: join(dir, "no-such-osascript") } });
+  run([URL_A], { env: { DIA_PROFILES_OSASCRIPT: join(dir, "no-such-osascript") } });
   assertPassedThrough([URL_A]);
 });
 
 test("a hung Herdr ls: stopped at the limit, then the real open", () => {
   tool("herdr", "exec sleep 600");
   const started = Date.now();
-  run([URL_A], { env: { ARC_SPACES_LS_TIMEOUT: "1" } });
+  run([URL_A], { env: { DIA_PROFILES_LS_TIMEOUT: "1" } });
   assert.ok(Date.now() - started < 300_000, "it must not wait for the sleep to end");
   assertPassedThrough([URL_A]);
 });

@@ -115,7 +115,7 @@ test("S5: the card shows the workspace of the folder Changes shows, asks one at 
   assert.match(card, /run\("layout\.hide", \{ id: BLOCK \}\)/);
   assert.match(card, /run\("layout\.show", \{ id: BLOCK \}\)/);
   assert.match(card, /const BLOCK = "pr-card";/);
-  assert.match(card, /exec\("open", \[url\]\)/, "Abrir en GitHub goes through `open`, so arc-spaces picks the Arc space");
+  assert.match(card, /exec\("open", \[url\]\)/, "Abrir en GitHub goes through `open`, so dia-profiles picks the Dia profile");
   assert.match(card, /url\.startsWith\("https:\/\/github\.com\/"\)/, "only a GitHub URL reaches it");
   assert.doesNotMatch(card, /open_url\(/);
 });
