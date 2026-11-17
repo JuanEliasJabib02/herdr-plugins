@@ -1211,9 +1211,20 @@ test("Orca's 'not mid-turn': a Claude whose turn ended restarts while its subage
   const records = { a1: subagent("Batch D T21: whole-task toggle"), a2: subagent("Fix r5"), a3: subagent("an old one", "idle") };
   const t1 = s.term("t1", { on: A, status: "busy", state: "working", records });
   // Three ran at the turn's end; Herdr names two of them. What Claude writes
-  // about the session while it waits doesn't start a turn.
+  // about the session while it waits doesn't start a turn, kinds a later
+  // Claude Code adds included (Claude Code 2.1.x wrote the latch, tools,
+  // worktree and relocation ones after turns' ends).
   endTurn(t1, 3);
-  for (const row of [{ type: "ai-title" }, { type: "pr-link" }, { type: "system", subtype: "away_summary" }]) {
+  for (const row of [
+    { type: "ai-title" },
+    { type: "pr-link" },
+    { type: "system", subtype: "away_summary" },
+    { type: "tools-used", tools: ["Bash"] },
+    { type: "isolation-latch", side: "main" },
+    { type: "worktree-state", worktreeSession: null },
+    { type: "relocated", relocatedCwd: "/x" },
+    { type: "something-new" },
+  ]) {
     appendFileSync(t1.transcriptFile, `${JSON.stringify({ ...row, sessionId: t1.sessionId })}\n`);
   }
   // Herdr lists none of t2's subagents: the count from the turn's end says it.
@@ -1266,29 +1277,33 @@ test("a turn still under way (a later prompt or a queued message), or one blocke
   const t4 = s.term("t4", { on: A, status: "busy", state: "working" });
   endTurn(t4, 1);
   appendFileSync(t4.transcriptFile, `{"type":"user","sessionId":"${t4.sessionId}","mess`);
-  // A line kind this file doesn't know (a later Claude Code's), or one a
-  // turn writes (an API request), even under session lines: not over.
+  // A line kind this file doesn't know but that carries a uuid (a later
+  // Claude Code's conversation line), or one a turn writes (an API request,
+  // a file-history line), even under session lines: not over.
   const t5 = s.term("t5", { on: A, status: "busy", state: "working" });
   endTurn(t5, 1);
-  appendFileSync(t5.transcriptFile, `${JSON.stringify({ type: "something-new", sessionId: t5.sessionId })}\n`);
+  appendFileSync(t5.transcriptFile, `${JSON.stringify({ type: "something-new", uuid: "u-1", sessionId: t5.sessionId })}\n`);
   const t6 = s.term("t6", { on: A, status: "busy", state: "working" });
   endTurn(t6, 1);
   appendFileSync(t6.transcriptFile, `${JSON.stringify({ type: "api-request", sessionId: t6.sessionId })}\n${JSON.stringify({ type: "mode", sessionId: t6.sessionId })}\n`);
+  const t8 = s.term("t8", { on: A, status: "busy", state: "working" });
+  endTurn(t8, 1);
+  appendFileSync(t8.transcriptFile, `${JSON.stringify({ type: "file-history-delta", sessionId: t8.sessionId })}\n${JSON.stringify({ type: "tools-used", sessionId: t8.sessionId })}\n`);
   // A queued message taken up (dequeue), even when another one was taken back.
   const t7 = s.term("t7", { on: A, status: "busy", state: "working" });
   endTurn(t7, 1);
   for (const operation of ["enqueue", "enqueue", "dequeue", "remove"]) {
     appendFileSync(t7.transcriptFile, `${JSON.stringify({ type: "queue-operation", operation, sessionId: t7.sessionId })}\n`);
   }
-  const terms = [t1, t2, t3, t4, t5, t6, t7];
+  const terms = [t1, t2, t3, t4, t5, t6, t7, t8];
   s.json(["use", B]);
-  await until(() => s.queue().length === 7 && s.queue().every((i) => i.state === "waitingIdle" && i.claimedBy), WAIT, "all seven waiting", s.queue);
+  await until(() => s.queue().length === 8 && s.queue().every((i) => i.state === "waitingIdle" && i.claimedBy), WAIT, "all eight waiting", s.queue);
   // Dozens of polls (25 ms each): none of them may act.
   await sleep(1000);
-  assert.deepEqual(s.queue().map((i) => i.state), Array(7).fill("waitingIdle"));
+  assert.deepEqual(s.queue().map((i) => i.state), Array(8).fill("waitingIdle"));
   assert.ok(terms.every((t) => alive(t.pid)), "no Claude was stopped");
   assert.deepEqual(s.sends(), []);
-  for (const t of ["t1", "t2", "t3", "t4", "t5", "t6", "t7"]) s.json(["restart", "--cancel", t]);
+  for (const t of ["t1", "t2", "t3", "t4", "t5", "t6", "t7", "t8"]) s.json(["restart", "--cancel", t]);
 });
 
 test("timeouts: a shell that doesn't come back, and a new Claude that never reports idle, end as timeout (4) with the line to run by hand", async () => {
