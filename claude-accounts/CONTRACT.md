@@ -296,7 +296,8 @@ code you don't know as a failure, as you read 1.
   change.
 - The other files in the state folder (`accounts.json`, `settings.json`,
   `usage-state.json`, `restart.json`, `pending-switch.json`, `live/`,
-  `details.json`, `login-link`, `lock/`): read `accounts.v1.json` instead.
+  `details.json`, `login-link`, `lock/`, `agents-check.log`): read
+  `accounts.v1.json` instead.
   One exception: agent-sleep reads `accounts.json` (a top-level array, each
   element's `configDir`) to find the folders a Claude's session file can be
   in.

@@ -586,8 +586,8 @@ export function closedJustNow(ui, now) {
 // (react's `seen` when it returns one, else the copy as react left it), or
 // null when it didn't change. A react that throws does nothing.
 
-export function reactState({ doc, restart, pending, link, now = Date.now() } = {}) {
-  return { restart: readRestart(restart), pendingSwitch: readPendingSwitch(pending), loginLink: readLoginLink(link), accounts: doc, now };
+export function reactState({ doc, restart, pending, link, now = Date.now(), agents = null } = {}) {
+  return { restart: readRestart(restart), pendingSwitch: readPendingSwitch(pending), loginLink: readLoginLink(link), accounts: doc, now, agents };
 }
 
 const NOTIFY_FIELDS = Object.freeze(["title", "body", "level", "timeout", "icon", "action"]);
@@ -599,7 +599,12 @@ export function pickNotify(n) {
   return out;
 }
 
-const NOTHING = Object.freeze({ notify: [], openConfirm: false, copyLink: null, seen: null });
+const NOTHING = Object.freeze({ notify: [], openConfirm: false, copyLink: null, seen: null, unlisted: [], recheckIn: null });
+
+// react's restarted Claudes Agents doesn't list: { terminal, sessionId }.
+const pickUnlisted = (u) => (isObject(u) && typeof u.terminal === "string" && u.terminal !== ""
+  ? { terminal: u.terminal, sessionId: typeof u.sessionId === "string" ? u.sessionId : null }
+  : null);
 
 export function applyReact(react, state, seen) {
   const before = isObject(seen) ? seen : {};
@@ -608,7 +613,7 @@ export function applyReact(react, state, seen) {
   try {
     r = react(state, copy);
   } catch {
-    return { ...NOTHING, notify: [] };
+    return { ...NOTHING, notify: [], unlisted: [] };
   }
   const out = isObject(r) ? r : {};
   const next = isObject(out.seen) ? out.seen : copy;
@@ -617,5 +622,7 @@ export function applyReact(react, state, seen) {
     openConfirm: out.openConfirm === true,
     copyLink: typeof out.copyLink === "string" && out.copyLink !== "" ? out.copyLink : null,
     seen: JSON.stringify(next) === JSON.stringify(before) ? null : next,
+    unlisted: (Array.isArray(out.unlisted) ? out.unlisted : []).map(pickUnlisted).filter(Boolean),
+    recheckIn: Number.isFinite(out.recheckIn) && out.recheckIn > 0 ? out.recheckIn : null,
   };
 }
