@@ -2309,13 +2309,13 @@ export async function reap(cx, { full = true, skip = null } = {}) {
     // off detached, after the write.
     const idleOff = [];
     if (full) {
-      const queue = cx.settings.queue;
-      const queueOn = queue.enabled !== false;
+      const queueSettings = cx.settings.queue;
+      const queueOn = queueSettings.enabled !== false;
       for (const [root, r] of Object.entries(s.repos)) {
         const holding = Boolean(holdingAt(s.queue.requests, root));
         const since = idleClock(r, { holding, now, queueOn });
         if (since !== (r.idleSince ?? null)) r.idleSince = since;
-        if (!r.busy && idleOffBlock(r, { holding, now, queue }) === null) idleOff.push(root);
+        if (!r.busy && idleOffBlock(r, { holding, now, queue: queueSettings }) === null) idleOff.push(root);
       }
     }
     dropStaleMarkers(s, now);

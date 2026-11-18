@@ -795,7 +795,8 @@ test("`off` gives the turn back and leaves the refs and the server terminal unto
   const calls = w.hc().calls.length;
   const off = await w.cli(["off"], { terminal: t });
   assert.equal(off.code, 0);
-  assert.match(off.stdout, /Gave back the Spotlight turn of AX-9\. The servers keep running until another task takes the projects\./);
+  // D50: what an agent lit goes off after idleOffMin (30 by default) with no turn.
+  assert.match(off.stdout, /^Gave back the Spotlight turn of AX-9\. The servers keep running until another task takes the projects, or for 30 min with no turn\.$/m);
   assert.deepEqual(refsOf(app.root), refs);
   const term = w.serverTerminal(app.root);
   assert.equal(term.state, "live");
@@ -803,6 +804,30 @@ test("`off` gives the turn back and leaves the refs and the server terminal unto
   assert.ok(!w.hc().calls.slice(calls).some((c) => ["interrupt", "kill", "send", "rm"].includes(c[0])));
   assert.equal(w.state().queue.requests.length, 0);
   assert.equal(w.state().repos[app.root].holder, ws);
+});
+
+test("D50: `off` names no idle turn-off when there is none: idleOffMin 0, or the queue off", async () => {
+  const w = makeWorld();
+  const app = makeRepo(w, "app", { pkg: DEV, tasks: ["AX-9"] });
+  w.register([{ id: "g1", repos: [app] }]);
+  w.listen(app.root, [3000]);
+  const ws = app.ws["AX-9"];
+  const t = w.agent(ws);
+  const kept = /^Gave back the Spotlight turn of AX-9\. The servers keep running until another task takes the projects\.$/m;
+
+  w.settings({ queue: { idleOffMin: 0 } });
+  assert.equal((await w.cli(["on"], { terminal: t, cwd: ws })).code, 0);
+  const never = await w.cli(["off"], { terminal: t });
+  assert.equal(never.code, 0, never.stderr + never.stdout);
+  assert.match(never.stdout, kept);
+
+  // The queue turned off while the turn was held: `off` still gives it back.
+  w.settings({});
+  assert.equal((await w.cli(["on"], { terminal: t, cwd: ws })).code, 0);
+  w.settings({ queue: { enabled: false } });
+  const queueOff = await w.cli(["off"], { terminal: t });
+  assert.equal(queueOff.code, 0, queueOff.stderr + queueOff.stdout);
+  assert.match(queueOff.stdout, kept);
 });
 
 // ── off --stop (D48) ───────────────────────────────────────────────────────

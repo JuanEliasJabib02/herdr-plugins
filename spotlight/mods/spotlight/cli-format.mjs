@@ -74,12 +74,17 @@ export function formatWaiting({ label, position, blockers }) {
 // ── off ────────────────────────────────────────────────────────────────────
 
 // `stop` (`off --stop`, D48): the servers don't keep running, the lines
-// after this one say what went off.
-export function formatOff({ released, wasWaiting, next }, { stop = false } = {}) {
+// after this one say what went off. `idleOffMin` (D50): the minutes with no
+// turn after which the reap turns off what an agent lit; 0 when it never
+// does (the setting 0, or the queue off).
+export function formatOff({ released, wasWaiting, next }, { stop = false, idleOffMin = 0 } = {}) {
   if (released === null) return wasWaiting ? "Left the line for the Spotlight." : "This terminal held no Spotlight turn.";
   let after = "";
   if (next.length > 0) after = ` ${next.join(", ")} ${next.length === 1 ? "is" : "are"} testing next.`;
-  else if (!stop) after = " The servers keep running until another task takes the projects.";
+  else if (!stop) {
+    const idle = idleOffMin > 0 ? `, or for ${idleOffMin} min with no turn` : "";
+    after = ` The servers keep running until another task takes the projects${idle}.`;
+  }
   return `Gave back the Spotlight turn of ${released}.${after}`;
 }
 

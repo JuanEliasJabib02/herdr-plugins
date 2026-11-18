@@ -359,7 +359,9 @@ async function verbOff(cx, opts) {
   await spawnLights(cx, r.result.keys);
   // D13: `off` checks the others' turn ends too.
   await reapQueue(cx, { full: false, skip: terminal });
-  out(formatOff(r.result, { stop: Boolean(opts.stop) }));
+  // D50: with the queue off there are no turns to measure, no idle turn-off.
+  const idleOffMin = settings.queue.enabled === false ? 0 : settings.queue.idleOffMin;
+  out(formatOff(r.result, { stop: Boolean(opts.stop), idleOffMin }));
   return opts.stop ? stopOwnTask(cx, r.result.task, deadline) : 0;
 }
 
