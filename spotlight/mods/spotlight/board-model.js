@@ -27,13 +27,11 @@
 //   reapTargets(state)       the terminals whose changes make the watcher reap
 
 import { buildStatus } from "./cli-format.mjs";
-import { IDLE_MS } from "./cli-turns.mjs";
+import { IDLE_MS, MINUTE_MS } from "./cli-turns.mjs";
 import { parseSettings, normRoot } from "./settings.js";
 
 // This mod's folder name under mods/, for openOverlay.
 export const MOD = "spotlight";
-
-const MINUTE_MS = 60_000;
 
 const isObject = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
 const isText = (v) => typeof v === "string" && v !== "";

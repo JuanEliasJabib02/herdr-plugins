@@ -4,6 +4,9 @@
 //   on [--terminal t] [--timeout-ms N]   take the task's test turn (exit 0
 //                                        holding, 1 still waiting, 2 usage)
 //   off [--terminal t]                   give the turn back, nothing else
+//   off --stop [--terminal t]            give it back and turn the task's
+//                                        Spotlight off (D48: the testing
+//                                        ended)
 //   toggle --workspace p [--force]       a human's on/off, outside the queue
 //   toggle --task KEY --group id         the whole task's, from its lane (D31)
 //   status [--json]                      read-only, no lock, no reap
@@ -27,7 +30,9 @@
 //             automatic sync, which leaves an env that couldn't run, N4),
 //             toggle --workspace p --note (projects-sidebar's click, the
 //             badges' and the menu's: a refusal it answers at once is an
-//             error toast and exit 0, D41)
+//             error toast and exit 0, D41),
+//             toggle --workspace <root> --inline --idle (the reap's
+//             turn-off of what an agent left with no turn, D50)
 //
 // `restart --free-port` is the server popup's "Liberar puerto y arrancar"
 // (D24): it stops the process the recorded port-busy error names, then
@@ -55,11 +60,12 @@ import {
 } from "./cli-env.mjs";
 import { lightingMarker, needsLight, requestFgPid } from "./cli-turns.mjs";
 import {
-  formatOn, formatWaiting, formatOff, formatStatus, buildStatus, slotOnlyNote, labelOf, namedBlockers,
+  formatOn, formatWaiting, formatOff, formatStatus, buildStatus, slotOnlyNote, labelOf, namedBlockers, stopNothing, stopShared,
 } from "./cli-format.mjs";
 import {
   markGranted, spawnLights, dropStaleMarkers, lightTask, syncRepo, deactivateRepo, ensureServer, waitForTurnServers,
   recordServers, reap, rescuedNotes, errorNote, survivorsPhrase, writeEnv, applyEnv, rememberTaskVariant, teardownWorkspace, teardownRepo,
+  stopTask, idleOffRepo,
 } from "./cli-work.mjs";
 import { setRootError } from "./server-errors.js";
 import { settleResumes, autoResume, continueTask, classifyTerminal } from "./cli-resume.mjs";
@@ -78,6 +84,8 @@ Agents
   spotlight on [--terminal t] [--timeout-ms N]   take your task's test turn; waits in line
                                                  (exit 1 while still waiting: run it again)
   spotlight off [--terminal t]                   give the turn back (the servers keep running)
+  spotlight off --stop [--terminal t]            give the turn back and turn your task's Spotlight off
+                                                 (servers stopped, roots restored) when your testing ends
   spotlight status [--json]                      who tests, waits or is paused; each root's server and log
   spotlight logs [--repo r] [--lines N] [--path] the server's log as plain text (--path: the file)
   spotlight restart [--repo r]                   restart the repo's server
@@ -119,6 +127,8 @@ const FLAGS = {
   auto: "bool",
   "free-port": "bool",
   ensure: "bool",
+  stop: "bool",
+  idle: "bool",
   help: "bool",
 };
 
@@ -200,11 +210,12 @@ async function reapQueue(cx, opts) {
 
 // ── on ─────────────────────────────────────────────────────────────────────
 
-// Marks and spawns a `light` when the turn needs one (D12).
+// Marks and spawns a `light` when the turn needs one (D12): the agent's
+// (D49), the queue on or off.
 async function ensureLighting(cx, key, turn, { checkLit }) {
   const r = await cx.store.updateState((s) => {
     if (!needsLight(s.queue.lighting[key], turn, { now: cx.now(), pidAlive, repos: s.repos, checkLit })) return false;
-    s.queue.lighting[key] = lightingMarker(turn, { now: cx.now(), taskKey: key });
+    s.queue.lighting[key] = lightingMarker(turn, { now: cx.now(), taskKey: key, by: "agent" });
     return true;
   });
   if (r.result) await spawnLights(cx, [key]);
@@ -319,9 +330,16 @@ async function verbOn(cx, opts) {
 
 // ── off ────────────────────────────────────────────────────────────────────
 
+// `off` gives the turn back and nothing else: the servers keep running, for
+// the board's Soltar turno and a failing round that tests again. `off
+// --stop` (D48), when the testing ends, gives it back the same way, then
+// turns the task's Spotlight off (stopOwnTask).
 async function verbOff(cx, opts) {
   const terminal = terminalOf(opts);
   if (!terminal) return usage("spotlight off: no terminal. Run it in a Herdr terminal ($HC_TERMINAL_ID) or pass --terminal <t>.");
+  // D48: --stop's repo lock waits end here, under an agent shell's
+  // 2-minute command cap, as `on`'s.
+  const deadline = cx.now() + DEFAULT_ON_TIMEOUT_MS;
   const settings = cx.settings;
   const r = await cx.store.updateState((s) => {
     const mine = s.queue.requests.find((x) => x.terminal === terminal);
@@ -335,13 +353,45 @@ async function verbOff(cx, opts) {
       wasWaiting: o.wasWaiting,
       next: o.granted.map((t) => labelOf(s.queue.requests, t.taskKey)),
       keys,
+      task: mine ? { key: mine.taskKey, label, members: mine.members ?? [] } : null,
     };
   });
   await spawnLights(cx, r.result.keys);
   // D13: `off` checks the others' turn ends too.
   await reapQueue(cx, { full: false, skip: terminal });
-  out(formatOff(r.result));
-  return 0;
+  // D50: with the queue off there are no turns to measure, no idle turn-off.
+  const idleOffMin = settings.queue.enabled === false ? 0 : settings.queue.idleOffMin;
+  out(formatOff(r.result, { stop: Boolean(opts.stop), idleOffMin }));
+  return opts.stop ? stopOwnTask(cx, r.result.task, deadline) : 0;
+}
+
+// `off --stop` (D48), its turn given back: the task of the request it gave
+// back, else (none: given back already, or the queue off) the task of the
+// folder it runs in, as `on` resolves it. Nothing is turned off while
+// another terminal of the task holds its turn; else each project an agent
+// lit, inline (an agent's call is no Herdr exec, and it needs the outcome),
+// a line each, once the task's lights at work ended (cli-work.mjs stopTask,
+// D49). Exit 1 when one refused, its server didn't stop, or a light still
+// ran at the deadline.
+async function stopOwnTask(cx, given, deadline) {
+  let task = given;
+  if (!task) {
+    const t = await resolveTask({
+      cwd: process.cwd(), shared: cx.shared, git: cx.taskGit, enabled: (root) => cx.store.repoEnabled(root, cx.settings),
+    });
+    task = t.ok ? { key: `${t.lane}/${t.taskKey}`, label: t.label, members: t.members } : null;
+  }
+  if (!task || task.members.length === 0) {
+    out(stopNothing(task?.label ?? null));
+    return 0;
+  }
+  if (cx.store.readState().queue.requests.some((x) => x.state === "holding" && x.taskKey === task.key)) {
+    out(stopShared(task.label));
+    return 0;
+  }
+  const r = await stopTask(cx, task.members, { deadline, label: task.label });
+  for (const line of r.lines) out(line);
+  return r.ok ? 0 : 1;
 }
 
 // ── toggle ─────────────────────────────────────────────────────────────────
@@ -349,11 +399,13 @@ async function verbOff(cx, opts) {
 async function verbToggle(cx, opts) {
   if (opts.task !== undefined || opts.group !== undefined) return verbToggleTask(cx, opts);
   if (!opts.workspace) return usage("spotlight toggle: --workspace <path> is required.");
+  if (opts.idle && opts.force) return usage("spotlight toggle: --idle is never forced.");
   const dir = path.resolve(opts.workspace);
   const workspace = await checkoutOf(dir);
   const root = workspace ? await repoRootOf(workspace) : null;
   if (!root) return usage(`spotlight toggle: ${dir} is not in a git repository.`);
   const name = cx.nameOf(root);
+  if (opts.idle) return toggleIdle(cx, { workspace, root });
   const force = Boolean(opts.force);
   const record = cx.store.readState().repos[root] ?? null;
   const refs = await readRefs(root);
@@ -428,8 +480,9 @@ async function verbToggle(cx, opts) {
   const taskKey = await taskKeyOfWorkspace(workspace, root, cx.shared);
   const now = cx.now();
   const members = [{ root, name, workspace, workspaces: [workspace] }];
+  // D49: a person's light (a row's flashlight, the workspace menu's toggle).
   await cx.store.updateState((s) => {
-    s.queue.lighting[key] = lightingMarker({ grantedAt: now, members }, { now, taskKey, force });
+    s.queue.lighting[key] = lightingMarker({ grantedAt: now, members }, { now, taskKey, force, by: "human" });
   });
   if (opts.inline) {
     const r = await lightTask(cx, key, { force });
@@ -443,6 +496,20 @@ async function verbToggle(cx, opts) {
   await spawnLights(cx, [key]);
   out(`Turning Spotlight on: ${path.basename(workspace)} onto ${name}. \`spotlight status\` shows when it is lit.`);
   return 0;
+}
+
+// `toggle --workspace <root> --inline --idle` (D50): the reap's detached
+// turn-off of a project an agent left idleOffMin minutes with no turn,
+// inline in that copy. Named by its root it only ever turns off, and it
+// never reads the refs to decide: cli-work.mjs idleOffRepo checks it all
+// again under the repo lock, where a project already off is no record. Its
+// output goes nowhere (a detached child): one line for a run by hand, exit 1
+// when it refused or its server didn't stop.
+async function toggleIdle(cx, { workspace, root }) {
+  if (workspace !== root) return usage("spotlight toggle: --idle takes the repository root, never a workspace.");
+  const r = await idleOffRepo(cx, root);
+  for (const line of r.lines) out(line);
+  return r.ok ? 0 : 1;
 }
 
 // `toggle --task <KEY> --group <id>` (D31): the lane's flashlight. Detached

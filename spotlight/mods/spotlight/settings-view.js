@@ -1,8 +1,9 @@
 // The settings dialog (T9, D4, D7, D12, S9), opened as an overlay with props
 // { view: "settings" } (the board's gear). It edits settings.json, which only
 // the mod writes (writeTextFile compare-and-swap against the text it read):
-//   Cola de pruebas   the queue switch, the global cap, each space's limit and
-//                     auto-resume;
+//   Cola de pruebas   the queue switch, the global cap, the minutes an
+//                     agent-lit repo may go with no turn before it is turned
+//                     off (0 = never), each space's limit and auto-resume;
 //   Repos             per repo: Usar Spotlight, the server command per env,
 //                     the env in use and the port.
 // The numbers are clamped, a command of more than one line or a bad port is
@@ -270,6 +271,7 @@ export default class SettingsView {
     };
     const q = this.form.queue;
     field("cap", q.cap, "2", (value) => ({ queue: "cap", value }), (v) => { q.cap = v; });
+    field("idleOffMin", q.idleOffMin, "30", (value) => ({ queue: "idleOffMin", value }), (v) => { q.idleOffMin = v; });
     for (const lane of this.lanes) {
       field(`lane:${lane.id}`, q.perSpace[lane.id], "1",
         (value) => ({ queue: "perSpace", lane: lane.id, value }), (v) => { q.perSpace[lane.id] = v; });
@@ -620,6 +622,7 @@ export default class SettingsView {
       .child(div().text_size(11).text_color(t.dim).pb(4)
         .child(q.enabled ? "Un turno de pruebas por tarea, en orden de llegada." : "Apagada: `spotlight on` prende el server al instante, sin turno."))
       .child(row("Máximo en total", "1–4", this.input(t, "cap", 56)))
+      .child(row("Apagar sin turno tras (min)", "0–240, 0 = nunca", this.input(t, "idleOffMin", 56)))
       .children(this.lanes.map((lane) => row(`${lane.name}: por espacio`, "1–4", this.input(t, `lane:${lane.id}`, 56))))
       .child(div().pt(6).child(this.toggle(t, "sl-set-resume", q.autoResume, "Continuar solo cuando vuelva el límite de uso",
         (cx) => this.persist({ queue: "autoResume", value: !q.autoResume }, cx))));

@@ -31,7 +31,21 @@
 //              ignored the Ctrl-C, or never got it; an automatic sync
 //              repeating that reason, env and planned command doesn't toast
 //              again, M1, N1; a start drops it, and so does one that failed
-//              unless the old server may still lead its terminal, N3) and
+//              unless the old server may still lead its terminal, N3),
+//              litBy? "agent" | "human" (D49: who lit it, written by every
+//              light, the lighting marker's `by`, never by a sync; an
+//              agent's light keeps "human" for the same holder; a record
+//              without it, lit before D49, reads as "human", whose repo is
+//              never turned off for an agent), idleSince? ms | null (D49:
+//              since when no holding turn has an agent-lit repo among its
+//              members, set once by the full reap, null while one does,
+//              with the queue off, and after every light; absent on a
+//              record that never had one; cli-turns.mjs idleClock),
+//              idleOffFailedAt? ms (D50: when the reap's turn-off of an
+//              agent-lit repo idleOffMin minutes with no turn was refused;
+//              no reap sends another until a light drops it; set in
+//              cli-work.mjs deactivateRepo's refusal write, never by any
+//              other turn-off; absent otherwise) and
 //              busy? { op, since, pid, workspace }
 //              (D33: a light, turn-off, Forzar sync or restart works on
 //              the repo right now; set and cleared under its repo lock by
@@ -40,7 +54,9 @@
 //     queue: { requests: [{ terminal, taskKey, lane, members, skipped, requestedAt, requestTurn,
 //                           fgPid, state, slotOnly, grantedAt, pausedAt, pauseReason, pauseMsg,
 //                           resumingUntil, handledTurn, autoResumes, lastActivityAt, outputHash }],
-//              lighting: { <lane>/<taskKey>: { grantId, phase, pid, startedAt, error } },
+//              lighting: { <lane>/<taskKey>: { grantId, phase, pid, startedAt, error, by? } },
+//                          by (D49): "agent" | "human", who lights; none
+//                          (a marker from before D49) lights as "human"
 //              taskBatch?: { <groupId>/<KEY>: { op, since, pid } } (D31: a
 //                          whole-task toggle running; setTaskBatch,
 //                          clearTaskBatch; absent when none runs) },

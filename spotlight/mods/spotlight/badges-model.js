@@ -64,7 +64,9 @@
 //                  workspace. No server badge (D42).
 //   4. queue       with the queue on, on the rows of a task that asked for a
 //                  turn: flask testing, clock + "#N" in line, pause paused
-//                  (Herdr's extra on the rows).
+//                  (Herdr's extra on the rows). Only for a task with no lane
+//                  drawn: a laned task says it once, on its lane's pill, not
+//                  on each of its worktree rows (a report, 2026-11-17).
 //
 // The root's row while Spotlight is on there (Orca's SpotlightPrimaryBadge
 // and its amber root bar):
@@ -510,8 +512,9 @@ function waitReason(blockers) {
 
 // 4. One queue badge per task that asked: testing wins over waiting, which
 // wins over paused. → Map(taskKey → { badge, pill, rows }): `badge` the
-// rows' icon (Herdr's extra), `pill` the lane header's, Orca's
-// TaskTestTurnBadge (D42): its words in a text pill, no tooltip, no click.
+// rows' icon (Herdr's extra; buildBadges puts it on the rows only of a task
+// with no lane), `pill` the lane header's, Orca's TaskTestTurnBadge
+// (D42): its words in a text pill, no tooltip, no click.
 function queueBadges(state, qctx) {
   const tasks = new Map();
   for (const r of state.queue.requests) {
@@ -778,34 +781,40 @@ export function buildBadges({ state, settings, projects = [], cache = {}, enable
 
   const queue = settings?.queue ?? {};
   const queued = queue.enabled !== false ? queueBadges(state, { ...queue }) : new Map();
-  for (const { badge: b, rows: at } of queued.values()) {
-    for (const p of at) {
-      // D39: on a lit root (the root terminal's own request, `cwd:<root>`),
-      // the queue badge takes the logs icon's place, within the cap.
-      const logs = logsOn.get(p);
-      if (!logs) {
-        add(p, b);
-        continue;
-      }
-      const list = rows.get(p);
-      list[list.indexOf(logs)] = b;
-      logsOn.delete(p);
-    }
-  }
 
   // The task lanes: `<groupId>/task:<KEY>`, as projects-sidebar keys them
   // (D29); a lane's queue key, and its env key (D32), is `<groupId>/<KEY>` (D12).
+  // Built before the rows' queue badges: a task whose lane is drawn shows its
+  // place in the queue on the lane only.
   const lanes = {};
+  const laned = new Set(); // queue keys of the tasks with a lane
   for (const lane of taskLanes({ projects, cache, enabled, taskGroups: Array.isArray(taskGroups) ? taskGroups : [] })) {
     const at = `${lane.group}/task:${lane.key}`;
+    const key = `${lane.group}/${lane.key}`;
+    laned.add(key);
     // Orca's order (TaskSectionHeader): the flashlight, the queue pill (D42), the env pill.
     const light = laneFlashlight(lane, { state, bin });
     if (light) add(at, light);
-    const asked = queued.get(`${lane.group}/${lane.key}`);
+    const asked = queued.get(key);
     if (asked) add(at, asked.pill);
     if (light) {
       lanes[laneEnvIdOf(lane.group, lane.key)] = { group: lane.group, task: lane.key, members: lane.members };
       add(at, lanePill(lane, { state, settings }));
+    }
+  }
+
+  for (const [key, { badge: b, rows: at }] of queued) {
+    for (const p of at) {
+      // D39: on a lit root (the root terminal's own request, `cwd:<root>`),
+      // the queue badge takes the logs icon's place, within the cap. Else a
+      // task whose lane is drawn says it on the lane's pill only (a report,
+      // 2026-11-17); a task with no lane keeps it on its rows (Herdr's extra).
+      const logs = logsOn.get(p);
+      if (logs) {
+        const list = rows.get(p);
+        list[list.indexOf(logs)] = b;
+        logsOn.delete(p);
+      } else if (!laned.has(key)) add(p, b);
     }
   }
 

@@ -101,14 +101,16 @@ function makeCx({ shared, disabled = [] } = {}) {
 }
 
 // Lights `workspace` onto `root` as a human's toggle would leave it (a record
-// whose log is under the test folder).
-async function lightDirect(cx, root, workspace) {
+// whose log is under the test folder). `by` (D49): the marker's, "agent" for
+// a light as an agent's turn leaves it; none, as a marker from before D49.
+async function lightDirect(cx, root, workspace, { by } = {}) {
   const { lightTask } = await import("../mods/spotlight/cli-work.mjs");
   const key = `direct/${root}`;
   state.repos[root] = { ...emptyRepo(), logPath: join(base, `${basename(root)}.log`), ...(state.repos[root] ?? {}) };
   state.queue.lighting[key] = {
     grantId: 1, phase: "pending", pid: null, startedAt: 1, error: null, errors: {}, taskKey: null, force: false,
     members: [{ root, name: basename(root), workspace, workspaces: [workspace] }],
+    ...(by ? { by } : {}),
   };
   assert.deepEqual((await lightTask(cx, key)).errors, {});
   assert.equal(state.repos[root].holder, workspace);
@@ -285,6 +287,64 @@ test("a repo with Spotlight off is skipped and left alone; a task none of whose 
   assert.deepEqual(state.repos, {});
   assert.deepEqual(state.notes, []);
   assert.equal(state.queue.taskBatch, undefined);
+});
+
+// ── D49: who lit it ─────────────────────────────────────────────────────────
+
+test("D49: the lane's light is a human's: what it lights says litBy human; on a half-lit task the member already lit is marked human too, under its repo lock, its idle clock stopped", async () => {
+  const front = makeRepo("front", ["AX-52"]);
+  const back = makeRepo("back", ["AX-52"]);
+  const { cx } = makeCx({ shared: sharedOf([{ id: "g1", repos: [front, back], organize: "task" }]) });
+  seedLogs(back.root);
+  // An agent's turn lit front and went: agent-lit, its idle clock running.
+  await lightDirect(cx, front.root, front.ws["AX-52"], { by: "agent" });
+  assert.equal(state.repos[front.root].litBy, "agent");
+  state.repos[front.root].idleSince = 500;
+  delete state.queue.lighting[`direct/${front.root}`];
+  const locks = [];
+  const withRepoLock = cx.store.withRepoLock;
+  cx.store.withRepoLock = (root, fn, opts) => {
+    locks.push(root);
+    return withRepoLock(root, fn, opts);
+  };
+
+  const r = await toggleTask(cx, { group: "g1", task: "AX-52" });
+  assert.deepEqual({ op: r.op, summary: r.summary }, { op: "on", summary: "Spotlight on · AX-52" }, JSON.stringify(r));
+  assert.equal(state.repos[front.root].holder, front.ws["AX-52"]);
+  assert.equal(state.queue.lighting[`direct/${front.root}`], undefined, "front, lit already, is not lit again");
+  assert.equal(state.repos[front.root].litBy, "human", "Juan lit the task: front is his now");
+  assert.equal(state.repos[front.root].idleSince, null);
+  assert.ok(locks.includes(front.root), "marked under front's repo lock");
+  assert.equal(state.queue.lighting[`direct/${back.root}`].by, "human");
+  assert.equal(state.repos[back.root].holder, back.ws["AX-52"]);
+  assert.equal(state.repos[back.root].litBy, "human");
+  assert.equal(state.repos[back.root].idleSince, null);
+});
+
+test("D49: a member that stopped being the task's between the lane's look and its repo lock is not marked: it is lit, as any member not held", async () => {
+  const front = makeRepo("front", ["AX-53", "scratch"]);
+  const back = makeRepo("back", ["AX-53"]);
+  const { cx } = makeCx({ shared: sharedOf([{ id: "g1", repos: [front, back] }]) });
+  seedLogs(back.root);
+  await lightDirect(cx, front.root, front.ws["AX-53"], { by: "agent" });
+  delete state.queue.lighting[`direct/${front.root}`];
+  // Someone else's light takes front while the lane waits for its lock.
+  const withRepoLock = cx.store.withRepoLock;
+  let taken = false;
+  cx.store.withRepoLock = (root, fn, opts) => {
+    if (root === front.root && !taken) {
+      taken = true;
+      state.repos[front.root].holder = front.ws.scratch;
+    }
+    return withRepoLock(root, fn, opts);
+  };
+
+  const r = await toggleTask(cx, { group: "g1", task: "AX-53" });
+  assert.equal(r.summary, "Spotlight on · AX-53", JSON.stringify(r));
+  assert.equal(state.queue.lighting[`direct/${front.root}`]?.phase, "done", "lit through its marker");
+  assert.equal(state.repos[front.root].holder, front.ws["AX-53"]);
+  assert.equal(state.repos[front.root].litBy, "human");
+  assert.equal(state.repos[back.root].litBy, "human");
 });
 
 test("one member failing: the other is still lit and 'Spotlight on en 1 de 2 proyectos'; the failure toasts itself; none ok: no summary", async () => {

@@ -18,12 +18,18 @@
 //
 // The batch runs inside queue.taskBatch[<groupId>/<KEY>] (cli-work.mjs
 // withTaskBatch), so the lane's flashlight spins and takes no click until it
-// ends. It takes no repo lock itself: lightTask and deactivateRepo take each
-// repo's in turn, never two at once.
+// ends. lightTask and deactivateRepo take each repo's lock in turn, never two
+// at once; the batch takes one itself only to mark a member it found lit
+// already as Juan's (markLitByHand, D49), and lets it go before the next.
+//
+// Every light here is a human's (D49): its marker says `by: "human"`, and a
+// member the task held already, which the batch doesn't light again, gets
+// `litBy: "human"` too, so an agent's light Juan took over by lighting the
+// task is never turned off as an agent's.
 
 import { resolveGroupTask, taskLit } from "./task.js";
 import { lightTask, deactivateRepo, withTaskBatch } from "./cli-work.mjs";
-import { lightingMarker } from "./cli-turns.mjs";
+import { lightingMarker, markLit } from "./cli-turns.mjs";
 import { addNote } from "./store.js";
 import { toSpotlightError } from "./sync.js";
 
@@ -80,10 +86,27 @@ async function turnOff(cx, members) {
   return errors;
 }
 
+// D49: a member one of the task's workspaces holds, read under its repo
+// lock, is marked lit by hand (markLit: `litBy: "human"`, its idle clock
+// stopped, as a light writes it) in one state write, so an auto-off or `off
+// --stop` can't come in between. → false when it isn't the task's any more (turned off, or taken by
+// someone else, since the batch looked): the caller lights it.
+async function markLitByHand(cx, member) {
+  return cx.store.withRepoLock(member.root, async () => {
+    const r = await cx.store.updateState((s) => {
+      if (!taskLit([member], s.repos)) return false;
+      markLit(s.repos[member.root], "human");
+      return true;
+    });
+    return r.result;
+  });
+}
+
 // The switch-away, then each member not held yet lit as a human's toggle
-// lights it. `key`: `<groupId>/<KEY>`, the lighting marker's taskKey (the
-// variant remembered per task, D12). → { [root]: message } of the members
-// that didn't light (lightMember toasts its own refusals).
+// lights it; one held already is marked as lit by hand (markLitByHand).
+// `key`: `<groupId>/<KEY>`, the lighting marker's taskKey (the variant
+// remembered per task, D12). → { [root]: message } of the members that
+// didn't light (lightMember toasts its own refusals).
 async function turnOn(cx, lane, key) {
   const mine = new Set(lane.members.map((m) => m.root));
   for (const { root } of lane.projects) {
@@ -96,11 +119,16 @@ async function turnOn(cx, lane, key) {
   }
   const errors = {};
   for (const m of lane.members) {
-    if (taskLit([m], cx.store.readState().repos)) continue;
+    try {
+      if (taskLit([m], cx.store.readState().repos) && (await markLitByHand(cx, m))) continue;
+    } catch (e) {
+      errors[m.root] = thrown(e);
+      continue;
+    }
     const marker = `direct/${m.root}`;
     const now = cx.now();
     await cx.store.updateState((s) => {
-      s.queue.lighting[marker] = lightingMarker({ grantedAt: now, members: [m] }, { now, taskKey: key });
+      s.queue.lighting[marker] = lightingMarker({ grantedAt: now, members: [m] }, { now, taskKey: key, by: "human" });
     });
     try {
       const r = await lightTask(cx, marker, { quiet: true });
