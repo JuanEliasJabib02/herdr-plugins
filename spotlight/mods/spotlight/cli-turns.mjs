@@ -1,7 +1,8 @@
 // What the CLI decides from Herdr's facts, as pure functions (no I/O, no
 // clock): when an agent's turn ends (D13), when a holder was last active
-// (D19), and when a task's turn needs a `light` (D12). The verbs in cli.mjs
-// gather the facts (hc get, hc read, the accounts lookup) and apply these.
+// (D19), when a task's turn needs a `light` (D12), and who lit a repo and
+// since when no turn has it (D49). The verbs in cli.mjs gather the facts
+// (hc get, hc read, the accounts lookup) and apply these.
 
 // D19: a holder idle this long shows "sin actividad hace N min" (T8).
 export const IDLE_MS = 10 * 60_000;
@@ -145,8 +146,11 @@ export function activityUpdate(req, { statusMs, outputHash }, now) {
 // turn's grantedAt ("off" with the queue off; a time for a human's toggle),
 // `members` what to light ({ root, name, workspace, workspaces }), `taskKey`
 // the task whose remembered variant applies (null for none), `force` the
-// human's "anyway".
-export function lightingMarker(turn, { now, taskKey = null, force = false }) {
+// human's "anyway", `by` who lights (D49): "agent" for a queue turn's light
+// (`on`, a grant, the reap's), "human" for a toggle; the light writes it on
+// each repo record as `litBy`. Anything but "agent" is "human", so a marker
+// from before D49, with no `by`, lights as a human's.
+export function lightingMarker(turn, { now, taskKey = null, force = false, by = "human" }) {
   return {
     grantId: turn.grantedAt,
     phase: "pending",
@@ -159,6 +163,7 @@ export function lightingMarker(turn, { now, taskKey = null, force = false }) {
     })),
     taskKey,
     force: Boolean(force),
+    by: litByOf(by),
   };
 }
 
@@ -187,4 +192,35 @@ export function needsLight(marker, turn, { now, pidAlive, repos, checkLit = fals
   if (turn.members.some((m) => !marked.has(m.root))) return true;
   if (marker.phase === "pending" || marker.phase === "running") return !lightAlive(marker, { now, pidAlive });
   return checkLit && turn.members.some((m) => !memberLit(m, repos));
+}
+
+// ── Who lit a repo, and since when nobody tests (D49) ──────────────────────
+
+// Who a marker's `by` or a record's `litBy` says lit it: "agent" only when it
+// says so; anything else, a missing one included, is "human".
+export const litByOf = (by) => (by === "agent" ? "agent" : "human");
+
+// What a light writes as the record's `litBy`: who lights, except that an
+// agent's light keeps "human" on a record a human lit for the same holder
+// (an agent testing what Juan lit). `record`: the repo's record before the
+// light's write, null for none.
+export function litByAfterLight(record, workspace, by) {
+  const who = litByOf(by);
+  return who === "agent" && record?.holder === workspace && record?.litBy === "human" ? "human" : who;
+}
+
+// The holding request with `root` among its members, any terminal's and any
+// task's; undefined when none has it. Paused and waiting requests are no turn.
+export function holdingAt(requests, root) {
+  return (requests ?? []).find((r) => r.state === "holding" && (r.members ?? []).some((m) => m.root === root));
+}
+
+// A repo record's idle clock (`idleSince`, ms) as a full reap leaves it,
+// from the state it writes: running on an agent-lit repo no holding turn
+// has, from the first reap that saw it so (never restarted by a later one);
+// null with the queue off (no turns to measure), on a repo lit by hand or
+// before D49, and while a holding turn has it. `holding`: holdingAt's answer.
+export function idleClock(record, { holding, now, queueOn }) {
+  if (!queueOn || record?.litBy !== "agent" || holding) return null;
+  return Number.isFinite(record.idleSince) ? record.idleSince : now;
 }

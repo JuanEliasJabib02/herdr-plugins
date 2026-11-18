@@ -324,6 +324,83 @@ test("a server that keeps listening toasts nothing, by the reap or by `on` (thei
   assert.deepEqual(state.repos[root].ports, [3000]);
 });
 
+// ── D49: since when nobody tests ───────────────────────────────────────────
+
+// A request of terminal t9 with the root among its members, in `st`
+// (holding, paused). Every reap here skips t9, so no `hc get` runs for it
+// and the request stays as written. A holding one comes with its done
+// lighting marker, so the reap spawns no light for it.
+function requestIn(st) {
+  const member = { root, name: "landing", workspace: wt, workspaces: [wt] };
+  state.queue.requests = [{
+    terminal: "t9", taskKey: "g1/AX-1", label: "AX-1", lane: "g1", members: [member], state: st, requestedAt: 900,
+    grantedAt: st === "holding" ? 900 : null, pausedAt: st === "paused" ? 950 : null, pauseReason: st === "paused" ? "limit" : null, pauseMsg: null,
+  }];
+  if (st === "holding") {
+    state.queue.lighting["g1/AX-1"] = {
+      grantId: 900, phase: "done", pid: null, startedAt: 900, error: null, errors: {}, members: [member], taskKey: "g1/AX-1", force: false, by: "agent",
+    };
+  }
+}
+
+test("D49: the full reap starts an agent-lit repo's idle clock once no holding turn has it, keeps it (never restarted) on the next reaps, and stops it while one does", async () => {
+  state.repos[root].litBy = "agent";
+  state.repos[root].idleSince = null;
+  await reap(cx, { skip: "t9" });
+  const since = state.repos[root].idleSince;
+  assert.ok(Number.isFinite(since), `idleSince: ${since}`);
+  await reap(cx, { skip: "t9" });
+  await reap(cx, { skip: "t9" });
+  assert.equal(state.repos[root].idleSince, since, "set once");
+
+  // A holding turn of any terminal with the root among its members: no clock.
+  requestIn("holding");
+  await reap(cx, { skip: "t9" });
+  assert.equal(state.repos[root].idleSince, null);
+  assert.equal(state.queue.requests[0].state, "holding");
+
+  // The turn ended: the clock starts again, from that reap.
+  state.queue.requests = [];
+  await reap(cx, { skip: "t9" });
+  assert.ok(state.repos[root].idleSince > since, `${state.repos[root].idleSince} after ${since}`);
+  // `on`'s and `off`'s reap (the queue part only) never touches it.
+  state.repos[root].idleSince = null;
+  await reap(cx, { full: false, skip: "t9" });
+  assert.equal(state.repos[root].idleSince, null);
+});
+
+test("D49: a paused request is no turn: the clock runs; a repo lit by hand, or with no litBy (lit before D49), never starts one", async () => {
+  state.repos[root].litBy = "agent";
+  requestIn("paused");
+  await reap(cx, { skip: "t9" });
+  assert.ok(Number.isFinite(state.repos[root].idleSince), JSON.stringify(state.repos[root]));
+  assert.equal(state.queue.requests[0].state, "paused");
+
+  state.repos[root].litBy = "human";
+  state.repos[root].idleSince = null;
+  await reap(cx, { skip: "t9" });
+  assert.equal(state.repos[root].idleSince, null);
+
+  delete state.repos[root].litBy;
+  delete state.repos[root].idleSince;
+  await reap(cx, { skip: "t9" });
+  assert.equal("idleSince" in state.repos[root], false, "an old record stays as it was");
+  assert.equal("litBy" in state.repos[root], false);
+});
+
+test("D49: with the queue off nothing starts the clock, and a value set before the switch went off is cleared by the next reap", async () => {
+  state.repos[root].litBy = "agent";
+  state.repos[root].idleSince = 500;
+  cx.settings = readSettings(JSON.stringify({ version: 1, queue: { enabled: false } }));
+  await reap(cx);
+  assert.equal(state.repos[root].idleSince, null);
+  await reap(cx);
+  assert.equal(state.repos[root].idleSince, null, "nothing starts it while off");
+  cx.settings = SETTINGS;
+  await reap(cx);
+  assert.ok(Number.isFinite(state.repos[root].idleSince), "back on: the clock starts");
+});
+
 // ── T37 (D44): the watcher reaps on the tick that sees it ──────────────────
 
 // `spotlight watch` (watch.mjs runWatcher) over this file's fake cx: its

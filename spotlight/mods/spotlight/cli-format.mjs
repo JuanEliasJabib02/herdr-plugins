@@ -57,7 +57,9 @@ export function formatOn({ label, servers = [], skipped = [], ready, note }) {
     lines.push("Logs: spotlight logs");
     for (const s of servers) lines.push(`  ${s.name.padEnd(width)}  ${s.logPath}`);
   }
-  lines.push("When you finish testing, run `spotlight off` so the next task can test.");
+  // D49: `off --stop` once the testing ends; `off` between failing rounds (D48).
+  lines.push("When your testing ends, run `spotlight off --stop`: the next task can test and your servers stop.");
+  lines.push("If a round failed and you will test again, run `spotlight off`: it gives the turn back and keeps them running.");
   return lines.join("\n");
 }
 

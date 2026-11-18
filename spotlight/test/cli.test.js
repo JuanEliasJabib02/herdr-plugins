@@ -998,6 +998,150 @@ test("D48: with no request (the turn given back already, or the queue off) `off 
   assert.match(help.stdout, /^ {2}spotlight off --stop \[--terminal t\] {2,}/m);
 });
 
+// ── Who lit it, and since when nobody tests (D49) ──────────────────────────
+
+test("D49: every light says who lit it: a queue light `agent`, a human's toggle `human`, each takeover overwriting it; an agent's light on the same holder keeps `human`, and on a record with no litBy writes `agent`; an automatic sync keeps it; `off --stop` leaves a project lit by hand on and names it", async () => {
+  const w = makeWorld();
+  const app = makeRepo(w, "app", { pkg: DEV, tasks: ["AX-60", "AX-61"] });
+  w.register([{ id: "g1", repos: [app] }]);
+  w.listen(app.root, [3000]);
+  const a = app.ws["AX-60"];
+  const b = app.ws["AX-61"];
+  const t = w.agent(a);
+  const rec = () => w.state().repos[app.root];
+  const run = async (args, opts) => {
+    const r = await w.cli(args, opts);
+    assert.equal(r.code, 0, `${args.join(" ")}: ${r.stderr}${r.stdout}`);
+    return r;
+  };
+  const on = () => run(["on"], { terminal: t, cwd: a });
+  const off = () => run(["off"], { terminal: t, cwd: a });
+  const toggle = (ws) => run(["toggle", "--workspace", ws, "--inline"]);
+
+  // The queue's light: the agent's; a light stops the idle clock.
+  const first = await on();
+  assert.deepEqual([rec().holder, rec().litBy, rec().idleSince], [a, "agent", null]);
+  assert.match(first.stdout, /^When your testing ends, run `spotlight off --stop`: the next task can test and your servers stop\.$/m);
+  assert.match(first.stdout, /^If a round failed and you will test again, run `spotlight off`: it gives the turn back and keeps them running\.$/m);
+  // A human's toggle takes it over: human.
+  await toggle(b);
+  assert.deepEqual([rec().holder, rec().litBy], [b, "human"]);
+  // The agent's next `on` lights its task again, taking it back: agent.
+  await on();
+  assert.deepEqual([rec().holder, rec().litBy], [a, "agent"]);
+
+  // A record lit before D49 (no litBy) lit again by the same holder: agent.
+  const s = w.state();
+  delete s.repos[app.root].litBy;
+  w.writeState(s);
+  await off();
+  await on();
+  assert.deepEqual([rec().holder, rec().litBy], [a, "agent"]);
+
+  // Juan lights the agent's own workspace by hand: the agent's light there keeps it his.
+  await off();
+  await toggle(b);
+  await toggle(a);
+  assert.deepEqual([rec().holder, rec().litBy], [a, "human"]);
+  await on();
+  assert.deepEqual([rec().holder, rec().litBy, rec().idleSince], [a, "human", null]);
+
+  // An automatic sync (the watcher's) moves the root and keeps it.
+  const synced = rec().lastSyncAt;
+  write(a, "edit.txt", "from the holder\n");
+  await run(["sync", "--repo", app.root, "--auto"]);
+  assert.equal(readFileSync(join(app.root, "edit.txt"), "utf8"), "from the holder\n");
+  assert.ok(rec().lastSyncAt > synced, "the sync went through");
+  assert.equal(rec().litBy, "human");
+
+  // `off --stop` leaves what Juan lit on, and says so.
+  const refs = refsOf(app.root);
+  const stop = await run(["off", "--stop"], { terminal: t, cwd: a });
+  assert.match(stop.stdout, /^Gave back the Spotlight turn of AX-60\.$/m);
+  assert.match(stop.stdout, /^app: lit by hand: its Spotlight stays on\.$/m);
+  assert.doesNotMatch(stop.stdout, /Spotlight off in app/);
+  assert.deepEqual(w.state().queue.requests, []);
+  assert.equal(rec().holder, a);
+  assert.deepEqual(refsOf(app.root), refs);
+  assert.notEqual(w.serverTerminal(app.root).foreground.name, "zsh", "its server still runs");
+});
+
+test("D49: the reap starts the idle clock once the agent's turn is given back, keeps it on the next reap, and a new `on` stops it; with the queue off the next reap clears it", async () => {
+  const w = makeWorld();
+  const app = makeRepo(w, "app", { pkg: DEV, tasks: ["AX-62"] });
+  w.register([{ id: "g1", repos: [app] }]);
+  w.listen(app.root, [3000]);
+  const ws = app.ws["AX-62"];
+  const t = w.agent(ws);
+  const rec = () => w.state().repos[app.root];
+  const run = async (args, opts) => {
+    const r = await w.cli(args, opts);
+    assert.equal(r.code, 0, `${args.join(" ")}: ${r.stderr}${r.stdout}`);
+    return r;
+  };
+
+  await run(["on"], { terminal: t, cwd: ws });
+  await run(["reap"]);
+  assert.equal(rec().idleSince, null, "its turn holds the project");
+  await run(["off"], { terminal: t, cwd: ws });
+  const before = Date.now();
+  await run(["reap"]);
+  const since = rec().idleSince;
+  assert.ok(Number.isFinite(since) && since >= before - 1000, `idleSince ${since}`);
+  await run(["reap"]);
+  assert.equal(rec().idleSince, since, "kept, never restarted");
+
+  await run(["on"], { terminal: t, cwd: ws });
+  assert.equal(rec().idleSince, null, "the new light stopped it");
+  await run(["reap"]);
+  assert.equal(rec().idleSince, null);
+
+  await run(["off"], { terminal: t, cwd: ws });
+  await run(["reap"]);
+  assert.ok(Number.isFinite(rec().idleSince));
+  w.settings({ queue: { enabled: false } });
+  await run(["reap"]);
+  assert.equal(rec().idleSince, null, "the queue off: no turns to measure");
+  assert.equal(rec().litBy, "agent");
+});
+
+test("D49: `off --stop` first waits out a light of its task still at work, then turns off what that light lit", async () => {
+  const w = makeWorld();
+  const app = makeRepo(w, "app", { pkg: DEV, tasks: ["AX-63"] });
+  w.register([{ id: "g1", repos: [app] }]);
+  w.listen(app.root, [3000]);
+  const ws = app.ws["AX-63"];
+  const t = w.agent(ws);
+  // The queue off: `on` marked its light and spawned it; it hasn't claimed
+  // the marker yet when the agent gives up and runs `off --stop`.
+  w.settings({ queue: { enabled: false } });
+  const member = { root: app.root, name: "app", workspace: ws, workspaces: [ws] };
+  w.writeState({
+    version: 1, repos: {}, notes: [], variants: {},
+    queue: {
+      requests: [],
+      lighting: {
+        "g1/AX-63": {
+          grantId: "off", phase: "pending", pid: null, startedAt: Date.now(), error: null, errors: {}, members: [member], taskKey: "g1/AX-63",
+          force: false, by: "agent",
+        },
+      },
+    },
+  });
+  const stopping = w.cli(["off", "--stop"], { terminal: t, cwd: ws });
+  await sleep(1500);
+  // The spawned light runs now.
+  const light = await w.cli(["light", "--task", "g1/AX-63"]);
+  assert.equal(light.code, 0, light.stderr + light.stdout);
+
+  const stop = await stopping;
+  assert.equal(stop.code, 0, stop.stderr + stop.stdout);
+  assert.match(stop.stdout, /^Spotlight off in app: root restored\.$/m);
+  assert.ok(stop.ms >= 1500, `off --stop returned after ${stop.ms} ms, before the light`);
+  assert.equal(w.state().repos[app.root], undefined);
+  assert.deepEqual(refsOf(app.root), []);
+});
+
 test("a `light` killed mid-way: the next `on` poll lights again and exits 0", async () => {
   const w = makeWorld();
   const app = makeRepo(w, "app", { pkg: DEV, tasks: ["AX-10"] });

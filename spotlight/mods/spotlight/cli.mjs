@@ -207,11 +207,12 @@ async function reapQueue(cx, opts) {
 
 // ── on ─────────────────────────────────────────────────────────────────────
 
-// Marks and spawns a `light` when the turn needs one (D12).
+// Marks and spawns a `light` when the turn needs one (D12): the agent's
+// (D49), the queue on or off.
 async function ensureLighting(cx, key, turn, { checkLit }) {
   const r = await cx.store.updateState((s) => {
     if (!needsLight(s.queue.lighting[key], turn, { now: cx.now(), pidAlive, repos: s.repos, checkLit })) return false;
-    s.queue.lighting[key] = lightingMarker(turn, { now: cx.now(), taskKey: key });
+    s.queue.lighting[key] = lightingMarker(turn, { now: cx.now(), taskKey: key, by: "agent" });
     return true;
   });
   if (r.result) await spawnLights(cx, [key]);
@@ -362,10 +363,11 @@ async function verbOff(cx, opts) {
 // `off --stop` (D48), its turn given back: the task of the request it gave
 // back, else (none: given back already, or the queue off) the task of the
 // folder it runs in, as `on` resolves it. Nothing is turned off while
-// another terminal of the task holds its turn; else each project, inline
-// (an agent's call is no Herdr exec, and it needs the outcome), a line each
-// (cli-work.mjs stopTask). Exit 1 when one refused, or its server didn't
-// stop.
+// another terminal of the task holds its turn; else each project an agent
+// lit, inline (an agent's call is no Herdr exec, and it needs the outcome),
+// a line each, once the task's lights at work ended (cli-work.mjs stopTask,
+// D49). Exit 1 when one refused, its server didn't stop, or a light still
+// ran at the deadline.
 async function stopOwnTask(cx, given, deadline) {
   let task = given;
   if (!task) {
@@ -382,7 +384,7 @@ async function stopOwnTask(cx, given, deadline) {
     out(stopShared(task.label));
     return 0;
   }
-  const r = await stopTask(cx, task.members, { deadline });
+  const r = await stopTask(cx, task.members, { deadline, label: task.label });
   for (const line of r.lines) out(line);
   return r.ok ? 0 : 1;
 }
@@ -471,8 +473,9 @@ async function verbToggle(cx, opts) {
   const taskKey = await taskKeyOfWorkspace(workspace, root, cx.shared);
   const now = cx.now();
   const members = [{ root, name, workspace, workspaces: [workspace] }];
+  // D49: a person's light (a row's flashlight, the workspace menu's toggle).
   await cx.store.updateState((s) => {
-    s.queue.lighting[key] = lightingMarker({ grantedAt: now, members }, { now, taskKey, force });
+    s.queue.lighting[key] = lightingMarker({ grantedAt: now, members }, { now, taskKey, force, by: "human" });
   });
   if (opts.inline) {
     const r = await lightTask(cx, key, { force });

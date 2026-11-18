@@ -4,7 +4,8 @@
 // hand), the env per task (its picks and the restarts they ask for),
 // waiting for the servers to listen (port of Orca's waitForTurnServers), the
 // teardown before a delete (D43), the turn-off when the testing ends (`off
-// --stop`, D48), and the reap. Node-only.
+// --stop`, D48), who lit each repo and since when no turn has it (D49), and
+// the reap. Node-only.
 //
 // Every git step runs under the repo's lock and reads the holder inside it,
 // so the last one to take the lock sees the latest holder (a sync racing a
@@ -35,7 +36,8 @@ import { logPathFor, appendLogHeader, rotateLog, readStartFailure, causeWords } 
 import { portUrl, foreignListener, stopProcessTree, goneIdentities, identityKey, isIdentity } from "./ports.js";
 import { release, pause, regrant, snapshot } from "./queue.js";
 import {
-  decideTurnEnd, activityUpdate, lightingMarker, lightAlive, needsLight, memberLit, classifyStep,
+  decideTurnEnd, activityUpdate, lightingMarker, lightAlive, needsLight, memberLit, classifyStep, litByOf, litByAfterLight, holdingAt,
+  idleClock,
 } from "./cli-turns.mjs";
 import { branchOf, hcGet, hcReadText, registeredRoots, taskKeyOfWorkspace } from "./cli-env.mjs";
 import { recordEnv, envKeyOf, entryKeys, sameEnvKey, taskEnvKey } from "./task-env.js";
@@ -244,12 +246,13 @@ function staleMarks(cx, state) {
 // ── Lighting hand-off (D12, D18) ───────────────────────────────────────────
 
 // Marks every granted turn that has repos to light; returns their keys,
-// for spawnLights once the state is written.
+// for spawnLights once the state is written. A queue turn's light is an
+// agent's (D49).
 export function markGranted(s, turns, now) {
   const keys = [];
   for (const turn of turns) {
     if (keys.includes(turn.taskKey) || turn.slotOnly || (turn.members ?? []).length === 0) continue;
-    s.queue.lighting[turn.taskKey] = lightingMarker(turn, { now, taskKey: turn.taskKey });
+    s.queue.lighting[turn.taskKey] = lightingMarker(turn, { now, taskKey: turn.taskKey, by: "agent" });
     keys.push(turn.taskKey);
   }
   return keys;
@@ -286,7 +289,9 @@ export function dropStaleMarkers(s, now) {
 // meanwhile (its repos grew) leaves the result to the newer one. `quiet`
 // (the whole-task toggle, D31, whose summary says it once): no "Spotlight on
 // · …" note per repo; errors still toast. A call option like `force`, never
-// stored on the marker, so a later `light --force` of it speaks again.
+// stored on the marker, so a later `light --force` of it speaks again. Who
+// lights is the marker's `by` (D49), so Proyectar igual (`light --force`)
+// lights as the marker's own light would.
 export async function lightTask(cx, key, { force = false, quiet = false } = {}) {
   const me = process.pid;
   const claimed = await cx.store.updateState((s) => {
@@ -304,7 +309,7 @@ export async function lightTask(cx, key, { force = false, quiet = false } = {}) 
   const errors = {};
   for (const member of marker.members) {
     try {
-      const r = await lightMember(cx, member, { force: force || marker.force, taskKey: marker.taskKey, quiet });
+      const r = await lightMember(cx, member, { force: force || marker.force, taskKey: marker.taskKey, quiet, by: marker.by });
       if (!r.ok) errors[member.root] = r.message;
     } catch (e) {
       errors[member.root] = toSpotlightError(e).message;
@@ -370,8 +375,9 @@ export function lightNote({ root, name, workspace, server, logPath }) {
 // and reads as no record until the light writes one. The record keeps the
 // holder's env key (D32, D46: `taskKey`, the marker's `<lane>/<KEY>`, as
 // task:<KEY>, the same in every space; else ws:<path>), so the server below
-// runs the env picked for it.
-async function lightMember(cx, member, { force, taskKey, quiet = false }) {
+// runs the env picked for it. It also says who lit it (D49, `by`: the
+// marker's) and stops the idle clock: `litBy` and `idleSince: null`.
+async function lightMember(cx, member, { force, taskKey, quiet = false, by }) {
   const { root, workspace } = member;
   const envKey = envKeyOf(taskKey, workspace);
   const name = member.name ?? cx.nameOf(root);
@@ -412,6 +418,9 @@ async function lightMember(cx, member, { force, taskKey, quiet = false }) {
     if (switched) appendLogHeader(logPath, { workspace: path.basename(workspace), branch, at: now });
     await cx.store.updateState((s) => {
       const r = { ...emptyRepo(), ...(s.repos[root] ?? {}) };
+      // D49: who lit it, read off the record before this light names its holder.
+      r.litBy = litByAfterLight(s.repos[root] ?? null, workspace, by);
+      r.idleSince = null;
       r.holder = workspace;
       // The root is lit: a root error ends. A server error stays for
       // ensureServer below, which decides it (its checkPort reads the port a
@@ -1776,30 +1785,40 @@ export async function teardownRepo(cx, root) {
 // whose light takes the root over, or another terminal of this task's), as
 // state.json says now; null when none has it.
 function turnAt(state, root) {
-  const r = state.queue.requests.find((x) => x.state === "holding" && (x.members ?? []).some((m) => m.root === root));
+  const r = holdingAt(state.queue.requests, root);
   return r ? labelOf(state.queue.requests, r.taskKey) : null;
 }
 
 // The line of a root `off --stop` left alone, from what its onlyIf saw: a
-// turn that has it, a holder outside the task, or nobody.
+// turn that has it, a holder outside the task, the task's own holder lit by
+// hand (D49: `litBy` "human", or none, lit before D49), or nobody.
 function leftOnLine(name, seen) {
   if (seen?.turn) return `${name}: ${seen.turn} tests there now: its Spotlight stays on.`;
-  if (seen?.holder) return `${name}: ${path.basename(seen.holder)} holds it now: its Spotlight stays on.`;
+  if (seen?.holder && !seen.mine) return `${name}: ${path.basename(seen.holder)} holds it now: its Spotlight stays on.`;
+  if (seen?.holder) return `${name}: lit by hand: its Spotlight stays on.`;
   return `Spotlight is not on in ${name}: nothing to turn off.`;
 }
 
 // `spotlight off --stop` (D48), once the caller's turn is given back: each
 // of `members` (the task's, one per repo) turned off in turn, inline, never
 // forced, `quiet` (a turn-off that goes through makes no toast; a refusal
-// toasts as Apagar's). A root goes off only when, read under its own repo
-// lock (deactivateRepo's onlyIf), one of the member's workspaces holds it
+// toasts as Apagar's). A light of one of the task's workspaces still at
+// work (its own turn's, or a toggle's) is waited out first, as teardown
+// does (D49), so it can't light a root after its turn-off; `label` (the
+// task's) names it when the deadline passes first, and then nothing is
+// turned off. A root goes off only when, read under its own repo lock
+// (deactivateRepo's onlyIf), one of the member's workspaces holds it, an
+// agent lit it (D49: `litBy`; one lit by hand, or before D49, is Juan's)
 // and no holding turn has it among its members: one lit by someone else
 // since, or one a granted turn's light takes over, is left on and named.
 // Each repo lock is waited on until `deadline` (one try once it passed).
 // → { ok, lines }: a line per root, as teardown prints them; ok false when
 // one refused, didn't stop its server or was never reached.
-export async function stopTask(cx, members, { deadline }) {
+export async function stopTask(cx, members, { deadline, label }) {
   const total = Math.max(0, deadline - cx.now());
+  const paths = members.flatMap((m) => m.workspaces ?? [m.workspace]);
+  const lights = await waitOutLights(cx, (marker) => membersOf(marker, paths).length > 0, deadline);
+  if (!lights) return { ok: false, lines: [`Gave up waiting after ${secondsOf(total)} s for a Spotlight light of ${label} still running: nothing turned off.`] };
   const lines = [];
   let ok = true;
   for (const m of members) {
@@ -1807,8 +1826,9 @@ export async function stopTask(cx, members, { deadline }) {
     const mine = m.workspaces ?? [m.workspace];
     let seen = null;
     const onlyIf = (record) => {
-      seen = { holder: record?.holder ?? null, turn: turnAt(cx.store.readState(), m.root) };
-      return !seen.turn && mine.includes(seen.holder);
+      const holder = record?.holder ?? null;
+      seen = { holder, mine: mine.includes(holder), litBy: litByOf(record?.litBy), turn: turnAt(cx.store.readState(), m.root) };
+      return !seen.turn && seen.mine && seen.litBy === "agent";
     };
     try {
       const r = await deactivateRepo(cx, m.root, { quiet: true, onlyIf, lockTimeoutMs: Math.max(0, deadline - cx.now()) });
@@ -2050,8 +2070,9 @@ export function applyTurnEnd(queue, cur, d, qctx) {
 // log rotation and a
 // detached sync for a server running another env than the effective one
 // (J-002); a regrant (a raised cap); lights for turns whose marker is
-// missing or whose light died; and busy marks and task batches whose
-// process is gone (staleMarks, D33, D31).
+// missing or whose light died; busy marks and task batches whose
+// process is gone (staleMarks, D33, D31); and each repo's idle clock
+// (D49, cli-turns.mjs idleClock), in the same write.
 // `on` and `off` run the queue part only (`full: false`: turn ends, the
 // regrant, the lights; D13 "checked by on, off and reap"), so the line moves
 // while the footer isn't running; `skip` is the caller's own terminal, whose
@@ -2186,8 +2207,17 @@ export async function reap(cx, { full = true, skip = null } = {}) {
     for (const turn of snapshot(s.queue).turns) {
       if (keys.includes(turn.taskKey)) continue;
       if (needsLight(s.queue.lighting[turn.taskKey], turn, { now, pidAlive, repos: s.repos })) {
-        s.queue.lighting[turn.taskKey] = lightingMarker(turn, { now, taskKey: turn.taskKey });
+        s.queue.lighting[turn.taskKey] = lightingMarker(turn, { now, taskKey: turn.taskKey, by: "agent" });
         keys.push(turn.taskKey);
+      }
+    }
+    // D49: each repo's idle clock, from the queue this write leaves. A
+    // record that never had one isn't given a null.
+    if (full) {
+      const queueOn = cx.settings.queue.enabled !== false;
+      for (const [root, r] of Object.entries(s.repos)) {
+        const since = idleClock(r, { holding: holdingAt(s.queue.requests, root), now, queueOn });
+        if (since !== (r.idleSince ?? null)) r.idleSince = since;
       }
     }
     dropStaleMarkers(s, now);
