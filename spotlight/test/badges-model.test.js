@@ -764,8 +764,9 @@ test("D31: a Task-mode group's lanes get the task's flashlight, keyed and acting
   assert.equal(buildLanes(both).value[laneKey("AX-3447")][0].tone, "dim");
   assertContract(buildLanes(both).value);
 
-  // The workspace rows keep their own badges, as before.
-  assert.deepEqual(value[B1], build().value[B1]);
+  // The workspace rows keep their own badges, as before, but the queue's
+  // flask: the lane's pill says it.
+  assert.deepEqual(value[B1], build().value[B1].filter((b) => !b.icon?.endsWith("/flask.svg")));
 });
 
 test("D31: no eligible member, no flashlight: a task only in repos whose Spotlight is off, the Servers lane and the No task lane publish none", () => {
@@ -829,7 +830,7 @@ const PROBANDO = { text: "Probando", tone: "dim", pill: true, look: "secondary" 
 const queuedPill = (n) => ({ text: `En cola #${n}`, tone: "dim", pill: true, look: "outline" });
 const PAUSADO = { text: "Pausado", tone: "dim", pill: true, look: "outline" };
 
-test("D31, D42: the task's queue badge on its lane, Orca's text pill: Probando, En cola #2, Pausado; the rows keep their icons; none with the queue off", () => {
+test("D31, D42: the task's queue badge on its lane, Orca's text pill: Probando, En cola #2, Pausado; the rows don't repeat it; none with the queue off", () => {
   const s = baseState();
   s.queue.requests.push({
     terminal: "t3", taskKey: "ax/login", label: "login", lane: "ax", state: "waiting", requestedAt: 4, members: [member(FRONT, "front", F2)], workspace: F2, root: FRONT,
@@ -842,19 +843,71 @@ test("D31, D42: the task's queue badge on its lane, Orca's text pill: Probando, 
   assert.deepEqual(value[laneKey("AX-3500")][1], queuedPill(1));
   // Behind AX-3500, and AX-3447 holds front.
   assert.deepEqual(value[laneKey("login")][1], queuedPill(2));
-  // The workspace rows keep their queue icons (Herdr's extra), with their reason.
-  assert.deepEqual(icons([value[F2][1]]), ["clock"]);
-  assert.equal(value[F2][1].text, "#2");
-  assert.equal(value[F2][1].tooltip, "En cola #2 · repo ocupado");
+  // The lane says it; the workspace rows have no queue icon.
+  assert.deepEqual(icons(value[F2]), ["flashlight"]);
   assertContract(value);
 
   Object.assign(s.queue.requests[1], { state: "paused", pauseReason: "limit", pausedAt: 9 });
   const paused = buildLanes(s).value;
   assert.deepEqual(paused[laneKey("AX-3500")][1], PAUSADO);
-  assert.equal(paused[B2][1].tooltip, "Pausado · sin límite", "the row's pause icon keeps its reason");
+  assert.deepEqual(icons(paused[B2]), ["flashlight"], "no pause icon on the row, the lane says it");
   assertContract(paused);
   const off = buildLanes(s, { settings: settingsOf({ version: 1, queue: { enabled: false } }) }).value;
   assert.deepEqual(icons(off[laneKey("AX-3447")]), ["flashlight", "Local ▾"]);
+});
+
+// A report (2026-11-17): three worktree rows of one task, each with the
+// flashlight and the flask, were noise; the task's lane already says it once.
+test("a task whose lane is drawn shows its queue state on the lane's pill only, not on its worktree rows; a task with no lane keeps it on its rows; the lit root's own badge stays in the logs icon's place", () => {
+  const s = baseState();
+  s.queue.requests.push({
+    terminal: "t3", taskKey: "ax/login", label: "login", lane: "ax", state: "waiting", requestedAt: 4, members: [member(FRONT, "front", F2)], workspace: F2, root: FRONT,
+  });
+  const { value } = buildLanes(s);
+  // AX-3447 holds: no flask on the holder's row (back) nor on its front row.
+  assert.deepEqual(icons(value[B1]), ["flashlight", ":3000 +1"]);
+  assert.deepEqual(icons(value[F1]), ["flashlight"]);
+  // AX-3500 and login wait: no clock on their rows.
+  assert.deepEqual(icons(value[B2]), ["flashlight"]);
+  assert.deepEqual(icons(value[F2]), ["flashlight"]);
+  // Their lanes keep the pill, in Orca's order.
+  assert.deepEqual(value[laneKey("AX-3447")][1], PROBANDO);
+  assert.deepEqual(value[laneKey("AX-3500")][1], queuedPill(1));
+  assert.deepEqual(value[laneKey("login")][1], queuedPill(2));
+  assertContract(value);
+
+  // Paused: the lane says it, the row has no pause icon.
+  Object.assign(s.queue.requests[1], { state: "paused", pauseReason: "limit", pausedAt: 9 });
+  const paused = buildLanes(s).value;
+  assert.deepEqual(paused[laneKey("AX-3500")][1], PAUSADO);
+  assert.deepEqual(icons(paused[B2]), ["flashlight"]);
+
+  // A task with no lane keeps the row badge: a task whose worktree isn't in
+  // the group's cache (no lane for it), or every task when its group isn't
+  // in Task mode.
+  const AX77 = `${WS}/back/ax-77`;
+  const lone = baseState();
+  lone.queue.requests.push({
+    terminal: "t6", taskKey: "ax/AX-77", label: "AX-77", lane: "ax", state: "holding", requestedAt: 5, grantedAt: 6, members: [], workspace: AX77, root: BACK, slotOnly: true,
+  });
+  const loneOut = buildLanes(lone).value;
+  assert.equal(loneOut[laneKey("AX-77")], undefined);
+  assert.deepEqual(icons(loneOut[AX77]), ["flask"]);
+  assert.deepEqual(icons(loneOut[B1]), ["flashlight", ":3000 +1"], "AX-3447's lane is drawn: its row has no flask");
+  const projectMode = buildLanes(baseState(), { taskGroups: [] }).value;
+  assert.deepEqual(icons(projectMode[B1]), ["flashlight", ":3000 +1", "flask"]);
+  assert.deepEqual(icons(projectMode[B2]), ["flashlight", "clock"]);
+
+  // The lit root's own request (the root terminal's, `cwd:<root>`) keeps its
+  // badge in the logs icon's place with the lanes drawn (D39).
+  const root = baseState();
+  root.queue.requests.push({
+    terminal: "t7", taskKey: `cwd:${BACK}`, label: "back", lane: "ax", state: "holding", requestedAt: 5, grantedAt: 6, members: [], workspace: BACK, root: BACK, slotOnly: true,
+  });
+  const rootOut = buildLanes(root).value;
+  assert.deepEqual(icons(rootOut[BACK]), ["flashlight", ":3000 +1", "flask", "x"]);
+  assert.equal(rootOut[BACK][2].tooltip, "Probando");
+  assertContract(rootOut);
 });
 
 test("D29: a group not in Task mode gets no lane keys", () => {
