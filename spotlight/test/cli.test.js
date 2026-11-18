@@ -1142,6 +1142,156 @@ test("D49: `off --stop` first waits out a light of its task still at work, then 
   assert.deepEqual(refsOf(app.root), []);
 });
 
+// ── The reap turns off what an agent forgot (D50) ──────────────────────────
+
+// A world of one project lit by an agent's `on` for `task` and given back:
+// `run` asserts exit 0, `age(min)` puts its idle clock that many minutes
+// back (as the reap would have kept it), `idle()` runs the reap's detached
+// command by hand.
+async function idleWorld(task, { files } = {}) {
+  const w = makeWorld();
+  const app = makeRepo(w, "app", { pkg: DEV, tasks: [task, `${task}-B`], files });
+  w.register([{ id: "g1", repos: [app] }]);
+  w.listen(app.root, [3000]);
+  const ws = app.ws[task];
+  const t = w.agent(ws);
+  const run = async (args, opts) => {
+    const r = await w.cli(args, opts);
+    assert.equal(r.code, 0, `${args.join(" ")}: ${r.stderr}${r.stdout}`);
+    return r;
+  };
+  const age = (min) => {
+    const s = w.state();
+    s.repos[app.root].idleSince = Date.now() - min * 60_000;
+    w.writeState(s);
+  };
+  const toasts = (from) => w.state().notes.slice(from).filter((n) => n.toast);
+  return {
+    w, app, ws, t, run, age, toasts,
+    on: () => run(["on"], { terminal: t, cwd: ws }),
+    off: () => run(["off"], { terminal: t, cwd: ws }),
+    idle: () => w.cli(["toggle", "--workspace", app.root, "--inline", "--idle"]),
+    rec: () => w.state().repos[app.root],
+  };
+}
+
+test("D50: the reap turns off, detached, a project an agent left idleOffMin minutes with no turn: the server stopped, the root restored, the log says why, no toast; not before", async () => {
+  const { w, app, ws, run, age, toasts, on, off, rec } = await idleWorld("AX-70");
+  await on();
+  await off();
+  await run(["reap"]);
+  assert.ok(Number.isFinite(rec().idleSince), "the clock runs");
+  await sleep(1500);
+  assert.equal(rec().holder, ws, "not before the limit");
+
+  age(31);
+  const notes = w.state().notes.length;
+  await run(["reap"]);
+  await w.until((s) => !s.repos[app.root], { what: "turned off by the reap's detached copy" });
+  assert.deepEqual(refsOf(app.root), []);
+  assert.equal(git(app.root, "symbolic-ref", "--short", "HEAD"), "main");
+  assert.equal(w.serverTerminal(app.root).foreground.name, "zsh", "the server was stopped");
+  const log = await serverLogText(w, "app");
+  assert.match(log, /Spotlight off — 31 min sin turno/);
+  assert.match(log, /Spotlight off — server stopped/);
+  assert.deepEqual(toasts(notes), [], "a turn-off that goes through makes no toast");
+});
+
+test("D50: the idle turn-off checks again under the repo lock: a project lit again, granted a turn, taken by hand or already off since the reap looked stays as it is, and it never lights one", async () => {
+  const { w, app, ws, run, age, idle, on, off, rec } = await idleWorld("AX-71");
+  await on();
+  await off();
+  const refs = refsOf(app.root);
+  const stays = async (line) => {
+    const r = await idle();
+    assert.equal(r.code, 0, r.stderr + r.stdout);
+    assert.match(r.stdout, line);
+    assert.equal(w.serverTerminal(app.root).foreground.name === "zsh", false, "its server still runs");
+  };
+
+  // Lit again since the reap saw it idle: every light stops the clock.
+  age(31);
+  await on();
+  await off();
+  await stays(/^app: not 30 min with no turn yet: its Spotlight stays on\.$/m);
+  // Its agent took a turn again meanwhile.
+  await on();
+  age(31);
+  await stays(/^app: AX-71 tests there now: its Spotlight stays on\.$/m);
+  await off();
+  // Juan took it with a toggle: his.
+  await run(["toggle", "--workspace", app.ws["AX-71-B"], "--inline"]);
+  age(31);
+  await stays(/^app: lit by hand: its Spotlight stays on\.$/m);
+  assert.equal(rec().holder, app.ws["AX-71-B"]);
+  assert.notDeepEqual(refsOf(app.root), [], "still lit");
+
+  // Turned off by hand meanwhile: nothing to do, and nothing lit.
+  await run(["toggle", "--workspace", app.ws["AX-71-B"], "--inline"]);
+  assert.equal(rec(), undefined);
+  const gone = await idle();
+  assert.equal(gone.code, 0, gone.stderr + gone.stdout);
+  assert.match(gone.stdout, /^Spotlight is not on in app: nothing to turn off\.$/m);
+  assert.equal(rec(), undefined);
+  assert.equal(w.state().queue.lighting[`direct/${app.root}`], undefined);
+  assert.deepEqual(refsOf(app.root), []);
+  assert.ok(refs.length > 0);
+
+  // Only the reap's command: a root, never forced.
+  const holder = await w.cli(["toggle", "--workspace", ws, "--inline", "--idle"]);
+  assert.equal(holder.code, 2, holder.stderr + holder.stdout);
+  assert.match(holder.stderr, /--idle takes the repository root/);
+  const forced = await w.cli(["toggle", "--workspace", app.root, "--inline", "--idle", "--force"]);
+  assert.equal(forced.code, 2, forced.stderr + forced.stdout);
+  assert.equal(rec(), undefined, "nothing lit");
+});
+
+test("D50: an idle turn-off the root refuses toasts once, as Apagar's, and marks idleOffFailedAt: two copies racing toast once, a no-op sync clearing the error brings no retry, and a new light does", async () => {
+  // A nested git repo in the root where the original commit has a file:
+  // the turn-off refuses untracked-collision, and a no-op sync clears it.
+  const { w, app, ws, run, age, toasts, idle, on, off, rec } = await idleWorld("AX-72", { files: { tool: "v1\n" } });
+  git(ws, "rm", "-q", "tool");
+  git(ws, "commit", "-q", "-m", "drop tool");
+  await on();
+  await off();
+  git(app.root, "init", "-q", "-b", "main", "tool");
+  write(app.root, "tool/x.txt", "x\n");
+  age(31);
+  const notes = w.state().notes.length;
+
+  const both = await Promise.all([idle(), idle()]);
+  assert.deepEqual(both.map((r) => r.code).sort(), [0, 1], both.map((r) => r.stderr + r.stdout).join("\n"));
+  assert.ok(both.some((r) => /^app: untracked-collision: /m.test(r.stdout)), both.map((r) => r.stdout).join("\n"));
+  assert.ok(both.some((r) => /^app: its idle turn-off was refused: its Spotlight stays on until it is lit again\.$/m.test(r.stdout)));
+  const added = toasts(notes);
+  assert.equal(added.length, 1, JSON.stringify(added));
+  assert.equal(added[0].level, "error");
+  assert.equal(added[0].title, "No se pudo apagar Spotlight en app");
+  const failedAt = rec().idleOffFailedAt;
+  assert.ok(Number.isFinite(failedAt), JSON.stringify(rec()));
+  assert.equal(rec().lastError.code, "untracked-collision");
+  assert.equal(rec().holder, ws);
+
+  // A no-op sync clears the root error; the mark stays, so the reap sends no other copy.
+  await run(["sync", "--repo", app.root, "--auto"]);
+  assert.equal(rec().lastError, null);
+  assert.equal(rec().idleOffFailedAt, failedAt);
+  await run(["reap"]);
+  await sleep(1500);
+  assert.equal(toasts(notes).length, 1, "no retry");
+  assert.equal(rec().idleOffFailedAt, failedAt);
+
+  // A light clears it: idle past the limit again, the reap's copy tries once more.
+  await on();
+  assert.equal("idleOffFailedAt" in rec(), false, JSON.stringify(rec()));
+  await off();
+  age(31);
+  await run(["reap"]);
+  await w.until((s) => Number.isFinite(s.repos[app.root]?.idleOffFailedAt), { what: "the retry refused" });
+  assert.equal(toasts(notes).length, 2);
+  assert.equal(rec().holder, ws, "never forced");
+});
+
 test("a `light` killed mid-way: the next `on` poll lights again and exits 0", async () => {
   const w = makeWorld();
   const app = makeRepo(w, "app", { pkg: DEV, tasks: ["AX-10"] });

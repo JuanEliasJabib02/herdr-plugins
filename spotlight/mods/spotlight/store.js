@@ -40,7 +40,12 @@
 //              since when no holding turn has an agent-lit repo among its
 //              members, set once by the full reap, null while one does,
 //              with the queue off, and after every light; absent on a
-//              record that never had one; cli-turns.mjs idleClock) and
+//              record that never had one; cli-turns.mjs idleClock),
+//              idleOffFailedAt? ms (D50: when the reap's turn-off of an
+//              agent-lit repo idleOffMin minutes with no turn was refused;
+//              no reap sends another until a light drops it; set in
+//              cli-work.mjs deactivateRepo's refusal write, never by any
+//              other turn-off; absent otherwise) and
 //              busy? { op, since, pid, workspace }
 //              (D33: a light, turn-off, Forzar sync or restart works on
 //              the repo right now; set and cleared under its repo lock by

@@ -4,8 +4,9 @@
 // hand), the env per task (its picks and the restarts they ask for),
 // waiting for the servers to listen (port of Orca's waitForTurnServers), the
 // teardown before a delete (D43), the turn-off when the testing ends (`off
-// --stop`, D48), who lit each repo and since when no turn has it (D49), and
-// the reap. Node-only.
+// --stop`, D48), who lit each repo and since when no turn has it (D49), the
+// turn-off of what an agent left with no turn (D50), and the reap.
+// Node-only.
 //
 // Every git step runs under the repo's lock and reads the holder inside it,
 // so the last one to take the lock sees the latest holder (a sync racing a
@@ -376,7 +377,8 @@ export function lightNote({ root, name, workspace, server, logPath }) {
 // holder's env key (D32, D46: `taskKey`, the marker's `<lane>/<KEY>`, as
 // task:<KEY>, the same in every space; else ws:<path>), so the server below
 // runs the env picked for it. It also says who lit it (D49, `by`: the
-// marker's) and stops the idle clock: `litBy` and `idleSince: null`.
+// marker's) and stops the idle clock: `litBy` and `idleSince: null`; and it
+// drops a refused idle turn-off's mark (D50: `idleOffFailedAt`).
 async function lightMember(cx, member, { force, taskKey, quiet = false, by }) {
   const { root, workspace } = member;
   const envKey = envKeyOf(taskKey, workspace);
@@ -421,6 +423,8 @@ async function lightMember(cx, member, { force, taskKey, quiet = false, by }) {
       // D49: who lit it, read off the record before this light names its holder.
       r.litBy = litByAfterLight(s.repos[root] ?? null, workspace, by);
       r.idleSince = null;
+      // D50: a new light is a new ask: the reap may turn it off again.
+      delete r.idleOffFailedAt;
       r.holder = workspace;
       // The root is lit: a root error ends. A server error stays for
       // ensureServer below, which decides it (its checkPort reads the port a
@@ -1391,7 +1395,14 @@ export async function syncRepo(cx, root, { force = false, asked = false, onlyIf,
 //                  the anchor refs dropped, the backup and rescued refs kept
 //                  (sync.js purgeRefs), and one warning note naming them
 //                  (purgeLines). → { ok: false, code, message, purged, lines }.
-export async function deactivateRepo(cx, root, { force = false, quiet = false, silent = false, onlyIf, lockTimeoutMs, purge = false } = {}) {
+//
+// For the reap's idle turn-off (D50, idleOffRepo):
+//   idle           the server log says why before the stop ("Spotlight off
+//                  — <N> min sin turno", the minutes since the record's
+//                  idleSince), and a refusal marks the record
+//                  idleOffFailedAt in the write that records its error, so
+//                  no reap sends another copy until a light clears it.
+export async function deactivateRepo(cx, root, { force = false, quiet = false, silent = false, onlyIf, lockTimeoutMs, purge = false, idle = false } = {}) {
   const name = cx.nameOf(root);
   const wait = lockTimeoutMs === undefined ? {} : { timeoutMs: lockTimeoutMs };
   // The refusal as told: `stopped`, stopServer's answer when the server was
@@ -1412,6 +1423,7 @@ export async function deactivateRepo(cx, root, { force = false, quiet = false, s
     const now = cx.now();
     await cx.store.updateState((s) => {
       s.repos[root] = setRootError({ ...emptyRepo(), ...(s.repos[root] ?? {}) }, { ...error, at: now });
+      if (idle) s.repos[root].idleOffFailedAt = now;
       if (noted) errorNote(s, { root, name, workspace, error: told, now, op: "off", also: notStopped ? stopFailure(stopped) : null });
     });
     return { ok: false, ...told, ...(stopped ? { stopped } : {}) };
@@ -1427,10 +1439,12 @@ export async function deactivateRepo(cx, root, { force = false, quiet = false, s
       // left the server's tree before the turn-off still dies when it holds
       // one of those ports, or one of the identities' own (ports.js
       // serverSnapshot adds them, G7), and is one of those processes.
-      const stop = async () => {
+      // `why`: a line the log gets first, saying why it stops (D50).
+      const stop = async (why = null) => {
         const procs = Array.isArray(record?.serverProcs) ? record.serverProcs : [];
         const ports = Array.isArray(record?.ports) ? record.ports : [];
         const head = { workspace: holder ? path.basename(holder) : null, branch: holder ? await branchOf(holder) : null };
+        if (why) appendLogHeader(logPath, { ...head, at: cx.now(), event: why });
         const stopped = await serverOf(cx).stopServer(
           { root, terminal: record?.serverTerminal ?? null, logPath, serverPid: record?.serverPid ?? null, ...head, ports, procs },
           cx.serverDeps,
@@ -1476,7 +1490,7 @@ export async function deactivateRepo(cx, root, { force = false, quiet = false, s
         });
         return { ok: true, warning: null, notActive: true };
       }
-      const stopped = await stop();
+      const stopped = await stop(idle ? idleOffWhy(record, cx.now()) : null);
       let res;
       try {
         res = await deactivate(cx.gitCtx, root, { force });
@@ -1843,6 +1857,82 @@ export async function stopTask(cx, members, { deadline, label }) {
   return { ok, lines };
 }
 
+// ── What an agent forgot (D50) ─────────────────────────────────────────────
+
+const MINUTE_MS = 60_000;
+
+// Why the idle turn-off leaves a repo alone, or null when it is due:
+// "off" no record; "disabled" the queue off (no turns to measure, D49) or
+// `idleOffMin` 0; "human" lit by hand, or before D49 (litByOf); "turn" a
+// holding turn has it (`holding`, a boolean); "refused" its last idle
+// turn-off was refused and no light came since (`idleOffFailedAt`); "early"
+// its idle clock (idleClock, which reads finite numbers only: a null one,
+// just lit, starts at `now`) hasn't run `idleOffMin` minutes. `queue`: the
+// settings' queue.
+function idleOffBlock(record, { holding, now, queue }) {
+  if (!record) return "off";
+  if (queue.enabled === false || !(queue.idleOffMin > 0)) return "disabled";
+  if (litByOf(record.litBy) !== "agent") return "human";
+  if (holding) return "turn";
+  if (Number.isFinite(record.idleOffFailedAt)) return "refused";
+  const since = idleClock(record, { holding: false, now, queueOn: true });
+  return since <= now - queue.idleOffMin * MINUTE_MS ? null : "early";
+}
+
+// The roots of `s` (the state the full reap writes, its clocks as that
+// write leaves them) whose idle turn-off is due, none of them busy (a
+// light, a turn-off or a Forzar sync at work there).
+function idleOffDue(s, { now, queue }) {
+  return Object.entries(s.repos)
+    .filter(([root, r]) => !r.busy && idleOffBlock(r, { holding: Boolean(holdingAt(s.queue.requests, root)), now, queue }) === null)
+    .map(([root]) => root);
+}
+
+// The server log's line before an idle turn-off's stop: the whole minutes
+// since the record's idleSince.
+function idleOffWhy(record, now) {
+  const since = record?.idleSince;
+  const minutes = Number.isFinite(since) ? Math.max(0, Math.floor((now - since) / MINUTE_MS)) : 0;
+  return `Spotlight off — ${minutes} min sin turno`;
+}
+
+// The line of a root the idle turn-off left alone, from idleOffBlock's why.
+function idleLeftOnLine(name, why, { turn, minutes }) {
+  if (why === "off") return `Spotlight is not on in ${name}: nothing to turn off.`;
+  if (why === "disabled") return `${name}: the idle turn-off is off (the queue off, or idleOffMin 0): its Spotlight stays on.`;
+  if (why === "human") return `${name}: lit by hand: its Spotlight stays on.`;
+  if (why === "turn") return `${name}: ${turn} tests there now: its Spotlight stays on.`;
+  if (why === "refused") return `${name}: its idle turn-off was refused: its Spotlight stays on until it is lit again.`;
+  return `${name}: not ${minutes} min with no turn yet: its Spotlight stays on.`;
+}
+
+// The reap's detached `spotlight toggle --workspace <root> --inline --idle`
+// (D50): the root turned off, `quiet` (one that goes through makes no
+// toast; the server log says why), never forced, only while idleOffBlock,
+// read under the repo lock (deactivateRepo's onlyIf) from the record and
+// state.json as they are then, still finds it due. A light since the reap
+// looked (every light stops the clock: a takeover, its own agent's), a turn
+// granted, a turn-off by hand and another copy's refusal all leave it as it
+// is. A refusal toasts as Apagar's and marks the record idleOffFailedAt
+// (deactivateRepo's `idle`), so the reap sends no other copy until a light.
+// The repo lock is waited on as any CLI call's. → { ok, lines }: one line,
+// as `off --stop` prints them; ok false when it refused or its server
+// didn't stop.
+export async function idleOffRepo(cx, root) {
+  const name = cx.nameOf(root);
+  const queue = cx.settings.queue;
+  let why = null;
+  let turn = null;
+  const onlyIf = (record) => {
+    turn = turnAt(cx.store.readState(), root);
+    why = idleOffBlock(record, { holding: turn !== null, now: cx.now(), queue });
+    return why === null;
+  };
+  const r = await deactivateRepo(cx, root, { quiet: true, idle: true, onlyIf });
+  if (r.skipped) return { ok: true, lines: [idleLeftOnLine(name, why, { turn, minutes: queue.idleOffMin })] };
+  return { ok: r.ok, lines: turnedOffLines(name, r) };
+}
+
 // ── Waiting for the servers (port of waitForTurnServers) ───────────────────
 
 // Where one repo of a turn stands, as `on` prints it.
@@ -2072,7 +2162,9 @@ export function applyTurnEnd(queue, cur, d, qctx) {
 // (J-002); a regrant (a raised cap); lights for turns whose marker is
 // missing or whose light died; busy marks and task batches whose
 // process is gone (staleMarks, D33, D31); and each repo's idle clock
-// (D49, cli-turns.mjs idleClock), in the same write.
+// (D49, cli-turns.mjs idleClock), in the same write, with a detached
+// turn-off for each repo an agent left idleOffMin minutes with no turn
+// (D50, idleOffRepo) once it is written.
 // `on` and `off` run the queue part only (`full: false`: turn ends, the
 // regrant, the lights; D13 "checked by on, off and reap"), so the line moves
 // while the footer isn't running; `skip` is the caller's own terminal, whose
@@ -2221,7 +2313,10 @@ export async function reap(cx, { full = true, skip = null } = {}) {
       }
     }
     dropStaleMarkers(s, now);
-    return { keys, classify, counts };
+    // D50: what an agent left idleOffMin minutes with no turn, from the
+    // clocks this write leaves; turned off detached, after the write.
+    const idleOff = full ? idleOffDue(s, { now, queue: cx.settings.queue }) : [];
+    return { keys, classify, counts, idleOff };
   });
 
   await spawnLights(cx, out.result.keys);
@@ -2233,5 +2328,10 @@ export async function reap(cx, { full = true, skip = null } = {}) {
     });
   }
   for (const root of envSyncs) cx.spawn(["sync", "--repo", root, "--auto"]);
+  // D50: by the root, never the holder: named by its root, `toggle` can
+  // only turn off (a holder's row could light it again), and the copy
+  // checks it all again under the repo lock (idleOffRepo). A turn-off
+  // outlasts the reap's second (D18).
+  for (const root of out.result.idleOff) cx.spawn(["toggle", "--workspace", root, "--inline", "--idle"]);
   return { ...out.result.counts, lights: out.result.keys.length };
 }

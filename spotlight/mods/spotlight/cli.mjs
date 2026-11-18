@@ -30,7 +30,9 @@
 //             automatic sync, which leaves an env that couldn't run, N4),
 //             toggle --workspace p --note (projects-sidebar's click, the
 //             badges' and the menu's: a refusal it answers at once is an
-//             error toast and exit 0, D41)
+//             error toast and exit 0, D41),
+//             toggle --workspace <root> --inline --idle (the reap's
+//             turn-off of what an agent left with no turn, D50)
 //
 // `restart --free-port` is the server popup's "Liberar puerto y arrancar"
 // (D24): it stops the process the recorded port-busy error names, then
@@ -63,7 +65,7 @@ import {
 import {
   markGranted, spawnLights, dropStaleMarkers, lightTask, syncRepo, deactivateRepo, ensureServer, waitForTurnServers,
   recordServers, reap, rescuedNotes, errorNote, survivorsPhrase, writeEnv, applyEnv, rememberTaskVariant, teardownWorkspace, teardownRepo,
-  stopTask,
+  stopTask, idleOffRepo,
 } from "./cli-work.mjs";
 import { setRootError } from "./server-errors.js";
 import { settleResumes, autoResume, continueTask, classifyTerminal } from "./cli-resume.mjs";
@@ -126,6 +128,7 @@ const FLAGS = {
   "free-port": "bool",
   ensure: "bool",
   stop: "bool",
+  idle: "bool",
   help: "bool",
 };
 
@@ -394,11 +397,13 @@ async function stopOwnTask(cx, given, deadline) {
 async function verbToggle(cx, opts) {
   if (opts.task !== undefined || opts.group !== undefined) return verbToggleTask(cx, opts);
   if (!opts.workspace) return usage("spotlight toggle: --workspace <path> is required.");
+  if (opts.idle && opts.force) return usage("spotlight toggle: --idle is never forced.");
   const dir = path.resolve(opts.workspace);
   const workspace = await checkoutOf(dir);
   const root = workspace ? await repoRootOf(workspace) : null;
   if (!root) return usage(`spotlight toggle: ${dir} is not in a git repository.`);
   const name = cx.nameOf(root);
+  if (opts.idle) return toggleIdle(cx, { workspace, root });
   const force = Boolean(opts.force);
   const record = cx.store.readState().repos[root] ?? null;
   const refs = await readRefs(root);
@@ -489,6 +494,20 @@ async function verbToggle(cx, opts) {
   await spawnLights(cx, [key]);
   out(`Turning Spotlight on: ${path.basename(workspace)} onto ${name}. \`spotlight status\` shows when it is lit.`);
   return 0;
+}
+
+// `toggle --workspace <root> --inline --idle` (D50): the reap's detached
+// turn-off of a project an agent left idleOffMin minutes with no turn,
+// inline in that copy. Named by its root it only ever turns off, and it
+// never reads the refs to decide: cli-work.mjs idleOffRepo checks it all
+// again under the repo lock, where a project already off is no record. Its
+// output goes nowhere (a detached child): one line for a run by hand, exit 1
+// when it refused or its server didn't stop.
+async function toggleIdle(cx, { workspace, root }) {
+  if (workspace !== root) return usage("spotlight toggle: --idle takes the repository root, never a workspace.");
+  const r = await idleOffRepo(cx, root);
+  for (const line of r.lines) out(line);
+  return r.ok ? 0 : 1;
 }
 
 // `toggle --task <KEY> --group <id>` (D31): the lane's flashlight. Detached
