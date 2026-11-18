@@ -29,7 +29,7 @@
 
 import { resolveGroupTask, taskLit } from "./task.js";
 import { lightTask, deactivateRepo, withTaskBatch } from "./cli-work.mjs";
-import { lightingMarker } from "./cli-turns.mjs";
+import { lightingMarker, markLit } from "./cli-turns.mjs";
 import { addNote } from "./store.js";
 import { toSpotlightError } from "./sync.js";
 
@@ -87,15 +87,15 @@ async function turnOff(cx, members) {
 }
 
 // D49: a member one of the task's workspaces holds, read under its repo
-// lock, is marked lit by hand (`litBy: "human"`, its idle clock stopped) in
-// one state write, so an auto-off or `off --stop` can't come in between.
-// → false when it isn't the task's any more (turned off, or taken by
+// lock, is marked lit by hand (markLit: `litBy: "human"`, its idle clock
+// stopped, as a light writes it) in one state write, so an auto-off or `off
+// --stop` can't come in between. → false when it isn't the task's any more (turned off, or taken by
 // someone else, since the batch looked): the caller lights it.
 async function markLitByHand(cx, member) {
   return cx.store.withRepoLock(member.root, async () => {
     const r = await cx.store.updateState((s) => {
       if (!taskLit([member], s.repos)) return false;
-      Object.assign(s.repos[member.root], { litBy: "human", idleSince: null });
+      markLit(s.repos[member.root], "human");
       return true;
     });
     return r.result;

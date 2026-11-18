@@ -790,11 +790,12 @@ export function buildBadges({ state, settings, projects = [], cache = {}, enable
   const laned = new Set(); // queue keys of the tasks with a lane
   for (const lane of taskLanes({ projects, cache, enabled, taskGroups: Array.isArray(taskGroups) ? taskGroups : [] })) {
     const at = `${lane.group}/task:${lane.key}`;
-    laned.add(`${lane.group}/${lane.key}`);
+    const key = `${lane.group}/${lane.key}`;
+    laned.add(key);
     // Orca's order (TaskSectionHeader): the flashlight, the queue pill (D42), the env pill.
     const light = laneFlashlight(lane, { state, bin });
     if (light) add(at, light);
-    const asked = queued.get(`${lane.group}/${lane.key}`);
+    const asked = queued.get(key);
     if (asked) add(at, asked.pill);
     if (light) {
       lanes[laneEnvIdOf(lane.group, lane.key)] = { group: lane.group, task: lane.key, members: lane.members };
@@ -805,18 +806,15 @@ export function buildBadges({ state, settings, projects = [], cache = {}, enable
   for (const [key, { badge: b, rows: at }] of queued) {
     for (const p of at) {
       // D39: on a lit root (the root terminal's own request, `cwd:<root>`),
-      // the queue badge takes the logs icon's place, within the cap.
+      // the queue badge takes the logs icon's place, within the cap. Else a
+      // task whose lane is drawn says it on the lane's pill only (a report,
+      // 2026-11-17); a task with no lane keeps it on its rows (Herdr's extra).
       const logs = logsOn.get(p);
-      if (!logs) {
-        // A report (2026-11-17): a task's flask on each of its worktree rows
-        // was noise. A task whose lane is drawn says it on the lane's pill
-        // only; a task with no lane keeps it on its rows (Herdr's extra).
-        if (!laned.has(key)) add(p, b);
-        continue;
-      }
-      const list = rows.get(p);
-      list[list.indexOf(logs)] = b;
-      logsOn.delete(p);
+      if (logs) {
+        const list = rows.get(p);
+        list[list.indexOf(logs)] = b;
+        logsOn.delete(p);
+      } else if (!laned.has(key)) add(p, b);
     }
   }
 

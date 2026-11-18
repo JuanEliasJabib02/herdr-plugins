@@ -1000,6 +1000,13 @@ test("D48: with no request (the turn given back already, or the queue off) `off 
 
 // ── Who lit it, and since when nobody tests (D49) ──────────────────────────
 
+// `w`'s CLI call that must exit 0 → its result.
+const cliOk = (w) => async (args, opts) => {
+  const r = await w.cli(args, opts);
+  assert.equal(r.code, 0, `${args.join(" ")}: ${r.stderr}${r.stdout}`);
+  return r;
+};
+
 test("D49: every light says who lit it: a queue light `agent`, a human's toggle `human`, each takeover overwriting it; an agent's light on the same holder keeps `human`, and on a record with no litBy writes `agent`; an automatic sync keeps it; `off --stop` leaves a project lit by hand on and names it", async () => {
   const w = makeWorld();
   const app = makeRepo(w, "app", { pkg: DEV, tasks: ["AX-60", "AX-61"] });
@@ -1009,11 +1016,7 @@ test("D49: every light says who lit it: a queue light `agent`, a human's toggle 
   const b = app.ws["AX-61"];
   const t = w.agent(a);
   const rec = () => w.state().repos[app.root];
-  const run = async (args, opts) => {
-    const r = await w.cli(args, opts);
-    assert.equal(r.code, 0, `${args.join(" ")}: ${r.stderr}${r.stdout}`);
-    return r;
-  };
+  const run = cliOk(w);
   const on = () => run(["on"], { terminal: t, cwd: a });
   const off = () => run(["off"], { terminal: t, cwd: a });
   const toggle = (ws) => run(["toggle", "--workspace", ws, "--inline"]);
@@ -1067,23 +1070,12 @@ test("D49: every light says who lit it: a queue light `agent`, a human's toggle 
 });
 
 test("D49: the reap starts the idle clock once the agent's turn is given back, keeps it on the next reap, and a new `on` stops it; with the queue off the next reap clears it", async () => {
-  const w = makeWorld();
-  const app = makeRepo(w, "app", { pkg: DEV, tasks: ["AX-62"] });
-  w.register([{ id: "g1", repos: [app] }]);
-  w.listen(app.root, [3000]);
-  const ws = app.ws["AX-62"];
-  const t = w.agent(ws);
-  const rec = () => w.state().repos[app.root];
-  const run = async (args, opts) => {
-    const r = await w.cli(args, opts);
-    assert.equal(r.code, 0, `${args.join(" ")}: ${r.stderr}${r.stdout}`);
-    return r;
-  };
+  const { w, run, rec, on, off } = await idleWorld("AX-62");
 
-  await run(["on"], { terminal: t, cwd: ws });
+  await on();
   await run(["reap"]);
   assert.equal(rec().idleSince, null, "its turn holds the project");
-  await run(["off"], { terminal: t, cwd: ws });
+  await off();
   const before = Date.now();
   await run(["reap"]);
   const since = rec().idleSince;
@@ -1091,12 +1083,12 @@ test("D49: the reap starts the idle clock once the agent's turn is given back, k
   await run(["reap"]);
   assert.equal(rec().idleSince, since, "kept, never restarted");
 
-  await run(["on"], { terminal: t, cwd: ws });
+  await on();
   assert.equal(rec().idleSince, null, "the new light stopped it");
   await run(["reap"]);
   assert.equal(rec().idleSince, null);
 
-  await run(["off"], { terminal: t, cwd: ws });
+  await off();
   await run(["reap"]);
   assert.ok(Number.isFinite(rec().idleSince));
   w.settings({ queue: { enabled: false } });
@@ -1155,11 +1147,7 @@ async function idleWorld(task, { files } = {}) {
   w.listen(app.root, [3000]);
   const ws = app.ws[task];
   const t = w.agent(ws);
-  const run = async (args, opts) => {
-    const r = await w.cli(args, opts);
-    assert.equal(r.code, 0, `${args.join(" ")}: ${r.stderr}${r.stdout}`);
-    return r;
-  };
+  const run = cliOk(w);
   const age = (min) => {
     const s = w.state();
     s.repos[app.root].idleSince = Date.now() - min * 60_000;

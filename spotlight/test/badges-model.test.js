@@ -867,20 +867,11 @@ test("a task whose lane is drawn shows its queue state on the lane's pill only, 
   // AX-3447 holds: no flask on the holder's row (back) nor on its front row.
   assert.deepEqual(icons(value[B1]), ["flashlight", ":3000 +1"]);
   assert.deepEqual(icons(value[F1]), ["flashlight"]);
-  // AX-3500 and login wait: no clock on their rows.
+  // AX-3500 and login wait: no clock on their rows. Their lanes keep the
+  // pill, and a paused one's row has no pause icon (the D31, D42 test above).
   assert.deepEqual(icons(value[B2]), ["flashlight"]);
   assert.deepEqual(icons(value[F2]), ["flashlight"]);
-  // Their lanes keep the pill, in Orca's order.
-  assert.deepEqual(value[laneKey("AX-3447")][1], PROBANDO);
-  assert.deepEqual(value[laneKey("AX-3500")][1], queuedPill(1));
-  assert.deepEqual(value[laneKey("login")][1], queuedPill(2));
   assertContract(value);
-
-  // Paused: the lane says it, the row has no pause icon.
-  Object.assign(s.queue.requests[1], { state: "paused", pauseReason: "limit", pausedAt: 9 });
-  const paused = buildLanes(s).value;
-  assert.deepEqual(paused[laneKey("AX-3500")][1], PAUSADO);
-  assert.deepEqual(icons(paused[B2]), ["flashlight"]);
 
   // A task with no lane keeps the row badge: a task whose worktree isn't in
   // the group's cache (no lane for it), or every task when its group isn't

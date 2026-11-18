@@ -37,8 +37,8 @@ import { logPathFor, appendLogHeader, rotateLog, readStartFailure, causeWords } 
 import { portUrl, foreignListener, stopProcessTree, goneIdentities, identityKey, isIdentity } from "./ports.js";
 import { release, pause, regrant, snapshot } from "./queue.js";
 import {
-  decideTurnEnd, activityUpdate, lightingMarker, lightAlive, needsLight, memberLit, classifyStep, litByOf, litByAfterLight, holdingAt,
-  idleClock,
+  decideTurnEnd, activityUpdate, lightingMarker, lightAlive, needsLight, memberLit, classifyStep, litByAfterLight, markLit, holdingAt,
+  idleClock, MINUTE_MS,
 } from "./cli-turns.mjs";
 import { branchOf, hcGet, hcReadText, registeredRoots, taskKeyOfWorkspace } from "./cli-env.mjs";
 import { recordEnv, envKeyOf, entryKeys, sameEnvKey, taskEnvKey } from "./task-env.js";
@@ -377,8 +377,8 @@ export function lightNote({ root, name, workspace, server, logPath }) {
 // holder's env key (D32, D46: `taskKey`, the marker's `<lane>/<KEY>`, as
 // task:<KEY>, the same in every space; else ws:<path>), so the server below
 // runs the env picked for it. It also says who lit it (D49, `by`: the
-// marker's) and stops the idle clock: `litBy` and `idleSince: null`; and it
-// drops a refused idle turn-off's mark (D50: `idleOffFailedAt`).
+// marker's), stops the idle clock and drops a refused idle turn-off's mark
+// (D50): cli-turns.mjs markLit.
 async function lightMember(cx, member, { force, taskKey, quiet = false, by }) {
   const { root, workspace } = member;
   const envKey = envKeyOf(taskKey, workspace);
@@ -421,10 +421,7 @@ async function lightMember(cx, member, { force, taskKey, quiet = false, by }) {
     await cx.store.updateState((s) => {
       const r = { ...emptyRepo(), ...(s.repos[root] ?? {}) };
       // D49: who lit it, read off the record before this light names its holder.
-      r.litBy = litByAfterLight(s.repos[root] ?? null, workspace, by);
-      r.idleSince = null;
-      // D50: a new light is a new ask: the reap may turn it off again.
-      delete r.idleOffFailedAt;
+      markLit(r, litByAfterLight(s.repos[root] ?? null, workspace, by));
       r.holder = workspace;
       // The root is lit: a root error ends. A server error stays for
       // ensureServer below, which decides it (its checkPort reads the port a
@@ -1382,11 +1379,13 @@ export async function syncRepo(cx, root, { force = false, asked = false, onlyIf,
 //                  files went, L11); rescued files, a server that didn't
 //                  stop and a root left detached still toast. A refusal
 //                  still goes on the record.
-//   onlyIf(record) turn off only when it says so (the workspace's own
+//   onlyIf(record, state)
+//                  turn off only when it says so (the workspace's own
 //                  holder), read under this call's repo lock before the busy
-//                  mark, so a row it skips never spins; skipped → { ok:
-//                  true, skipped: true }, as syncRepo's onlyIf. Taking the
-//                  lock outside first would throw lock-reentry.
+//                  mark, so a row it skips never spins; `state` the
+//                  state.json `record` was read from; skipped → { ok: true,
+//                  skipped: true }, as syncRepo's onlyIf. Taking the lock
+//                  outside first would throw lock-reentry.
 //   lockTimeoutMs  how long to wait for the repo lock (teardown's time
 //                  left); past it, LockError "lock-timeout".
 //   purge          refused, the repo goes all the same (Orca's
@@ -1429,7 +1428,10 @@ export async function deactivateRepo(cx, root, { force = false, quiet = false, s
     return { ok: false, ...told, ...(stopped ? { stopped } : {}) };
   };
   return cx.store.withRepoLock(root, async () => {
-    if (onlyIf && !onlyIf(cx.store.readState().repos[root] ?? null)) return { ok: true, skipped: true };
+    if (onlyIf) {
+      const state = cx.store.readState();
+      if (!onlyIf(state.repos[root] ?? null, state)) return { ok: true, skipped: true };
+    }
     return withBusy(cx, root, { op: "off", workspace: (r) => r?.holder ?? null }, async () => {
       const record = cx.store.readState().repos[root] ?? null;
       const holder = record?.holder ?? null;
@@ -1708,6 +1710,12 @@ export const TEARDOWN_MS = 80_000;
 
 const secondsOf = (ms) => `${Math.round(ms / 100) / 10}`;
 
+// A light still at work past the deadline: nothing goes off.
+const lightsGaveUpLine = (total, label) =>
+  `Gave up waiting after ${secondsOf(total)} s for a Spotlight light of ${label} still running: nothing turned off.`;
+
+const notOnLine = (name) => `Spotlight is not on in ${name}: nothing to turn off.`;
+
 // A lighting marker's members that name one of `paths` as their workspace.
 const membersOf = (m, paths) => (m?.members ?? []).filter((x) => (x.workspaces ?? [x.workspace]).some((p) => paths.includes(p)));
 
@@ -1734,23 +1742,27 @@ function turnedOffLines(name, r) {
   if (r.skipped) return [];
   if (r.purged) return r.lines.map((line) => `${name}: ${line}`);
   const lines = [];
-  if (r.ok && r.notActive) lines.push(`Spotlight is not on in ${name}: nothing to turn off.`);
+  if (r.ok && r.notActive) lines.push(notOnLine(name));
   else if (r.ok) lines.push(`Spotlight off in ${name}: root restored.${r.warning ? ` ${r.warning.message}` : ""}`);
   else lines.push(`${name}: ${r.code}: ${oneLine(r.message)}`);
   for (const line of rescuedNotes(r.rescued, r.discardedRepos)) lines.push(`${name}: ${line}`);
   return lines;
 }
 
-// One root's silent turn-off within teardown's deadline: its repo lock
-// waited on for the time left (one try once it passed). Never throws.
-async function teardownRoot(cx, root, { deadline, total, ...opts }) {
+// One root's turn-off within a deadline (teardown's, `off --stop`'s): its
+// repo lock waited on for the time left (one try once it passed). Never
+// throws. → { r, lines }: deactivateRepo's answer (null when it threw) and
+// the lines to print (turnedOffLines', or why it threw).
+async function turnOffWithin(cx, root, { deadline, total, ...opts }) {
   const name = cx.nameOf(root);
   try {
-    const r = await deactivateRepo(cx, root, { ...opts, silent: true, lockTimeoutMs: Math.max(0, deadline - cx.now()) });
-    return turnedOffLines(name, r);
+    const r = await deactivateRepo(cx, root, { ...opts, lockTimeoutMs: Math.max(0, deadline - cx.now()) });
+    return { r, lines: turnedOffLines(name, r) };
   } catch (e) {
-    if (e instanceof LockError && e.code === "lock-timeout") return [`Gave up waiting for ${name}'s lock after ${secondsOf(total)} s: nothing turned off there.`];
-    return [`${name}: ${toSpotlightError(e).message}`];
+    if (e instanceof LockError && e.code === "lock-timeout") {
+      return { r: null, lines: [`Gave up waiting for ${name}'s lock after ${secondsOf(total)} s: nothing turned off there.`] };
+    }
+    return { r: null, lines: [`${name}: ${toSpotlightError(e).message}`] };
   }
 }
 
@@ -1768,14 +1780,15 @@ export async function teardownWorkspace(cx, paths) {
   const deadline = cx.now() + total;
   const label = path.basename(paths[0]);
   const lights = await waitOutLights(cx, (m) => membersOf(m, paths).length > 0, deadline);
-  if (!lights) return [`Gave up waiting after ${secondsOf(total)} s for a Spotlight light of ${label} still running: nothing turned off.`];
+  if (!lights) return [lightsGaveUpLine(total, label)];
   const roots = new Set(lights.flatMap((m) => membersOf(m, paths).map((x) => x.root)));
   for (const [root, r] of Object.entries(cx.store.readState().repos)) {
     if (paths.includes(r.holder) || paths.includes(r.busy?.workspace)) roots.add(root);
   }
   const lines = [];
   for (const root of [...roots].sort()) {
-    lines.push(...(await teardownRoot(cx, root, { onlyIf: (r) => paths.includes(r?.holder), deadline, total })));
+    const off = await turnOffWithin(cx, root, { silent: true, onlyIf: (r) => paths.includes(r?.holder), deadline, total });
+    lines.push(...off.lines);
   }
   return lines.length > 0 ? lines : [`Nothing to turn off: ${label} holds no Spotlight root.`];
 }
@@ -1789,8 +1802,8 @@ export async function teardownRepo(cx, root) {
   const total = cx.teardownMs ?? TEARDOWN_MS;
   const deadline = cx.now() + total;
   const lights = await waitOutLights(cx, (m) => (m?.members ?? []).some((x) => x.root === root), deadline);
-  if (!lights) return [`Gave up waiting after ${secondsOf(total)} s for a Spotlight light of ${cx.nameOf(root)} still running: nothing turned off.`];
-  return teardownRoot(cx, root, { purge: true, deadline, total });
+  if (!lights) return [lightsGaveUpLine(total, cx.nameOf(root))];
+  return (await turnOffWithin(cx, root, { silent: true, purge: true, deadline, total })).lines;
 }
 
 // ── The testing ends (D48) ─────────────────────────────────────────────────
@@ -1803,14 +1816,30 @@ function turnAt(state, root) {
   return r ? labelOf(state.queue.requests, r.taskKey) : null;
 }
 
-// The line of a root `off --stop` left alone, from what its onlyIf saw: a
-// turn that has it, a holder outside the task, the task's own holder lit by
-// hand (D49: `litBy` "human", or none, lit before D49), or nobody.
-function leftOnLine(name, seen) {
-  if (seen?.turn) return `${name}: ${seen.turn} tests there now: its Spotlight stays on.`;
-  if (seen?.holder && !seen.mine) return `${name}: ${path.basename(seen.holder)} holds it now: its Spotlight stays on.`;
-  if (seen?.holder) return `${name}: lit by hand: its Spotlight stays on.`;
-  return `Spotlight is not on in ${name}: nothing to turn off.`;
+// Why `off --stop` leaves a root alone, or null when it goes off, from its
+// record and state.json read under its repo lock: "turn" a holding turn has
+// it (`turn`, turnAt's label); "off" nobody holds it; "taken" a holder
+// outside `mine` (the member's workspaces); "human" the task's own holder
+// lit by hand (D49: `litBy` "human", or none, lit before D49).
+function stopBlock(record, { mine, turn }) {
+  if (turn) return "turn";
+  if (!record?.holder) return "off";
+  if (!mine.includes(record.holder)) return "taken";
+  if (record.litBy !== "agent") return "human";
+  return null;
+}
+
+// The line of a root a turn-off left alone, from its why (stopBlock's for
+// `off --stop`, idleOffBlock's for the idle turn-off): `turn` the holding
+// turn's label, `holder` the record's, `minutes` the idleOffMin setting.
+function leftOnLine(name, why, { turn = null, holder = null, minutes = null } = {}) {
+  if (why === "off") return notOnLine(name);
+  if (why === "turn") return `${name}: ${turn} tests there now: its Spotlight stays on.`;
+  if (why === "taken") return `${name}: ${path.basename(holder)} holds it now: its Spotlight stays on.`;
+  if (why === "human") return `${name}: lit by hand: its Spotlight stays on.`;
+  if (why === "disabled") return `${name}: the idle turn-off is off (the queue off, or idleOffMin 0): its Spotlight stays on.`;
+  if (why === "refused") return `${name}: its idle turn-off was refused: its Spotlight stays on until it is lit again.`;
+  return `${name}: not ${minutes} min with no turn yet: its Spotlight stays on.`;
 }
 
 // `spotlight off --stop` (D48), once the caller's turn is given back: each
@@ -1832,60 +1861,40 @@ export async function stopTask(cx, members, { deadline, label }) {
   const total = Math.max(0, deadline - cx.now());
   const paths = members.flatMap((m) => m.workspaces ?? [m.workspace]);
   const lights = await waitOutLights(cx, (marker) => membersOf(marker, paths).length > 0, deadline);
-  if (!lights) return { ok: false, lines: [`Gave up waiting after ${secondsOf(total)} s for a Spotlight light of ${label} still running: nothing turned off.`] };
+  if (!lights) return { ok: false, lines: [lightsGaveUpLine(total, label)] };
   const lines = [];
   let ok = true;
   for (const m of members) {
-    const name = cx.nameOf(m.root);
     const mine = m.workspaces ?? [m.workspace];
     let seen = null;
-    const onlyIf = (record) => {
-      const holder = record?.holder ?? null;
-      seen = { holder, mine: mine.includes(holder), litBy: litByOf(record?.litBy), turn: turnAt(cx.store.readState(), m.root) };
-      return !seen.turn && seen.mine && seen.litBy === "agent";
+    const onlyIf = (record, state) => {
+      const turn = turnAt(state, m.root);
+      seen = { why: stopBlock(record, { mine, turn }), turn, holder: record?.holder ?? null };
+      return seen.why === null;
     };
-    try {
-      const r = await deactivateRepo(cx, m.root, { quiet: true, onlyIf, lockTimeoutMs: Math.max(0, deadline - cx.now()) });
-      lines.push(...(r.skipped ? [leftOnLine(name, seen)] : turnedOffLines(name, r)));
-      if (!r.ok) ok = false;
-    } catch (e) {
-      ok = false;
-      if (e instanceof LockError && e.code === "lock-timeout") lines.push(`Gave up waiting for ${name}'s lock after ${secondsOf(total)} s: nothing turned off there.`);
-      else lines.push(`${name}: ${toSpotlightError(e).message}`);
-    }
+    const { r, lines: off } = await turnOffWithin(cx, m.root, { quiet: true, onlyIf, deadline, total });
+    lines.push(...(r?.skipped ? [leftOnLine(cx.nameOf(m.root), seen.why, seen)] : off));
+    if (!r?.ok) ok = false;
   }
   return { ok, lines };
 }
 
 // ── What an agent forgot (D50) ─────────────────────────────────────────────
 
-const MINUTE_MS = 60_000;
-
 // Why the idle turn-off leaves a repo alone, or null when it is due:
 // "off" no record; "disabled" the queue off (no turns to measure, D49) or
-// `idleOffMin` 0; "human" lit by hand, or before D49 (litByOf); "turn" a
+// `idleOffMin` 0; "human" lit by hand, or before D49 (no `litBy`); "turn" a
 // holding turn has it (`holding`, a boolean); "refused" its last idle
 // turn-off was refused and no light came since (`idleOffFailedAt`); "early"
-// its idle clock (idleClock, which reads finite numbers only: a null one,
-// just lit, starts at `now`) hasn't run `idleOffMin` minutes. `queue`: the
-// settings' queue.
+// its idle clock (`idleSince`; null, just lit, hasn't started) hasn't run
+// `idleOffMin` minutes. `queue`: the settings' queue.
 function idleOffBlock(record, { holding, now, queue }) {
   if (!record) return "off";
   if (queue.enabled === false || !(queue.idleOffMin > 0)) return "disabled";
-  if (litByOf(record.litBy) !== "agent") return "human";
+  if (record.litBy !== "agent") return "human";
   if (holding) return "turn";
   if (Number.isFinite(record.idleOffFailedAt)) return "refused";
-  const since = idleClock(record, { holding: false, now, queueOn: true });
-  return since <= now - queue.idleOffMin * MINUTE_MS ? null : "early";
-}
-
-// The roots of `s` (the state the full reap writes, its clocks as that
-// write leaves them) whose idle turn-off is due, none of them busy (a
-// light, a turn-off or a Forzar sync at work there).
-function idleOffDue(s, { now, queue }) {
-  return Object.entries(s.repos)
-    .filter(([root, r]) => !r.busy && idleOffBlock(r, { holding: Boolean(holdingAt(s.queue.requests, root)), now, queue }) === null)
-    .map(([root]) => root);
+  return Number.isFinite(record.idleSince) && record.idleSince <= now - queue.idleOffMin * MINUTE_MS ? null : "early";
 }
 
 // The server log's line before an idle turn-off's stop: the whole minutes
@@ -1894,16 +1903,6 @@ function idleOffWhy(record, now) {
   const since = record?.idleSince;
   const minutes = Number.isFinite(since) ? Math.max(0, Math.floor((now - since) / MINUTE_MS)) : 0;
   return `Spotlight off — ${minutes} min sin turno`;
-}
-
-// The line of a root the idle turn-off left alone, from idleOffBlock's why.
-function idleLeftOnLine(name, why, { turn, minutes }) {
-  if (why === "off") return `Spotlight is not on in ${name}: nothing to turn off.`;
-  if (why === "disabled") return `${name}: the idle turn-off is off (the queue off, or idleOffMin 0): its Spotlight stays on.`;
-  if (why === "human") return `${name}: lit by hand: its Spotlight stays on.`;
-  if (why === "turn") return `${name}: ${turn} tests there now: its Spotlight stays on.`;
-  if (why === "refused") return `${name}: its idle turn-off was refused: its Spotlight stays on until it is lit again.`;
-  return `${name}: not ${minutes} min with no turn yet: its Spotlight stays on.`;
 }
 
 // The reap's detached `spotlight toggle --workspace <root> --inline --idle`
@@ -1923,13 +1922,13 @@ export async function idleOffRepo(cx, root) {
   const queue = cx.settings.queue;
   let why = null;
   let turn = null;
-  const onlyIf = (record) => {
-    turn = turnAt(cx.store.readState(), root);
+  const onlyIf = (record, state) => {
+    turn = turnAt(state, root);
     why = idleOffBlock(record, { holding: turn !== null, now: cx.now(), queue });
     return why === null;
   };
   const r = await deactivateRepo(cx, root, { quiet: true, idle: true, onlyIf });
-  if (r.skipped) return { ok: true, lines: [idleLeftOnLine(name, why, { turn, minutes: queue.idleOffMin })] };
+  if (r.skipped) return { ok: true, lines: [leftOnLine(name, why, { turn, minutes: queue.idleOffMin })] };
   return { ok: r.ok, lines: turnedOffLines(name, r) };
 }
 
@@ -2304,18 +2303,22 @@ export async function reap(cx, { full = true, skip = null } = {}) {
       }
     }
     // D49: each repo's idle clock, from the queue this write leaves. A
-    // record that never had one isn't given a null.
+    // record that never had one isn't given a null. D50: then whether what
+    // an agent left idleOffMin minutes with no turn is due, from that clock,
+    // none busy (a light, a turn-off or a Forzar sync at work there); turned
+    // off detached, after the write.
+    const idleOff = [];
     if (full) {
-      const queueOn = cx.settings.queue.enabled !== false;
+      const queue = cx.settings.queue;
+      const queueOn = queue.enabled !== false;
       for (const [root, r] of Object.entries(s.repos)) {
-        const since = idleClock(r, { holding: holdingAt(s.queue.requests, root), now, queueOn });
+        const holding = Boolean(holdingAt(s.queue.requests, root));
+        const since = idleClock(r, { holding, now, queueOn });
         if (since !== (r.idleSince ?? null)) r.idleSince = since;
+        if (!r.busy && idleOffBlock(r, { holding, now, queue }) === null) idleOff.push(root);
       }
     }
     dropStaleMarkers(s, now);
-    // D50: what an agent left idleOffMin minutes with no turn, from the
-    // clocks this write leaves; turned off detached, after the write.
-    const idleOff = full ? idleOffDue(s, { now, queue: cx.settings.queue }) : [];
     return { keys, classify, counts, idleOff };
   });
 
