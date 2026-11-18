@@ -23,6 +23,9 @@
 //   - `hc read` prints the terminal's screen: a starship-like two-line
 //     prompt ("ws on  main", then "❯ "), the typed lines, Claude's error;
 //   - `hc get` shows the fake terminal's `records` (its subagents) while Claude lives;
+//     with `silentStarts: n`, the next n new Claudes never report a status
+//     (Claude Code's startup probe went unanswered), and `reported` is true
+//     unless the terminal sets it false (nothing there ever reported);
 //   - every call is logged with whether HC_TERMINAL_ID or HC_SCOPE reached it.
 // Session files and transcripts are real files in fake config dirs; every
 // profile's projects/ links to ~/.claude/projects, as on the person's Mac.
@@ -206,7 +209,8 @@ function view(v) {
     foreground: running
       ? { pid: v.claude, name: v.name || "claude.exe", argv: v.argv, cwd: "/tmp" }
       : { pid: v.pid, name: "zsh", argv: ["-zsh"], cwd: "/tmp" },
-    status: running ? { app: "claude-code", state: v.state || "idle" } : null,
+    status: running && !v.silent ? { app: "claude-code", state: v.state || "idle" } : null,
+    reported: v.reported !== false,
     records: running ? v.records || null : null,
     state: v.own && !running ? "finished" : "live",
     title: v.title || null,
@@ -267,7 +271,8 @@ if (cmd === "ls") {
       fs.appendFileSync(path.join(dir, "pids"), child.pid + "\\n");
       fs.mkdirSync(path.join(lands, "sessions"), { recursive: true });
       fs.writeFileSync(path.join(lands, "sessions", child.pid + ".json"), JSON.stringify({ pid: child.pid, sessionId: sid, status: v.startStatus || "idle" }));
-      save(t, { ...load(t), claude: child.pid, argv: ["/Users/tester/.local/bin/claude", ...typed.args], state: "idle", records: null, screen: [...screen, "╭─ Claude Code ─╮"] });
+      const silentStarts = v.silentStarts || 0;
+      save(t, { ...load(t), claude: child.pid, argv: ["/Users/tester/.local/bin/claude", ...typed.args], state: "idle", records: null, silent: silentStarts > 0, silentStarts: Math.max(0, silentStarts - 1), screen: [...screen, "╭─ Claude Code ─╮"] });
     }
   }
   process.stdout.write(JSON.stringify({ turn: 1 }) + "\\n");
@@ -1304,6 +1309,71 @@ test("a turn still under way (a later prompt or a queued message), or one blocke
   assert.ok(terms.every((t) => alive(t.pid)), "no Claude was stopped");
   assert.deepEqual(s.sends(), []);
   for (const t of ["t1", "t2", "t3", "t4", "t5", "t6", "t7", "t8"]) s.json(["restart", "--cancel", t]);
+});
+
+test("a turn's file-history snapshot written again after its end (Claude Code 2.1.327) doesn't keep the restart waiting; a snapshot whose prompt isn't written yet does", async () => {
+  const s = sandbox({ active: A, switchMode: "restart" });
+  const row = (term, value) => appendFileSync(term.transcriptFile, `${JSON.stringify({ ...value, sessionId: term.sessionId })}\n`);
+  const prompt = (term, uuid) => row(term, { type: "user", uuid, message: { role: "user", content: "como vas" } });
+  const snapshot = (term, messageId) => row(term, { type: "file-history-snapshot", messageId, snapshot: { messageId, trackedFileBackups: {} }, isSnapshotUpdate: false });
+  // AX-3841 (t10q): the prompt, its snapshot, the turn's end, the same
+  // snapshot again, then task notifications queued and absorbed while its
+  // tester ran in the background.
+  const t1 = s.term("t1", { on: A, status: "busy", state: "working", records: { a1: subagent("Tester AX-3841 family card") } });
+  prompt(t1, "m-1");
+  snapshot(t1, "m-1");
+  endTurn(t1, 1);
+  snapshot(t1, "m-1");
+  for (const operation of ["enqueue", "remove", "enqueue", "enqueue", "remove", "remove"]) row(t1, { type: "queue-operation", operation });
+  // The next prompt's snapshot goes in right before its prompt line: that
+  // turn has begun.
+  const t2 = s.term("t2", { on: A, status: "busy", state: "working", records: { a1: subagent("y") } });
+  prompt(t2, "m-1");
+  snapshot(t2, "m-1");
+  endTurn(t2, 1);
+  snapshot(t2, "m-2");
+  s.json(["use", B]);
+  await until(() => s.item((i) => i.terminal === "t1")?.state === "done", WAIT, "t1's restart", s.queue);
+  assert.ok(!alive(t1.pid), "t1's old Claude was stopped");
+  assert.match(s.sends("t1")[1].text, /These subagents were still running and were stopped: "Tester AX-3841 family card"/);
+  assert.equal(s.item((i) => i.terminal === "t2").state, "waitingIdle");
+  assert.ok(alive(t2.pid), "t2's Claude still runs");
+  s.json(["restart", "--cancel", "t2"]);
+});
+
+test("a new Claude that never reports to Herdr (its startup probe went unanswered, so Agents doesn't list it) is restarted again before the message; the next one reports", async () => {
+  const s = sandbox({ timing: { report: 300 } });
+  const t1 = s.term("t1", { on: A, silentStarts: 1 });
+  const job = s.json(["resume", "--terminal", "t1", "--account", B, "--message", "hola"]);
+  const done = await s.final(job.job);
+  assert.equal(done.state, "done");
+  const typed = s.typed("t1");
+  assert.equal(typed.length, 2, "the resume line went in twice");
+  assert.deepEqual(typed[1].args, typed[0].args);
+  assert.deepEqual(
+    s.sends("t1").map((x) => (/ --resume /.test(x.text) ? "line" : x.text)),
+    ["line", "line", "hola"],
+    "the message goes once, to the Claude that reports",
+  );
+  const now = s.worldOf("t1");
+  assert.equal(now.silent, false);
+  assert.ok(alive(now.claude));
+  assert.equal(accountNow(s, "t1"), B);
+  const log = readFileSync(join(s.state, "agents-check.log"), "utf8");
+  assert.match(log, /^\S+Z claude-accounts: t1's new Claude \(session \S+\) didn't report to Herdr within 0\.3 s, so Agents wouldn't list it: restarted it again \(1 of 2\)\n$/);
+});
+
+test("a new Claude still silent after 2 more restarts: done anyway with its message; a terminal where nothing ever reported isn't restarted again", async () => {
+  const s = sandbox({ timing: { report: 300 } });
+  s.term("t1", { on: A, silentStarts: 99 });
+  const first = await s.final(s.json(["resume", "--terminal", "t1", "--account", B, "--message", "hola"]).job);
+  assert.equal(first.state, "done");
+  assert.equal(s.typed("t1").length, 3);
+  assert.equal(s.sends("t1").at(-1).text, "hola");
+  s.term("t2", { on: A, silentStarts: 1, reported: false });
+  const second = await s.final(s.json(["resume", "--terminal", "t2", "--account", B]).job);
+  assert.equal(second.state, "done");
+  assert.equal(s.typed("t2").length, 1);
 });
 
 test("timeouts: a shell that doesn't come back, and a new Claude that never reports idle, end as timeout (4) with the line to run by hand", async () => {

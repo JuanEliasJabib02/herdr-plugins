@@ -243,6 +243,7 @@ test("store: the mod's folder name, the state folder's file names, and its paths
     details: "details.json",
     loginLink: "login-link",
     live: "live",
+    agentsLog: "agents-check.log",
   });
   assert.equal(stateDir("/Users/ana"), "/Users/ana/.config/herdr-app/claude-accounts");
   assert.equal(cliPath("/Users/ana/.config/herdr-app"), "/Users/ana/.config/herdr-app/mods/claude-accounts/bin/claude-accounts");

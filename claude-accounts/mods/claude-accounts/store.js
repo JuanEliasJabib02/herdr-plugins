@@ -35,6 +35,7 @@ export const FILES = Object.freeze({
   details: "details.json",
   loginLink: "login-link",
   live: "live",
+  agentsLog: "agents-check.log",
 });
 
 // The state folder: the CLI's default, ~/.config/herdr-app/claude-accounts

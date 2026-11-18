@@ -18,7 +18,7 @@
 //   list is empty), a re-read then, another when react asks for one
 //   (recheckIn), and a log line with hc's view of each restarted Claude the
 //   list doesn't show, so the cause can be told apart next time: on stdout
-//   and, stamped, in the state folder's AGENTS_LOG (Herdr under launchd
+//   and, stamped, in the state folder's agents-check.log (Herdr under launchd
 //   drops its stdout).
 // A click on it opens the popover above it; the mode (Detailed | Compact) is
 // the shared UI value the popover sets (D12).
@@ -52,8 +52,6 @@ const SETTLE = 150;
 const RETRY = 2000;
 // Herdr's Agents list is empty right after a start; it's read after this.
 const AGENTS_WARMUP = 20_000;
-// The state folder's log of restarted Claudes Agents didn't list.
-const AGENTS_LOG = "agents-check.log";
 // The usage's hover area reaches this far past its text.
 const TRIGGER_PAD = 4;
 // The refresh spinner, drawn natively (frames()).
@@ -91,7 +89,7 @@ function agentsShown() {
 // A restarted Claude Agents doesn't list, logged with hc's view of its
 // terminal: a null status with `reported` means Claude stopped reporting,
 // a status there means the window lost it. The line also goes, after an
-// ISO timestamp, to the end of `dir`'s AGENTS_LOG.
+// ISO timestamp, to the end of `dir`'s agents-check.log.
 async function logUnlisted({ terminal, sessionId }, dir) {
   const r = await exec("hc", ["get", terminal, "--json"]).catch((e) => ({ code: -1, stdout: "", stderr: String(e) }));
   let view = (r.stderr ?? "").trim() || `hc exited ${r.code}`;
@@ -103,7 +101,7 @@ async function logUnlisted({ terminal, sessionId }, dir) {
   }
   const line = `claude-accounts: ${terminal} (session ${sessionId}) was restarted, but Agents doesn't list it; hc get: ${view}`;
   console.log(line);
-  await exec("sh", ["-c", 'printf "%s\\n" "$1" >> "$2"', "sh", `${new Date().toISOString()} ${line}`, `${dir}/${AGENTS_LOG}`]);
+  await exec("sh", ["-c", 'printf "%s\\n" "$1" >> "$2"', "sh", `${new Date().toISOString()} ${line}`, `${dir}/${FILES.agentsLog}`]);
 }
 
 // A Herdr tab runs the CLI's login, which runs `claude auth login` there (D3).
