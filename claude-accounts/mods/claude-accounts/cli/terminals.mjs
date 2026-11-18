@@ -257,23 +257,35 @@ const quiet = (row) =>
 
 // What a transcript's tail says, by its lines from the end (see lastTurn).
 // A queued message taken back (remove) cancels the enqueue before it; one
-// taken up (dequeue) starts a turn.
+// taken up (dequeue) starts a turn. A file-history snapshot of a message
+// already written is quiet: Claude Code 2.1.327 writes a turn's snapshot
+// again after the turn's end. One whose message isn't written yet is the
+// next turn's, which writes it right before its prompt line.
 function turnOfTail(text, cut) {
   // The last line still being written: whatever it is, it's newer.
   if (!text.endsWith("\n")) return null;
   const lines = text.split("\n");
   if (cut) lines.shift();
-  let takenBack = 0;
-  for (let i = lines.length - 1; i >= 0; i--) {
-    if (!lines[i].trim()) continue;
-    let row;
+  const rows = lines.map((line) => {
+    if (!line.trim()) return undefined;
     try {
-      row = JSON.parse(lines[i]);
+      return JSON.parse(line);
     } catch {
       return null;
     }
+  });
+  const written = new Set();
+  const pastSnapshots = new Set();
+  rows.forEach((row, i) => {
+    if (row?.type === "file-history-snapshot" && written.has(row.messageId)) pastSnapshots.add(i);
+    if (typeof row?.uuid === "string") written.add(row.uuid);
+  });
+  let takenBack = 0;
+  for (let i = rows.length - 1; i >= 0; i--) {
+    const row = rows[i];
+    if (row === undefined) continue;
     if (!row || typeof row !== "object") return null;
-    if (row.isSidechain || quiet(row)) continue;
+    if (row.isSidechain || quiet(row) || pastSnapshots.has(i)) continue;
     if (row.type === "queue-operation" && row.operation === "remove") {
       takenBack += 1;
       continue;
@@ -448,6 +460,7 @@ export async function inspectTerminal(t, known) {
     title: null,
     app: null,
     state: null,
+    reported: false,
     argv: [],
     account: null,
     configDir: null,
@@ -466,6 +479,9 @@ export async function inspectTerminal(t, known) {
   result.title = str(info.title);
   result.app = str(info.status?.app);
   result.state = str(info.status?.state);
+  // Some program in this terminal has reported a status (OSC 7501) at some
+  // point: Herdr keeps this after the program exits.
+  result.reported = info.reported === true;
   result.agents = runningAgents(info.records);
   const fg = info.foreground;
   if (!fg || !Number.isInteger(fg.pid)) return { ...result, kind: "notClaude" };

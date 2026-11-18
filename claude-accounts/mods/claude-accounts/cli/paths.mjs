@@ -26,6 +26,7 @@ export const FILES = Object.freeze({
   details: "details.json",
   loginLink: "login-link",
   lock: "lock",
+  agentsLog: "agents-check.log",
 });
 
 const userHome = (env) => env.HOME || homedir();

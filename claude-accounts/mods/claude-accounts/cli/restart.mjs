@@ -149,7 +149,7 @@
 
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { rm } from "node:fs/promises";
+import { appendFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { parseArgs } from "node:util";
@@ -167,18 +167,23 @@ import { HC_SEND_TIMEOUT_MS, getTerminal, hasTranscript, hc, inspectTerminal, is
 // step 1, or the new Claude at a startup dialog in step 5 (resume-gaps D4),
 // before the item ends; heartbeat: how often a runner refreshes its claims;
 // stale: a claim (or an unclaimed queued item) older than this is void;
-// waitPoll: how often --wait reads the job.
+// waitPoll: how often --wait reads the job; report: how long an idle new
+// Claude may go without reporting to Herdr before it's started again (a
+// Claude that reports does within seconds).
 const TIMING = Object.freeze({
   poll: 1000,
   shell: 30_000,
   claude: 120_000,
   shellBack: 5_000,
+  report: 15_000,
   dialog: 600_000,
   heartbeat: 15_000,
   stale: 60_000,
   waitPoll: 250,
 });
 const MAX_WAIT_S = 25;
+// How many times step 5 starts again a new Claude that never reports.
+const MAX_RELAUNCHES = 2;
 const KEEP_FINAL_MS = 24 * 60 * 60 * 1000;
 
 const FINAL_CODES = Object.freeze({ done: 0, timeout: 4, landedElsewhere: 6, failed: 9, cancelled: 10 });
@@ -1012,112 +1017,146 @@ async function runItem(home, id, t) {
     await sleep(t.poll);
   }
 
-  // 2. Stop Claude: SIGTERM to the foreground (probe b4).
-  const pid = found.foregroundPid;
-  if (Number.isInteger(pid) && pid > 1 && pid !== found.pid && pid !== process.pid) {
+  // Steps 2–5, then again for a new Claude that never reports (step 5).
+  let pid = found.foregroundPid;
+  for (let relaunches = 0; ; relaunches++) {
+    // 2. Stop Claude: SIGTERM to the foreground (probe b4).
+    if (Number.isInteger(pid) && pid > 1 && pid !== found.pid && pid !== process.pid) {
+      try {
+        process.kill(pid, "SIGTERM");
+      } catch (e) {
+        if (e.code !== "ESRCH") {
+          await finish(home, id, "failed", withLine(`couldn't stop Claude (${e.code})`, line));
+          return;
+        }
+      }
+    }
+
+    // 3. Wait for the shell.
+    const shellBy = Date.now() + t.shell;
+    for (;;) {
+      let info;
+      try {
+        info = await getTerminal(item.terminal);
+      } catch {
+        info = undefined;
+      }
+      if (info === null || info?.state === "finished") {
+        await finish(home, id, "failed", withLine(`terminal ${item.terminal} is gone`, line));
+        return;
+      }
+      if (info && Number.isInteger(info.foreground?.pid) && info.foreground.pid === info.pid) break;
+      if (Date.now() >= shellBy) {
+        await finish(home, id, "timeout", withLine(`the shell didn't come back within ${Math.round(t.shell / 1000)} s`, line));
+        return;
+      }
+      await sleep(t.poll);
+    }
+
+    // 4. Type the line.
+    item = await setState(home, id, "starting");
+    if (!item) return;
     try {
-      process.kill(pid, "SIGTERM");
+      await hc(["send", "--", item.terminal, line], { timeout: HC_SEND_TIMEOUT_MS });
     } catch (e) {
-      if (e.code !== "ESRCH") {
-        await finish(home, id, "failed", withLine(`couldn't stop Claude (${e.code})`, line));
+      await finish(home, id, "failed", withLine(`couldn't type the resume line (${e.message})`, line));
+      return;
+    }
+
+    // 5. Wait for the new Claude, idle and on the target. The shell back in
+    // the foreground for shellBack with no new Claude means Claude refused
+    // the line and exited: fail now, with what it printed. A new Claude
+    // stopped at a startup dialog (D4) holds the cap while it asks, up to
+    // TIMING.dialog; once answered, the cap starts over.
+    let claudeBy = Date.now() + t.claude;
+    let shellSince = null;
+    // The question the item holds in restart.json (null: none), and since when.
+    let asked = null;
+    let askedSince = null;
+    // A new Claude that's idle but hasn't reported to Herdr, since when; the
+    // pid of one that never did within t.report.
+    let quietSince = null;
+    let silent = null;
+    for (;;) {
+      const fresh = await inspectTerminal(item.terminal, known);
+      if (fresh.kind === "missing") {
+        await finish(home, id, "failed", withLine(`terminal ${item.terminal} is gone`, line));
         return;
       }
-    }
-  }
-
-  // 3. Wait for the shell.
-  const shellBy = Date.now() + t.shell;
-  for (;;) {
-    let info;
-    try {
-      info = await getTerminal(item.terminal);
-    } catch {
-      info = undefined;
-    }
-    if (info === null || info?.state === "finished") {
-      await finish(home, id, "failed", withLine(`terminal ${item.terminal} is gone`, line));
-      return;
-    }
-    if (info && Number.isInteger(info.foreground?.pid) && info.foreground.pid === info.pid) break;
-    if (Date.now() >= shellBy) {
-      await finish(home, id, "timeout", withLine(`the shell didn't come back within ${Math.round(t.shell / 1000)} s`, line));
-      return;
-    }
-    await sleep(t.poll);
-  }
-
-  // 4. Type the line.
-  item = await setState(home, id, "starting");
-  if (!item) return;
-  try {
-    await hc(["send", "--", item.terminal, line], { timeout: HC_SEND_TIMEOUT_MS });
-  } catch (e) {
-    await finish(home, id, "failed", withLine(`couldn't type the resume line (${e.message})`, line));
-    return;
-  }
-
-  // 5. Wait for the new Claude, idle and on the target. The shell back in
-  // the foreground for shellBack with no new Claude means Claude refused
-  // the line and exited: fail now, with what it printed. A new Claude
-  // stopped at a startup dialog (D4) holds the cap while it asks, up to
-  // TIMING.dialog; once answered, the cap starts over.
-  let claudeBy = Date.now() + t.claude;
-  let shellSince = null;
-  // The question the item holds in restart.json (null: none), and since when.
-  let asked = null;
-  let askedSince = null;
-  for (;;) {
-    const fresh = await inspectTerminal(item.terminal, known);
-    if (fresh.kind === "missing") {
-      await finish(home, id, "failed", withLine(`terminal ${item.terminal} is gone`, line));
-      return;
-    }
-    const shellUp = Number.isInteger(fresh.foregroundPid) && fresh.foregroundPid === fresh.pid && !fresh.ownProgram;
-    if (!shellUp) shellSince = null;
-    else if (shellSince === null) shellSince = Date.now();
-    else if (Date.now() - shellSince >= t.shellBack) {
-      const said = await hc(["read", "--", item.terminal]).then((screen) => screenReason(screen, line), () => null);
-      await finish(home, id, "failed", withLine(said ?? "no new Claude came up after the resume line", line));
-      return;
-    }
-    if (fresh.kind === "claude" && fresh.foregroundPid !== pid) {
-      if (fresh.account !== item.to) {
-        await finish(home, id, "landedElsewhere", `the new Claude runs on ${fresh.account ?? "a folder no account has"} (${fresh.configDir})`);
+      const shellUp = Number.isInteger(fresh.foregroundPid) && fresh.foregroundPid === fresh.pid && !fresh.ownProgram;
+      if (!shellUp) shellSince = null;
+      else if (shellSince === null) shellSince = Date.now();
+      else if (Date.now() - shellSince >= t.shellBack) {
+        const said = await hc(["read", "--", item.terminal]).then((screen) => screenReason(screen, line), () => null);
+        await finish(home, id, "failed", withLine(said ?? "no new Claude came up after the resume line", line));
         return;
       }
-      if (isIdle(fresh)) break;
-    }
-    // Not idle yet: is it asking a startup question? Never read while the
-    // shell is in front: its screen can still show the last frame of a
-    // dialog Claude quit from. The question is written only when it
-    // changes (the mod's toast says it); a screen hc can't read changes
-    // nothing.
-    const question = shellUp ? null : await askedOn(item.terminal);
-    if (question !== undefined && question !== asked) {
-      const changed = await mutate(home, id, (current) => {
-        if (question === null) delete current.question;
-        else current.question = question;
-      });
-      if (!changed) return;
-      if (question === null) claudeBy = Date.now() + t.claude;
-      else if (asked === null) askedSince = Date.now();
-      asked = question;
-    }
-    if (asked !== null) {
-      if (Date.now() - askedSince >= t.dialog) {
-        // Claude runs, so there's no line to type by hand.
-        await finish(home, id, "timeout", `the new Claude is still asking “${asked}” in ${item.terminal}; answer it there`);
+      if (fresh.kind === "claude" && fresh.foregroundPid !== pid) {
+        if (fresh.account !== item.to) {
+          await finish(home, id, "landedElsewhere", `the new Claude runs on ${fresh.account ?? "a folder no account has"} (${fresh.configDir})`);
+          return;
+        }
+        // Claude Code asks the terminal once, at startup, whether it takes
+        // status reports (OSC 7501); with no answer within 2 s (a slow start,
+        // several Claudes restarting at once) it never reports, and Herdr's
+        // Agents never lists it. Where some program reported before, an idle
+        // new Claude that still hasn't after t.report is started again, up
+        // to MAX_RELAUNCHES times; then it stays, and the mod's Agents check
+        // warns.
+        if (isIdle(fresh)) {
+          if (fresh.app !== null || !fresh.reported || relaunches >= MAX_RELAUNCHES) break;
+          quietSince ??= Date.now();
+          if (Date.now() - quietSince >= t.report) {
+            silent = { pid: fresh.foregroundPid, sessionId: fresh.sessionId };
+            break;
+          }
+        } else quietSince = null;
+      }
+      // Not idle yet: is it asking a startup question? Never read while the
+      // shell is in front: its screen can still show the last frame of a
+      // dialog Claude quit from. The question is written only when it
+      // changes (the mod's toast says it); a screen hc can't read changes
+      // nothing.
+      const question = shellUp ? null : await askedOn(item.terminal);
+      if (question !== undefined && question !== asked) {
+        const changed = await mutate(home, id, (current) => {
+          if (question === null) delete current.question;
+          else current.question = question;
+        });
+        if (!changed) return;
+        if (question === null) claudeBy = Date.now() + t.claude;
+        else if (asked === null) askedSince = Date.now();
+        asked = question;
+      }
+      if (asked !== null) {
+        if (Date.now() - askedSince >= t.dialog) {
+          // Claude runs, so there's no line to type by hand.
+          await finish(home, id, "timeout", `the new Claude is still asking “${asked}” in ${item.terminal}; answer it there`);
+          return;
+        }
+      } else if (Date.now() >= claudeBy) {
+        await finish(home, id, "timeout", withLine(`the new Claude didn't report idle within ${Math.round(t.claude / 1000)} s`, line));
         return;
       }
-    } else if (Date.now() >= claudeBy) {
-      await finish(home, id, "timeout", withLine(`the new Claude didn't report idle within ${Math.round(t.claude / 1000)} s`, line));
-      return;
+      await sleep(t.poll);
     }
-    await sleep(t.poll);
+    if (silent === null) break;
+    pid = silent.pid;
+    await logLine(
+      home,
+      `${item.terminal}'s new Claude (session ${silent.sessionId}) didn't report to Herdr within ${t.report / 1000} s, so Agents wouldn't list it: restarted it again (${relaunches + 1} of ${MAX_RELAUNCHES})`,
+    );
   }
 
   // 6. The message, then done.
   await deliver(home, id, item);
+}
+
+// A line, after an ISO timestamp, at the end of the state folder's
+// agents-check.log (the mod's Agents check writes there too). A log that
+// can't be written never stops a restart.
+async function logLine(home, text) {
+  await appendFile(join(home, FILES.agentsLog), `${new Date().toISOString()} claude-accounts: ${text}\n`).catch(() => {});
 }
 
 // A resume job's message, typed as the user's; then done.
