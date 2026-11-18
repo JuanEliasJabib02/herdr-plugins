@@ -76,6 +76,7 @@ test("the form shows stored values as text, and the per-space limit of every lan
     enabled: false,
     cap: "3",
     autoResume: true,
+    idleOffMin: "30",
     perSpace: { "g-ax": "2", "g-me": "1", spaceless: "1" },
   });
   assert.deepEqual(form.repos["/w/ax-back"], {
@@ -157,13 +158,14 @@ test("a raised cap returns needsReap: true; a repo-only change returns false", (
   });
 });
 
-test("every queue field counts for needsReap: switch, auto-resume, a lane's limit", () => {
+test("every queue field counts for needsReap: switch, auto-resume, a lane's limit, the idle turn-off", () => {
   const settings = defaultSettings();
   const lanes = lanesOf(REG);
   for (const change of [
     (f) => { f.queue.enabled = false; },
     (f) => { f.queue.autoResume = true; },
     (f) => { f.queue.perSpace["g-me"] = "2"; },
+    (f) => { f.queue.idleOffMin = "45"; },
   ]) {
     const form = toForm(settings, { lanes, repos: [] });
     change(form);
@@ -498,6 +500,41 @@ test("queue values save one by one, as before; a queue change asks for the reap"
   assert.equal(off.needsReap, true);
   assert.equal(saveChange(settings, { queue: "autoResume", value: true }).settings.queue.autoResume, true);
   assert.equal(saveChange(settings, { queue: "autoResume", value: false }).settings, null);
+});
+
+test("Apagar sin turno tras (min): 30 by default, clamped 0–240, 0 = never, saved on its own; a change asks for the reap", async () => {
+  // A file without the key shows the default in its field.
+  const settings = stored({ version: 1, queue: { cap: 2, later: true } });
+  assert.equal(toForm(settings).queue.idleOffMin, "30");
+  assert.equal(fieldText(settings, { queue: "idleOffMin" }), "30");
+  // Saved on its own, the other queue values and unknown keys kept.
+  const set = saveChange(settings, { queue: "idleOffMin", value: " 45 " });
+  assert.deepEqual(set.errors, []);
+  assert.equal(set.needsReap, true);
+  assert.deepEqual(set.settings.queue, { enabled: true, perSpace: {}, cap: 2, autoResume: false, idleOffMin: 45, later: true });
+  assert.equal(fieldText(set.settings, { queue: "idleOffMin" }), "45");
+  // Outside 0–240 clamped, a fraction rounded; 0 (never) is a value of its own.
+  for (const [typed, saved] of [["500", 240], ["-5", 0], ["0", 0], ["12.6", 13], ["240", 240]]) {
+    const out = saveChange(settings, { queue: "idleOffMin", value: typed });
+    assert.equal(out.settings.queue.idleOffMin, saved, `typed ${typed}`);
+    assert.equal(out.needsReap, true);
+    assert.equal(fieldText(out.settings, { queue: "idleOffMin" }), String(saved));
+  }
+  // Text that isn't a number, or an empty field, is not saved: the field shows the stored value again.
+  for (const typed of ["treinta", "", "  ", "30 min"]) {
+    assert.deepEqual(saveChange(set.settings, { queue: "idleOffMin", value: typed }), { settings: null, errors: [], needsReap: false });
+  }
+  assert.equal(fieldText(set.settings, { queue: "idleOffMin" }), "45");
+  // The value already stored writes nothing.
+  assert.deepEqual(saveChange(settings, { queue: "idleOffMin", value: "30" }), { settings: null, errors: [], needsReap: false });
+  // The save round trip: through the CAS into settings.json and read back.
+  let file = serializeSettings(settings);
+  const io = { read: async () => file, write: async (text, expected) => { assert.equal(expected, file); file = text; } };
+  const r = await casWrite(io, { text: file, settings }, (s) => saveChange(s, { queue: "idleOffMin", value: "0" }));
+  assert.deepEqual([r.ok, r.wrote, r.needsReap], [true, true, true]);
+  assert.equal(JSON.parse(file).queue.idleOffMin, 0);
+  assert.equal(parseSettings(file).settings.queue.idleOffMin, 0);
+  assert.equal(toForm(parseSettings(file).settings).queue.idleOffMin, "0");
 });
 
 test("each save goes through the CAS: a stale snapshot reads the file again and applies the change to it", async () => {

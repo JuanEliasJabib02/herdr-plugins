@@ -1,11 +1,13 @@
 // Spotlight's settings.json (D7, D12, S9): the queue switch, the per-space
-// limit, the global cap, auto-resume, and per repo whether Spotlight is on,
-// its server command per env, the env and the port. Written only by the mod
-// (the settings view, writeTextFile compare-and-swap); the CLI reads it
-// through store.js. Pure, no Node or Herdr import, so the mod and the CLI
-// share it:
+// limit, the global cap, auto-resume, the minutes an agent-lit repo may go
+// with no turn before it is turned off (idleOffMin, 0 = never), and per repo
+// whether Spotlight is on, its server command per env, the env and the port.
+// Written only by the mod (the settings view, writeTextFile compare-and-swap);
+// the CLI reads it through store.js. Pure, no Node or Herdr import, so the
+// mod and the CLI share it:
 //   { version: 1,
-//     queue: { enabled: true, perSpace: { <groupId>|"spaceless": 1 }, cap: 2, autoResume: false },
+//     queue: { enabled: true, perSpace: { <groupId>|"spaceless": 1 }, cap: 2, autoResume: false,
+//              idleOffMin: 30 },
 //     repos: { <root>: { enabled: true|false|null, envs: { local, dev, prod: command|null },
 //                        env: "local", port: null } } }
 // Reading never throws: a value that isn't a v1 object is the defaults
@@ -21,10 +23,13 @@ export const ENVS = ["local", "dev", "prod"];
 // The lane of a repo outside every projects.v1 group (D12).
 export const SPACELESS = "spaceless";
 
-// Integer ranges: the global cap (1..4, D12) and each space's limit, which
-// can't usefully pass the cap.
+// Integer ranges: the global cap (1..4, D12), each space's limit, which
+// can't usefully pass the cap, and "Apagar sin turno tras (min)": the whole
+// minutes an agent-lit repo may go with no turn before the reap turns it
+// off, 0 = never.
 export const CAP = { min: 1, max: 4, fallback: 2 };
 export const PER_SPACE = { min: 1, max: 4, fallback: 1 };
+export const IDLE_OFF_MIN = { min: 0, max: 240, fallback: 30 };
 const PORT = { min: 1, max: 65535 };
 
 const isObject = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
@@ -39,7 +44,7 @@ export function normRoot(path) {
 export function defaultSettings() {
   return {
     version: SETTINGS_VERSION,
-    queue: { enabled: true, perSpace: {}, cap: CAP.fallback, autoResume: false },
+    queue: { enabled: true, perSpace: {}, cap: CAP.fallback, autoResume: false, idleOffMin: IDLE_OFF_MIN.fallback },
     repos: {},
   };
 }
@@ -81,6 +86,7 @@ function parseQueue(value) {
     perSpace,
     cap: clampInt(q.cap, CAP),
     autoResume: typeof q.autoResume === "boolean" ? q.autoResume : false,
+    idleOffMin: clampInt(q.idleOffMin, IDLE_OFF_MIN),
   };
 }
 

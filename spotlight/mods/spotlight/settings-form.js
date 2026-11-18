@@ -17,6 +17,7 @@ import {
   SPACELESS,
   CAP,
   PER_SPACE,
+  IDLE_OFF_MIN,
   normRoot,
   clampInt,
   parseCommand,
@@ -87,7 +88,7 @@ export function toForm(settings, { lanes = [], repos = [] } = {}) {
     };
   }
   return {
-    queue: { enabled: q.enabled, cap: String(q.cap), autoResume: q.autoResume, perSpace },
+    queue: { enabled: q.enabled, cap: String(q.cap), autoResume: q.autoResume, idleOffMin: String(q.idleOffMin), perSpace },
     repos: formRepos,
   };
 }
@@ -126,6 +127,7 @@ export function applyForm(settings, form) {
     enabled: Boolean(form.queue.enabled),
     cap: numberField(form.queue.cap, CAP, q.cap),
     autoResume: Boolean(form.queue.autoResume),
+    idleOffMin: numberField(form.queue.idleOffMin, IDLE_OFF_MIN, q.idleOffMin),
     perSpace,
   };
 
@@ -159,6 +161,7 @@ export function applyForm(settings, form) {
     queue.enabled !== q.enabled ||
     queue.cap !== q.cap ||
     queue.autoResume !== q.autoResume ||
+    queue.idleOffMin !== q.idleOffMin ||
     !sameJson(perSpaceValues(settings, perSpace), perSpaceValues(settings, q.perSpace));
   return { settings: { ...settings, queue, repos }, errors: [], needsReap };
 }
@@ -252,6 +255,7 @@ export function variantHelp(detection) {
 // A change is one control's new value:
 //   { queue: "enabled" | "autoResume", value: boolean }   the queue's switches
 //   { queue: "cap", value: text }                          Máximo en total
+//   { queue: "idleOffMin", value: text }                   Apagar sin turno tras (min)
 //   { queue: "perSpace", lane, value: text }               a space's limit
 //   { root, field: "enabled", value: boolean }             Usar Spotlight
 //   { root, field: "env", value: "local" | "dev" | "prod" } the env chip
@@ -294,7 +298,7 @@ export function saveChange(settings, change) {
     else if (change.field === "enabled" || change.field === "env" || change.field === "port") f[change.field] = change.value;
     else return nothing;
   } else if (change?.queue === "perSpace" && change.lane) form.queue.perSpace[change.lane] = change.value;
-  else if (["enabled", "autoResume", "cap"].includes(change?.queue)) form.queue[change.queue] = change.value;
+  else if (["enabled", "autoResume", "cap", "idleOffMin"].includes(change?.queue)) form.queue[change.queue] = change.value;
   else return nothing;
   const out = applyForm(settings, form);
   if (!out.settings) return { settings: null, errors: out.errors, needsReap: false };

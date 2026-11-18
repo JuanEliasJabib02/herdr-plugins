@@ -695,10 +695,10 @@ test("reconcile: refs win; a repo whose refs are gone is cleared, failed reads k
 
 // ── settings.json ──────────────────────────────────────────────────────────
 
-test("parseSettings: no file reads as the defaults (queue on, 1 per space, cap 2, auto-resume off)", () => {
+test("parseSettings: no file reads as the defaults (queue on, 1 per space, cap 2, auto-resume off, idle turn-off at 30 min)", () => {
   assert.deepEqual(parseSettings(null), { settings: defaultSettings(), valid: true });
   assert.deepEqual(defaultSettings(), {
-    version: 1, queue: { enabled: true, perSpace: {}, cap: 2, autoResume: false }, repos: {},
+    version: 1, queue: { enabled: true, perSpace: {}, cap: 2, autoResume: false, idleOffMin: 30 }, repos: {},
   });
   const s = defaultSettings();
   assert.equal(perSpaceLimit(s, "g1"), 1);
@@ -711,7 +711,7 @@ test("parseSettings: no file reads as the defaults (queue on, 1 per space, cap 2
 test("parseSettings: values are clamped or fall back field by field", () => {
   const { settings, valid } = parseSettings(JSON.stringify({
     version: 1,
-    queue: { enabled: false, perSpace: { g1: 0, g2: 3.4, g3: "x", spaceless: 7 }, cap: 9, autoResume: true },
+    queue: { enabled: false, perSpace: { g1: 0, g2: 3.4, g3: "x", spaceless: 7 }, cap: 9, autoResume: true, idleOffMin: 500 },
     repos: {
       "/code/app/": {
         enabled: false,
@@ -725,7 +725,7 @@ test("parseSettings: values are clamped or fall back field by field", () => {
     },
   }));
   assert.equal(valid, true);
-  assert.deepEqual(settings.queue, { enabled: false, perSpace: { g1: 1, g2: 3, spaceless: 4 }, cap: 4, autoResume: true });
+  assert.deepEqual(settings.queue, { enabled: false, perSpace: { g1: 1, g2: 3, spaceless: 4 }, cap: 4, autoResume: true, idleOffMin: 240 });
   assert.deepEqual(settings.repos, {
     "/code/app": { enabled: false, envs: { local: "pnpm dev", dev: null, prod: null }, env: "dev", port: 3000 },
     "/code/web": { enabled: null, envs: { local: null, dev: null, prod: null }, env: "local", port: null },
@@ -738,6 +738,26 @@ test("parseSettings: values are clamped or fall back field by field", () => {
   assert.deepEqual(parseSettings({ version: 1, queue: { enabled: "no", autoResume: 1 } }).settings.queue, defaultSettings().queue);
   assert.equal(parseSettings({ version: 1, queue: { cap: 3 } }).settings.queue.cap, 3);
   assert.deepEqual(parseSettings({ version: 1, repos: { "/a": { port: 3000.5 } } }).settings.repos["/a"].port, null);
+});
+
+test("parseSettings: queue.idleOffMin is whole minutes, 30 when the file has none, 0 = never, clamped 0–240", () => {
+  const idle = (queue) => parseSettings({ version: 1, queue }).settings.queue.idleOffMin;
+  // A file from before the key: the default.
+  assert.equal(idle({ cap: 3 }), 30);
+  assert.equal(idle(undefined), 30);
+  // 0 stays 0 (never turned off automatically); the ends of the range are kept.
+  assert.equal(idle({ idleOffMin: 0 }), 0);
+  assert.equal(idle({ idleOffMin: 240 }), 240);
+  assert.equal(idle({ idleOffMin: 45 }), 45);
+  // Outside the range clamped, a fraction rounded, anything but a number the default.
+  assert.equal(idle({ idleOffMin: 241 }), 240);
+  assert.equal(idle({ idleOffMin: -5 }), 0);
+  assert.equal(idle({ idleOffMin: 12.6 }), 13);
+  for (const bad of ["45", null, true, Number.NaN, {}]) assert.equal(idle({ idleOffMin: bad }), 30);
+  // The other queue values are read as before.
+  assert.deepEqual(parseSettings({ version: 1, queue: { cap: 3, idleOffMin: 10 } }).settings.queue, {
+    enabled: true, perSpace: {}, cap: 3, autoResume: false, idleOffMin: 10,
+  });
 });
 
 test("readSettings: an invalid settings file falls back to the defaults and is kept as a backup, once", () => {
