@@ -805,6 +805,199 @@ test("`off` gives the turn back and leaves the refs and the server terminal unto
   assert.equal(w.state().repos[app.root].holder, ws);
 });
 
+// ── off --stop (D48) ───────────────────────────────────────────────────────
+
+// The server log of a repo whose record is gone: `spotlight logs --path`
+// still names it.
+async function serverLogText(w, name) {
+  const r = await w.cli(["logs", "--repo", name, "--path"]);
+  assert.equal(r.code, 0, r.stderr + r.stdout);
+  return readFileSync(r.stdout.trim(), "utf8");
+}
+
+test("D48: `off --stop` gives the turn back and turns the task's Spotlight off in each of its projects: the record gone, the server stopped, the root restored, no toast", async () => {
+  const w = makeWorld();
+  const front = makeRepo(w, "front", { pkg: DEV, tasks: ["AX-90"] });
+  const back = makeRepo(w, "back", { pkg: DEV, tasks: ["AX-90"] });
+  w.register([{ id: "g1", repos: [front, back] }]);
+  w.listen(front.root, [3000]);
+  w.listen(back.root, [3001]);
+  const ws = front.ws["AX-90"];
+  const t = w.agent(ws);
+  const on = await w.cli(["on"], { terminal: t, cwd: ws });
+  assert.equal(on.code, 0, on.stderr + on.stdout);
+  assert.equal(w.state().repos[front.root].holder, ws);
+  assert.equal(w.state().repos[back.root].holder, back.ws["AX-90"]);
+  const notes = w.state().notes.length;
+
+  const off = await w.cli(["off", "--stop"], { terminal: t, cwd: ws });
+  assert.equal(off.code, 0, off.stderr + off.stdout);
+  assert.match(off.stdout, /^Gave back the Spotlight turn of AX-90\.$/m);
+  assert.doesNotMatch(off.stdout, /servers keep running/);
+  assert.match(off.stdout, /^Spotlight off in front: root restored\.$/m);
+  assert.match(off.stdout, /^Spotlight off in back: root restored\.$/m);
+  const s = w.state();
+  assert.deepEqual(s.queue.requests, []);
+  for (const repo of [front, back]) {
+    assert.equal(s.repos[repo.root], undefined, `${repo.name}: the record is gone`);
+    assert.deepEqual(refsOf(repo.root), [], repo.name);
+    assert.equal(git(repo.root, "symbolic-ref", "--short", "HEAD"), "main");
+    assert.equal(w.serverTerminal(repo.root).foreground.name, "zsh", `${repo.name}: the server was stopped`);
+    assert.match(await serverLogText(w, repo.name), /Spotlight off — server stopped/);
+  }
+  assert.deepEqual(s.notes.slice(notes).filter((n) => n.toast), [], "a turn-off that goes through makes no toast");
+});
+
+test("D48: `off --stop` leaves on, and names, a project another task's workspace took meanwhile; the task's other projects go off", async () => {
+  const w = makeWorld();
+  const front = makeRepo(w, "front", { pkg: DEV, tasks: ["AX-91", "AX-92"] });
+  const back = makeRepo(w, "back", { pkg: DEV, tasks: ["AX-91"] });
+  w.register([{ id: "g1", repos: [front, back] }]);
+  w.listen(front.root, [3000]);
+  w.listen(back.root, [3001]);
+  const ws = front.ws["AX-91"];
+  const t = w.agent(ws);
+  assert.equal((await w.cli(["on"], { terminal: t, cwd: ws })).code, 0);
+  // A human's toggle on AX-92 takes front over.
+  const took = await w.cli(["toggle", "--workspace", front.ws["AX-92"], "--inline"]);
+  assert.equal(took.code, 0, took.stderr + took.stdout);
+  assert.equal(w.state().repos[front.root].holder, front.ws["AX-92"]);
+  const refs = refsOf(front.root);
+
+  const off = await w.cli(["off", "--stop"], { terminal: t, cwd: ws });
+  assert.equal(off.code, 0, off.stderr + off.stdout);
+  assert.match(off.stdout, /^front: ax-92 holds it now: its Spotlight stays on\.$/m);
+  assert.match(off.stdout, /^Spotlight off in back: root restored\.$/m);
+  const s = w.state();
+  assert.equal(s.repos[front.root].holder, front.ws["AX-92"]);
+  assert.deepEqual(refsOf(front.root), refs);
+  assert.notEqual(w.serverTerminal(front.root).foreground.name, "zsh", "front's server still runs");
+  assert.equal(s.repos[back.root], undefined);
+});
+
+test("D48: `off --stop` that hands the turn to a task waiting for the same project leaves that project on for its light, and names the task", async () => {
+  const w = makeWorld();
+  const app = makeRepo(w, "app", { pkg: DEV, tasks: ["AX-93", "AX-94"] });
+  w.register([{ id: "g1", repos: [app] }]);
+  w.listen(app.root, [3000]);
+  const tA = w.agent(app.ws["AX-93"]);
+  const tB = w.agent(app.ws["AX-94"]);
+  assert.equal((await w.cli(["on"], { terminal: tA, cwd: app.ws["AX-93"] })).code, 0);
+  const pending = w.cli(["on", "--timeout-ms", "30000"], { terminal: tB, cwd: app.ws["AX-94"] });
+  await w.until((s) => requestOf(s, tB)?.state === "waiting", { what: "B waiting" });
+
+  const off = await w.cli(["off", "--stop"], { terminal: tA, cwd: app.ws["AX-93"] });
+  assert.equal(off.code, 0, off.stderr + off.stdout);
+  assert.match(off.stdout, /^Gave back the Spotlight turn of AX-93\. AX-94 is testing next\.$/m);
+  assert.match(off.stdout, /^app: AX-94 tests there now: its Spotlight stays on\.$/m);
+  assert.doesNotMatch(off.stdout, /Spotlight off in app/);
+  const on = await pending;
+  assert.equal(on.code, 0, on.stderr + on.stdout);
+  assert.match(on.stdout, /app {2}http:\/\/localhost:3000 {2}listening/);
+  assert.equal(w.state().repos[app.root].holder, app.ws["AX-94"]);
+});
+
+test("D48: while another terminal of the task holds its turn, `off --stop` gives back only its own and says the servers stay; the last one turns them off", async () => {
+  const w = makeWorld();
+  const app = makeRepo(w, "app", { pkg: DEV, tasks: ["AX-95"] });
+  w.register([{ id: "g1", repos: [app] }]);
+  w.listen(app.root, [3000]);
+  const ws = app.ws["AX-95"];
+  const t1 = w.agent(ws);
+  const t2 = w.agent(ws);
+  assert.equal((await w.cli(["on"], { terminal: t1, cwd: ws })).code, 0);
+  assert.equal((await w.cli(["on"], { terminal: t2, cwd: ws })).code, 0);
+  const refs = refsOf(app.root);
+  const before = w.serverTerminal(app.root).foreground;
+
+  const first = await w.cli(["off", "--stop"], { terminal: t1, cwd: ws });
+  assert.equal(first.code, 0, first.stderr + first.stdout);
+  assert.match(first.stdout, /^Gave back the Spotlight turn of AX-95\.$/m);
+  assert.match(first.stdout, /^Another terminal of AX-95 still holds its turn: its servers stay on for it\.$/m);
+  assert.doesNotMatch(first.stdout, /Spotlight off in app/);
+  let s = w.state();
+  assert.equal(requestOf(s, t1), undefined);
+  assert.equal(requestOf(s, t2).state, "holding");
+  assert.equal(s.repos[app.root].holder, ws);
+  assert.deepEqual(refsOf(app.root), refs);
+  assert.deepEqual(w.serverTerminal(app.root).foreground, before);
+
+  const last = await w.cli(["off", "--stop"], { terminal: t2, cwd: ws });
+  assert.equal(last.code, 0, last.stderr + last.stdout);
+  assert.match(last.stdout, /^Spotlight off in app: root restored\.$/m);
+  s = w.state();
+  assert.deepEqual(s.queue.requests, []);
+  assert.equal(s.repos[app.root], undefined);
+  assert.equal(w.serverTerminal(app.root).foreground.name, "zsh");
+});
+
+test("D48: a project that refuses the turn-off stays as it is: never forced, its line names the code, an error toast as Apagar's, exit 1; the turn is given back all the same", async () => {
+  const w = makeWorld();
+  const app = makeRepo(w, "app", { pkg: DEV, tasks: ["AX-96"] });
+  w.register([{ id: "g1", repos: [app] }]);
+  w.listen(app.root, [3000]);
+  const ws = app.ws["AX-96"];
+  const t = w.agent(ws);
+  assert.equal((await w.cli(["on"], { terminal: t, cwd: ws })).code, 0);
+  git(app.root, "commit", "-q", "--allow-empty", "-m", "made in the root");
+  const refs = refsOf(app.root);
+  const notes = w.state().notes.length;
+
+  const off = await w.cli(["off", "--stop"], { terminal: t, cwd: ws });
+  assert.equal(off.code, 1, off.stderr + off.stdout);
+  assert.match(off.stdout, /^Gave back the Spotlight turn of AX-96\.$/m);
+  assert.match(off.stdout, /^app: root-diverged: /m);
+  const s = w.state();
+  assert.deepEqual(s.queue.requests, []);
+  assert.equal(s.repos[app.root].holder, ws);
+  assert.equal(s.repos[app.root].lastError.code, "root-diverged");
+  assert.deepEqual(refsOf(app.root), refs, "never forced");
+  const added = s.notes.slice(notes);
+  assert.equal(added.length, 1, JSON.stringify(added));
+  assert.equal(added[0].level, "error");
+  assert.equal(added[0].title, "No se pudo apagar Spotlight en app");
+});
+
+test("D48: with no request (the turn given back already, or the queue off) `off --stop` turns off the task of the folder it runs in; a folder that is no task has nothing to stop; no terminal exits 2", async () => {
+  const w = makeWorld();
+  const app = makeRepo(w, "app", { pkg: DEV, tasks: ["AX-97"] });
+  w.register([{ id: "g1", repos: [app] }]);
+  w.listen(app.root, [3000]);
+  const ws = app.ws["AX-97"];
+  const t = w.agent(ws);
+  assert.equal((await w.cli(["on"], { terminal: t, cwd: ws })).code, 0);
+  assert.equal((await w.cli(["off"], { terminal: t, cwd: ws })).code, 0);
+  assert.equal(w.state().repos[app.root].holder, ws);
+
+  const stop = await w.cli(["off", "--stop"], { terminal: t, cwd: ws });
+  assert.equal(stop.code, 0, stop.stderr + stop.stdout);
+  assert.match(stop.stdout, /^This terminal held no Spotlight turn\.$/m);
+  assert.match(stop.stdout, /^Spotlight off in app: root restored\.$/m);
+  assert.equal(w.state().repos[app.root], undefined);
+  assert.equal(w.serverTerminal(app.root).foreground.name, "zsh");
+
+  // D5: the queue off, `on` lights with no request; `off --stop` still works.
+  w.settings({ queue: { enabled: false } });
+  assert.equal((await w.cli(["on"], { terminal: t, cwd: ws })).code, 0);
+  assert.equal(w.state().repos[app.root].holder, ws);
+  assert.deepEqual(w.state().queue.requests, []);
+  const off = await w.cli(["off", "--stop"], { terminal: t, cwd: ws });
+  assert.equal(off.code, 0, off.stderr + off.stdout);
+  assert.match(off.stdout, /^Spotlight off in app: root restored\.$/m);
+  assert.equal(w.state().repos[app.root], undefined);
+
+  const main = await w.cli(["off", "--stop"], { terminal: t, cwd: app.root });
+  assert.equal(main.code, 0, main.stderr + main.stdout);
+  assert.match(main.stdout, /^Nothing to stop: this folder is not part of a task\.$/m);
+
+  const none = await w.cli(["off", "--stop"], { cwd: ws });
+  assert.equal(none.code, 2, none.stderr + none.stdout);
+  assert.match(none.stderr, /^spotlight off: no terminal\./);
+
+  const help = await w.cli(["--help"]);
+  assert.match(help.stdout, /^ {2}spotlight off --stop \[--terminal t\] {2,}/m);
+});
+
 test("a `light` killed mid-way: the next `on` poll lights again and exits 0", async () => {
   const w = makeWorld();
   const app = makeRepo(w, "app", { pkg: DEV, tasks: ["AX-10"] });

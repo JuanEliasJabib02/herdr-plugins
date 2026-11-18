@@ -71,13 +71,27 @@ export function formatWaiting({ label, position, blockers }) {
 
 // ── off ────────────────────────────────────────────────────────────────────
 
-export function formatOff({ released, wasWaiting, next }) {
+// `stop` (`off --stop`, D48): the servers don't keep running, the lines
+// after this one say what went off.
+export function formatOff({ released, wasWaiting, next }, { stop = false } = {}) {
   if (released === null) return wasWaiting ? "Left the line for the Spotlight." : "This terminal held no Spotlight turn.";
-  const after =
-    next.length > 0
-      ? ` ${next.join(", ")} ${next.length === 1 ? "is" : "are"} testing next.`
-      : " The servers keep running until another task takes the projects.";
+  let after = "";
+  if (next.length > 0) after = ` ${next.join(", ")} ${next.length === 1 ? "is" : "are"} testing next.`;
+  else if (!stop) after = " The servers keep running until another task takes the projects.";
   return `Gave back the Spotlight turn of ${released}.${after}`;
+}
+
+// `off --stop` (D48) with nothing of a task to turn off: the folder is no
+// task (`label` null), or its task has no project that can hold a Spotlight.
+export function stopNothing(label) {
+  return label === null
+    ? "Nothing to stop: this folder is not part of a task."
+    : `Nothing to stop: no project of ${label} can hold a Spotlight here.`;
+}
+
+// `off --stop` (D48) while another terminal of the task still holds its turn.
+export function stopShared(label) {
+  return `Another terminal of ${label} still holds its turn: its servers stay on for it.`;
 }
 
 // ── status ─────────────────────────────────────────────────────────────────

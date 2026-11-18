@@ -3,7 +3,8 @@
 // the server (start, restart on a lockfile or command change, its end by
 // hand), the env per task (its picks and the restarts they ask for),
 // waiting for the servers to listen (port of Orca's waitForTurnServers), the
-// teardown before a delete (D43), and the reap. Node-only.
+// teardown before a delete (D43), the turn-off when the testing ends (`off
+// --stop`, D48), and the reap. Node-only.
 //
 // Every git step runs under the repo's lock and reads the holder inside it,
 // so the last one to take the lock sees the latest holder (a sync racing a
@@ -43,6 +44,7 @@ import {
   setRootError, setServerError, clearRootError, clearServerError, serverDown,
 } from "./server-errors.js";
 import { oneLine } from "./text.js";
+import { labelOf } from "./cli-format.mjs";
 
 const sha1 = (text) => crypto.createHash("sha1").update(text).digest("hex");
 
@@ -1766,6 +1768,59 @@ export async function teardownRepo(cx, root) {
   const lights = await waitOutLights(cx, (m) => (m?.members ?? []).some((x) => x.root === root), deadline);
   if (!lights) return [`Gave up waiting after ${secondsOf(total)} s for a Spotlight light of ${cx.nameOf(root)} still running: nothing turned off.`];
   return teardownRoot(cx, root, { purge: true, deadline, total });
+}
+
+// ── The testing ends (D48) ─────────────────────────────────────────────────
+
+// The label of a holding turn with `root` among its members (another task's,
+// whose light takes the root over, or another terminal of this task's), as
+// state.json says now; null when none has it.
+function turnAt(state, root) {
+  const r = state.queue.requests.find((x) => x.state === "holding" && (x.members ?? []).some((m) => m.root === root));
+  return r ? labelOf(state.queue.requests, r.taskKey) : null;
+}
+
+// The line of a root `off --stop` left alone, from what its onlyIf saw: a
+// turn that has it, a holder outside the task, or nobody.
+function leftOnLine(name, seen) {
+  if (seen?.turn) return `${name}: ${seen.turn} tests there now: its Spotlight stays on.`;
+  if (seen?.holder) return `${name}: ${path.basename(seen.holder)} holds it now: its Spotlight stays on.`;
+  return `Spotlight is not on in ${name}: nothing to turn off.`;
+}
+
+// `spotlight off --stop` (D48), once the caller's turn is given back: each
+// of `members` (the task's, one per repo) turned off in turn, inline, never
+// forced, `quiet` (a turn-off that goes through makes no toast; a refusal
+// toasts as Apagar's). A root goes off only when, read under its own repo
+// lock (deactivateRepo's onlyIf), one of the member's workspaces holds it
+// and no holding turn has it among its members: one lit by someone else
+// since, or one a granted turn's light takes over, is left on and named.
+// Each repo lock is waited on until `deadline` (one try once it passed).
+// → { ok, lines }: a line per root, as teardown prints them; ok false when
+// one refused, didn't stop its server or was never reached.
+export async function stopTask(cx, members, { deadline }) {
+  const total = Math.max(0, deadline - cx.now());
+  const lines = [];
+  let ok = true;
+  for (const m of members) {
+    const name = cx.nameOf(m.root);
+    const mine = m.workspaces ?? [m.workspace];
+    let seen = null;
+    const onlyIf = (record) => {
+      seen = { holder: record?.holder ?? null, turn: turnAt(cx.store.readState(), m.root) };
+      return !seen.turn && mine.includes(seen.holder);
+    };
+    try {
+      const r = await deactivateRepo(cx, m.root, { quiet: true, onlyIf, lockTimeoutMs: Math.max(0, deadline - cx.now()) });
+      lines.push(...(r.skipped ? [leftOnLine(name, seen)] : turnedOffLines(name, r)));
+      if (!r.ok) ok = false;
+    } catch (e) {
+      ok = false;
+      if (e instanceof LockError && e.code === "lock-timeout") lines.push(`Gave up waiting for ${name}'s lock after ${secondsOf(total)} s: nothing turned off there.`);
+      else lines.push(`${name}: ${toSpotlightError(e).message}`);
+    }
+  }
+  return { ok, lines };
 }
 
 // ── Waiting for the servers (port of waitForTurnServers) ───────────────────

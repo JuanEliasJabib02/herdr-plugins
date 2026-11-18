@@ -4,6 +4,9 @@
 //   on [--terminal t] [--timeout-ms N]   take the task's test turn (exit 0
 //                                        holding, 1 still waiting, 2 usage)
 //   off [--terminal t]                   give the turn back, nothing else
+//   off --stop [--terminal t]            give it back and turn the task's
+//                                        Spotlight off (D48: the testing
+//                                        ended)
 //   toggle --workspace p [--force]       a human's on/off, outside the queue
 //   toggle --task KEY --group id         the whole task's, from its lane (D31)
 //   status [--json]                      read-only, no lock, no reap
@@ -55,11 +58,12 @@ import {
 } from "./cli-env.mjs";
 import { lightingMarker, needsLight, requestFgPid } from "./cli-turns.mjs";
 import {
-  formatOn, formatWaiting, formatOff, formatStatus, buildStatus, slotOnlyNote, labelOf, namedBlockers,
+  formatOn, formatWaiting, formatOff, formatStatus, buildStatus, slotOnlyNote, labelOf, namedBlockers, stopNothing, stopShared,
 } from "./cli-format.mjs";
 import {
   markGranted, spawnLights, dropStaleMarkers, lightTask, syncRepo, deactivateRepo, ensureServer, waitForTurnServers,
   recordServers, reap, rescuedNotes, errorNote, survivorsPhrase, writeEnv, applyEnv, rememberTaskVariant, teardownWorkspace, teardownRepo,
+  stopTask,
 } from "./cli-work.mjs";
 import { setRootError } from "./server-errors.js";
 import { settleResumes, autoResume, continueTask, classifyTerminal } from "./cli-resume.mjs";
@@ -78,6 +82,8 @@ Agents
   spotlight on [--terminal t] [--timeout-ms N]   take your task's test turn; waits in line
                                                  (exit 1 while still waiting: run it again)
   spotlight off [--terminal t]                   give the turn back (the servers keep running)
+  spotlight off --stop [--terminal t]            give the turn back and turn your task's Spotlight off
+                                                 (servers stopped, roots restored) when your testing ends
   spotlight status [--json]                      who tests, waits or is paused; each root's server and log
   spotlight logs [--repo r] [--lines N] [--path] the server's log as plain text (--path: the file)
   spotlight restart [--repo r]                   restart the repo's server
@@ -119,6 +125,7 @@ const FLAGS = {
   auto: "bool",
   "free-port": "bool",
   ensure: "bool",
+  stop: "bool",
   help: "bool",
 };
 
@@ -319,9 +326,16 @@ async function verbOn(cx, opts) {
 
 // ── off ────────────────────────────────────────────────────────────────────
 
+// `off` gives the turn back and nothing else: the servers keep running, for
+// the board's Soltar turno and a failing round that tests again. `off
+// --stop` (D48), when the testing ends, gives it back the same way, then
+// turns the task's Spotlight off (stopOwnTask).
 async function verbOff(cx, opts) {
   const terminal = terminalOf(opts);
   if (!terminal) return usage("spotlight off: no terminal. Run it in a Herdr terminal ($HC_TERMINAL_ID) or pass --terminal <t>.");
+  // D48: --stop's repo lock waits end here, under an agent shell's
+  // 2-minute command cap, as `on`'s.
+  const deadline = cx.now() + DEFAULT_ON_TIMEOUT_MS;
   const settings = cx.settings;
   const r = await cx.store.updateState((s) => {
     const mine = s.queue.requests.find((x) => x.terminal === terminal);
@@ -335,13 +349,42 @@ async function verbOff(cx, opts) {
       wasWaiting: o.wasWaiting,
       next: o.granted.map((t) => labelOf(s.queue.requests, t.taskKey)),
       keys,
+      task: mine ? { key: mine.taskKey, label, members: mine.members ?? [] } : null,
     };
   });
   await spawnLights(cx, r.result.keys);
   // D13: `off` checks the others' turn ends too.
   await reapQueue(cx, { full: false, skip: terminal });
-  out(formatOff(r.result));
-  return 0;
+  out(formatOff(r.result, { stop: Boolean(opts.stop) }));
+  return opts.stop ? stopOwnTask(cx, r.result.task, deadline) : 0;
+}
+
+// `off --stop` (D48), its turn given back: the task of the request it gave
+// back, else (none: given back already, or the queue off) the task of the
+// folder it runs in, as `on` resolves it. Nothing is turned off while
+// another terminal of the task holds its turn; else each project, inline
+// (an agent's call is no Herdr exec, and it needs the outcome), a line each
+// (cli-work.mjs stopTask). Exit 1 when one refused, or its server didn't
+// stop.
+async function stopOwnTask(cx, given, deadline) {
+  let task = given;
+  if (!task) {
+    const t = await resolveTask({
+      cwd: process.cwd(), shared: cx.shared, git: cx.taskGit, enabled: (root) => cx.store.repoEnabled(root, cx.settings),
+    });
+    task = t.ok ? { key: `${t.lane}/${t.taskKey}`, label: t.label, members: t.members } : null;
+  }
+  if (!task || task.members.length === 0) {
+    out(stopNothing(task?.label ?? null));
+    return 0;
+  }
+  if (cx.store.readState().queue.requests.some((x) => x.state === "holding" && x.taskKey === task.key)) {
+    out(stopShared(task.label));
+    return 0;
+  }
+  const r = await stopTask(cx, task.members, { deadline });
+  for (const line of r.lines) out(line);
+  return r.ok ? 0 : 1;
 }
 
 // ── toggle ─────────────────────────────────────────────────────────────────
