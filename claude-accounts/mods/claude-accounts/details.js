@@ -4,8 +4,8 @@
 // 90 days, all time), Orca's eight cards in a grid of four columns with
 // Herdr's tokens and active time under them (each card with its group's
 // "since <date>", and a coverage note per group that doesn't cover the
-// range), the daily chart, by model, by project and by account, the time to
-// each limit, and recent sessions in Orca's seven columns. What it says is
+// range), the daily chart, by model, and recent sessions in Orca's seven
+// columns. What it says is
 // details-model.js's; this file only draws it. Owners: T10, T20b.
 //   props: { view: "details" }
 //
@@ -185,12 +185,7 @@ export default class Details {
     return [
       cardGrid(r, t),
       chart(r.daily, t),
-      h_flex().gap(10).items_start()
-        .child(this.breakdown("model", r.byModel, t))
-        .child(this.breakdown("project", r.byProject, t)),
-      h_flex().gap(10).items_start()
-        .child(this.breakdown("account", r.byAccount, t))
-        .child(limitsSection(r.limits, t)),
+      this.breakdown("model", r.byModel, t),
       recentSection(r.recent, t),
     ];
   }
@@ -282,17 +277,6 @@ function chart(d, t) {
       .child(div().w_full().max_w(40).rounded_t(3).bg(b.tokens > 0 ? t.accent : t.raised)
         .h(b.tokens > 0 ? Math.max(2, Math.round(b.share * CHART_H)) : 1))
       .child(div().h(13).text_size(10.5).text_color(t.dim).whitespace_nowrap().child(b.label ?? "")))));
-}
-
-// The time to each limit: one row per account, a column per window.
-function limitsSection(l, t) {
-  const el = section(t, l.title, l.description).flex_1().min_w(0);
-  if (l.empty) return el.child(div().text_size(11.5).text_color(t.dim).child(l.empty));
-  return el.child(v_flex().gap(9).children(l.rows.map((row) => v_flex().gap(3)
-    .child(div().truncate().child(row.account))
-    .children(row.cells.map((c) => h_flex().gap(8).text_size(11.5)
-      .child(div().w(92).flex_none().text_color(t.dim).child(c.label))
-      .child(div().flex_1().min_w(0).truncate().text_color(c.text === "Not hit" ? t.dim : t.foreground).child(c.text)))))));
 }
 
 // Orca's UsageRecentSessionsTable: Last active, Project, Model, Turns,
