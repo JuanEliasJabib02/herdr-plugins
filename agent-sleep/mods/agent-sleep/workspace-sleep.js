@@ -315,9 +315,14 @@ export const answerCommand = (question, yes) => `${yes ? CONFIRM : CANCEL}${ques
 // projects-sidebar keeps a copy (tree-model.js sleepCommand) and the root
 // suite holds the two together. Null for what isn't an absolute path.
 const SLEEP_AT = `${SLEEP_WORKSPACE}.`;
+// awake-agent D1: one worktree's asleep Claudes woken by its path, from a
+// shell (`herdr-app do agent-sleep.wake.<hex>`, what wake-agent runs), with
+// the same hex. It stays out of the popup's table too.
+const WAKE_AT = "wake.";
 export const MAX_PATH_BYTES = 4096;
 
-export function sleepWorkspaceCommand(path) {
+// An absolute path's UTF-8 in hex, lowercase; null for anything else.
+function hexOf(path) {
   if (!isAbsolute(path)) return null;
   let bytes;
   try {
@@ -332,12 +337,24 @@ export function sleepWorkspaceCommand(path) {
       i += 2;
     } else hex += bytes.charCodeAt(i).toString(16).padStart(2, "0");
   }
-  return `${SLEEP_AT}${hex}`;
+  return hex;
 }
 
-// The path a `sleep-workspace.<hex>` names, its trailing slash gone (as
-// projects-sidebar's normPath), or null: odd or non-hex digits, more than
-// MAX_PATH_BYTES, bytes that aren't UTF-8, a NUL, or a relative path.
+export function sleepWorkspaceCommand(path) {
+  const hex = hexOf(path);
+  return hex === null ? null : `${SLEEP_AT}${hex}`;
+}
+
+// `wake.<hex>`, or null for what isn't an absolute path.
+export function wakeCommand(path) {
+  const hex = hexOf(path);
+  return hex === null ? null : `${WAKE_AT}${hex}`;
+}
+
+// The path a `sleep-workspace.<hex>` or `wake.<hex>` names, its trailing
+// slash gone (as projects-sidebar's normPath), or null: odd or non-hex
+// digits, more than MAX_PATH_BYTES, bytes that aren't UTF-8, a NUL, or a
+// relative path.
 function pathOfHex(hex) {
   if (!/^(?:[0-9A-Fa-f]{2})+$/.test(hex) || hex.length > MAX_PATH_BYTES * 2) return null;
   let path;
@@ -350,15 +367,17 @@ function pathOfHex(hex) {
   return path.replace(/\/+$/, "") || "/";
 }
 
-// → { kind: "sleep", path? } | { kind: "answer", question, yes } | null:
-// the bare command sleeps the shown workspace, `sleep-workspace.<hex>` the
-// one at that path.
+// → { kind: "sleep", path? } | { kind: "wake", path } | { kind: "answer",
+// question, yes } | null: the bare command sleeps the shown workspace,
+// `sleep-workspace.<hex>` the one at that path, `wake.<hex>` wakes what
+// sleeps at that path.
 export function parseWorkspaceCommand(name) {
   if (typeof name !== "string") return null;
   if (name === SLEEP_WORKSPACE) return { kind: "sleep" };
-  if (name.startsWith(SLEEP_AT)) {
-    const path = pathOfHex(name.slice(SLEEP_AT.length));
-    return path === null ? null : { kind: "sleep", path };
+  for (const [prefix, kind] of [[SLEEP_AT, "sleep"], [WAKE_AT, "wake"]]) {
+    if (!name.startsWith(prefix)) continue;
+    const path = pathOfHex(name.slice(prefix.length));
+    return path === null ? null : { kind, path };
   }
   for (const [prefix, yes] of [[CONFIRM, true], [CANCEL, false]]) {
     if (!name.startsWith(prefix)) continue;

@@ -119,14 +119,35 @@ its own.
     spaces, and wakes once you leave it and come back.
   - **Until it wakes**, showing a tab of it doesn't resume its Claudes, and
     neither does Wake all. Its row has projects-sidebar's moon, and no moon of
-    this mod after the label.
+    this mod after the label. Waking it by its path (below) wakes it too.
+- **Wake one worktree** (`agent-sleep.wake.<hex>`, the worktree's path as
+  UTF-8 in hex, as `sleep-workspace.<hex>` names one): every Claude asleep
+  there wakes, whether it slept on its own or with its workspace, and no tab
+  is shown. It is how one Claude wakes another's worktree from a shell.
+  - A workspace you put to sleep wakes as a click on its row wakes it, its
+    tabs back in their spaces but none shown, and then every Claude in it
+    resumes, not only those that were working.
+  - One still going to sleep gets what a click mid-sleep gets: its remaining
+    stops are dropped, and its Claudes wake once the stops already under way
+    are done. A Claude automatic sleep is stopping right then wakes once it is
+    asleep.
+  - A Claude with something typed at its shell is looked at again every
+    2 seconds. One with another program in front stays asleep and keeps its
+    record. One whose terminal is in another workspace you put to sleep stays
+    asleep, so that sleep isn't undone.
+  - After 60 seconds it gives up, and `log.txt` gets one line per Claude still
+    asleep or being stopped there, with the last reason seen: `t2: not woken
+    (wake /code/app): its shell line isn't a bare prompt (shell, typed)`.
+    Putting that workspace to sleep in the meantime ends the wake the same way
+    ("put to sleep again"). A wake under way is lost when the mod reloads.
 
 **Keys** (projects layout): `cmd-alt-s` Sleep now, `cmd-alt-w` Wake all. Commands
 you can bind or run with `herdr-app do agent-sleep.<name>`: `sleep-now`,
 `wake-all`, `toggle` (automatic sleep), `less` and `more` (the wait), `panel`
 (the popup), `sleep-workspace` (no key, as in Orca; the popup's row runs it),
-and `sleep-workspace.<hex>` (a workspace by its path's UTF-8 in hex, what
-projects-sidebar's right-click Sleep runs).
+`sleep-workspace.<hex>` (a workspace by its path's UTF-8 in hex, what
+projects-sidebar's right-click Sleep runs), and `wake.<hex>` (what sleeps at a
+worktree's path, the same hex; see "Wake one worktree").
 
 **Files:** `<Herdr home>/agent-sleep/settings.json` (`enabled`, `idleMinutes`)
 and `sleeping.json` (one record per Claude: session id, folder, flags, its

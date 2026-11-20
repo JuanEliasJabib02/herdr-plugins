@@ -14,8 +14,9 @@ import assert from "node:assert/strict";
 import { readFileSync, readdirSync } from "node:fs";
 import { registerHooks } from "node:module";
 import { PULSE_MS } from "../mods/agent-sleep/coordinator.js";
+import { wakeCommand } from "../mods/agent-sleep/workspace-sleep.js";
 import {
-  HOME, APP, SETTINGS, WORKSPACES, makeWorld, deps, spacesWorld, addShell, settledTabs, entries,
+  HOME, APP, SETTINGS, WORKSPACES, makeWorld, deps, spacesWorld, addShell, settledTabs, entries, storeRecord, records, resumes,
 } from "./harness.js";
 
 // Stand-ins exporting exactly the names the mod's files import, read from
@@ -186,6 +187,24 @@ test("a moon copy whose window is there at init pulses on its first beat and run
   await beat();
   assert.deepEqual(settledTabs(w), ["a1"]);
   assert.equal(entries(w)["/code/app"]?.state, "sleeping");
+});
+
+test("awake-agent D1, D4: `herdr-app do agent-sleep.wake.<hex>` reaches the moon's listener, and its next pulse resumes the Claude asleep at that path, its tab hidden", async () => {
+  const w = world();
+  // /code/app's tab is hidden: Inicio is shown, so the reveal path never resumes t3.
+  spacesWorld(w, [{ id: "sa", tabs: { a1: [["pa1", "t3", "/code/app"]] } }, { id: "inicio", folder: HOME, tabs: { i1: [["pi1", null, null]] } }], "inicio");
+  storeRecord(w, "t3", { rootPid: 103 });
+  const { beat } = moonCopy(w);
+  await beat();
+  await beat();
+  assert.deepEqual(resumes(w), [], "asleep, its tab hidden");
+  await new Promise(setImmediate);
+  await send(w, wakeCommand("/code/app"));
+  assert.deepEqual(resumes(w), [], "a command does no I/O: the pulse acts");
+  await beat();
+  assert.deepEqual(resumes(w).map((s) => s.address), ["t3"]);
+  assert.equal(Object.hasOwn(records(w), "t3"), false);
+  assert.equal(w.spaces.find((s) => s.active).id, "inicio", "nothing shown");
 });
 
 test("a copy that is no moon (the popup, an overlay) starts no timer and no listener, window or not", async () => {
