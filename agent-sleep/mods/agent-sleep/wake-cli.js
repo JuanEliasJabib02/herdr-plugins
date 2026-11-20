@@ -1,12 +1,6 @@
-// `wake-agent` (awake-agent D5): from a shell, what agent-sleep put to sleep,
-// and one worktree's Claudes woken by its path, so a Claude can wake another
-// worktree's before it messages it (S1).
-//
-//   wake-agent           what sleeps: one line per worktree, its path, the
-//                        terminals of its Claudes asleep and how it slept
-//                        (idle, or workspace: put to sleep as a whole)
-//   wake-agent <path>    sends the mod's `wake.<hex>` (D1) with `herdr-app
-//                        do` and waits until each Claude there is up
+// `wake-agent` (awake-agent D5): the CLI a Claude runs to wake another
+// worktree's sleeping Claudes before it messages them (S1). USAGE says what
+// it does and its exit codes; this says how.
 //
 // Up is a Claude in front of its terminal (`hc get`'s foreground, through
 // programName: the native installer's process is named after its version)
@@ -15,29 +9,24 @@
 // that misses Herdr's 2 s startup check never reports one. Herdr's `blocked`,
 // when there, only adds that it waits for an answer in its tab.
 //
-// The targets are the mod's own (coordinator.js wakeTargets): the Claudes
-// whose record is asleep or being stopped, at the path (its worktree, or
-// Claude's own folder) or in the tabs of the path's workspace entry, and only
-// in tabs still open (`hc ls`). A sleeping entry counts as something to wake
+// The targets are the mod's own (workspace-sleep.js wakeTargets), only in
+// tabs still open (`hc ls`). A sleeping entry counts as something to wake
 // before any of its Claudes is asleep: the wake calls its stops off.
 //
-// Exit codes: 0 up (or the list); 1 Herdr refused the wake (its error, at
-// once), or not up after WAKE_TIMEOUT_MS (the terminals still down, then the
-// lines the mod gave up with in log.txt); 2 nothing asleep at the path, or a
-// usage error, as spotlight's CLI.
-//
-// Pure, as the mod's files are: files, programs and the clock come injected,
-// and bin/wake-agent.mjs wires node's. It only reads the files the loop copy
-// writes, through the mod's own parsers: the mod stays their one writer
-// (agent-sleep D11), and a wake happens only in the loop copy, at its next
-// pulse, which needs a Herdr window (D4).
+// Pure, as the mod's files are: files, programs, the clock and path.resolve
+// come injected, and bin/wake-agent.mjs wires node's. It only reads the files
+// the loop copy writes, through the mod's own parsers: the mod stays their
+// one writer (agent-sleep D11), and a wake happens only in the loop copy, at
+// its next pulse, which needs a Herdr window (D4).
 
-import { MOD, WAKE_DEADLINE_MS } from "./coordinator.js";
+import { MOD, WAKE_DEADLINE_MS } from "./constants.js";
 import { paths, parseRecords } from "./store.js";
 import { workspacesPaths, parseWorkspaces } from "./workspaces-store.js";
-import { wakeCommand, sleptTerminals } from "./workspace-sleep.js";
+import { wakeCommand, sleptTerminals, sleptBy, wakeTargets, entryWake } from "./workspace-sleep.js";
 import { loadSession, loadConfigDirs, isClaudeForeground, programName } from "./claude-session.js";
-import { logPaths } from "./log.js";
+import { logPaths, parseLogLine, notWokenHead } from "./log.js";
+import { statusWord } from "./rules.js";
+import { workspaceOf, recordPath } from "./badges.js";
 
 // How long a wake is waited on: past the mod's own deadline (D3), so the
 // lines it gives up with are in log.txt by then. And how often each terminal
@@ -58,8 +47,6 @@ usage error. A relative path is taken from the shell's folder.`;
 const isObject = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
 const list = (v) => (Array.isArray(v) ? v : []);
 const own = (map, key) => (isObject(map) && Object.hasOwn(map, key) ? map[key] : undefined);
-// Herdr's status: a word in `hc ls`, { app, state } in `hc get`.
-const statusWord = (s) => (isObject(s) ? s.state : s) ?? null;
 const names = (addresses) => addresses.join(", ");
 
 function parseJson(text) {
@@ -68,22 +55,6 @@ function parseJson(text) {
   } catch {
     return null;
   }
-}
-
-// ── The path ────────────────────────────────────────────────────────────────
-
-// `arg` made absolute against `cwd`, `.` and `..` resolved, no trailing slash
-// (the mod's decoder rejects a relative path and drops the slash). Symlinks
-// are left as they are: the mod compares paths as strings.
-export function resolvePath(arg, cwd) {
-  const raw = String(arg).startsWith("/") ? String(arg) : `${cwd}/${arg}`;
-  const parts = [];
-  for (const segment of raw.split("/")) {
-    if (segment === "" || segment === ".") continue;
-    if (segment === "..") parts.pop();
-    else parts.push(segment);
-  }
-  return `/${parts.join("/")}`;
 }
 
 // ── Reading the world ──────────────────────────────────────────────────────
@@ -99,29 +70,22 @@ async function call(cx, file, args) {
   } catch (e) {
     return { ok: false, message: String(e?.message ?? e) };
   }
-  const json = parseJson(r?.stdout) ?? parseJson(r?.stderr);
+  const out = parseJson(r?.stdout);
+  const json = out ?? parseJson(r?.stderr);
   const error = isObject(json) && "error" in json ? json.error : undefined;
-  if (r?.code === 0 && error === undefined) return { ok: true, value: parseJson(r?.stdout) };
+  if (r?.code === 0 && error === undefined) return { ok: true, value: out };
   const said = isObject(error) ? error.message : error;
   return { ok: false, message: String(said ?? (r?.stderr || r?.stdout || `${file} exited ${r?.code}`)).trim() };
-}
-
-async function readText(cx, path) {
-  try {
-    const text = await cx.readText(path);
-    return typeof text === "string" ? text : null;
-  } catch {
-    return null;
-  }
 }
 
 // sleeping.json's records and workspaces.json's entries, as the mod reads
 // them (a missing or broken file is none).
 async function readFiles(cx) {
-  return {
-    records: parseRecords(await readText(cx, paths(cx.appHome).sleeping)).records,
-    entries: parseWorkspaces(await readText(cx, workspacesPaths(cx.appHome).file)).entries,
-  };
+  const [records, entries] = await Promise.all([
+    cx.readText(paths(cx.appHome).sleeping),
+    cx.readText(workspacesPaths(cx.appHome).file),
+  ]);
+  return { records: parseRecords(records).records, entries: parseWorkspaces(entries).entries };
 }
 
 // `hc ls --json`'s live terminals: { ok: true, live: Map address → terminal }
@@ -135,32 +99,26 @@ async function liveTerminals(cx) {
   return { ok: true, live: new Map(live.map((t) => [t.address, t])) };
 }
 
-// Each entry's terminals, every tab of its spaces (sleptTerminals: what its
-// sleep holds), from `herdr-app ls`: Map path → Set. Empty without entries,
-// or when Herdr can't say (the records' own paths still count).
-async function sleptBy(cx, entries) {
-  const out = new Map();
-  if (Object.keys(entries).length === 0) return out;
+// Herdr's spaces, and their panes as the mod's live panes() gives them
+// ({ tab, terminal }), from `herdr-app ls`, for what a workspace's sleep holds
+// (sleptBy). None when Herdr can't say: the records' own paths still count.
+async function herdrLayout(cx) {
   const r = await call(cx, "herdr-app", ["ls"]);
   const spaces = r.ok ? list(r.value?.spaces) : [];
   const panes = spaces.flatMap((s) =>
     list(s?.tabs).flatMap((tab) => list(tab?.terminals).map((t) => ({ tab: tab?.id, terminal: t?.terminal }))),
   );
-  for (const path of Object.keys(entries).sort()) out.set(path, sleptTerminals({ [path]: entries[path] }, spaces, panes));
-  return out;
+  return { spaces, panes };
 }
 
 // ── What sleeps ─────────────────────────────────────────────────────────────
 
 // One line per worktree something sleeps in: `<path>  <terminals>  <kind>`,
-// sorted by path. A Claude asleep in a tab of a workspace put to sleep is
-// listed under that workspace, which is what wakes it; one whose tab is gone
-// (`live` without it) isn't listed; `live` null lists every one.
+// sorted by path. A Claude asleep in a tab of a workspace put to sleep
+// (`slept`: sleptBy's terminal → path) is listed under that workspace, which
+// is what wakes it; one whose tab is gone (`live` without it) isn't listed;
+// `live` null lists every one.
 export function asleepLines({ records, entries, live, slept }) {
-  const holder = (address) => {
-    for (const [path, terminals] of slept) if (terminals.has(address)) return path;
-    return null;
-  };
   const groups = new Map();
   const group = (path) => {
     if (!groups.has(path)) groups.set(path, []);
@@ -169,7 +127,7 @@ export function asleepLines({ records, entries, live, slept }) {
   for (const address of Object.keys(records).sort()) {
     const r = records[address];
     if (r.state !== "asleep" || (live && !live.has(address))) continue;
-    group(holder(address) ?? r.workspacePath ?? r.cwd).push(address);
+    group(slept.get(address) ?? recordPath(r)).push(address);
   }
   for (const path of Object.keys(entries)) group(path);
   return [...groups.keys()].sort().map((path) => {
@@ -181,14 +139,15 @@ export function asleepLines({ records, entries, live, slept }) {
 
 async function listAsleep(cx) {
   const { records, entries } = await readFiles(cx);
-  const anything = Object.values(records).some((r) => r.state === "asleep") || Object.keys(entries).length > 0;
-  let live = null;
-  if (anything) {
-    const hc = await liveTerminals(cx);
-    if (hc.ok) live = hc.live;
-    else cx.err(`wake-agent: can't tell which tabs are still open (hc ls --json: ${hc.message}); every record is listed.`);
+  const anyEntry = Object.keys(entries).length > 0;
+  if (!anyEntry && !Object.values(records).some((r) => r.state === "asleep")) {
+    cx.out("wake-agent: nothing asleep.");
+    return 0;
   }
-  const lines = anything ? asleepLines({ records, entries, live, slept: await sleptBy(cx, entries) }) : [];
+  const [hc, layout] = await Promise.all([liveTerminals(cx), anyEntry ? herdrLayout(cx) : null]);
+  if (!hc.ok) cx.err(`wake-agent: can't tell which tabs are still open (hc ls --json: ${hc.message}); every record is listed.`);
+  const slept = layout ? sleptBy(entries, layout.spaces, layout.panes) : new Map();
+  const lines = asleepLines({ records, entries, live: hc.ok ? hc.live : null, slept });
   if (lines.length === 0) cx.out("wake-agent: nothing asleep.");
   for (const line of lines) cx.out(line);
   return 0;
@@ -198,13 +157,13 @@ async function listAsleep(cx) {
 
 // `hc get <t> --json`'s terminal → { up: true, blocked } when a Claude is in
 // front with its session file (in any of `configDirs`, loadConfigDirs'
-// list), else { up: false, why }.
-export async function claudeUp(t, { home, configDirs, readText: read, exec }) {
+// list; its transcript isn't looked for), else { up: false, why }.
+export async function claudeUp(t, { home, configDirs, readText, exec }) {
   const fg = isObject(t) ? t.foreground : null;
   if (!isClaudeForeground(fg)) {
     return { up: false, why: isObject(fg) ? `${programName(fg) ?? "a program"} in front` : "nothing in front" };
   }
-  const session = await loadSession({ home, pid: fg.pid, foregroundName: programName(fg), configDirs }, { readText: read, exec });
+  const session = await loadSession({ home, pid: fg.pid, foregroundName: programName(fg), configDirs, transcript: false }, { readText, exec });
   if (!session.ok) return { up: false, why: `Claude in front, no session file (${session.reason})` };
   return { up: true, blocked: statusWord(t.status) === "blocked" };
 }
@@ -216,39 +175,19 @@ async function lookAt(cx, address, record) {
   if (record?.state === "stopping") return { up: false, why: "being put to sleep" };
   const got = await call(cx, "hc", ["get", address, "--json"]);
   if (!got.ok) return { up: false, why: `hc get: ${got.message}` };
-  const seen = await claudeUp(got.value, {
-    home: cx.home,
-    configDirs: await cx.configDirs(),
-    readText: (path) => readText(cx, path),
-    exec: cx.exec,
-  });
+  const seen = await claudeUp(got.value, { home: cx.home, configDirs: await cx.configDirs(), readText: cx.readText, exec: cx.exec });
   if (!seen.up && record?.state === "asleep") return { up: false, why: `still asleep (${seen.why})` };
   return seen;
 }
 
 // The live terminals under `path` (its folder or below) with a Claude up.
 async function upUnder(cx, path, live) {
-  const prefix = path === "/" ? "/" : `${path}/`;
-  const up = [];
-  for (const [address, t] of [...live].sort(([a], [b]) => (a < b ? -1 : 1))) {
-    const cwd = typeof t.cwd === "string" ? t.cwd.replace(/\/+$/, "") || "/" : null;
-    if (cwd === null || (cwd !== path && !cwd.startsWith(prefix))) continue;
-    if ((await lookAt(cx, address, null)).up) up.push(address);
-  }
-  return up;
+  const under = [...live.keys()].sort().filter((address) => workspaceOf(live.get(address).cwd, [path]) !== null);
+  const looks = await Promise.all(under.map((address) => lookAt(cx, address, null)));
+  return under.filter((_, i) => looks[i].up);
 }
 
 // ── Waking one path ────────────────────────────────────────────────────────
-
-// The terminals a wake at `path` is for, as the mod's wakeTargets: a record
-// asleep or being stopped, at the path or in its workspace's tabs.
-function targetsAt(path, records, terminals) {
-  return Object.keys(records).sort().filter((address) => {
-    const r = records[address];
-    if (r.state !== "asleep" && r.state !== "stopping") return false;
-    return r.workspacePath === path || r.cwd === path || terminals.has(address);
-  });
-}
 
 const closedNote = (gone) =>
   gone.length === 0 ? "" : ` ${names(gone)} slept there, but ${gone.length === 1 ? "its tab was" : "their tabs were"} closed.`;
@@ -265,29 +204,19 @@ async function nothingThere(cx, path, gone, hc) {
   return 2;
 }
 
-// The entry still to be acted on by the mod: asleep, or going to sleep and
-// not yet told to wake instead (wakeAfter). Null once it is gone or told.
-function pendingEntry(entries, path) {
-  const e = own(entries, path);
-  if (!e || (e.state === "sleeping" && e.wakeAfter === true)) return null;
-  return e;
-}
-
-const LINE = /^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2}) (.*)$/;
-
-// log.txt's lines (log.js logLine: `YYYY-MM-DD HH:MM:SS <text>`, local time)
-// where the mod gave up a wake at `path` for one of `subjects` (a terminal,
-// or the path for its workspace), stamped in the second of `since` or later:
-// coordinator.js endWake's `<t>: not woken (wake <path>): <why>`.
+// log.txt's lines (log.js parseLogLine) where the mod gave up a wake at
+// `path` for one of `subjects` (a terminal, or the path for its workspace),
+// stamped in the second of `since` or later: coordinator.js endWake's
+// `<t>: not woken (wake <path>): <why>` (log.js notWokenHead).
 export function wakeLogLines(text, { path, subjects, since }) {
   const from = Math.floor(since / 1000) * 1000;
-  const heads = subjects.map((s) => `${s}: not woken (wake ${path}): `);
+  const mark = notWokenHead("", path); // any subject's, looked for before a line is parsed
+  const heads = subjects.map((s) => notWokenHead(s, path));
   const out = [];
   for (const line of String(text ?? "").split("\n")) {
-    const m = LINE.exec(line);
-    if (!m) continue;
-    const at = new Date(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6]).getTime();
-    if (at >= from && heads.some((h) => m[7].startsWith(h))) out.push(line);
+    if (!line.includes(mark)) continue;
+    const parsed = parseLogLine(line);
+    if (parsed !== null && parsed.at >= from && heads.some((h) => parsed.text.startsWith(h))) out.push(line);
   }
   return out;
 }
@@ -301,16 +230,16 @@ async function wake(cx, path) {
     return 2;
   }
   const first = await readFiles(cx);
-  const atPath = targetsAt(path, first.records, new Set());
-  const hc = await liveTerminals(cx);
-  if (!own(first.entries, path) && atPath.length === 0) return nothingThere(cx, path, [], hc);
+  const entry = own(first.entries, path);
+  const [hc, layout] = await Promise.all([liveTerminals(cx), entry ? herdrLayout(cx) : null]);
+  if (!entry && wakeTargets(first.records, path).length === 0) return nothingThere(cx, path, [], hc);
   if (!hc.ok) {
     cx.err(`wake-agent: can't list Herdr's terminals (hc ls --json): ${hc.message}`);
     return 1;
   }
-  const entry = own(first.entries, path);
-  const terminals = entry ? (await sleptBy(cx, { [path]: entry })).get(path) : new Set();
-  const all = targetsAt(path, first.records, terminals);
+  // Its workspace's terminals, every tab of its spaces: what its sleep holds.
+  const terminals = layout ? sleptTerminals({ [path]: entry }, layout.spaces, layout.panes) : new Set();
+  const all = wakeTargets(first.records, path, terminals);
   const closed = all.filter((a) => !hc.live.has(a));
   const targets = all.filter((a) => hc.live.has(a));
   if (!entry && targets.length === 0) return nothingThere(cx, path, closed, hc);
@@ -329,24 +258,21 @@ async function wake(cx, path) {
   const gone = new Set();
   const why = new Map();
   for (;;) {
-    const files = await readFiles(cx);
-    const seen = await liveTerminals(cx);
-    if (seen.ok) for (const a of targetsAt(path, files.records, terminals)) if (seen.live.has(a)) known.add(a);
-    for (const address of [...known].sort()) {
-      if (up.has(address) || gone.has(address)) continue;
-      if (seen.ok && !seen.live.has(address)) {
-        gone.add(address);
-        continue;
-      }
-      const look = await lookAt(cx, address, own(files.records, address));
-      if (look.up) up.set(address, look);
-      else why.set(address, look.why);
-    }
-    const entryLeft = pendingEntry(files.entries, path);
+    // The mod acts at its next pulse: the first look is one poll after the send.
+    await cx.sleep(Math.min(cx.pollMs, since + cx.timeoutMs - cx.now()));
+    const [files, seen] = await Promise.all([readFiles(cx), liveTerminals(cx)]);
+    if (seen.ok) for (const a of wakeTargets(files.records, path, terminals)) if (seen.live.has(a)) known.add(a);
+    const waiting = [...known].sort().filter((a) => !up.has(a) && !gone.has(a));
+    if (seen.ok) for (const a of waiting) if (!seen.live.has(a)) gone.add(a);
+    const looking = waiting.filter((a) => !gone.has(a));
+    const looks = await Promise.all(looking.map((a) => lookAt(cx, a, own(files.records, a))));
+    looking.forEach((a, i) => (looks[i].up ? up.set(a, looks[i]) : why.set(a, looks[i].why)));
+    // The entry still to be acted on by the mod: asleep, or going to sleep
+    // and not yet told to wake instead (wakeAfter).
+    const entryLeft = entryWake(own(files.entries, path));
     const down = [...known].sort().filter((a) => !up.has(a) && !gone.has(a));
     if (down.length === 0 && !entryLeft) return wokeUp(cx, path, { known, up, gone });
     if (cx.now() - since >= cx.timeoutMs) return gaveUp(cx, path, { down, why, entryLeft, since });
-    await cx.sleep(Math.min(cx.pollMs, since + cx.timeoutMs - cx.now()));
   }
 }
 
@@ -372,10 +298,10 @@ function wokeUp(cx, path, { known, up, gone }) {
 async function gaveUp(cx, path, { down, why, entryLeft, since }) {
   cx.err(`wake-agent: ${path} isn't up after ${cx.timeoutMs / 1000} s:`);
   for (const address of down) cx.err(`${address}: ${why.get(address) ?? "not looked at"}`);
-  if (entryLeft) cx.err(`its workspace: ${entryLeft.state === "asleep" ? "still asleep" : "still going to sleep"}`);
+  if (entryLeft) cx.err(`its workspace: ${entryLeft === "now" ? "still asleep" : "still going to sleep"}`);
   const log = logPaths(paths(cx.appHome).dir);
-  const text = `${(await readText(cx, log.rotated)) ?? ""}\n${(await readText(cx, log.file)) ?? ""}`;
-  const lines = wakeLogLines(text, { path, subjects: entryLeft ? [...down, path] : down, since });
+  const [rotated, current] = await Promise.all([cx.readText(log.rotated), cx.readText(log.file)]);
+  const lines = wakeLogLines(`${rotated ?? ""}\n${current ?? ""}`, { path, subjects: entryLeft ? [...down, path] : down, since });
   if (lines.length === 0) {
     cx.err(
       "agent-sleep logged nothing about them since the wake was sent: Herdr's window may be closed (agent-sleep acts only while one is open, in a layout with its moon).",
@@ -392,7 +318,10 @@ async function gaveUp(cx, path, { down, why, entryLeft, since }) {
 // argv (after node and the script) and the world:
 //   exec(file, args)  → { code, stdout, stderr }, rejecting only when the
 //                       program can't start
-//   readText(path)    → the file's text, or null
+//   readText(path)    → the file's text, or null; never throws
+//   resolve(cwd, arg) node's path.resolve: `arg` made absolute, `.` and `..`
+//                     gone, no trailing slash, as the mod's decoder wants it
+//                     (symlinks stay: the mod compares paths as strings)
 //   now(), sleep(ms)  the clock
 //   home, appHome     $HOME, and Herdr's home (HERDR_APP_HOME or
 //                     ~/.config/herdr-app, as the plugin's)
@@ -408,8 +337,7 @@ export async function main(argv, deps) {
     ...deps,
     // The folders a session file can be in, listed once per run (find over
     // three roots), as the coordinator caches them.
-    configDirs: () =>
-      (dirs ??= loadConfigDirs({ home: deps.home, appHome: deps.appHome }, { readText: (p) => readText(cx, p), exec: deps.exec })),
+    configDirs: () => (dirs ??= loadConfigDirs({ home: deps.home, appHome: deps.appHome }, { readText: deps.readText, exec: deps.exec })),
   };
   const args = list(argv).map(String);
   if (args.length === 0) return listAsleep(cx);
@@ -421,5 +349,5 @@ export async function main(argv, deps) {
     cx.err(`wake-agent: ${args.length > 1 ? "one path at a time" : args[0] === "" ? "an empty path" : `unknown option ${args[0]}`}\n\n${USAGE}`);
     return 2;
   }
-  return wake(cx, resolvePath(args[0], cx.cwd));
+  return wake(cx, cx.resolve(cx.cwd, args[0]));
 }

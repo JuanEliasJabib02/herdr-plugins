@@ -16,10 +16,27 @@ export const LOG_MAX_BYTES = 1024 * 1024;
 const pad = (n) => String(n).padStart(2, "0");
 
 // "2026-11-09 07:05:03", local time.
-const localTime = (ms) => {
+export const localTime = (ms) => {
   const d = new Date(ms);
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
 };
+
+const LINE = /^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2}) (.*)$/;
+
+// logLine read back: { at, text }, `at` the stamp's second in ms (local
+// time), or null for a line that isn't one. wake-agent's CLI reads log.txt
+// with it (awake-agent D5).
+export function parseLogLine(line) {
+  const m = LINE.exec(String(line));
+  if (m === null) return null;
+  return { at: new Date(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6]).getTime(), text: m[7] };
+}
+
+// awake-agent D3: how a wake by path's give-up line starts, `<subject>: not
+// woken (wake <path>): ` (a terminal, or the path for its workspace), the
+// reason after it. The coordinator writes it (endWake); wake-agent's CLI
+// looks for it after its own timeout.
+export const notWokenHead = (subject, path) => `${subject}: not woken (wake ${path}): `;
 
 // One event, one line: a stack's lines are joined with " | ", and control
 // characters (a NUL can't travel in an argument) are dropped.

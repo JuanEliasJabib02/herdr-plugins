@@ -10,31 +10,28 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, chmodSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { main, USAGE, WAKE_TIMEOUT_MS, POLL_MS, resolvePath, claudeUp, asleepLines, wakeLogLines } from "../mods/agent-sleep/wake-cli.js";
-import { MOD, WAKE_DEADLINE_MS } from "../mods/agent-sleep/coordinator.js";
+import { main, USAGE, WAKE_TIMEOUT_MS, POLL_MS, claudeUp, asleepLines, wakeLogLines } from "../mods/agent-sleep/wake-cli.js";
+import { MOD } from "../mods/agent-sleep/constants.js";
 import { wakeCommand } from "../mods/agent-sleep/workspace-sleep.js";
-import { logLine } from "../mods/agent-sleep/log.js";
+import { logLine, parseLogLine, notWokenHead } from "../mods/agent-sleep/log.js";
+import { parseRecords, serializeRecords } from "../mods/agent-sleep/store.js";
+import { parseWorkspaces, serializeWorkspaces } from "../mods/agent-sleep/workspaces-store.js";
+import { procStartCommand, sessionFilePath } from "../mods/agent-sleep/claude-session.js";
+import { HOME, APP, SLEEPING, WORKSPACES, LOG, SID1, NATIVE, NATIVE_CLAUDE, sessionPath } from "./harness.js";
 
-const HOME = "/Users/demo";
-const APP = `${HOME}/.config/herdr-app`;
-const SLEEPING = `${APP}/agent-sleep/sleeping.json`;
-const WORKSPACES = `${APP}/agent-sleep/workspaces.json`;
-const LOG = `${APP}/agent-sleep/log.txt`;
 const LOG_1 = `${APP}/agent-sleep/log.1.txt`;
 // Local time, as log.txt's stamps are.
 const NOW = new Date(2026, 10, 20, 17, 0, 0).getTime();
-const SID1 = "00000000-0000-4000-8000-000000000001";
 const PROC_START = "Fri Nov 20 21:00:00 2026";
 // `hc get t8h --json`, 2026-11-16 (test/claude-session.test.js:77, NATIVE_FG):
 // the native installer's Claude, named by the OS after its version. Only
 // programName(foreground) reads it as Claude; its raw name never does.
-const NATIVE_FG = { argv: ["/Users/demo/.local/bin/claude", "--resume", SID1], cwd: "/code/app", name: "2.1.326", pid: 2018 };
+const NATIVE_FG = { argv: [NATIVE_CLAUDE, "--resume", SID1], cwd: "/code/app", name: NATIVE.name, pid: 2018 };
 const BLOCKED = { app: "claude-code", state: "blocked" };
 
 const wakeOf = (path) => `${MOD}.${wakeCommand(path)}`;
-const sessionPath = (pid) => `${HOME}/.claude/sessions/${pid}.json`;
 const sessionFile = (pid, cwd = "/code/app") =>
   JSON.stringify({ pid, sessionId: SID1, cwd, procStart: PROC_START, kind: "interactive", status: "idle" });
 
@@ -46,19 +43,22 @@ const entry = (over = {}) => ({ spaces: { sa: ["a1"] }, state: "asleep", at: NOW
 
 // ── The fake world ──────────────────────────────────────────────────────────
 
-function world({ records = null, entries = null, spaces = [] } = {}) {
+// `hcDown`: every `hc` fails to start, as with no Herdr server. `cwd`: the
+// shell's folder the CLI runs in.
+function world({ records = null, entries = null, spaces = [], hcDown = false, cwd = "/code" } = {}) {
   const w = {
     now: NOW, files: new Map(), terminals: new Map(), spaces, calls: [], sent: [], out: [], err: [], sleeps: 0,
-    doReply: () => ({ code: 0, stdout: "", stderr: "" }), onSleep: null, procStarts: new Map(),
+    doReply: () => ({ code: 0, stdout: "", stderr: "" }), onSleep: null, procStarts: new Map(), hcDown, cwd,
   };
   if (records) setRecords(w, records);
   if (entries) setEntries(w, entries);
   return w;
 }
-const setRecords = (w, records) => w.files.set(SLEEPING, `${JSON.stringify({ version: 1, records }, null, 2)}\n`);
-const setEntries = (w, entries) => w.files.set(WORKSPACES, `${JSON.stringify({ version: 1, workspaces: entries }, null, 2)}\n`);
-const recordsOf = (w) => JSON.parse(w.files.get(SLEEPING)).records;
-const entriesOf = (w) => JSON.parse(w.files.get(WORKSPACES)).workspaces;
+// The mod's files, written and read as the mod does (store.js, workspaces-store.js).
+const setRecords = (w, records) => w.files.set(SLEEPING, serializeRecords(records));
+const setEntries = (w, entries) => w.files.set(WORKSPACES, serializeWorkspaces(entries));
+const recordsOf = (w) => parseRecords(w.files.get(SLEEPING)).records;
+const entriesOf = (w) => parseWorkspaces(w.files.get(WORKSPACES)).entries;
 
 // A live terminal with its shell in front (its own pid), or with a Claude
 // (`claude`: the native installer's, with its session file unless `session:
@@ -72,10 +72,18 @@ function claude(w, address, { cwd = "/code/app", pid = 100, fgPid = 2018, status
   if (session) w.files.set(sessionPath(fgPid), sessionFile(fgPid, cwd));
 }
 
+// t1's Claude asleep at /code/app, its shell back in its tab.
+function oneAsleep() {
+  const w = world({ records: { t1: record() } });
+  shell(w, "t1");
+  return w;
+}
+
 const json = (v, code = 0) => ({ code, stdout: `${JSON.stringify(v)}\n`, stderr: "" });
 
 async function exec(w, file, args) {
   w.calls.push([file, ...args]);
+  if (file === "hc" && w.hcDown) throw new Error("hc: no server");
   if (file === "hc" && args[0] === "ls") {
     // `hc ls --json` has no foreground (plan review v2, Suggestion 3), and its status is a word.
     const terminals = [...w.terminals.values()].map(({ address, state, cwd, status }) => ({ address, state, cwd, status: status?.state, agent: "claude-code" }));
@@ -90,8 +98,9 @@ async function exec(w, file, args) {
     w.sent.push(args.slice(1).join(" "));
     return w.doReply(w);
   }
-  if (file === "env" && args.join(" ").startsWith("TZ=UTC ps -o lstart= -p ")) {
-    const started = w.procStarts.get(Number(args.at(-1)));
+  const pid = Number(args.at(-1));
+  if ([file, ...args].join(" ") === procStartCommand(pid)?.join(" ")) {
+    const started = w.procStarts.get(pid);
     return started ? { code: 0, stdout: `${started}\n`, stderr: "" } : { code: 1, stdout: "", stderr: "" };
   }
   if (file === "find") return { code: 1, stdout: "", stderr: "find: no such folder" };
@@ -101,6 +110,7 @@ async function exec(w, file, args) {
 const deps = (w) => ({
   exec: (file, args) => exec(w, file, args),
   readText: async (path) => (w.files.has(path) ? w.files.get(path) : null),
+  resolve, // bin/wake-agent.mjs's, node's path.resolve
   now: () => w.now,
   sleep: async (ms) => {
     w.now += ms;
@@ -109,7 +119,7 @@ const deps = (w) => ({
   },
   home: HOME,
   appHome: APP,
-  cwd: "/code",
+  cwd: w.cwd,
   out: (text) => w.out.push(text),
   err: (text) => w.err.push(text),
 });
@@ -124,14 +134,6 @@ function resumed(w, address, over = {}) {
   setRecords(w, rest);
   claude(w, address, { cwd: w.terminals.get(address)?.cwd, ...over });
 }
-
-// ── The constants ───────────────────────────────────────────────────────────
-
-test("D5: a wake is waited on for 90 s, polled every 2 s: past the mod's own 60 s deadline, so its give-up lines are in log.txt by then", () => {
-  assert.equal(WAKE_TIMEOUT_MS, 90_000);
-  assert.equal(POLL_MS, 2_000);
-  assert.ok(WAKE_TIMEOUT_MS > WAKE_DEADLINE_MS);
-});
 
 test("--help prints the usage, exit 0; a second argument or an unknown flag is a usage error, exit 2, and nothing is read", async () => {
   for (const flag of ["--help", "-h", "help"]) {
@@ -196,9 +198,7 @@ test("wake-agent lists each asleep worktree once: its path, its terminals, idle 
 test("wake-agent only has closed tabs asleep: nothing asleep; without hc's list it lists every record, and says why", async () => {
   const w = world({ records: { t4: record() } });
   assert.equal((await run(w)).out, "wake-agent: nothing asleep.");
-  const blind = world({ records: { t4: record() } });
-  const real = blind.terminals;
-  blind.terminals = { values: () => { throw new Error("hc: no server"); }, get: (a) => real.get(a) };
+  const blind = world({ records: { t4: record() }, hcDown: true });
   const r = await run(blind);
   assert.equal(r.code, 0);
   assert.deepEqual(blind.out, ["/code/app  t4  idle"]);
@@ -207,18 +207,22 @@ test("wake-agent only has closed tabs asleep: nothing asleep; without hc's list 
 
 // ── wake-agent <path>: the argument ─────────────────────────────────────────
 
-test("the path is made absolute against the shell's folder, with no trailing slash, as the mod's decoder wants it", () => {
-  assert.equal(resolvePath("app/", "/code"), "/code/app");
-  assert.equal(resolvePath("/code/app//", "/elsewhere"), "/code/app");
-  assert.equal(resolvePath("../code/./app", "/x"), "/code/app");
-  assert.equal(resolvePath(".", "/code/app"), "/code/app");
-  assert.equal(resolvePath("/", "/code"), "/");
-  assert.equal(resolvePath("a b/ñ", "/code"), "/code/a b/ñ");
+test("the path is made absolute against the shell's folder (path.resolve, injected), with no trailing slash, as the mod's decoder wants it", async () => {
+  for (const [arg, cwd, path] of [
+    ["app/", "/code", "/code/app"],
+    ["/code/app//", "/elsewhere", "/code/app"],
+    ["../code/./app", "/x", "/code/app"],
+    [".", "/code/app", "/code/app"],
+    ["/", "/code", "/"],
+    ["a b/ñ", "/code", "/code/a b/ñ"],
+  ]) {
+    const r = await run(world({ cwd }), arg);
+    assert.equal(r.out, `wake-agent: nothing asleep at ${path}. No Claude is up there either.`, `${arg} from ${cwd}`);
+  }
 });
 
 test("wake-agent app/ from /code wakes /code/app: the command carries the absolute path, its slash dropped", async () => {
-  const w = world({ records: { t1: record() } });
-  shell(w, "t1");
+  const w = oneAsleep();
   w.doReply = (w) => {
     resumed(w, "t1");
     return json({});
@@ -258,9 +262,7 @@ test("nothing asleep at the path but a record whose tab was closed: exit 2 says 
   assert.equal(r.code, 2);
   assert.equal(r.out, "wake-agent: nothing asleep at /code/app. No Claude is up there either. t1 slept there, but its tab was closed.");
   assert.deepEqual(w.sent, []);
-  const blind = world();
-  blind.terminals = { values: () => { throw new Error("hc: no server"); } };
-  const b = await run(blind, "/nowhere/");
+  const b = await run(world({ hcDown: true }), "/nowhere/");
   assert.equal(b.code, 2);
   assert.match(b.out, /^wake-agent: nothing asleep at \/nowhere\. Whether a Claude is up there can't be told: /);
 });
@@ -281,8 +283,7 @@ test("a path whose only state is a sleeping workspace entry sends the wake inste
 // ── Herdr refuses: exit 1 at once ───────────────────────────────────────────
 
 test("herdr-app do printing {error} (exit 1): exit 1 at once with Herdr's error, nothing polled", async () => {
-  const w = world({ records: { t1: record() } });
-  shell(w, "t1");
+  const w = oneAsleep();
   w.doReply = () => json({ error: "no command agent-sleep.wake.2f636f64652f617070: agent-sleep isn't loaded in this layout" }, 1);
   const r = await run(w, "/code/app");
   assert.equal(r.code, 1);
@@ -292,16 +293,14 @@ test("herdr-app do printing {error} (exit 1): exit 1 at once with Herdr's error,
 });
 
 test("herdr-app do exiting non-zero with no JSON, or not starting at all: exit 1 at once with what it said", async () => {
-  const w = world({ records: { t1: record() } });
-  shell(w, "t1");
+  const w = oneAsleep();
   w.doReply = () => ({ code: 2, stdout: "", stderr: "herdr-app: Herdr isn't running\n" });
   const r = await run(w, "/code/app");
   assert.equal(r.code, 1);
   assert.equal(r.err, "wake-agent: Herdr refused the wake of /code/app: herdr-app: Herdr isn't running");
   assert.equal(w.sleeps, 0);
 
-  const gone = world({ records: { t1: record() } });
-  shell(gone, "t1");
+  const gone = oneAsleep();
   gone.doReply = () => {
     throw Object.assign(new Error("spawn herdr-app ENOENT"), { code: "ENOENT" });
   };
@@ -323,6 +322,28 @@ test("readiness: the version-named Claude with its session file is up with no He
   assert.deepEqual(await look({ address: "tx", state: "live", foreground: NATIVE_FG, status: null }), { up: true, blocked: false });
   assert.deepEqual(await look({ address: "tx", state: "live", foreground: NATIVE_FG, status: BLOCKED }), { up: true, blocked: true });
   assert.deepEqual(await look({ address: "tx", state: "live", foreground: NATIVE_FG, status: "blocked" }), { up: true, blocked: true }, "hc ls's word too");
+});
+
+test("readiness reads the session file and looks for no transcript (no `find` over projects/)", async () => {
+  const w = world();
+  claude(w, "tx", { fgPid: 2018 });
+  const seen = await claudeUp({ address: "tx", state: "live", foreground: NATIVE_FG, status: null }, { home: HOME, configDirs: [null], readText: deps(w).readText, exec: deps(w).exec });
+  assert.deepEqual(seen, { up: true, blocked: false });
+  assert.deepEqual(w.calls.map(([f]) => f), ["env"], "ps only");
+});
+
+test("after the wake is sent, the first look waits one poll: the mod acts at its next pulse", async () => {
+  const w = oneAsleep();
+  let looked = null;
+  w.onSleep = (w) => {
+    looked ??= hcGets(w);
+    resumed(w, "t1");
+  };
+  const r = await run(w, "/code/app");
+  assert.equal(r.code, 0, r.err);
+  assert.equal(looked, 0, "no `hc get` before the first sleep");
+  assert.equal(w.sleeps, 1);
+  assert.equal(w.now - NOW, POLL_MS);
 });
 
 test("readiness: a shell in front, Claude with no session file, or nothing in front is down, with why", async () => {
@@ -417,8 +438,7 @@ test("a target whose tab closes while it is waited on is named gone and not wait
 });
 
 test("every target's tab closes before one is up: nothing left to wake, exit 1, naming them", async () => {
-  const w = world({ records: { t1: record() } });
-  shell(w, "t1");
+  const w = oneAsleep();
   w.onSleep = (w) => w.terminals.delete("t1");
   const r = await run(w, "/code/app");
   assert.equal(r.code, 1);
@@ -468,8 +488,7 @@ test("not up after 90 s: exit 1 naming the terminals still down, then the mod's 
 });
 
 test("not up after 90 s with no such line since the wake: Herdr's window may be closed; an older wake's line doesn't count", async () => {
-  const w = world({ records: { t1: record() } });
-  shell(w, "t1");
+  const w = oneAsleep();
   w.files.set(LOG, `${logLine(NOW - 1_000, NOT_WOKEN)}\n`);
   const r = await run(w, "/code/app");
   assert.equal(r.code, 1);
@@ -505,6 +524,10 @@ test("wakeLogLines keeps only `<t>: not woken (wake <path>): ` lines for the giv
   ].join("\n");
   assert.deepEqual(wakeLogLines(text, { path: "/code/app", subjects: ["t1"], since }), [logLine(NOW, NOT_WOKEN)]);
   assert.deepEqual(wakeLogLines(null, { path: "/code/app", subjects: ["t1"], since }), []);
+  // log.js, both directions: the line the mod writes, read back.
+  assert.equal(NOT_WOKEN.startsWith(notWokenHead("t1", "/code/app")), true);
+  assert.deepEqual(parseLogLine(logLine(NOW + 999, NOT_WOKEN)), { at: NOW, text: NOT_WOKEN });
+  assert.equal(parseLogLine("garbage line"), null);
 });
 
 test("asleepLines is the list's pure part: nothing asleep gives no line", () => {
@@ -565,11 +588,13 @@ test("bin/wake-agent: an empty Herdr home has nothing asleep (exit 0); /nowhere/
 test("bin/wake-agent wakes a path through `herdr-app do agent-sleep.wake.<hex>` and sees this very process as an up Claude (real ps, its session file under HOME)", () => {
   const s = sandbox();
   const pid = process.pid;
-  const ps = spawnSync("env", ["TZ=UTC", "ps", "-o", "lstart=", "-p", String(pid)], { encoding: "utf8" });
+  const [cmd, ...args] = procStartCommand(pid);
+  const ps = spawnSync(cmd, args, { encoding: "utf8" });
   assert.equal(ps.status, 0, ps.stderr);
-  mkdirSync(join(s.home, ".claude/sessions"), { recursive: true });
-  writeFileSync(join(s.home, ".claude/sessions", `${pid}.json`), JSON.stringify({ pid, sessionId: SID1, cwd: "/code/app", procStart: ps.stdout, kind: "interactive" }));
-  writeFileSync(join(s.app, "agent-sleep/sleeping.json"), JSON.stringify({ version: 1, records: { t1: record() } }));
+  const session = sessionFilePath(s.home, pid);
+  mkdirSync(dirname(session), { recursive: true });
+  writeFileSync(session, JSON.stringify({ pid, sessionId: SID1, cwd: "/code/app", procStart: ps.stdout, kind: "interactive" }));
+  writeFileSync(join(s.app, "agent-sleep/sleeping.json"), serializeRecords({ t1: record() }));
   writeFileSync(join(s.bin, "hc-ls.json"), JSON.stringify({ hidden_finished: [], terminals: [{ address: "t1", state: "live", cwd: "/code/app" }] }));
   writeFileSync(join(s.bin, "hc-get-t1.json"), JSON.stringify({ address: "t1", state: "live", cwd: "/code/app", foreground: { ...NATIVE_FG, pid }, status: null }));
   const r = s.runBin("/code/app");

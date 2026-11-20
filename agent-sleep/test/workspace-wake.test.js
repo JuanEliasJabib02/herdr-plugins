@@ -9,7 +9,9 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { Coordinator, PULSE_MS, REQUEST_KEY, RETRY_MS, WAKE_DEADLINE_MS } from "../mods/agent-sleep/coordinator.js";
 import { BADGE_KEY } from "../mods/agent-sleep/badges.js";
-import { SLEEP_WORKSPACE, answerCommand, cameBack, wakePlan, sleptTerminals, wakeCommand, sleepWorkspaceCommand } from "../mods/agent-sleep/workspace-sleep.js";
+import {
+  SLEEP_WORKSPACE, answerCommand, cameBack, wakePlan, sleptTerminals, sleptBy, entryWake, wakeTargets, wakeCommand, sleepWorkspaceCommand,
+} from "../mods/agent-sleep/workspace-sleep.js";
 import {
   NOW, HOME, COPY, SID1, SID2, IDLE_319, EXIT, SHELL_BARE, SHELL_TYPED, ORCA_DEV_PROFILES, PROFILE, deps, addClaude, addProfile, exitClaude, records,
   exits, resumes, at, spacesWorld, showSpace, settledTabs, entries, workspaceSetup, storeRecord, logFile, stamp, setup, sleepT1,
@@ -81,6 +83,27 @@ test("D4: the terminals a workspace's sleep holds are every one in a space an en
   assert.deepEqual([...sleptTerminals({ "/code/app": entry() }, SPACES, PANES)], ["t1", "t3", "t4", "t5"]);
   assert.deepEqual([...sleptTerminals({}, SPACES, PANES)], []);
   assert.deepEqual([...sleptTerminals(null, SPACES, PANES)], []);
+  // sleptBy: each with the entry whose sleep holds it, the first entry's when two list it.
+  const two = { "/code/b": entry({ spaces: { sb: ["b1"], sa2: ["a3"] } }), "/code/app": entry() };
+  assert.deepEqual([...sleptBy(two, SPACES, PANES)], [["t4", "/code/b"], ["t2", "/code/b"], ["t1", "/code/app"], ["t3", "/code/app"], ["t5", "/code/app"]]);
+  assert.deepEqual([...sleptTerminals(two, SPACES, PANES)].sort(), ["t1", "t2", "t3", "t4", "t5"]);
+});
+
+test("awake-agent D2, D3: what waking an entry does (entryWake), and the terminals a wake by path is for (wakeTargets)", () => {
+  assert.equal(entryWake(entry()), "now");
+  assert.equal(entryWake(entry({ state: "sleeping" })), "after");
+  assert.equal(entryWake(entry({ state: "sleeping", wakeAfter: true })), null, "already told");
+  assert.equal(entryWake(undefined), null);
+  const recs = {
+    t3: { state: "asleep", workspacePath: "/code/app", cwd: "/code/app/web" },
+    t1: { state: "stopping", workspacePath: null, cwd: "/code/app" },
+    t2: { state: "asleep", workspacePath: "/code/b", cwd: "/code/b" },
+    t4: { state: "live", workspacePath: "/code/app", cwd: "/code/app" },
+    t5: { state: "asleep", workspacePath: "/code/c", cwd: "/code/c" },
+  };
+  assert.deepEqual(wakeTargets(recs, "/code/app"), ["t1", "t3"], "asleep or being stopped, at the path; sorted");
+  assert.deepEqual(wakeTargets(recs, "/code/app", new Set(["t5", "t4"])), ["t1", "t3", "t5"], "and in its workspace's tabs");
+  assert.deepEqual(wakeTargets(null, "/code/app"), []);
 });
 
 // ── Through the coordinator ─────────────────────────────────────────────────
@@ -328,6 +351,17 @@ const wakes = (co) => [...co.wakes.keys()];
 const shownNow = (w) => ({ spaces: w.spaces.map((s) => `${s.id}:${s.active}`), focused: w.focused });
 const inLog = (appends) => appends.map((a) => a.text).join("");
 
+// t2 asleep on its own with a typed shell line: a wake keeps waiting on it.
+const typedT2 = (w) => {
+  t2Asleep(w);
+  w.screens.t2 = SHELL_TYPED;
+};
+
+// Pulses up to the one before the deadline of a wake first seen at `since`.
+async function untilDeadline(co, w, since) {
+  while (w.now + PULSE_MS < since + WAKE_DEADLINE_MS) await step(co, w);
+}
+
 test("Wake by path: a Claude asleep on its own at the path, its tab hidden, is resumed at the next pulse as a wake; nothing is shown, and one asleep at another path stays asleep", async () => {
   const { w, co } = await ready((w) => {
     t2Asleep(w);
@@ -360,6 +394,28 @@ test("Wake by path: another program in front of its shell → not resumed and it
   assert.deepEqual(resumes(w), []);
   assert.equal(records(w).t2.state, "asleep");
   assert.deepEqual(w.logs.filter((l) => l.startsWith("t2: not resumed")), ["t2: not resumed (wake /code/checkout-flow): vim is in front of its shell"], "said once");
+});
+
+test("Wake by path: another program in front, or a terminal gone, is looked at again only after RETRY_MS, as a typed shell line is", async () => {
+  const { w, co } = await ready((w) => {
+    t2Asleep(w);
+    w.core.t2 = { ...w.core.t2, foreground: { argv: ["vim"], cwd: "/code/checkout-flow", name: "vim", pid: 300 } };
+    exitClaude(w, "t3", EXIT.replaceAll(SID1, SID3));
+    storeRecord(w, "t3", { sessionId: SID3, cwd: "/code/checkout-flow", workspacePath: "/code/checkout-flow", rootPid: 103 });
+  });
+  delete w.core.t3; // its tab closed after the last tick
+  const gets = () => ["t2", "t3"].map((a) => w.calls.filter(([c, x]) => c === "get" && x === a).length);
+  co.command(wakeCommand("/code/checkout-flow"));
+  const since = w.now + PULSE_MS;
+  await step(co, w);
+  assert.deepEqual(gets(), [1, 1], "tried at once");
+  assert.deepEqual([co.retryAt.t2, co.retryAt.t3], [since + RETRY_MS, since + RETRY_MS]);
+  await step(co, w);
+  assert.deepEqual(gets(), [1, 1], "their retryAt hasn't passed: skipped");
+  await step(co, w);
+  assert.deepEqual(gets(), [2, 2], "looked at again");
+  assert.deepEqual(resumes(w), []);
+  assert.deepEqual(co.wakes.get("/code/checkout-flow").why, { t2: "vim is in front of its shell", t3: "terminal gone" }, "the last reason, for the deadline's lines");
 });
 
 test("Wake by path: an asleep workspace's entry is gone and every Claude it put to sleep resumes in the same pulse, idle ones too; its tabs come back, none is shown", async () => {
@@ -407,10 +463,7 @@ test("Wake by path mid-sleep: wakeAfter and its job gone, so no further /exit; t
 });
 
 test("Wake by path: a typed shell line is retried once its retryAt passes, never before; at WAKE_DEADLINE_MS the wake gives up with a log.txt line per terminal still down", async () => {
-  const { w, co } = await ready((w) => {
-    t2Asleep(w);
-    w.screens.t2 = SHELL_TYPED;
-  });
+  const { w, co } = await ready(typedT2);
   const appends = logFile(w, co);
   const reads = () => w.calls.filter(([c, a]) => c === "read" && a === "t2").length;
   co.command(wakeCommand("/code/checkout-flow"));
@@ -422,7 +475,7 @@ test("Wake by path: a typed shell line is retried once its retryAt passes, never
   assert.equal(reads(), 1, "its retryAt hasn't passed: skipped");
   await step(co, w);
   assert.equal(reads(), 2, "retried on a later pulse");
-  while (w.now + PULSE_MS < since + WAKE_DEADLINE_MS) await step(co, w);
+  await untilDeadline(co, w, since);
   assert.deepEqual(wakes(co), ["/code/checkout-flow"], "still trying");
   await step(co, w);
   assert.equal(w.now, since + WAKE_DEADLINE_MS);
@@ -451,7 +504,8 @@ test("Wake by path: a Claude at the path whose terminal another workspace's asle
   await step(co, w);
   assert.deepEqual(resumes(w), []);
   assert.ok(w.logs.includes("t3: not resumed (wake /code/checkout-flow): held by workspace /code/app"), JSON.stringify(w.logs));
-  while (w.now < since + WAKE_DEADLINE_MS) await step(co, w);
+  await untilDeadline(co, w, since);
+  await step(co, w);
   assert.deepEqual(wakes(co), []);
   assert.ok(inLog(appends).includes(`${stamp(since + WAKE_DEADLINE_MS)} t3: not woken (wake /code/checkout-flow): held by workspace /code/app\n`), inLog(appends));
   assert.deepEqual(resumes(w), []);
@@ -461,10 +515,7 @@ test("Wake by path: a Claude at the path whose terminal another workspace's asle
 });
 
 test("Wake by path, then a sleep of that workspace: the last ask wins; the wake is dropped with its lines and the new sleep isn't woken", async () => {
-  const { w, co } = await ready((w) => {
-    t2Asleep(w);
-    w.screens.t2 = SHELL_TYPED;
-  });
+  const { w, co } = await ready(typedT2);
   co.command(wakeCommand("/code/checkout-flow"));
   await step(co, w);
   assert.deepEqual(wakes(co), ["/code/checkout-flow"]);
@@ -490,14 +541,29 @@ test("Wake by path while automatic sleep's /exit is under way: the wake waits fo
   assert.deepEqual(wakes(co), []);
 });
 
+test("Wake by path asked mid-pulse: the next pulse takes it, its clock starts there, and the Claude it resumes counts as found", async () => {
+  const { w, co } = await ready(t2Asleep);
+  // The command comes from the listener while a pulse is under way.
+  const workspaceStep = co.workspaceStep.bind(co);
+  co.workspaceStep = (o) => {
+    co.workspaceStep = workspaceStep;
+    co.command(wakeCommand("/code/checkout-flow"));
+    return workspaceStep(o);
+  };
+  await step(co, w);
+  assert.deepEqual(resumes(w), [], "that pulse leaves it");
+  assert.equal(co.wakes.get("/code/checkout-flow").since, null);
+  await step(co, w);
+  assert.deepEqual(resumes(w).map((s) => s.address), ["t2"]);
+  assert.deepEqual(wakes(co), []);
+  assert.equal(w.logs.some((l) => l.includes("nothing asleep there")), false, JSON.stringify(w.logs));
+});
+
 test("Wake by path asked again, even mid-pulse at its deadline: the same wake goes on, its clock started again", async () => {
-  const { w, co } = await ready((w) => {
-    t2Asleep(w);
-    w.screens.t2 = SHELL_TYPED;
-  });
+  const { w, co } = await ready(typedT2);
   co.command(wakeCommand("/code/checkout-flow"));
   const since = w.now + PULSE_MS;
-  while (w.now + PULSE_MS < since + WAKE_DEADLINE_MS) await step(co, w);
+  await untilDeadline(co, w, since);
   // The deadline's pulse: the command comes from the listener while that pulse reads t2.
   w.onRead = (address, w) => {
     if (address !== "t2") return;
@@ -509,7 +575,8 @@ test("Wake by path asked again, even mid-pulse at its deadline: the same wake go
   assert.deepEqual(wakes(co), ["/code/checkout-flow"], "not given up: asked again");
   assert.equal(w.logs.filter((l) => l.includes("not woken")).length, 0);
   const again = w.now + PULSE_MS;
-  while (w.now < again + WAKE_DEADLINE_MS) await step(co, w);
+  await untilDeadline(co, w, again);
+  await step(co, w);
   assert.deepEqual(wakes(co), []);
   assert.deepEqual(w.logs.filter((l) => l.includes("not woken")), ["t2: not woken (wake /code/checkout-flow): its shell line isn't a bare prompt (shell, typed)"]);
 });

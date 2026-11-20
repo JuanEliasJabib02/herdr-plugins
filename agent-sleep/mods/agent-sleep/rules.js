@@ -169,8 +169,9 @@ export function signatureOf({ address, state, statusMs, turn, sessionId, screenH
   return [address, state, statusMs, turn, sessionId, screenHash].map(String).join("|");
 }
 
-// Core gives the status as { app, state }; herdr terminals() as a plain word.
-function statusWord(status) {
+// Core gives the status as { app, state }; herdr terminals() and `hc ls` as a
+// plain word. Null for none. wake-agent's CLI reads Herdr's `blocked` with it.
+export function statusWord(status) {
   const word = typeof status === "string" ? status : isObject(status) ? status.state : null;
   return typeof word === "string" && word !== "" ? word : null;
 }

@@ -58,6 +58,11 @@ function tooltip(count, since) {
 
 const toSet = (v) => (v instanceof Set ? v : new Set(Array.isArray(v) ? v : []));
 
+// The worktree a record is grouped under: its workspace, else Claude's own
+// folder, with no trailing slash; "" for neither. The moon's rows and
+// wake-agent's list both group by it.
+export const recordPath = (r) => trimSlash(r?.workspacePath) || trimSlash(r?.cwd);
+
 // One badge per workspace with at least one "asleep" record; {} when none,
 // which clears projects-sidebar's moons. Keys sorted, so equal records give
 // an equal value. `formatTime` is injectable for tests in other time zones.
@@ -73,7 +78,7 @@ export function badgeValue({ records, modFolder, formatTime = clock, slept = nul
   const groups = new Map();
   for (const [address, r] of Object.entries(records ?? {})) {
     if (!r || r.state !== "asleep" || sleptTerminals.has(address)) continue;
-    const path = trimSlash(r.workspacePath) || trimSlash(r.cwd);
+    const path = recordPath(r);
     if (!path || sleptPaths.has(path)) continue;
     const g = groups.get(path) ?? { count: 0, since: Infinity };
     g.count += 1;

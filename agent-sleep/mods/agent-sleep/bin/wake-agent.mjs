@@ -36,6 +36,7 @@ const home = os.homedir();
 main(process.argv.slice(2), {
   exec,
   readText,
+  resolve: path.resolve,
   now: Date.now,
   sleep: (ms) => new Promise((resolve) => setTimeout(resolve, Math.max(0, ms))),
   home,

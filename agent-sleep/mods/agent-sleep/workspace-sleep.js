@@ -236,21 +236,49 @@ export function cameBack(entry, { previous, shown } = {}) {
 // Wake all leave them alone (D4: no undo of a sleep, R1#5), and agent-sleep's
 // moon stays off them (D3: projects-sidebar draws the row's own).
 export function sleptTerminals(entries, spaces, panes) {
-  const ids = new Set();
-  const tabs = new Set();
-  for (const e of Object.values(isObject(entries) ? entries : {})) {
+  return new Set(sleptBy(entries, spaces, panes).keys());
+}
+
+// sleptTerminals, each with the path of the entry whose sleep holds it:
+// Map terminal → path, entry by entry (Object.keys order), each in its
+// panes' order. A terminal two entries list is the first one's.
+export function sleptBy(entries, spaces, panes) {
+  const out = new Map();
+  for (const [path, e] of Object.entries(isObject(entries) ? entries : {})) {
     if (!isObject(e?.spaces)) continue;
+    const tabs = new Set();
     for (const [id, listed] of Object.entries(e.spaces)) {
-      ids.add(id);
       for (const tab of list(listed)) tabs.add(tab);
+      for (const space of list(spaces)) {
+        if (isObject(space) && space.id === id) for (const t of list(space.tabs)) if (isObject(t)) tabs.add(t.id);
+      }
+    }
+    for (const p of list(panes)) {
+      if (isObject(p) && tabs.has(p.tab) && isAddress(p.terminal) && !out.has(p.terminal)) out.set(p.terminal, path);
     }
   }
-  for (const space of list(spaces)) {
-    if (isObject(space) && ids.has(space.id)) for (const t of list(space.tabs)) if (isObject(t)) tabs.add(t.id);
-  }
-  const out = new Set();
-  for (const p of list(panes)) if (isObject(p) && tabs.has(p.tab) && isAddress(p.terminal)) out.add(p.terminal);
   return out;
+}
+
+// D4 and awake-agent D2: what waking an entry does now: "now" for one asleep
+// (its wake), "after" for one still going to sleep and not yet told
+// (`wakeAfter`: step 6 wakes it instead), null for none, or one already told.
+export function entryWake(entry) {
+  if (entry?.state === "asleep") return "now";
+  if (entry?.state === "sleeping" && entry.wakeAfter !== true) return "after";
+  return null;
+}
+
+// awake-agent D3: the terminals a wake by path is for, still down: their
+// record asleep or being stopped, at the path (its worktree, or Claude's own
+// folder) or among `terminals` (its workspace's tabs). Sorted.
+export function wakeTargets(records, path, terminals = new Set()) {
+  const all = isObject(records) ? records : {};
+  return Object.keys(all).sort().filter((address) => {
+    const r = all[address];
+    if (r?.state !== "asleep" && r?.state !== "stopping") return false;
+    return r.workspacePath === path || r.cwd === path || terminals.has(address);
+  });
 }
 
 // D4's wake, steps 1–2: `unsettle`, every tab the entry lists that still
