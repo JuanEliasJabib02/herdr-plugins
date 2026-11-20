@@ -1,0 +1,5 @@
+# Commands scripts/install.sh puts on PATH: each line an executable of this
+# plugin's mods, linked as ~/.local/bin/<its name> to the installed copy, so a
+# Claude runs `wake-agent` by name to wake another worktree's sleeping Claudes
+# before it messages them (awake-agent D5).
+mods/agent-sleep/bin/wake-agent
