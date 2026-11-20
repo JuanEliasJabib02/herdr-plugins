@@ -7,12 +7,12 @@
 //   details-model.js   what the window draws, from details.json: the range
 //                      picker, the cards, the cache figures with "since
 //                      <date>" and the coverage note, the daily chart, by
-//                      model and recent sessions, plus "Updated Xm ago" while a run
-//                      goes (the stale label).
+//                      model, plus "Updated Xm ago" while a run goes (the
+//                      stale label).
 // claude-accounts T20b (S7 S6, D24): Orca's eight cards in Orca's order, its
-// cost format and unpriced suffix, by model with sessions and turns, recent sessions with Orca's seven columns, a "since" and coverage
-// note per group of figures, and "n/a" for each key an older claude-usage
-// doesn't print.
+// cost format and unpriced suffix, by model with sessions and turns, a
+// "since" and coverage note per group of figures, and "n/a" for each key
+// an older claude-usage doesn't print.
 //
 // Every CLI run is the installed form, the bin through its shebang, inside a
 // sandbox of its own: HOME and CLAUDE_ACCOUNTS_HOME are tmp folders and
@@ -414,8 +414,6 @@ test("numbers: Orca's token format, counts with separators, active time in hours
 
 // Orca's eight cards, in Orca's order (ClaudeUsagePane.tsx:168-237).
 const ORCA_CARDS = ["input", "output", "cacheRead", "cacheWrite", "reuse", "zeroCacheRead", "sessions", "cost"];
-// Orca's recent sessions headings (ClaudeUsageDetails.tsx:65-73).
-const ORCA_HEADINGS = ["Last active", "Project", "Model", "Turns", "Input", "Output", "Cache"];
 const card = (m, key) => m.report.cards.find((c) => c.key === key);
 
 // The fixture as an older claude-usage prints it: none of D24's keys.
@@ -424,7 +422,6 @@ function olderResult() {
   delete old.turnFiguresSince;
   for (const key of ["output", "sessions", "zeroCacheReadResponses", "turnResponses", "estimatedCostUsd", "unpricedModels", "turnFiguresCoverage"]) delete old.totals[key];
   for (const row of old.byModel) delete row.sessions;
-  for (const row of old.recentSessions) for (const key of ["responses", "input", "output", "cacheRead", "cacheWrite"]) delete row[key];
   return old;
 }
 
@@ -509,7 +506,6 @@ test("since <date>: each group of figures says when its data starts, with the sh
     "Input, output and cache figures cover only sessions still on disk: 72% of this range's tokens.",
     "Zero-cache-read turns and cost cover only sessions still on disk: 65% of this range's tokens.",
   ]);
-  assert.equal(m.report.recent.description, "Cache reuse rate: 91% (since Nov 3)");
 
   const whole = model(ranOnce({
     ...USAGE,
@@ -519,7 +515,6 @@ test("since <date>: each group of figures says when its data starts, with the sh
   }));
   assert.ok(whole.report.cards.every((c) => c.since === null), "both groups start on or before the range's first day");
   assert.deepEqual(whole.report.coverage, []);
-  assert.equal(whole.report.recent.description, "Cache reuse rate: 91%");
 
   const tiny = model(ranOnce({ ...USAGE, totals: { ...USAGE.totals, cacheCoverage: 0.9996, turnFiguresCoverage: 0.004 } }));
   assert.deepEqual(tiny.report.coverage, [
@@ -546,17 +541,11 @@ test("an older claude-usage without D24's keys: each figure it doesn't print rea
   assert.equal(card(m, "zeroCacheRead").since, null);
   assert.deepEqual(m.report.coverage, ["Input, output and cache figures cover only sessions still on disk: 72% of this range's tokens."]);
   assert.deepEqual(m.report.byModel.rows.map((r) => r.sub), ["n/a sessions • 1,620 turns", "n/a sessions • 690 turns"]);
-  assert.deepEqual(m.report.recent.headings, ORCA_HEADINGS);
-  assert.deepEqual(m.report.recent.rows[0].cells, ["Nov 6, 4:17 PM", "herdr-plugins", "opus", "n/a", "n/a", "n/a", "n/a"]);
 });
 
-test("no By project, By account or Time to limit: they said too much about the person", () => {
+test("no By project, By account, Time to limit or Recent sessions: they said too much about the person", () => {
   const { report } = model(ranOnce());
-  assert.deepEqual(Object.keys(report), ["cards", "extras", "coverage", "explanation", "daily", "byModel", "recent"]);
-});
-
-test("a path:null project in recent sessions: named by its slug", () => {
-  assert.equal(model(ranOnce()).report.recent.rows[2].cells[1], "-Users-ana-src-old-app");
+  assert.deepEqual(Object.keys(report), ["cards", "extras", "coverage", "explanation", "daily", "byModel"]);
 });
 
 test("the stale label: while a run goes, or after one fails, the last result shows with its own age", () => {
@@ -603,7 +592,6 @@ test("an empty range says Orca's empty message; a partial result still draws", (
   assert.deepEqual(partial.report.coverage, []);
   assert.equal(partial.report.byModel.top, "Top model: n/a");
   assert.deepEqual(partial.report.daily.bars, []);
-  assert.equal(partial.report.recent.empty, "No sessions in this range.");
 });
 
 test("the daily chart: one bar per day up to a month, Orca's MM-DD labels and token tooltips", () => {
@@ -646,28 +634,6 @@ test("by model: Orca's sessions • turns under each row; top row and share of t
   assert.ok(Math.abs(byModel.rows[0].share - 14100000 / 18450000) < 1e-9);
   const odd = model(ranOnce({ ...USAGE, byModel: [{ model: null, tokens: 10, responses: 1, sessions: 1 }] })).report.byModel.rows[0];
   assert.deepEqual([odd.label, odd.sub], ["Unknown", "1 session • 1 turn"]);
-});
-
-test("recent sessions: Orca's seven columns; a session without cache figures reads n/a; its account and length on hover", () => {
-  const { recent } = model(ranOnce()).report;
-  assert.equal(recent.title, "Recent sessions");
-  assert.deepEqual(recent.headings, ORCA_HEADINGS);
-  assert.deepEqual(recent.rows.map((r) => r.cells), [
-    ["Nov 6, 4:17 PM", "herdr-plugins", "opus", "212", "64.0k", "1.2M", "6.6M"],
-    ["Nov 6, 9:40 AM", "orca", "sonnet", "58", "21.0k", "312.0k", "2.2M"],
-    // A frozen pre-v4 line: its turns, and no cache figures.
-    ["Nov 2, 12:00 PM", "-Users-ana-src-old-app", "opus", "31", "n/a", "n/a", "n/a"],
-  ]);
-  assert.equal(recent.rows[0].key, "3f1c2b7e-8a4d-4e55-9a51-0c2d6f1b7a10");
-  assert.equal(recent.rows[0].hint, "ana@example.com · 3h 17m");
-  assert.equal(recent.rows[1].hint, "ben@example.org · 1h 40m");
-  const short = model(ranOnce({ ...USAGE, recentSessions: [{ id: "s", project: null, account: null, model: null, startedAt: NOW - 30_000, endedAt: NOW, tokens: 12, responses: 1, input: 3, output: 9, cacheRead: 0, cacheWrite: 0 }] }));
-  assert.deepEqual(short.report.recent.rows[0].cells, ["Nov 6, 4:20 PM", "Unknown", "Unknown", "1", "3", "9", "0"]);
-  assert.equal(short.report.recent.rows[0].hint, "Unknown · <1m");
-  // Cache is read + write: one of them missing is n/a, never half a sum.
-  const half = model(ranOnce({ ...USAGE, recentSessions: [{ ...USAGE.recentSessions[0], cacheWrite: null }] }));
-  assert.equal(half.report.recent.rows[0].cells[6], "n/a");
-  assert.equal(recent.empty, null);
 });
 
 // ── Last: nothing outlives the tests ─────────────────────────────────────────

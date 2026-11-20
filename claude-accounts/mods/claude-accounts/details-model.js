@@ -24,10 +24,11 @@
 // "n/a". By model keeps claude-usage's tokens (input + cache
 // write + output, every line; Orca's are input + output) with Orca's
 // "N sessions • N turns", and a session's model is the one with the most
-// tokens (Orca's is the last turn's): D24. Recent sessions has Orca's seven
-// columns. Beyond Orca: the tokens and active time cards, a session's
-// account and length on hover, and charts for 30, 90 days and all time (weekly bars past a month; Orca draws
-// the last 10 days only).
+// tokens (Orca's is the last turn's): D24. Beyond Orca: the tokens and
+// active time cards, and charts for 30, 90 days and all time (weekly bars
+// past a month; Orca draws the last 10 days only). By project, By account,
+// Time to limit and Recent sessions aren't drawn: they said too much about
+// the person.
 //
 //   RANGES, DEFAULT_RANGE, RANGE_LABELS   the picker: Orca's 7d, 30d, 90d, all
 //   pickRange(value)                      a known range, else the default
@@ -38,7 +39,7 @@
 //   chartBars(daily)                      the daily chart's bars
 //   detailsModel({ details, range, now, execError })   the whole window
 
-import { formatCoverage, formatDate, formatDuration, formatSince, formatUpdated } from "./format.js";
+import { formatCoverage, formatSince, formatUpdated } from "./format.js";
 
 export const RANGES = Object.freeze(["7", "30", "90", "all"]);
 export const DEFAULT_RANGE = "7";
@@ -116,12 +117,6 @@ const share = (part, whole) => (isNumber(part) && isNumber(whole) && whole > 0 ?
 // Orca's reuse rate: Math.round(rate * 100)%, or n/a.
 const reuse = (rate) => (isNumber(rate) ? `${Math.round(rate * 100)}%` : "n/a");
 
-// A session's length: "<1m", else format.js's "3h 17m".
-function formatSpan(ms) {
-  if (!isNumber(ms) || ms < 0) return "—";
-  return ms < 60_000 ? "<1m" : formatDuration(ms);
-}
-
 // ── The chart ────────────────────────────────────────────────────────────────
 
 // claude-usage's daily [{date, tokens}] (one per day of the range) as bars:
@@ -185,37 +180,6 @@ function byModel(result, total) {
     hint: null,
     gone: false,
   })));
-}
-
-// Orca's UsageRecentSessionsTable with its seven columns: Last active,
-// Project, Model, Turns, Input, Output, and Cache (read + write). A session
-// from a line without cache figures (pre-v4) has null for those four: n/a.
-// Its account and how long it ran, which Orca doesn't have, are the row's
-// hint.
-const RECENT_HEADINGS = Object.freeze(["Last active", "Project", "Model", "Turns", "Input", "Output", "Cache"]);
-
-function recent(result, reuseText, since) {
-  const rows = list(result.recentSessions).map((s) => ({
-    key: text(s.id) ?? `${s.startedAt}`,
-    cells: [
-      formatDate(s.endedAt) ?? "—",
-      text(s.project) ?? "Unknown",
-      text(s.model) ?? "Unknown",
-      formatCount(s.responses),
-      formatTokens(s.input),
-      formatTokens(s.output),
-      isNumber(s.cacheRead) && isNumber(s.cacheWrite) ? formatTokens(s.cacheRead + s.cacheWrite) : "n/a",
-    ],
-    hint: `${text(s.account) ?? "Unknown"} · ${formatSpan(isNumber(s.endedAt) && isNumber(s.startedAt) ? s.endedAt - s.startedAt : null)}`,
-  }));
-  return {
-    title: "Recent sessions",
-    // Orca's "Cache reuse rate:" line, with the cache figures' "since".
-    description: `Cache reuse rate: ${reuseText}${since ? ` (${since})` : ""}`,
-    headings: [...RECENT_HEADINGS],
-    rows,
-    empty: rows.length ? null : "No sessions in this range.",
-  };
 }
 
 // ── The cards ────────────────────────────────────────────────────────────────
@@ -292,7 +256,6 @@ function report(result, now) {
     explanation: EXPLANATION,
     daily: chartBars(result.daily),
     byModel: byModel(result, total),
-    recent: recent(result, reuseText, cacheSince),
   };
 }
 
@@ -309,11 +272,10 @@ function report(result, now) {
 //             while the first run goes, "No usage read for this range yet."
 //             when none has, or Orca's empty message for a range with no
 //             tokens; null when there's a report.
-// - report    { cards, extras, coverage, explanation, daily, byModel,
-//             recent }, or null. cards are
-//             Orca's eight and extras Herdr's two, each { key, label,
-//             value, hint, since }; coverage holds the notes of the groups
-//             that cover part of the range.
+// - report    { cards, extras, coverage, explanation, daily, byModel }, or
+//             null. cards are Orca's eight and extras Herdr's two, each
+//             { key, label, value, hint, since }; coverage holds the notes
+//             of the groups that cover part of the range.
 export function detailsModel({ details, range, now = Date.now(), execError = null } = {}) {
   const key = pickRange(range);
   const entry = isObject(details?.ranges?.[key]) ? details.ranges[key] : {};

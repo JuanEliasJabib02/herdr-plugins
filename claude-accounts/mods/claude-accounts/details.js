@@ -4,8 +4,7 @@
 // 90 days, all time), Orca's eight cards in a grid of four columns with
 // Herdr's tokens and active time under them (each card with its group's
 // "since <date>", and a coverage note per group that doesn't cover the
-// range), the daily chart, by model, and recent sessions in Orca's seven
-// columns. What it says is
+// range), the daily chart and by model. What it says is
 // details-model.js's; this file only draws it. Owners: T10, T20b.
 //   props: { view: "details" }
 //
@@ -186,7 +185,6 @@ export default class Details {
       cardGrid(r, t),
       chart(r.daily, t),
       this.breakdown("model", r.byModel, t),
-      recentSection(r.recent, t),
     ];
   }
 
@@ -279,35 +277,3 @@ function chart(d, t) {
       .child(div().h(13).text_size(10.5).text_color(t.dim).whitespace_nowrap().child(b.label ?? "")))));
 }
 
-// Orca's UsageRecentSessionsTable: Last active, Project, Model, Turns,
-// Input, Output, Cache. The counts are right-aligned.
-const COLUMNS = Object.freeze([
-  { w: 112 },
-  { flex: true },
-  { w: 96 },
-  { w: 52, right: true },
-  { w: 58, right: true },
-  { w: 58, right: true },
-  { w: 58, right: true },
-]);
-
-function cell(i, value, t, head) {
-  const c = COLUMNS[i];
-  const base = c.flex ? div().flex_1().min_w(0) : div().w(c.w).flex_none();
-  return base.truncate().px(4)
-    .when(Boolean(c.right), (el) => el.text_right())
-    .text_color(head ? t.dim : i === 1 ? t.foreground : t.muted)
-    .child(value);
-}
-
-function recentSection(r, t) {
-  const el = section(t, r.title, r.description);
-  if (r.empty) return el.child(div().text_size(11.5).text_color(t.dim).child(r.empty));
-  return el.child(v_flex()
-    .child(h_flex().py(5).text_size(11).border_b(1).border_color(t.border)
-      .children(r.headings.map((h, i) => cell(i, h, t, true))))
-    .children(r.rows.map((row, n) => h_flex().id(`ca-details-session-${row.key}`).py(5)
-      .when(Boolean(row.hint), (s) => s.tooltip(row.hint))
-      .when(n < r.rows.length - 1, (s) => s.border_b(1).border_color(t.border))
-      .children(row.cells.map((v, i) => cell(i, v, t, false))))));
-}
