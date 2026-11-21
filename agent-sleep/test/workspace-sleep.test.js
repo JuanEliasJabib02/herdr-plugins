@@ -11,7 +11,7 @@ import assert from "node:assert/strict";
 import { Coordinator, PULSE_MS, REQUEST_KEY } from "../mods/agent-sleep/coordinator.js";
 import {
   placeOf, localPlaces, kindOf, flightOf, promptStep, shownEdges, tabsToSettle, processGroups, hangUpGroup,
-  didntStopNotice, parseWorkspaceCommand, answerCommand, sleepWorkspaceCommand, SLEEP_WORKSPACE, WAIT_PULSES, INTERRUPT_DEADLINE_MS, PROGRAM_GRACE_MS, CLEAR_KEY,
+  didntStopNotice, parseWorkspaceCommand, answerCommand, sleepWorkspaceCommand, wakeCommand, SLEEP_WORKSPACE, WAIT_PULSES, INTERRUPT_DEADLINE_MS, PROGRAM_GRACE_MS, CLEAR_KEY,
 } from "../mods/agent-sleep/workspace-sleep.js";
 import { isShellRoot } from "../mods/agent-sleep/rules.js";
 import {
@@ -158,20 +158,24 @@ test("the command's name, and the confirm's answers naming the question they ans
   }
 });
 
-test("T6: a workspace by its path, as the right-click's Sleep names it: `sleep-workspace.<the path's UTF-8 in hex>`", () => {
-  assert.equal(sleepWorkspaceCommand("/code/app"), "sleep-workspace.2f636f64652f617070");
-  assert.deepEqual(parseWorkspaceCommand("sleep-workspace.2f636f64652f617070"), { kind: "sleep", path: "/code/app" });
-  for (const path of ["/Users/alex/orca/workspaces/herdr-plugins/sleep-agent", "/code/ñandú app", "C:/code/app", "/"]) {
-    assert.deepEqual(parseWorkspaceCommand(sleepWorkspaceCommand(path)), { kind: "sleep", path }, path);
+test("T6 and awake-agent D1: a workspace's sleep (the right-click's Sleep) and a worktree's wake by its path, `sleep-workspace.<hex>` and `wake.<hex>`, the same hex: the path's UTF-8", () => {
+  for (const [command, prefix, kind] of [[sleepWorkspaceCommand, "sleep-workspace.", "sleep"], [wakeCommand, "wake.", "wake"]]) {
+    assert.equal(command("/code/app"), `${prefix}2f636f64652f617070`);
+    assert.deepEqual(parseWorkspaceCommand(`${prefix}2f636f64652f617070`), { kind, path: "/code/app" });
+    for (const path of ["/Users/alex/orca/workspaces/herdr-plugins/sleep-agent", "/code/ñandú app", "C:/code/app", "/"]) {
+      assert.equal(command(path).slice(prefix.length), sleepWorkspaceCommand(path).slice("sleep-workspace.".length), path);
+      assert.deepEqual(parseWorkspaceCommand(command(path)), { kind, path }, path);
+    }
+    assert.deepEqual(parseWorkspaceCommand(command("/code/app/")), { kind, path: "/code/app" }, "a trailing slash goes, as projects-sidebar's normPath");
+    assert.deepEqual(parseWorkspaceCommand(`${prefix}2F636F64652F617070`), { kind, path: "/code/app" }, "either case");
+    // Not a path: none, odd or non-hex digits, bytes that aren't UTF-8, a
+    // relative path, a NUL, or more than MAX_PATH_BYTES.
+    for (const hex of ["", "0123456789ab", "2f2", "zz", "616263", "2f00", "2fff", "2f".repeat(4097)]) {
+      assert.equal(parseWorkspaceCommand(`${prefix}${hex}`), null, `${prefix}${hex}`);
+    }
+    for (const path of ["", "code/app", null, 7]) assert.equal(command(path), null, `${prefix} ${String(path)}`);
   }
-  assert.deepEqual(parseWorkspaceCommand(sleepWorkspaceCommand("/code/app/")), { kind: "sleep", path: "/code/app" }, "a trailing slash goes, as projects-sidebar's normPath");
-  assert.deepEqual(parseWorkspaceCommand("sleep-workspace.2F636F64652F617070"), { kind: "sleep", path: "/code/app" }, "either case");
-  // Not a path this could sleep: odd or non-hex digits, bytes that aren't
-  // UTF-8, a relative path, a NUL, or more than MAX_PATH_BYTES.
-  for (const hex of ["0123456789ab", "2f2", "zz", "616263", "2f00", "2fff", "2f".repeat(4097)]) {
-    assert.equal(parseWorkspaceCommand(`sleep-workspace.${hex}`), null, hex);
-  }
-  for (const path of ["", "code/app", null, 7]) assert.equal(sleepWorkspaceCommand(path), null, String(path));
+  assert.equal(parseWorkspaceCommand("wake-all"), null, "Wake all stays the popup's table's");
 });
 
 test("D10's toast: \"<workspace>: <N> terminals didn't stop\", naming each and why", () => {
@@ -869,4 +873,14 @@ test("the bare command and the answers go through command(); the popup's table s
   assert.equal(co.command(sleepWorkspaceCommand("/code/checkout-flow")), true, "T6: one by its path");
   assert.deepEqual(co.sleepRequest, { path: "/code/checkout-flow", force: false });
   assert.equal(SLEEPING.endsWith("/agent-sleep/sleeping.json"), true);
+});
+
+test("awake-agent D1: `wake.<hex>` goes through command() and only records the wake; a bad one is no command", async () => {
+  const { w, co } = await ready();
+  const before = { calls: w.calls.length, execs: w.execs.length, writes: w.writes.length };
+  assert.equal(co.command(wakeCommand("/code/checkout-flow")), true);
+  assert.deepEqual([...co.wakes.keys()], ["/code/checkout-flow"]);
+  assert.deepEqual({ calls: w.calls.length, execs: w.execs.length, writes: w.writes.length }, before, "no I/O until the next pulse");
+  assert.equal(co.command("wake.zz"), false);
+  assert.equal(co.command("wake.636f6465"), false, "a relative path");
 });

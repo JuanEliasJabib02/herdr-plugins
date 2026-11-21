@@ -17,7 +17,7 @@ import { BADGE_KEY, ASLEEP_KEY } from "../mods/agent-sleep/badges.js";
 import {
   fixture, MIN, NOW, HOME, APP, SLEEPING, SETTINGS, SID1, SID2, NVM_CLAUDE, PROC_START, EMPTY, SUGGESTION, DRAFT, EXIT, SHELL_BARE, SHELL_TYPED, claude, shellOf, ok, fail, makeWorld, addClaude, putSession, exitClaude, show, liveTerminals, deps, records, exits, resumes, at, sleepT1, setup, storeRecord,
   ORCA_DEV_PROFILES, HERDR_PROFILES, PROFILE, SAVED, addProfile, putAccounts,
-  ACTIVE, ACCOUNTS_V1, WORKSPACES, workspaceSetup, spacesWorld, showSpace, addShell, NATIVE,
+  ACTIVE, ACCOUNTS_V1, WORKSPACES, workspaceSetup, spacesWorld, showSpace, addShell, NATIVE, logFile, stamp,
 } from "./harness.js";
 
 // ── Which copy runs the loop (D11) ────────────────────────────────────────
@@ -1271,29 +1271,7 @@ test("Claude Code is recognised in every terminal shape", () => {
 });
 
 // ── The log file (resume-gaps D2, D3) ─────────────────────────────────────
-
-const LOG = `${APP}/agent-sleep/log.txt`;
-
-// A line's local time as log.txt writes it.
-const stamp = (ms) => {
-  const d = new Date(ms);
-  const p = (n) => String(n).padStart(2, "0");
-  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
-};
-
-// The appends to log.txt (an `sh -c` naming it), with how many hc calls and
-// execs had run when each ran. `result()` is what the append returns, or
-// throws: a success by default.
-function logFile(w, co, result = () => ok("")) {
-  const appends = [];
-  const exec = co.d.exec;
-  co.d.exec = async (cmd, args, options) => {
-    if (!(/(^|\/)sh$/.test(cmd) && args[0] === "-c" && args.includes(LOG))) return exec(cmd, args, options);
-    appends.push({ text: args.at(-1), calls: w.calls.length, execs: w.execs.length });
-    return result();
-  };
-  return appends;
-}
+// (logFile and stamp are harness.js's, shared with workspace-wake.test.js.)
 
 const vimIn = (t) => ({ ...shellOf(t), foreground: { argv: ["vim"], cwd: "/code/app", name: "vim", pid: 300 } });
 

@@ -6,6 +6,7 @@
 // `kill` a hang-up runs: nothing reaches a real process.
 import { readFileSync } from "node:fs";
 import { Coordinator } from "../mods/agent-sleep/coordinator.js";
+import { localTime } from "../mods/agent-sleep/log.js";
 
 export const fixture = (name) => readFileSync(new URL(`./fixtures/${name}`, import.meta.url), "utf8");
 
@@ -324,6 +325,27 @@ export function deps(w) {
       return fail(`unknown program ${cmd}`);
     },
   };
+}
+
+// ── The log file (resume-gaps D2, D3) ──────────────────────────────────────
+
+export const LOG = `${APP}/agent-sleep/log.txt`;
+
+// A line's local time as log.txt writes it.
+export const stamp = localTime;
+
+// The appends to log.txt (an `sh -c` naming it), with how many hc calls and
+// execs had run when each ran. `result()` is what the append returns, or
+// throws: a success by default.
+export function logFile(w, co, result = () => ok("")) {
+  const appends = [];
+  const exec = co.d.exec;
+  co.d.exec = async (cmd, args, options) => {
+    if (!(/(^|\/)sh$/.test(cmd) && args[0] === "-c" && args.includes(LOG))) return exec(cmd, args, options);
+    appends.push({ text: args.at(-1), calls: w.calls.length, execs: w.execs.length });
+    return result();
+  };
+  return appends;
 }
 
 export const records = (w) => (w.files[SLEEPING] ? JSON.parse(w.files[SLEEPING]).records : {});

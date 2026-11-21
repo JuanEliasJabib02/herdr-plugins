@@ -38,6 +38,11 @@
 //     workspaces.json reconciled at start, on ticks and while one runs (D9);
 //     and its wake (workspace-sleep D4) when one of its spaces is shown again;
 //   - "Sleep now" / "Wake all" requests (D9);
+//   - a wake by path (awake-agent D1–D3, `wake.<hex>`), from the pulse after
+//     it was asked: its workspace's part right after the shown edge, as a
+//     click on its row acts, and its Claudes resumed after Wake all, each
+//     tried again no sooner than RETRY_MS after a try that didn't resume it,
+//     for up to WAKE_DEADLINE_MS;
 //   - every visible terminal with an `asleep` record is resumed (D8: level,
 //     not edge, so a reveal during a stop resumes once the shell is back).
 //     Wake all and this reveal leave alone the terminals of a workspace put to
@@ -62,17 +67,18 @@ import { readPrompt, classifyProbe, promptRestored, PROBE_KEY, ERASE_KEY } from 
 import { resumeFlags, resumeCommand, canResumeIn, hintDifference, REPLAYABLE_ENV } from "./resume.js";
 import {
   WAIT_PULSES, INTERRUPT_DEADLINE_MS, PROGRAM_GRACE_MS, CLEAR_KEY, interruptArgs, localPlaces, shownSpace, entrySpaces,
-  kindOf, UNTOUCHED, flightOf, promptStep, processGroups, hangUpGroup, shownEdges, cameBack, sleptTerminals, wakePlan,
-  tabsToSettle, didntStopNotice, parseWorkspaceCommand,
+  kindOf, UNTOUCHED, flightOf, promptStep, processGroups, hangUpGroup, shownEdges, cameBack, sleptTerminals, sleptBy, wakePlan,
+  tabsToSettle, didntStopNotice, parseWorkspaceCommand, entryWake, wakeTargets,
 } from "./workspace-sleep.js";
 import {
   workspacesPaths, loadWorkspaces, saveWorkspaces, withEntry, withoutEntry, listedTabs, terminalsOf, reconcileSpaces,
 } from "./workspaces-store.js";
-import { LogBuffer, appendCommand, logPaths } from "./log.js";
+import { LogBuffer, appendCommand, logPaths, notWokenHead } from "./log.js";
+import { MOD, WAKE_DEADLINE_MS } from "./constants.js";
 
-// This mod's folder under mods/: asset paths go through it, never a literal
-// (Herdr's mod.clone rewrites it in a copy).
-export const MOD = "agent-sleep";
+// The mod's folder (asset paths, commands) and a wake by path's deadline
+// live in constants.js, which wake-agent's CLI shares.
+export { MOD, WAKE_DEADLINE_MS };
 export const PULSE_MS = 1000;
 // Shared values (D14): what the loop copy says to the popup, and the popup to it.
 export const VIEW_KEY = "agent-sleep.view";
@@ -80,7 +86,8 @@ export const REQUEST_KEY = "agent-sleep.request";
 // After /exit, the stopping terminal is checked on every pulse for this
 // long; later, ticks reconcile it (D4: asleep whenever the shell is back).
 export const SETTLE_MS = 30_000;
-// A reveal that found a typed shell line looks again after this.
+// A reveal that found a typed shell line looks again after this; so does a
+// wake by path at a terminal it couldn't resume.
 export const RETRY_MS = 2000;
 // D5's probe: reads of the screen after `x`, until it changed.
 const PROBE_READS = 5;
@@ -259,14 +266,16 @@ export const COMMANDS = Object.freeze({
 // A command by name: the table's, or a workspace sleep's (workspace-sleep
 // D5), which stay out of the table the popup's buttons are: `sleep-workspace`
 // sleeps the shown workspace, `sleep-workspace.<hex>` the one at that path
-// (T6, the right-click's Sleep), and the confirm's answers
-// (`confirm-sleep.<question>`, `cancel-sleep.<question>`) name the question
-// they answer. None does I/O either. Null for any other name.
+// (T6, the right-click's Sleep), `wake.<hex>` wakes what sleeps at that path
+// (awake-agent D1), and the confirm's answers (`confirm-sleep.<question>`,
+// `cancel-sleep.<question>`) name the question they answer. None does I/O
+// either. Null for any other name.
 export function commandOf(name) {
   if (typeof name !== "string") return null;
   if (Object.hasOwn(COMMANDS, name)) return COMMANDS[name];
   const c = parseWorkspaceCommand(name);
   if (c?.kind === "sleep") return (co) => co.requestSleepWorkspace(c.path ?? null);
+  if (c?.kind === "wake") return (co) => co.requestWake(c.path);
   if (c?.kind === "answer") return (co) => co.answerQuestion(c.question, c.yes);
   return null;
 }
@@ -337,6 +346,13 @@ export class Coordinator {
     this.questions = 0;
     this.shownSpaces = null; // the spaces shown at the last pulse (D4's edge); null before the first look
     this.spacesStarted = false; // the start reconcile (D9 rule 3) ran
+    // awake-agent D3: path → a wake by path under way, in memory only:
+    //   since      the first pulse that saw it (its deadline's start), or null
+    //              until a pulse starts with it (seeWakes)
+    //   why        terminal → the last reason it wasn't resumed
+    //   terminals  its workspace's terminals, while it had an entry
+    //   found      something asleep, being stopped, or an entry was there
+    this.wakes = new Map();
   }
 
   // ── Entry points ──
@@ -363,9 +379,11 @@ export class Coordinator {
       } else if (this.youngStop(now)) {
         await this.settle();
       }
-      await this.workspaceStep({ ticked });
+      if (this.wakes.size > 0) this.seeWakes();
+      const layout = await this.workspaceStep({ ticked });
       if (this.sleepNowRequested || this.queue) await this.manualStep();
       if (this.wakeAllRequested) await this.wakeAllStep();
+      if (this.wakes.size > 0) await this.wakeStep(layout);
       await this.revealStep();
       this.publishBadges();
       this.publishAsleep();
@@ -398,6 +416,17 @@ export class Coordinator {
 
   requestWakeAll() {
     this.wakeAllRequested = true;
+  }
+
+  // awake-agent D3: wake what sleeps at `path` (an absolute path, no trailing
+  // slash). Recorded only; the pulses from the next one act. Asked again
+  // while one is under way, that one goes on with its clock started again: a
+  // command can come mid-pulse, so the wake a pulse is working on is never
+  // replaced.
+  requestWake(path) {
+    const wake = this.wakes.get(path);
+    if (wake) wake.since = null;
+    else this.wakes.set(path, { since: null, why: {}, terminals: new Set(), found: false });
   }
 
   // workspace-sleep D5: a workspace's sleep, by its path, or the shown one's
@@ -439,7 +468,7 @@ export class Coordinator {
       due: this.due,
       labels: this.dueLabels,
       lastEvent: this.lastEvent,
-      holds: { ...this.envHolds(), ...this.holds },
+      holds: this.allHolds(),
       fields: this.fields,
       slept: this.sleptTerminals(),
     });
@@ -493,16 +522,17 @@ export class Coordinator {
     return view;
   }
 
-  // Asleep Claudes whose stored env the resume can't replay: said by the
-  // popup from their record, so a reload keeps saying it.
-  envHolds() {
+  // address → why that asleep Claude stays asleep, as the popup lists it and
+  // a wake by path says it: a hold (this.holds) first, else a stored env the
+  // resume can't replay, said from its record so a reload keeps saying it.
+  allHolds() {
     const out = {};
     for (const [address, r] of Object.entries(this.records)) {
       if (r?.state === "asleep" && typeof r.env === "string" && !REPLAYABLE_ENV.includes(r.env)) {
         out[address] = envHold(labelOf(r) ?? address, r.env);
       }
     }
-    return out;
+    return { ...out, ...this.holds };
   }
 
   // A settings change: merges `change` in, clamps it (store.js), saves it with a
@@ -632,6 +662,92 @@ export class Coordinator {
     for (const address of Object.keys(this.records).sort()) {
       if (this.records[address]?.state === "asleep" && !slept.has(address)) await this.resume(address, "wake");
     }
+  }
+
+  // awake-agent D3, before a pulse's wake work: each wake's clock starts at
+  // the first pulse that sees it (its deadline counts from there), and it
+  // notes whether anything is there to wake, so its end can say there was
+  // nothing. A wake asked mid-pulse waits for the next pulse: until then its
+  // `since` is null, and wakeEntries and wakeStep pass it by.
+  seeWakes() {
+    const now = this.d.now();
+    for (const [path, wake] of this.wakes) {
+      wake.since ??= now;
+      wake.found ||= own(this.workspaces, path) !== undefined || wakeTargets(this.records, path, wake.terminals).length > 0;
+    }
+  }
+
+  // awake-agent D2, D3: a wake by path, its Claudes' part (its workspace's
+  // ran in workspaceStep, wakeEntries), on the layout workspaceStep read
+  // (`panes` null when it didn't read them). Each pulse, every Claude asleep
+  // at the path or in its workspace's tabs is resumed through tryResume (a
+  // wake: a taken-over record stays), except one whose retryAt hasn't passed
+  // and one a workspace's sleep still holds (sleptBy: no undo of a sleep).
+  // The wake ends once nothing there is asleep or being stopped and its
+  // workspace has no entry, so one asked mid-sleep outlives that sleep's
+  // stops; else at WAKE_DEADLINE_MS (endWake). Without spaces there is no
+  // evidence of what a sleep holds: no resume.
+  async wakeStep({ spaces, panes }) {
+    const now = this.d.now();
+    const holders = spaces.length > 0 ? sleptBy(this.workspaces, spaces, panes ?? this.safe(() => list(this.d.live.panes()), [])) : null;
+    for (const [path, wake] of [...this.wakes]) {
+      if (wake.since === null) continue; // asked mid-pulse: the next pulse takes it
+      if (holders) await this.wakeClaudes(path, wake, now, holders);
+      if (wakeTargets(this.records, path, wake.terminals).length > 0 || own(this.workspaces, path) !== undefined) {
+        if (wake.since !== null && now - wake.since >= WAKE_DEADLINE_MS) this.endWake(path);
+        continue;
+      }
+      this.wakes.delete(path); // done
+      if (!wake.found) this.log(`${path}: wake asked, nothing asleep there`);
+    }
+  }
+
+  // One pulse of wakeStep for one path: each Claude's resume, or why not.
+  // `holders`: terminal → the workspace whose sleep holds it (sleptBy).
+  async wakeClaudes(path, wake, now, holders) {
+    const tag = `wake ${path}`;
+    for (const address of wakeTargets(this.records, path, wake.terminals)) {
+      if (own(this.records, address)?.state === "stopping") {
+        wake.why[address] = "not asleep yet";
+        continue;
+      }
+      if (holders.has(address)) {
+        wake.why[address] = `held by workspace ${holders.get(address)}`;
+        this.waitLog(address, `not resumed (${tag}): ${wake.why[address]}`);
+        continue;
+      }
+      if ((this.retryAt[address] ?? 0) > now) {
+        const held = own(this.allHolds(), address);
+        wake.why[address] ??= held ? `held: ${held}` : "waiting to look again";
+        continue;
+      }
+      const out = await this.tryResume(address, { tag });
+      if (out.ok) {
+        delete wake.why[address];
+        this.log(`${address}: resumed (${tag})`);
+        continue;
+      }
+      wake.why[address] = out.why;
+      // Looked at again after RETRY_MS, not every pulse: each look is an
+      // `hc get`. A typed line and a hold have set their own retryAt.
+      if (!((this.retryAt[address] ?? 0) > now)) this.retryAt[address] = now + RETRY_MS;
+    }
+  }
+
+  // A wake by path gives up (awake-agent D3): one line per terminal still
+  // down, in log.txt's format, `<t>: not woken (wake <path>): <why>`
+  // (log.js notWokenHead), the last reason seen unless `why` says another.
+  // It is the contract wake-agent's CLI reads after its own timeout: holds, a
+  // gone terminal and a wait said once before write nothing more.
+  endWake(path, why = null) {
+    const wake = this.wakes.get(path);
+    if (!wake) return;
+    this.wakes.delete(path);
+    for (const address of wakeTargets(this.records, path, wake.terminals)) {
+      this.log(`${notWokenHead(address, path)}${why ?? wake.why[address] ?? "not tried yet"}`);
+    }
+    const e = own(this.workspaces, path);
+    if (e) this.log(`${notWokenHead(path, path)}${why ?? `its workspace is still ${e.state === "asleep" ? "asleep" : "going to sleep"}`}`);
   }
 
   // D8, level-triggered: every shown terminal with an asleep record. A
@@ -977,44 +1093,61 @@ export class Coordinator {
 
   // ── The resume (D8, S6) ──
 
-  // `via`: "reveal" (its tab is shown) or "wake" (Wake all).
+  // `via`: "reveal" (its tab is shown) or "wake" (Wake all, a workspace's
+  // wake), which names it in the log. Only the reveal drops a taken-over
+  // record. True when the resume was typed.
   async resume(address, via) {
+    return (await this.tryResume(address, { tag: via, dropTakenOver: via === "reveal" })).ok;
+  }
+
+  // resume(), saying why it didn't: → { ok: true } or { ok: false, why }.
+  // `tag` names the wake in its log lines ("not resumed (<tag>): <why>");
+  // `dropTakenOver`: another program in front of its shell means you took
+  // it over, and its record goes (the reveal's D8). A wake by path
+  // (awake-agent D3) calls it with its own tag.
+  async tryResume(address, { tag, dropTakenOver = false }) {
+    const no = (why) => ({ ok: false, why });
     const r = own(this.records, address);
-    if (!r || r.state !== "asleep") return false;
+    if (!r || r.state !== "asleep") return no("not asleep");
     const now = this.d.now();
     const label = labelOf(r) ?? address;
+    const held = (why) => {
+      this.hold(address, why, now);
+      return no(`held: ${why}`);
+    };
     const t = await this.getTerminal(address);
-    if (!t || t.state !== "live") return false; // gone: the next tick drops it
+    if (!t || t.state !== "live") return no("terminal gone"); // the next tick drops it
     if (!foregroundIsShell(t)) {
       // You took over (D8): your own program is in front of its shell.
       const program = programName(t.foreground) ?? "another program";
-      this.waitLog(address, `not resumed (${via}): ${program} is in front of its shell${via === "reveal" ? "; taken over, its record goes" : ""}`);
-      if (via === "reveal") {
+      const why = `${program} is in front of its shell${dropTakenOver ? "; taken over, its record goes" : ""}`;
+      this.waitLog(address, `not resumed (${tag}): ${why}`);
+      if (dropTakenOver) {
         if (await this.save(withoutRecord(this.records, address))) this.lastEvent = `${label}: taken over, not resumed`;
       }
-      return false;
+      return no(why);
     }
     const screen = await this.read(address);
     const prompt = readPrompt(screen, programName(t.foreground));
     if (prompt.program !== "shell" || prompt.state !== "bare") {
       this.retryAt[address] = now + RETRY_MS; // a typed line: wait for it
-      this.waitLog(address, `not resumed (${via}): its shell line isn't a bare prompt (${prompt.program}, ${prompt.state})`);
-      return false;
+      const why = `its shell line isn't a bare prompt (${prompt.program}, ${prompt.state})`;
+      this.waitLog(address, `not resumed (${tag}): ${why}`);
+      return no(why);
     }
     // Claude's own hint, still on screen, has the last word on the env.
     const env = r.env ?? null;
     const hint = parseExitScreen(screen);
     if (hint.shape === "resume" && hint.sessionId === r.sessionId && (hint.env ?? null) !== env) {
-      this.hold(address, envHold(label, hint.env ?? "no env"), now);
-      return false;
+      return held(envHold(label, hint.env ?? "no env"));
     }
     // resume-gaps D1: in claude-accounts' active account, where a new Claude
     // would start, unless that one is full and the one it slept in isn't
     // (S4); without an active file, in the one it slept in (D15; a record
     // without one is System default). Read here, once its shell is ready:
-    // every wake (reveal, Wake all, a workspace's wake: "now", restart
-    // recovery) comes through this one place. Only into a folder that still
-    // exists.
+    // every wake (reveal, Wake all, a workspace's wake: "now", a wake by
+    // path, restart recovery) comes through this one place. Only into a
+    // folder that still exists.
     const account = await loadWakeAccount(
       { appHome: this.d.appHome, configDir: r.configDir ?? null },
       { readText: (path) => this.d.files.read(path) },
@@ -1024,18 +1157,17 @@ export class Coordinator {
       flags: r.flags, sessionId: r.sessionId, cwd: r.cwd, shellCwd: t.foreground.cwd ?? null, shell: t.foreground.name, env, configDir,
     });
     if (!cmd.ok) {
-      this.hold(address, cmd.reason === "unsupported-env" ? envHold(label, env) : `${label} stays asleep: ${cmd.reason}`, now);
-      return false;
+      return held(cmd.reason === "unsupported-env" ? envHold(label, env) : `${label} stays asleep: ${cmd.reason}`);
     }
     if (configDir !== null && (await this.run("test", ["-d", configDir])).code !== 0) {
-      this.hold(address, goneHold(label), now);
-      return false;
+      return held(goneHold(label));
     }
     // Claimed and saved before anything is typed: resumed exactly once.
     const { records: next, claimed } = claim(this.records, address);
     if (!claimed || !(await this.save(next))) {
-      this.waitLog(address, `not resumed (${via}): its claim wasn't saved (sleeping.json changed under it)`);
-      return false;
+      const why = "its claim wasn't saved (sleeping.json changed under it)";
+      this.waitLog(address, `not resumed (${tag}): ${why}`);
+      return no(why);
     }
     delete this.retryAt[address];
     // Said once per wake (the claim above succeeds once), only when it isn't
@@ -1043,14 +1175,15 @@ export class Coordinator {
     if (account.why !== null) this.log(`${address}: wakes in the account it slept in (${configDir ?? "System default"}): ${account.why}`);
     const sent = await this.call(["send", address, cmd.command]);
     if (sent.code !== 0) {
+      const error = (sent.stderr || sent.stdout || "").trim();
       this.lastEvent = `Couldn't resume ${label}`;
-      this.log(`${address}: resume not sent (${(sent.stderr || sent.stdout || "").trim()}); type it yourself: ${cmd.command}`);
-      return false;
+      this.log(`${address}: resume not sent (${error}); type it yourself: ${cmd.command}`);
+      return no(`resume not sent (${error})`);
     }
     const afterRestart = r.by === "restart" ? " after a restart" : "";
     this.d.notify({ title: `Resuming ${label}${afterRestart}`, body: `Session ${r.sessionId.slice(0, 8)} · same flags as before` });
     this.lastEvent = `Woke ${label}${afterRestart}`;
-    return true;
+    return { ok: true };
   }
 
   hold(address, why, now) {
@@ -1075,15 +1208,19 @@ export class Coordinator {
   // at start, on a tick and while a sleep is under way, then a new sleep's
   // steps 1–3 or one step of one that runs (D10). With no workspace asleep
   // and none asked for it does no I/O. Without spaces there is no evidence.
+  // → { spaces, panes } as it read them (panes null when it didn't), the
+  // layout a wake by path's Claudes' part (wakeStep) works on.
   async workspaceStep({ ticked }) {
     const spaces = this.safe(() => list(this.d.live.spaces()), []);
-    if (spaces.length === 0) return;
+    if (spaces.length === 0) return { spaces, panes: null };
     if (ticked) await this.loadEntries();
     await this.watchShown(spaces);
+    const panes = this.wakes.size > 0 ? await this.wakeEntries(spaces) : null;
     const sleeping = Object.values(this.workspaces).some((e) => e?.state === "sleeping");
     if (!this.spacesStarted || ticked || sleeping) await this.reconcileWorkspaces();
     if (this.sleepRequest) await this.beginSleep(this.sleepRequest);
     else await this.jobStep();
+    return { spaces, panes };
   }
 
   // D4: the person came back to a workspace put to sleep (cameBack: one of
@@ -1098,19 +1235,52 @@ export class Coordinator {
     this.shownSpaces = shown;
     if (edges.size === 0) return;
     for (const [path, e] of Object.entries(this.workspaces)) {
-      if (!cameBack(e, { previous, shown })) continue;
-      if (e.state === "asleep") {
-        await this.wakeWorkspace(path);
-        continue;
-      }
-      if (e.state !== "sleeping" || e.wakeAfter === true) continue;
-      delete this.jobs[path];
-      const saved = await this.updateEntries((entries) => {
-        const cur = own(entries, path);
-        return cur?.state === "sleeping" ? withEntry(entries, path, { ...cur, wakeAfter: true }) : null;
-      });
-      this.log(`${path}: shown again while going to sleep; its stops are dropped${saved ? "" : " (workspaces.json not written)"}`);
+      if (cameBack(e, { previous, shown })) await this.wakeEntry(path, "shown again");
     }
+  }
+
+  // D4: a workspace someone came back to (watchShown) or asked for by path
+  // (wakeEntries), as entryWake says: asleep, it wakes now (wakeWorkspace);
+  // going to sleep, it is told to wake instead (wakeAfterSleep, `why` in its
+  // log line); already told, nothing.
+  async wakeEntry(path, why) {
+    const how = entryWake(own(this.workspaces, path));
+    if (how === "now") await this.wakeWorkspace(path);
+    else if (how === "after") await this.wakeAfterSleep(path, why);
+  }
+
+  // D4's wakeAfter: a sleep under way is told to wake instead. The rest of
+  // its stops are dropped, so no /exit reaches a Claude someone came back to
+  // or asked for, and step 6 (finishSleep) wakes it. A click on its row
+  // (watchShown) and a wake by path (wakeEntries) both come here through
+  // wakeEntry; `why` says which in the log.
+  async wakeAfterSleep(path, why) {
+    delete this.jobs[path];
+    const saved = await this.updateEntries((entries) => {
+      const cur = own(entries, path);
+      return cur?.state === "sleeping" ? withEntry(entries, path, { ...cur, wakeAfter: true }) : null;
+    });
+    this.log(`${path}: ${why} while going to sleep; its stops are dropped${saved ? "" : " (workspaces.json not written)"}`);
+  }
+
+  // awake-agent D2: a wake by path, its workspace's part, here where a click
+  // on its row acts, before a sleep's next stop (wakeEntry): an asleep entry
+  // wakes now (its tabs back in their spaces, none shown, its wake: "now"
+  // Claudes resumed, the entry dropped); one still going to sleep gets what a
+  // click mid-sleep gets. Its terminals become the wake's, so wakeStep
+  // resumes the rest of them. A wake asked mid-pulse (`since` still null)
+  // waits for the next pulse. → the panes, read only for a path with an
+  // entry, else null.
+  async wakeEntries(spaces) {
+    let panes = null;
+    for (const [path, wake] of [...this.wakes]) {
+      const e = own(this.workspaces, path);
+      if (wake.since === null || !e) continue;
+      panes ??= this.safe(() => list(this.d.live.panes()), []);
+      for (const a of sleptTerminals({ [path]: e }, spaces, panes)) wake.terminals.add(a);
+      await this.wakeEntry(path, "asked to wake");
+    }
+    return panes;
   }
 
   // D9: workspaces.json against Herdr's spaces (reconcileSpaces), saved with a
@@ -1184,6 +1354,8 @@ export class Coordinator {
     for (const id of listedTabs(entry)) this.herdr("tab.settle", { id });
     this.jobs[target] = newJob();
     this.lastEvent = `Putting ${label} to sleep`;
+    // The last ask wins: a wake by path still under way would undo this sleep.
+    this.endWake(target, "put to sleep again");
   }
 
   // D12: each local space's workspace, from its place through agent-sleep's
@@ -1478,7 +1650,11 @@ export class Coordinator {
   // claimed before anything is typed. A wake: "now" one that can't be resumed
   // yet (a typed shell line, another program in front) waits for its tab as
   // the rest do. A reload before the drop leaves an entry with its tabs back,
-  // which D9's rule 2 drops at start.
+  // which D9's rule 2 drops at start. With a wake by path under way for it
+  // (awake-agent D3: asked now, or its wakeAfter that step 6 acts on), each
+  // resume also leaves its `<t>: resumed (wake <path>)` line, as wakeClaudes'
+  // do: the entry is gone by the end of this pulse, so that line is what
+  // wake-agent's CLI finds for a Claude typed but never up.
   async wakeWorkspace(path) {
     const entry = own(this.workspaces, path);
     if (!entry) return;
@@ -1489,8 +1665,13 @@ export class Coordinator {
       records: this.records,
     });
     for (const id of unsettle) this.herdr("tab.unsettle", { id });
+    const byPath = this.wakes.has(path);
     let resumed = 0;
-    for (const address of now) if (await this.resume(address, "wake")) resumed += 1;
+    for (const address of now) {
+      if (!(await this.resume(address, "wake"))) continue;
+      resumed += 1;
+      if (byPath) this.log(`${address}: resumed (wake ${path})`);
+    }
     delete this.jobs[path];
     const saved = await this.updateEntries((entries) => (own(entries, path) ? withoutEntry(entries, path) : null));
     this.log(`${path}: woken, ${unsettle.length} tab(s) back, ${resumed} of ${now.length} wake: "now" Claude(s) resumed${saved ? "" : " (workspaces.json not written)"}`);

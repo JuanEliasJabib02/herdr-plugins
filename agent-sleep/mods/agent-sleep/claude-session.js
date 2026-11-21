@@ -204,18 +204,20 @@ async function read(readText, path) {
   }
 }
 
-// { home, pid, foregroundName, configDirs } and { readText(path),
+// { home, pid, foregroundName, configDirs, transcript } and { readText(path),
 // exec(cmd, args) } → checkSession's result plus `configDir` (the candidate
 // whose file passed, exactly as given; null for ~/.claude) and `transcript`
 // (its path, or null when none was found: rules.js's `no-transcript`).
 // `configDirs` is loadConfigDirs' list, ~/.claude alone by default; a
 // candidate failing isConfigDir is skipped unread. ps runs once, at the first
-// file found. With no file passing: the first failure, or `no-session-file`
-// when no candidate had one. Never throws: a read or exec that fails is a
-// refusal. ps's output counts only when it exited 0; find's stdout counts
-// whatever its exit code (unreadable folders make it exit 1 while still
-// listing what it found).
-export async function loadSession({ home, pid, foregroundName, configDirs = [null] } = {}, { readText, exec } = {}) {
+// file found. `transcript: false` skips the transcript's `find` (it is then
+// null), for a caller that only asks whether the file checks out
+// (wake-agent's readiness). With no file passing: the first failure, or
+// `no-session-file` when no candidate had one. Never throws: a read or exec
+// that fails is a refusal. ps's output counts only when it exited 0; find's
+// stdout counts whatever its exit code (unreadable folders make it exit 1
+// while still listing what it found).
+export async function loadSession({ home, pid, foregroundName, configDirs = [null], transcript: findTranscript = true } = {}, { readText, exec } = {}) {
   if (!isClaudeName(foregroundName)) return { ok: false, reason: "not-claude" };
   if (sessionFilePath(home, pid) === null) return { ok: false, reason: "bad-pid" };
   let procStart;
@@ -235,6 +237,7 @@ export async function loadSession({ home, pid, foregroundName, configDirs = [nul
       continue;
     }
     const dir = configDir ?? null;
+    if (!findTranscript) return { ...checked, configDir: dir, transcript: null };
     const found = await run(exec, transcriptLookupCommand(home, checked.sessionId, dir));
     const transcript = found ? parseTranscriptLookup(found.stdout, { home, sessionId: checked.sessionId, configDir: dir }) : null;
     return { ...checked, configDir: dir, transcript };

@@ -517,14 +517,20 @@ test("a run that fails partway prunes nothing; the next good run does", { skip: 
   assert.deepEqual(manifest(home, "demo"), ["layouts/demo.json", "mods/a"]);
 });
 
-test("the real agent-sleep plugin: its mod is copied, its keys merged, projects-sidebar's files left alone", () => {
+test("the real agent-sleep plugin: its mod is copied, its keys merged, projects-sidebar's files left alone, and its wake-agent CLI on PATH (awake-agent D5)", () => {
   const home = fakeHome({ "layouts/projects.json": "the sidebar's\n", "mods/projects/main.js": "the sidebar's\n", "keys.json": "{}\n" });
   const r = run(INSTALL, home, "agent-sleep");
   assert.equal(r.status, 0, r.stderr);
-  assert.deepEqual(manifest(home, "agent-sleep"), ["mods/agent-sleep"]);
-  for (const file of ["main.js", "mod.json", "coordinator.js", "panel-model.js", "views/status.js", "views/panel.js", "icons/moon.svg"]) {
+  const link = join(binDir(home), "wake-agent");
+  assert.deepEqual(manifest(home, "agent-sleep"), [link, "mods/agent-sleep"]);
+  for (const file of ["main.js", "mod.json", "coordinator.js", "panel-model.js", "views/status.js", "views/panel.js", "icons/moon.svg", "wake-cli.js", "bin/wake-agent.mjs", "package.json"]) {
     assert.ok(existsSync(join(home, "mods/agent-sleep", file)), file);
   }
+  assert.equal(readlinkSync(link), join(home, "mods/agent-sleep/bin/wake-agent"));
+  // Through the link, on the installed copy: an empty Herdr home has nothing asleep.
+  const list = spawnSync(link, [], { encoding: "utf8", env: { ...process.env, HOME: userHome(home), HERDR_APP_HOME: home } });
+  assert.equal(list.status, 0, list.stderr);
+  assert.equal(list.stdout, "wake-agent: nothing asleep.\n");
   assert.deepEqual(JSON.parse(readFileSync(join(home, "keys.json"), "utf8"))["layout:projects"], {
     "cmd-alt-s": "agent-sleep.sleep-now",
     "cmd-alt-w": "agent-sleep.wake-all",
@@ -549,7 +555,7 @@ test("the real projects-sidebar install brings agent-sleep through requires, and
   const home = fakeHome();
   const r = run(INSTALL, home, "--no-keys", "projects-sidebar");
   assert.equal(r.status, 0, r.stderr);
-  assert.deepEqual(manifest(home, "agent-sleep"), ["mods/agent-sleep"]);
+  assert.deepEqual(manifest(home, "agent-sleep"), [join(binDir(home), "wake-agent"), "mods/agent-sleep"]);
   assert.ok(existsSync(join(home, "mods/agent-sleep/main.js")));
   assert.match(readFileSync(join(home, "layouts/projects.json"), "utf8"), /"mod": "agent-sleep"/);
   assert.ok(!existsSync(join(home, "agent-sleep/settings.json")), "no settings file: off");
