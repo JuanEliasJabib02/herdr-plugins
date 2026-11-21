@@ -21,13 +21,16 @@
 //
 // Suites run one after another, never at once, each from its folder as
 // `node --test --test-reporter=dot <files>`: a pass prints a dot, a failure
-// prints in full. A line before each says why it runs, and a table of suite
-// | files | pass | fail | seconds ends the run. Exit 0 when every suite
+// prints in full. A test past 2 minutes fails (--test-timeout), and a suite
+// ends once its tests have, whatever they left running (--test-force-exit):
+// a hang is a failed row, never a run that doesn't end. A line before each
+// suite says why it runs, and a table of suite | files | pass | fail |
+// seconds ends the run (cancelled counts as fail). Exit 0 when every suite
 // passed or nothing maps ("nothing to test"), 1 when one failed, 2 on a
 // usage error.
 
 import { execFileSync, spawn } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -78,18 +81,21 @@ export function select(changed, suites) {
   // The root test/ isn't read by other suites; "test/" in their code is
   // their own test folder.
   const folders = [...new Set(changed.map(topFolder).filter((f) => f !== null && f !== "test"))].sort();
+  // Of the given [{ path, text }], those that name a changed folder, with
+  // the folders each names.
+  const readers = (list) => list.map((f) => ({ file: f.path, folders: foldersRead(f.text, folders) })).filter((r) => r.folders.length);
   const plan = [];
   for (const suite of suites) {
     if (whole.has(suite.name)) {
       plan.push(entry(suite, allFiles(suite), "changed"));
       continue;
     }
-    const helpers = suite.helpers.map((h) => ({ file: h.path, folders: foldersRead(h.text, folders) })).filter((h) => h.folders.length);
+    const helpers = readers(suite.helpers);
     if (helpers.length) {
       plan.push(entry(suite, allFiles(suite), helpers.map((h) => `${h.file} reads ${slashed(h.folders)}`).join("; ")));
       continue;
     }
-    const reads = suite.files.map((f) => ({ file: f.path, folders: foldersRead(f.text, folders) })).filter((r) => r.folders.length);
+    const reads = readers(suite.files);
     if (!reads.length) continue;
     const read = [...new Set(reads.flatMap((r) => r.folders))].sort();
     plan.push(entry(suite, reads.map((r) => r.file), `${reads.length === 1 ? "it reads" : "they read"} ${slashed(read)}`, reads));
@@ -110,30 +116,22 @@ export function namedSuites(names, suites) {
   });
 }
 
-const isDir = (path) => {
-  try {
-    return statSync(path).isDirectory();
-  } catch {
-    return false;
-  }
-};
-
-// One suite's files, or null when its test/ has no *.test.js: the test
-// files right under test/, and the helpers (any other .js or .mjs under
-// test/, at any depth), each with its text.
+// One suite's files, or null when it has no test/ or its test/ has no
+// *.test.js: the test files right under test/, and the helpers (any other
+// .js or .mjs under test/, at any depth, outside node_modules), each with
+// its text.
 function readSuite(repo, name, dir) {
   const testDir = join(repo, dir, "test");
-  if (!isDir(testDir)) return null;
+  let paths;
+  try {
+    paths = readdirSync(testDir, { recursive: true }).sort();
+  } catch {
+    return null;
+  }
   const read = (path) => ({ path: `test/${path}`, text: readFileSync(join(testDir, path), "utf8") });
-  const files = readdirSync(testDir)
-    .filter((f) => f.endsWith(".test.js"))
-    .sort()
-    .map(read);
+  const files = paths.filter((p) => !p.includes("/") && p.endsWith(".test.js")).map(read);
   if (!files.length) return null;
-  const helpers = readdirSync(testDir, { recursive: true })
-    .filter((p) => /\.m?js$/.test(p) && !p.endsWith(".test.js") && !p.split("/").includes("node_modules"))
-    .sort()
-    .map(read);
+  const helpers = paths.filter((p) => /\.m?js$/.test(p) && !p.endsWith(".test.js") && !p.split("/").includes("node_modules")).map(read);
   return { name, dir, files, helpers };
 }
 
@@ -141,7 +139,7 @@ function readSuite(repo, name, dir) {
 // folder, by name.
 export function findSuites(repo) {
   const folders = readdirSync(repo, { withFileTypes: true })
-    .filter((d) => d.isDirectory() && !d.name.startsWith(".") && d.name !== "node_modules" && !ROOT_FOLDERS.has(d.name))
+    .filter((d) => d.isDirectory() && !d.name.startsWith(".") && d.name !== "node_modules")
     .map((d) => d.name)
     .sort();
   return [readSuite(repo, ROOT, ""), ...folders.map((f) => readSuite(repo, f, f))].filter(Boolean);
@@ -150,7 +148,7 @@ export function findSuites(repo) {
 // The repo paths changed since the merge base of <base> and HEAD: commits,
 // the working tree (staged or not), and untracked files. A moved file
 // counts at both paths.
-export function changedFiles(repo, base) {
+function changedFiles(repo, base) {
   const git = (...args) => execFileSync("git", ["-C", repo, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
   let since;
   try {
@@ -196,7 +194,16 @@ function tapCount(tap, key) {
 // counts. Resolves to its table row and whether it passed.
 async function runSuite(repo, e, tmp) {
   const tap = join(tmp, `${e.name}.tap`);
-  const args = ["--test", "--test-reporter=dot", "--test-reporter-destination=stdout", "--test-reporter=tap", `--test-reporter-destination=${tap}`, ...e.files];
+  const args = [
+    "--test",
+    "--test-timeout=120000",
+    "--test-force-exit",
+    "--test-reporter=dot",
+    "--test-reporter-destination=stdout",
+    "--test-reporter=tap",
+    `--test-reporter-destination=${tap}`,
+    ...e.files,
+  ];
   const started = performance.now();
   const code = await new Promise((resolve) => {
     const child = spawn(process.execPath, args, { cwd: join(repo, e.dir), stdio: ["ignore", "inherit", "inherit"] });
@@ -228,7 +235,7 @@ function parseArgs(argv) {
   return opts;
 }
 
-export async function main(argv, repo) {
+async function main(argv, repo) {
   let plan;
   try {
     const opts = parseArgs(argv);

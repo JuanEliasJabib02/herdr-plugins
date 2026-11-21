@@ -6,7 +6,7 @@
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import { execFile, execFileSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { registerHooks } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -29,6 +29,15 @@ const realExec = (command, args = [], opts = {}) => new Promise((resolve, reject
     else resolve({ code: error ? error.code : 0, stdout, stderr });
   });
 });
+
+// Checks `ok` (sync or async) every 5 ms until it holds; fails after about `ms`.
+const until = async (what, ok, ms = 5000) => {
+  for (let i = 0; i < ms / 5; i++) {
+    if (await ok()) return;
+    await new Promise((resolve) => { setTimeout(resolve, 5); });
+  }
+  assert.fail(`never happened: ${what}`);
+};
 
 const git = (cwd, ...args) => execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false", ...args], { cwd, stdio: "pipe" });
 function write(root, rel, text = "needle\n") {
@@ -514,7 +523,12 @@ test("D2: a result by its number, wherever its file is and collapsed or not", as
 
 // ── Risk 4: stopping a search for real ─────────────────────────────────────
 
-// A git that prints one hit and then never ends, as one searching a huge repo.
+// A git that prints one hit and then runs on, as one searching a huge repo: about 30 s,
+// long past any stop, and then a second hit, which only a search nobody stopped prints.
+// It ends by itself, so a test that never stops it still ends: a shim left running
+// holds the file open. The loop isn't exec'd: the shim's sh keeps the tag in its
+// command line. Once its first hit is out it leaves `started` beside itself, so the
+// stop can't land before there's something to hand over.
 function endlessGit() {
   const dir = join(base, `shim-${Math.random().toString(36).slice(2)}`);
   mkdirSync(dir);
@@ -522,44 +536,21 @@ function endlessGit() {
   writeFileSync(shim, `#!/bin/sh
 case "$*" in *rev-parse*) echo true; exit 0;; esac
 printf 'a.js\\0001\\0001\\000needle\\n'
-while :; do sleep 0.05; done
+: > "$(dirname "$0")/started"
+i=0; while [ $i -lt 600 ]; do sleep 0.05; i=$((i+1)); done
+printf 'b.js\\0001\\0001\\000needle\\n'
 `);
   chmodSync(shim, 0o755);
   const env = { ...process.env, PATH: `${dir}:${process.env.PATH}` };
-  return (command, args, opts = {}) => realExec(command, args, { ...opts, env });
+  return { exec: (command, args, opts = {}) => realExec(command, args, { ...opts, env }), started: join(dir, "started") };
 }
 
-const pause = (ms) => new Promise((resolve) => { setTimeout(resolve, ms); });
-
-// The search starts when the machine gets to it: under load, past any fixed wait. So
-// the test polls until a process runs under the tag, or the deadline passes.
-async function searchStarted(tag, deadline = 10_000) {
-  const end = Date.now() + deadline;
-  while (Date.now() < end) {
-    if ((await realExec("pgrep", ["-f", tag])).code === 0) return true;
-    await pause(20);
-  }
-  return false;
-}
-
-// Kills what runs under the tag until the search hands back: a shim left running holds
-// the file open forever, and one can start after its test gave up on it. Plain pkill,
-// not killArgs, so the cleanup doesn't depend on the code under test.
-async function stopSearch(tag, running, deadline = 10_000) {
-  const ended = running.then(() => true, () => true), end = Date.now() + deadline;
-  while (!(await Promise.race([ended, pause(50).then(() => false)]))) {
-    if (Date.now() > end) throw new Error(`the search under ${tag} still runs`);
-    await realExec("pkill", ["-f", tag]);
-  }
-}
-
-// The timeout and t.after: a test stuck on the search still ends, and kills it as it goes.
-test("Risk 4: pkill stops the search and only the search: the shell and head live to hand over what it found", { timeout: 20_000 }, async (t) => {
-  const tag = newTag(), exec = endlessGit();
+test("Risk 4: pkill stops the search and only the search: the shell and head live to hand over what it found", async () => {
+  const tag = newTag(), { exec, started } = endlessGit();
   assert.match(tag, /^[a-z0-9-]+$/, "safe in a pattern and in a command line");
   const running = readSearch({ root: base, options: options(), tag }, exec);
-  t.after(() => stopSearch(tag, running));
-  assert.equal(await searchStarted(tag), true, "the search started");
+  // The search starts when the machine gets to it: under load, past any fixed wait.
+  await until("the search to start", () => existsSync(started), 10_000);
   const [command, args] = killArgs(tag);
   assert.equal(command, "pkill");
   assert.equal((await realExec(command, args)).code, 0, "it found the process");
@@ -778,13 +769,6 @@ const findAll = (e, kind, out = []) => {
   return out;
 };
 const textOf = (e) => (typeof e === "string" ? e : isEl(e) ? e.kids.map(textOf).filter(Boolean).join(" ") : "");
-const until = async (what, ok) => {
-  for (let i = 0; i < 1000; i++) {
-    if (ok()) return;
-    await new Promise((resolve) => { setTimeout(resolve, 5); });
-  }
-  assert.fail(`never happened: ${what}`);
-};
 
 const { default: CodeExplorer } = await import("../mods/code-explorer/main.js");
 const THEME = new Proxy({}, { get: (_t, k) => String(k) });

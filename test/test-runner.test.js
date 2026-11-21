@@ -3,13 +3,10 @@
 // `--changed` runs the suites a branch touched whole, plus the test files of
 // other suites that name a touched folder as a path; a suite's helper that
 // names one runs its whole suite. The selection is a pure function, tested
-// here without git; the last tests drive the runner itself on a temporary
-// git repo: --changed --list, and runs (one suite after another, a header
-// line before each, a table at the end, the exit code).
-//
-// The folder names of this repo are written here without the slash that
-// follows them in a path, so this file never names a plugin the way D4
-// matches, and doesn't run as a dependent of every plugin.
+// here on fake suites; the last tests drive the runner itself on a temporary
+// repo: --changed --list (on a git one), and runs (one suite after another, a
+// header line before each, a table at the end, the exit code). This repo's
+// own map, who reads whom, is test-deps.test.js.
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
@@ -17,7 +14,7 @@ import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renam
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { ROOT, foldersRead, select, everySuite, namedSuites, findSuites, listLines, headLine, tableLines } from "../scripts/test.mjs";
+import { ROOT, foldersRead, select, everySuite, namedSuites, listLines, headLine, tableLines } from "../scripts/test.mjs";
 
 const repo = fileURLToPath(new URL("..", import.meta.url));
 const RUNNER = join(repo, "scripts/test.mjs");
@@ -178,67 +175,7 @@ test("D5: the table: suite | files | pass | fail | seconds, aligned; a suite wit
   );
 });
 
-// ── This repo's suites and who reads whom (D4's map, S2) ───────────────────
-
-const real = findSuites(repo);
-// A change to a file of that folder, written without the folder's slash.
-const changedIn = (folder) => select([`${folder}/mods/changed.js`], real);
-const filesOf = (plan, name) => plan.find((e) => e.name === name)?.files ?? [];
-const includes = (plan, name, files) => {
-  for (const f of files) assert.ok(filesOf(plan, name).includes(f), `${name} runs ${f}; it runs ${JSON.stringify(filesOf(plan, name))}`);
-};
-
-test("findSuites: root and every plugin with a test folder, root first, each with its test files and helpers", () => {
-  const names = real.map((s) => s.name);
-  assert.equal(names[0], ROOT);
-  for (const name of ["agent-sleep", "claude-accounts", "code-editor", "dia-profiles", "keep-awake", "projects-sidebar", "spotlight"]) assert.ok(names.includes(name), name);
-  assert.deepEqual(names.slice(1), [...names.slice(1)].sort());
-  assert.ok(!names.includes("scripts") && !names.includes("odd") && !names.includes("test"));
-  const root = real[0];
-  assert.equal(root.dir, "");
-  assert.ok(root.files.some((f) => f.path === "test/test-runner.test.js"));
-  assert.ok(root.files.every((f) => /^test\/[^/]+\.test\.js$/.test(f.path) && typeof f.text === "string"));
-  const sleep = real.find((s) => s.name === "agent-sleep");
-  assert.ok(sleep.helpers.some((h) => h.path === "test/harness.js"));
-  assert.ok(sleep.helpers.every((h) => !h.path.endsWith(".test.js")));
-});
-
-test("S2, projects-sidebar changed: spotlight's badges and menus, dia-profiles' open, code-editor's layout tests and the root keys test run", () => {
-  const plan = changedIn("projects-sidebar");
-  assert.equal(plan.find((e) => e.name === "projects-sidebar").why, "changed");
-  includes(plan, "spotlight", ["test/badges-model.test.js", "test/menus-model.test.js"]);
-  includes(plan, "dia-profiles", ["test/dia-profiles-open.test.js"]);
-  includes(plan, "code-editor", ["test/code-editor-install.test.js", "test/code-tabs-model.test.js"]);
-  includes(plan, ROOT, ["test/keys-merge.test.js"]);
-  assert.ok(!filesOf(plan, "spotlight").includes("test/queue.test.js"), "a spotlight file that doesn't read it stays out");
-});
-
-test("S2, claude-accounts changed: agent-sleep runs whole (its harness reads the accounts), spotlight's CLI test runs", () => {
-  const plan = changedIn("claude-accounts");
-  const sleep = plan.find((e) => e.name === "agent-sleep");
-  assert.match(sleep.why, /^test\/harness\.js reads .*claude-accounts\//);
-  assert.equal(sleep.files.length, real.find((s) => s.name === "agent-sleep").files.length);
-  includes(plan, "spotlight", ["test/cli.test.js"]);
-});
-
-test("S2, agent-sleep changed: projects-sidebar's tests that read its keys run", () => {
-  includes(changedIn("agent-sleep"), "projects-sidebar", ["test/agents-sleeping-model.test.js", "test/agents-workspace-model.test.js", "test/new-workspace-model.test.js"]);
-});
-
-test("S2, scripts changed: the root suite and the install tests of code-editor and dia-profiles run", () => {
-  const plan = changedIn("scripts");
-  assert.equal(plan.find((e) => e.name === ROOT).why, "changed");
-  includes(plan, "code-editor", ["test/code-editor-install.test.js"]);
-  includes(plan, "dia-profiles", ["test/dia-profiles-install.test.js"]);
-});
-
-test("S1, keep-awake changed: its suite runs, and none of the suites it doesn't touch", () => {
-  const names = changedIn("keep-awake").map((e) => e.name);
-  assert.equal(names.includes("keep-awake"), true);
-  for (const other of ["agent-sleep", "claude-accounts", "dia-profiles", "spotlight"]) assert.equal(names.includes(other), false, other);
-});
-
-// ── The runner on a temporary git repo (D3, D5, D6) ────────────────────────
+// ── The runner on a temporary repo (D3, D5, D6) ────────────────────────────
 
 // Git must never read the person's config (signing, hooks, default branch)
 // nor a GIT_DIR inherited from a hook that runs these tests; the runner's
@@ -263,8 +200,8 @@ const commitAll = (dir, message) => {
 };
 
 const PASSES = 'import { test } from "node:test";\ntest("one", () => {});\ntest("two", () => {});\n';
-// A repo with this runner in scripts/, three suites and a README, all on
-// main; then a branch `work` checked out.
+// A repo with this runner in scripts/, three suites and a README; no git,
+// which only --changed needs.
 function fakeRepo(extra = {}) {
   const dir = join(scratch, `repo-${++n}`);
   write(dir, {
@@ -280,6 +217,11 @@ function fakeRepo(extra = {}) {
   });
   mkdirSync(join(dir, "scripts"), { recursive: true });
   copyFileSync(RUNNER, join(dir, "scripts/test.mjs"));
+  return dir;
+}
+// The same, for --changed: all on main, then a branch `work` checked out.
+function gitRepo(extra = {}) {
+  const dir = fakeRepo(extra);
   git(dir, "init", "-q", "-b", "main");
   commitAll(dir, "base");
   git(dir, "checkout", "-q", "-b", "work");
@@ -289,7 +231,7 @@ function fakeRepo(extra = {}) {
 const runner = (dir, ...args) => spawnSync(process.execPath, [join(dir, "scripts/test.mjs"), ...args], { cwd: scratch, env: ENV, encoding: "utf8" });
 
 test("D6, --changed --list: the branch's commits, staged, unstaged and untracked files; what reads them; nothing runs", () => {
-  const dir = fakeRepo();
+  const dir = gitRepo();
   write(dir, { "alpha/mods/a.js": "export const a = 2;\n" });
   commitAll(dir, "alpha on the branch");
   const r = runner(dir, "--changed", "--list");
@@ -307,7 +249,7 @@ test("D6, --changed --list: the branch's commits, staged, unstaged and untracked
 });
 
 test("D3: a file moved out of a suite changes both folders; a root *.md alone is nothing to test", () => {
-  const dir = fakeRepo({ "gamma/test/h.test.js": PASSES });
+  const dir = gitRepo({ "gamma/test/h.test.js": PASSES });
   write(dir, { "notes.md": "x\n" });
   const md = runner(dir, "--changed", "--list");
   assert.equal(md.status, 0, md.stderr);
@@ -326,7 +268,7 @@ test("D3: a file moved out of a suite changes both folders; a root *.md alone is
 });
 
 test("D2: --changed <base> diffs against that base; a base that doesn't exist fails with 2", () => {
-  const dir = fakeRepo();
+  const dir = gitRepo();
   write(dir, { "alpha/mods/a.js": "export const a = 2;\n" });
   commitAll(dir, "alpha");
   git(dir, "branch", "alpha-done");
@@ -352,12 +294,12 @@ test("D2: --list alone lists every suite; a named suite that doesn't exist fails
 
 test("D5: a run: suites one after another, a header line before each, dots for passes, a table, exit 0", () => {
   const times = join(scratch, `times-${++n}.txt`);
-  // Each suite's test waits 300 ms between two stamps: overlapping stamps
+  // Each suite's test waits 100 ms between two stamps: overlapping stamps
   // would mean two suites ran at once.
   const timed = (name) =>
-    `import { test } from "node:test";\nimport { appendFileSync } from "node:fs";\ntest("${name}", async () => {\n  appendFileSync(process.env.TIMES, "${name} start " + Date.now() + "\\n");\n  await new Promise((r) => setTimeout(r, 300));\n  appendFileSync(process.env.TIMES, "${name} end " + Date.now() + "\\n");\n});\n`;
+    `import { test } from "node:test";\nimport { appendFileSync } from "node:fs";\nconst TIMES = ${JSON.stringify(times)};\ntest("${name}", async () => {\n  appendFileSync(TIMES, "${name} start " + Date.now() + "\\n");\n  await new Promise((r) => setTimeout(r, 100));\n  appendFileSync(TIMES, "${name} end " + Date.now() + "\\n");\n});\n`;
   const dir = fakeRepo({ "alpha/test/t.test.js": timed("alpha"), "gamma/test/t.test.js": timed("gamma") });
-  const r = spawnSync(process.execPath, [join(dir, "scripts/test.mjs"), "alpha", "gamma"], { cwd: scratch, env: { ...ENV, TIMES: times }, encoding: "utf8" });
+  const r = runner(dir, "alpha", "gamma");
   assert.equal(r.status, 0, r.stdout + r.stderr);
   const lines = r.stdout.trim().split("\n");
   assert.equal(lines[0], "alpha: 2 files, named");
@@ -374,11 +316,22 @@ test("D5: a run: suites one after another, a header line before each, dots for p
 
 test("D5: a failing suite prints its failure in full, the others still run, and the run exits 1", () => {
   const dir = fakeRepo({ "alpha/test/broken.test.js": 'import { test } from "node:test";\nimport assert from "node:assert/strict";\ntest("alpha breaks", () => { assert.equal(1, 2); });\n' });
-  const r = runner(dir);
+  const r = runner(dir, "alpha", "gamma");
   assert.equal(r.status, 1, r.stdout + r.stderr);
   assert.match(r.stdout, /✖ alpha breaks/);
   assert.match(r.stdout, /1 !== 2/);
-  assert.match(r.stdout, /^gamma: 1 file, all suites$/m, "the suites after it still run");
+  assert.match(r.stdout, /^gamma: 1 file, named$/m, "the suites after it still run");
   assert.match(r.stdout, /^alpha +2 +2 +1 +\d+\.\d$/m);
-  assert.match(r.stdout, /^root +1 +2 +0 +\d+\.\d$/m);
+  assert.match(r.stdout, /^gamma +1 +2 +0 +\d+\.\d$/m);
+});
+
+test("D5: a test that leaves something running doesn't hold its suite: the run ends and goes on", () => {
+  const dir = fakeRepo({ "alpha/test/open.test.js": 'import { test } from "node:test";\ntest("leaves a timer", () => { setTimeout(() => {}, 20_000); });\n' });
+  const started = performance.now();
+  const r = runner(dir, "alpha", "gamma");
+  const seconds = (performance.now() - started) / 1000;
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.ok(seconds < 10, `the run waited on the timer: ${seconds.toFixed(1)} s`);
+  assert.match(r.stdout, /^alpha +2 +3 +0 +\d+\.\d$/m);
+  assert.match(r.stdout, /^gamma +1 +2 +0 +\d+\.\d$/m, "the next suite ran");
 });
