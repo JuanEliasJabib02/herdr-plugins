@@ -5,12 +5,16 @@
 #   1. rm -rf odd/check-<task>
 #   2. extracts `git archive HEAD` there, adds the untracked files under the
 #      top folders of the given files (files no commit has yet: a plugin
-#      before its first commit), then the task's own files on top
+#      before its first commit), then the task's own files on top (a given
+#      file that is untracked goes in and counts once, as the task's own)
 #   3. runs there what `npm run test:changed` would for those files, through
 #      the snapshot's `scripts/test.mjs --files`: their suites, and the other
 #      suites' test files that read their folders (scripts/install.sh also
 #      runs code-editor-install and dia-profiles-install). Prints the table
-#      that ends the run, or "nothing to test", which passes
+#      that ends the run, or "nothing to test", which passes. When the runner
+#      ends with another code than 0 or 1 it prints the log's last 20 lines
+#      instead; 2 is the runner rejecting the arguments (a HEAD whose
+#      scripts/test.mjs predates --files)
 #   4. runs scripts/check-views.sh on the snapshot's mod, one line per view
 #   5. exits non-zero on the first failure
 #
@@ -76,10 +80,15 @@ while [ "$i" -gt 0 ]; do
 done
 
 # The folders whose untracked files go in, from the given files, each once
-# (space-separated; folder names have no spaces).
+# (space-separated; folder names have no spaces), and the given files one
+# per line, so an untracked one goes in once, as the task's own.
+nl='
+'
 folders=
+given=
 for f in "$@"; do
   [ "$f" = "--" ] && break
+  given="$given$f$nl"
   case $f in
     */*) folder=${f%%/*} ;;
     *) folder= ;;
@@ -119,6 +128,9 @@ if [ -n "$folders" ]; then
   list=$(git ls-files --others --exclude-standard -- $folders) || fail "git ls-files failed"
   while IFS= read -r f; do
     [ -n "$f" ] || continue
+    case "$nl$given" in
+      *"$nl$f$nl"*) continue ;; # given: copied and counted below
+    esac
     put "$f"
     untracked=$((untracked + 1))
   done <<EOF
@@ -139,9 +151,22 @@ echo "check-snapshot: $task: HEAD $(git rev-parse --short HEAD) + $untracked unt
 log="$snap/check-snapshot.log"
 run_tests "$@" > "$log" 2>&1
 code=$?
-# The lines after the log's last blank one: the table, or "nothing to test".
-awk '/^$/ { n = 0; next } { last[++n] = $0 } END { for (i = 1; i <= n; i++) print last[i] }' "$log"
-[ "$code" -eq 0 ] || fail "a suite failed (exit $code); full output in $log"
+case $code in
+  0 | 1)
+    # The lines after the log's last blank one: the table, or "nothing to test".
+    awk '/^$/ { n = 0; next } { last[++n] = $0 } END { for (i = 1; i <= n; i++) print last[i] }' "$log"
+    [ "$code" -eq 0 ] || fail "a suite failed (exit $code); full output in $log"
+    ;;
+  2)
+    # A usage error: no table, and the reason is in the log's last lines.
+    tail -n 20 "$log"
+    fail "the snapshot's scripts/test.mjs rejected the arguments (exit 2; a HEAD whose runner predates --files?); full output in $log"
+    ;;
+  *)
+    tail -n 20 "$log"
+    fail "the snapshot's scripts/test.mjs failed (exit $code); full output in $log"
+    ;;
+esac
 
 # 4. The views, if any: what follows the --.
 while [ $# -gt 0 ] && [ "$1" != "--" ]; do shift; done

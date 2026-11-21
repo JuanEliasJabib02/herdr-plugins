@@ -547,10 +547,20 @@ printf 'b.js\\0001\\0001\\000needle\\n'
 
 test("Risk 4: pkill stops the search and only the search: the shell and head live to hand over what it found", async (t) => {
   const tag = newTag(), { exec, started } = endlessGit();
-  // A failure before the stop never leaves the shim running out its 30 s.
-  t.after(() => realExec(...killArgs(tag)));
+  let running = null, settled = false;
+  // A failure before the stop never leaves the shim running out its 30 s. The kill
+  // is pkill's own, not killArgs: a broken killArgs fails the test, it can't leave
+  // the shim behind. A search that hasn't settled may start its shim after that
+  // kill, so one more once it settles, or after a second at most.
+  t.after(async () => {
+    await realExec("pkill", ["-f", tag]);
+    if (!running || settled) return;
+    await Promise.race([running.catch(() => {}), new Promise((resolve) => { setTimeout(resolve, 1000); })]);
+    await realExec("pkill", ["-f", tag]);
+  });
   assert.match(tag, /^[a-z0-9-]+$/, "safe in a pattern and in a command line");
-  const running = readSearch({ root: base, options: options(), tag }, exec);
+  running = readSearch({ root: base, options: options(), tag }, exec);
+  running.then(() => { settled = true; }, () => { settled = true; });
   // The search starts when the machine gets to it: under load, past any fixed wait.
   await until("the search to start", () => existsSync(started), 10_000);
   const [command, args] = killArgs(tag);

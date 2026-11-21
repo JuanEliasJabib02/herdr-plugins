@@ -10,7 +10,8 @@
 //                                            and the test files that read it
 //   node scripts/test.mjs --files <path>...  what --changed would run if those
 //                                            repo paths were what changed (no
-//                                            git; a leading ./ is dropped)
+//                                            git; a leading ./ is dropped, a
+//                                            bare folder name is that folder)
 //   add --list to print what would run and why, without running it
 //
 // What changed: the branch's commits, the working tree (staged or not) and
@@ -19,9 +20,16 @@
 // the root suite. A test file of another suite runs too when its code names
 // a changed top-level folder X as a path or a data location: X/ right after
 // a quote, a backtick or a slash (../ included), or X whole between two of
-// the same quote ("X", 'X', `X`: join(app, "X", …)), on a line that doesn't
-// start as a comment. A helper under a suite's test/ that does runs its
-// whole suite.
+// the same quote ("X", 'X', `X`) as an argument after the first: right after
+// a comma and optional spaces, and not followed by optional spaces and a
+// colon (join(app, "X", …) counts; { name: "X" } and { "X": … } don't), on a
+// line that doesn't start as a comment. A helper under a suite's test/ that
+// does runs its whole suite.
+//
+// --files paths are relative to the repo root: an absolute one or one with
+// a .. segment is a usage error. A bare name that is a suite or a folder at
+// the repo root is that folder ("keep-awake" is keep-awake/, "root" the root
+// suite's test/); any other bare name is a file at the root.
 //
 // Suites run one after another, never at once, each from its folder as
 // `node --test --test-reporter=dot <files>`: a pass prints a dot, a failure
@@ -34,7 +42,7 @@
 // usage error.
 
 import { execFileSync, spawn } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -62,13 +70,15 @@ const escape = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 // The folders, of those given, that a file's code names as a path: X/ right
 // after a quote, a backtick or a slash, or X whole between two of the same
-// quote (a folder joined by name), on a line that isn't a comment.
+// quote as a path call's argument (a folder joined by name): right after a
+// comma and any spaces, line breaks included, and not followed by any spaces
+// and a colon (a key). On a line that isn't a comment.
 export function foldersRead(text, folders) {
   const code = text
     .split("\n")
     .filter((line) => !COMMENT.test(line))
     .join("\n");
-  return folders.filter((x) => new RegExp(`["'\`/]${escape(x)}/|(["'\`])${escape(x)}\\1`).test(code));
+  return folders.filter((x) => new RegExp(`["'\`/]${escape(x)}/|,\\s*(["'\`])${escape(x)}\\1(?!\\s*:)`).test(code));
 }
 
 const slashed = (folders) => folders.map((f) => `${f}/`).join(", ");
@@ -225,8 +235,25 @@ async function runSuite(repo, e, tmp) {
   };
 }
 
-// A repo path as given to --files: "./keep-awake/x" is "keep-awake/x".
-const repoPath = (path) => path.replace(/^(\.\/)+/, "");
+// A repo path as given to --files: "./keep-awake/x" is "keep-awake/x". An
+// absolute path, or one with a .. segment, is a usage error.
+function repoPath(given) {
+  const path = given.replace(/^(\.\/)+/, "");
+  if (path.startsWith("/")) throw new UsageError(`--files: ${given} is absolute; give it relative to the repo root`);
+  if (path.split("/").includes("..")) throw new UsageError(`--files: ${given} has a .. segment; give it relative to the repo root, inside it`);
+  return path;
+}
+
+// A bare --files name (no slash) that is a suite or a folder at the repo
+// root, as that folder: "keep-awake" is "keep-awake/". The root suite has
+// no folder of its own name: "root" is its test/, so that "/root/…" in
+// another suite's code doesn't read as it. Any other path, a file at the
+// root included, as it is.
+function asFolder(path, repo, names) {
+  if (path.includes("/") || path === "" || path === ".") return path;
+  if (path === ROOT) return "test/";
+  return names.has(path) || statSync(join(repo, path), { throwIfNoEntry: false })?.isDirectory() ? `${path}/` : path;
+}
 
 function parseArgs(argv) {
   const opts = { list: false, changed: false, base: "main", names: [], files: null };
@@ -255,7 +282,10 @@ async function main(argv, repo) {
     const opts = parseArgs(argv);
     const suites = findSuites(repo);
     if (opts.changed) plan = select(changedFiles(repo, opts.base), suites);
-    else if (opts.files) plan = select(opts.files, suites);
+    else if (opts.files) {
+      const names = new Set(suites.map((s) => s.name));
+      plan = select(opts.files.map((p) => asFolder(p, repo, names)), suites);
+    }
     else if (opts.names.length) plan = namedSuites(opts.names, suites);
     else plan = everySuite(suites);
     if (!plan.length) {

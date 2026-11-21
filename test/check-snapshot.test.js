@@ -135,6 +135,47 @@ test("D7: a failing suite fails the check, and points at the full output", () =>
   assert.equal(existsSync(join(dir, "odd/check-T2/check-snapshot.log")), true);
 });
 
+test("D7: a given file that is also untracked goes in once and counts once, as the task's own", () => {
+  const dir = fakeRepo();
+  write(dir, {
+    "alpha/test/new.test.js": PASSES, // untracked and given
+    "alpha/test/other.test.js": PASSES, // untracked, same folder: in
+  });
+  const r = check(dir, "T8", "./alpha/test/new.test.js");
+  assert.equal(r.status, 0, out(r));
+  assert.match(r.stdout, /^check-snapshot: T8: HEAD \w+ \+ 1 untracked \+ 1 own file\(s\) in odd\/check-T8$/m);
+  assert.match(r.stdout, /^alpha +3 +6 +0 +\d+\.\d$/m);
+  assert.match(r.stdout, /check-snapshot: T8 ok\n$/);
+});
+
+// HEAD's runner replaced by one that prints 30 numbered lines, a blank one,
+// then two last lines, and exits with `code`.
+function oldRunner(code) {
+  const dir = fakeRepo();
+  write(dir, {
+    "scripts/test.mjs": `for (let i = 1; i <= 30; i++) console.log("line " + i);\nconsole.log("");\nconsole.error("test: unknown option --files");\nconsole.error("usage: node scripts/test.mjs [<suite>...]");\nprocess.exitCode = ${code};\n`,
+  });
+  git(dir, "commit", "-q", "-am", "a runner from before --files");
+  return dir;
+}
+
+test("D7: a runner that rejects the arguments (exit 2) says so, with the log's last 20 lines, not a suite failure", () => {
+  const r = check(oldRunner(2), "T9", "alpha/mods/a.js");
+  assert.equal(r.status, 1, out(r));
+  assert.match(r.stdout, /^line 14\n(line \d+\n){16}\ntest: unknown option --files\nusage: node scripts\/test\.mjs \[<suite>\.\.\.\]\n/m, "the last 20 lines");
+  assert.doesNotMatch(r.stdout, /^line 13$/m);
+  assert.match(r.stdout, /check-snapshot: T9: the snapshot's scripts\/test\.mjs rejected the arguments \(exit 2; a HEAD whose runner predates --files\?\); full output in odd\/check-T9\/check-snapshot\.log\n$/);
+  assert.doesNotMatch(r.stdout, /a suite failed/);
+});
+
+test("D7: a runner that ends with another code than 0, 1 or 2 shows the log's last 20 lines too", () => {
+  const r = check(oldRunner(7), "T10", "alpha/mods/a.js");
+  assert.equal(r.status, 1, out(r));
+  assert.match(r.stdout, /^line 14\n(line \d+\n){16}\ntest: unknown option --files\n/m);
+  assert.doesNotMatch(r.stdout, /^line 13$/m);
+  assert.match(r.stdout, /check-snapshot: T10: the snapshot's scripts\/test\.mjs failed \(exit 7\); full output in odd\/check-T10\/check-snapshot\.log\n$/);
+});
+
 test("D7: a task name that isn't letters, digits and dashes, or no file, is a usage error", () => {
   const dir = fakeRepo();
   for (const args of [["a/b", "alpha/mods/a.js"], ["..", "alpha/mods/a.js"], ["T1"], ["T1", "--", "footer"]]) {

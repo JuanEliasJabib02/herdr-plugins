@@ -64,6 +64,9 @@ test("S2, claude-accounts changed: agent-sleep runs whole (its harness reads the
   assert.equal(sleep.files.length, real.find((s) => s.name === "agent-sleep").files.length);
   // resume.test.js builds the plugin's folders as join(app, "claude-accounts", …).
   includes(plan, "spotlight", ["test/cli.test.js", "test/resume.test.js"]);
+  // A space named claude-accounts ({ name: "claude-accounts" }) and the layout's
+  // { mod: "claude-accounts" } block are names, not the plugin's files.
+  assert.equal(filesOf(plan, "projects-sidebar").length, 0, `projects-sidebar runs ${JSON.stringify(filesOf(plan, "projects-sidebar"))}`);
 });
 
 test("S2, agent-sleep changed: projects-sidebar's tests that read its keys run, and claude-accounts' restart test that reads its sleeping.json", () => {
@@ -77,9 +80,10 @@ test("S2, code-editor, dia-profiles or keep-awake changed: what reads them is th
   const expected = {
     "code-editor/": { [ROOT]: ["test/test-deps.test.js"] },
     "dia-profiles/": { [ROOT]: ["test/test-deps.test.js"] },
-    // The installer brings keep-awake through projects-sidebar's requires; the
-    // smoke test checks the layout's keep-awake block.
-    "keep-awake/": { [ROOT]: ["test/install.test.js", "test/test-deps.test.js"], "projects-sidebar": ["test/smoke.test.js"] },
+    // The installer brings keep-awake through projects-sidebar's requires
+    // (manifest(home, "keep-awake")). projects-sidebar's smoke test checks its
+    // own layout's { mod: "keep-awake" } block: a name, not keep-awake's files.
+    "keep-awake/": { [ROOT]: ["test/install.test.js", "test/test-deps.test.js"] },
   };
   for (const [folder, readers] of Object.entries(expected)) assert.deepEqual(readersOf(changedIn(folder)), readers, folder);
 });
@@ -89,6 +93,8 @@ test("S2, scripts changed: the root suite and the install tests of code-editor a
   assert.equal(plan.find((e) => e.name === ROOT).why, "changed");
   includes(plan, "code-editor", ["test/code-editor-install.test.js"]);
   includes(plan, "dia-profiles", ["test/dia-profiles-install.test.js"]);
+  // server-plan.test.js writes a package.json with a "scripts" key: not scripts/.
+  assert.equal(filesOf(plan, "spotlight").length, 0, `spotlight runs ${JSON.stringify(filesOf(plan, "spotlight"))}`);
 });
 
 test("S1, keep-awake changed: its suite runs, and none of the suites it doesn't touch", () => {

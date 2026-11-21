@@ -76,9 +76,33 @@ test("D4: X/ counts right after a double or single quote, a backtick, ../ or /",
   }
 });
 
-test("D4: X whole between two of the same quote counts too: a folder joined by name", () => {
-  for (const text of ['join(box, "alpha", "x.json")', "{ mod: 'alpha' }", "`alpha`", 'join(app, "mods", "alpha", "bin")']) {
+test("D4: X whole between two of the same quote counts too as a path call's argument: right after a comma", () => {
+  for (const text of [
+    'join(box, "alpha", "x.json")',
+    "join(app, 'alpha')",
+    'join(app,"alpha")',
+    "join(app, `alpha`)",
+    'join(app, "mods", "alpha", "bin")',
+    'run(INSTALL, home, "--no-keys",   "alpha")',
+  ]) {
     assert.deepEqual(foldersRead(`const p = ${text};\n`, ["alpha"]), ["alpha"], text);
+  }
+  assert.deepEqual(foldersRead('const p = join(\n  app,\n  "alpha",\n);\n', ["alpha"]), ["alpha"], "an argument on a line of its own");
+});
+
+test("D4: X whole between quotes as a key, a key's value or alone doesn't count: a name, not a path", () => {
+  for (const text of [
+    '{ name: "alpha" }',
+    "{ id: 's2', mod: 'alpha' }",
+    '{ "alpha": { "dev": 1 } }',
+    '{ x: 1, "alpha": 2 }',
+    '{ x: 1, "alpha" : 2 }',
+    '"alpha"',
+    "`alpha`",
+    '["alpha"]',
+    'list.includes("alpha")',
+  ]) {
+    assert.deepEqual(foldersRead(`const p = ${text};\n`, ["alpha"]), [], text);
   }
 });
 
@@ -318,6 +342,34 @@ test("D2, --files: the given repo paths select as --changed would, without git; 
   assert.equal(run.status, 0, run.stdout + run.stderr);
   assert.match(run.stdout, /^alpha: 1 file, changed$/m);
   assert.match(run.stdout, /^beta +1 +2 +0 +\d+\.\d$/m, "it runs what it lists");
+});
+
+test("D2, --files: a bare name that is a suite or a folder of the repo is that folder; a root file stays a root file", () => {
+  const dir = fakeRepo({ "docs/notes.md": "# notes\n", "scripts/install.sh": "#!/bin/sh\n", "gamma/test/home.test.js": `const HOME = "/root/x";\n${PASSES}` });
+  const lines = (...args) => runner(dir, ...args).stdout.trim().split("\n");
+  assert.deepEqual(lines("--files", "alpha", "--list"), ["alpha: 1 file, changed", "beta: 1 file, it reads alpha/", "  test/reads.test.js reads alpha/"]);
+  assert.deepEqual(lines("--files", "./gamma", "--list"), ["gamma: 2 files, changed"], "./ in front too");
+  assert.deepEqual(lines("--files", "docs", "--list"), ["nothing to test"], "a folder that isn't a suite, as docs/");
+  assert.deepEqual(lines("--files", "scripts", "--list"), ["root: 1 file, changed"]);
+  // No folder is named root: "/root/x" in gamma's test isn't the root suite.
+  assert.deepEqual(lines("--files", "root", "--list"), ["root: 1 file, changed"], "the root suite by its name, alone");
+  assert.deepEqual(lines("--files", "package.json", "--list"), ["root: 1 file, changed"], "a file at the root");
+});
+
+test("D2, --files: an absolute path or one with a .. segment fails with 2 and says why", () => {
+  const dir = fakeRepo();
+  for (const [path, why] of [
+    ["/abs/alpha/x.js", /^test: --files: \/abs\/alpha\/x\.js is absolute; give it relative to the repo root$/m],
+    [`${dir}/alpha/mods/a.js`, /is absolute; give it relative to the repo root$/m],
+    ["../x", /^test: --files: \.\.\/x has a \.\. segment; give it relative to the repo root, inside it$/m],
+    ["alpha/../../x", /^test: --files: alpha\/\.\.\/\.\.\/x has a \.\. segment/m],
+    ["./..", /^test: --files: \.\/\.\. has a \.\. segment/m],
+  ]) {
+    const r = runner(dir, "--files", "alpha/mods/a.js", path, "--list");
+    assert.equal(r.status, 2, `${path}: ${r.stdout}${r.stderr}`);
+    assert.match(r.stderr, why, path);
+    assert.equal(r.stdout, "", `${path}: nothing listed`);
+  }
 });
 
 test("D2, --files: no path, or with --changed or suite names, fails with 2", () => {
