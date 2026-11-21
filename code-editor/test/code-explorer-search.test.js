@@ -529,11 +529,37 @@ while :; do sleep 0.05; done
   return (command, args, opts = {}) => realExec(command, args, { ...opts, env });
 }
 
-test("Risk 4: pkill stops the search and only the search: the shell and head live to hand over what it found", async () => {
+const pause = (ms) => new Promise((resolve) => { setTimeout(resolve, ms); });
+
+// The search starts when the machine gets to it: under load, past any fixed wait. So
+// the test polls until a process runs under the tag, or the deadline passes.
+async function searchStarted(tag, deadline = 10_000) {
+  const end = Date.now() + deadline;
+  while (Date.now() < end) {
+    if ((await realExec("pgrep", ["-f", tag])).code === 0) return true;
+    await pause(20);
+  }
+  return false;
+}
+
+// Kills what runs under the tag until the search hands back: a shim left running holds
+// the file open forever, and one can start after its test gave up on it. Plain pkill,
+// not killArgs, so the cleanup doesn't depend on the code under test.
+async function stopSearch(tag, running, deadline = 10_000) {
+  const ended = running.then(() => true, () => true), end = Date.now() + deadline;
+  while (!(await Promise.race([ended, pause(50).then(() => false)]))) {
+    if (Date.now() > end) throw new Error(`the search under ${tag} still runs`);
+    await realExec("pkill", ["-f", tag]);
+  }
+}
+
+// The timeout and t.after: a test stuck on the search still ends, and kills it as it goes.
+test("Risk 4: pkill stops the search and only the search: the shell and head live to hand over what it found", { timeout: 20_000 }, async (t) => {
   const tag = newTag(), exec = endlessGit();
   assert.match(tag, /^[a-z0-9-]+$/, "safe in a pattern and in a command line");
   const running = readSearch({ root: base, options: options(), tag }, exec);
-  await new Promise((resolve) => { setTimeout(resolve, 300); });
+  t.after(() => stopSearch(tag, running));
+  assert.equal(await searchStarted(tag), true, "the search started");
   const [command, args] = killArgs(tag);
   assert.equal(command, "pkill");
   assert.equal((await realExec(command, args)).code, 0, "it found the process");
