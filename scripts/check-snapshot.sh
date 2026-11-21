@@ -6,10 +6,11 @@
 #   2. extracts `git archive HEAD` there, adds the untracked files under the
 #      top folders of the given files (files no commit has yet: a plugin
 #      before its first commit), then the task's own files on top
-#   3. runs the suites of those files there, through the snapshot's
-#      scripts/test.mjs: each file's top folder, and root for a file in
-#      scripts/, in the root test/ or at the root; once each, in the order
-#      given. Prints the table that ends the run
+#   3. runs there what `npm run test:changed` would for those files, through
+#      the snapshot's `scripts/test.mjs --files`: their suites, and the other
+#      suites' test files that read their folders (scripts/install.sh also
+#      runs code-editor-install and dia-profiles-install). Prints the table
+#      that ends the run, or "nothing to test", which passes
 #   4. runs scripts/check-views.sh on the snapshot's mod, one line per view
 #   5. exits non-zero on the first failure
 #
@@ -18,7 +19,9 @@
 #   scripts/check-snapshot.sh T1 claude-accounts/test/claude-accounts-smoke.test.js -- footer popup
 #
 # The task is letters, digits and dashes. Files are relative to the repo
-# root, at least one. Only untracked files are added under those folders:
+# root (a leading ./ is dropped), at least one. A top folder that isn't a
+# suite still adds its untracked files. Only untracked files are added under
+# those folders:
 # another task's edits to a committed file stay out. The views belong to
 # $CHECK_MOD (default claude-accounts/mods/claude-accounts). The
 # check-views.sh that runs is this checkout's, so a new one works before its
@@ -51,9 +54,29 @@ put() {
   mkdir -p "$snap/$(dirname "$1")" && cp -p "$1" "$snap/$1" || fail "couldn't copy $1"
 }
 
-# The suites to run and the folders whose untracked files go in, from the
-# given files, each once (space-separated; folder names have no spaces).
-suites=
+# The given files without a leading ./ ("./keep-awake/x" is keep-awake/x:
+# its folder is keep-awake, never "."), the views after the -- as given.
+i=$#
+in_views=0
+while [ "$i" -gt 0 ]; do
+  a=$1
+  shift
+  i=$((i - 1))
+  if [ "$in_views" -eq 0 ] && [ "$a" != "--" ]; then
+    while :; do
+      case $a in
+        ./*) a=${a#./} ;;
+        *) break ;;
+      esac
+    done
+  else
+    in_views=1
+  fi
+  set -- "$@" "$a"
+done
+
+# The folders whose untracked files go in, from the given files, each once
+# (space-separated; folder names have no spaces).
 folders=
 for f in "$@"; do
   [ "$f" = "--" ] && break
@@ -62,20 +85,29 @@ for f in "$@"; do
     *) folder= ;;
   esac
   case $folder in
-    '' | scripts | test) suite=root ;;
-    *) suite=$folder ;;
+    '' | . | ..) continue ;;
   esac
-  case " $suites " in
-    *" $suite "*) ;;
-    *) suites="$suites $suite" ;;
+  case " $folders " in
+    *" $folder "*) ;;
+    *) folders="$folders $folder" ;;
   esac
-  if [ -n "$folder" ]; then
-    case " $folders " in
-      *" $folder "*) ;;
-      *) folders="$folders $folder" ;;
-    esac
-  fi
 done
+
+# The snapshot's runner on the given files: "$@" up to its --.
+run_tests() {
+  i=$#
+  while [ "$i" -gt 0 ]; do
+    a=$1
+    shift
+    i=$((i - 1))
+    if [ "$a" = "--" ]; then
+      shift "$i"
+      break
+    fi
+    set -- "$@" "$a"
+  done
+  node "$snap/scripts/test.mjs" --files "$@"
+}
 
 rm -rf "$snap"
 mkdir -p "$snap"
@@ -95,25 +127,25 @@ EOF
 fi
 
 own=0
-while [ $# -gt 0 ] && [ "$1" != "--" ]; do
-  put "$1"
+for f in "$@"; do
+  [ "$f" = "--" ] && break
+  put "$f"
   own=$((own + 1))
-  shift
 done
-[ $# -gt 0 ] && shift
 echo "check-snapshot: $task: HEAD $(git rev-parse --short HEAD) + $untracked untracked + $own own file(s) in $snap"
 
-# 3. The suites, in the snapshot: its own runner finds its own repo.
+# 3. What --changed would run for those files, in the snapshot: its own
+# runner finds its own repo.
 log="$snap/check-snapshot.log"
-# Unquoted: one argument per suite.
-node "$snap/scripts/test.mjs" $suites > "$log" 2>&1
+run_tests "$@" > "$log" 2>&1
 code=$?
-count=0
-for s in $suites; do count=$((count + 1)); done
-tail -n $((count + 1)) "$log"
+# The lines after the log's last blank one: the table, or "nothing to test".
+awk '/^$/ { n = 0; next } { last[++n] = $0 } END { for (i = 1; i <= n; i++) print last[i] }' "$log"
 [ "$code" -eq 0 ] || fail "a suite failed (exit $code); full output in $log"
 
-# 4. The views, if any.
+# 4. The views, if any: what follows the --.
+while [ $# -gt 0 ] && [ "$1" != "--" ]; do shift; done
+[ $# -gt 0 ] && shift
 if [ $# -gt 0 ]; then
   "$repo/scripts/check-views.sh" "$mod" "$@" || fail "a view check failed"
 fi

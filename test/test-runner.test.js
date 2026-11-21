@@ -76,12 +76,23 @@ test("D4: X/ counts right after a double or single quote, a backtick, ../ or /",
   }
 });
 
-test("D4: a name without its slash, inside another word, or on a comment line doesn't count", () => {
+test("D4: X whole between two of the same quote counts too: a folder joined by name", () => {
+  for (const text of ['join(box, "alpha", "x.json")', "{ mod: 'alpha' }", "`alpha`", 'join(app, "mods", "alpha", "bin")']) {
+    assert.deepEqual(foldersRead(`const p = ${text};\n`, ["alpha"]), ["alpha"], text);
+  }
+});
+
+test("D4: a name without its slash or its quotes, inside another word, or on a comment line doesn't count", () => {
   for (const text of [
-    'const p = join(box, "alpha", "x.json");',
+    'const p = "alpha-beta";',
+    "const p = 'alphas';",
+    'const p = "alpha.json";',
+    "const p = \"alpha';",
+    "const p = `${alpha}`;",
     'const p = "xalpha/y";',
     "const p = alpha/2;",
     "// reads ../alpha/x",
+    '  // join(box, "alpha", "x.json")',
     "   * see `alpha/RECIPE.md`",
     "/* the ../alpha/ folder */",
     "# cat $HOME/alpha/x",
@@ -163,13 +174,13 @@ test("D5: the table: suite | files | pass | fail | seconds, aligned; a suite wit
   assert.deepEqual(
     tableLines([
       { name: ROOT, files: 2, pass: 47, fail: 0, seconds: 4.04 },
-      { name: "projects-sidebar", files: 14, pass: 513, fail: 2, seconds: 12.3 },
+      { name: "the-longest-name", files: 14, pass: 513, fail: 2, seconds: 12.3 },
       { name: "gamma", files: 1, pass: null, fail: null, seconds: 0.25 },
     ]),
     [
       "suite             files  pass  fail  seconds",
       "root                  2    47     0      4.0",
-      "projects-sidebar     14   513     2     12.3",
+      "the-longest-name     14   513     2     12.3",
       "gamma                 1     ?     ?      0.3",
     ],
   );
@@ -290,6 +301,32 @@ test("D2: --list alone lists every suite; a named suite that doesn't exist fails
   assert.match(bad.stderr, /no suite named nope; suites: root, alpha, beta, gamma/);
   const mixed = runner(dir, "--changed", "main", "alpha");
   assert.equal(mixed.status, 2, "--changed takes one base, not suite names");
+});
+
+test("D2, --files: the given repo paths select as --changed would, without git; ./ in front is the same path", () => {
+  const dir = fakeRepo({ "gamma/test/install.test.js": `const INSTALL = "../../scripts/install.sh";\n${PASSES}` });
+  const lines = (...args) => runner(dir, ...args).stdout.trim().split("\n");
+  assert.deepEqual(lines("--files", "scripts/install.sh", "--list"), ["root: 1 file, changed", "gamma: 1 file, it reads scripts/", "  test/install.test.js reads scripts/"]);
+  assert.deepEqual(lines("--list", "--files", "./alpha/mods/a.js", "gamma/x.js"), [
+    "alpha: 1 file, changed",
+    "beta: 1 file, it reads alpha/",
+    "  test/reads.test.js reads alpha/",
+    "gamma: 2 files, changed",
+  ]);
+  assert.deepEqual(lines("--files", "README.md", "docs/notes.txt"), ["nothing to test"]);
+  const run = runner(dir, "--files", "alpha/mods/a.js");
+  assert.equal(run.status, 0, run.stdout + run.stderr);
+  assert.match(run.stdout, /^alpha: 1 file, changed$/m);
+  assert.match(run.stdout, /^beta +1 +2 +0 +\d+\.\d$/m, "it runs what it lists");
+});
+
+test("D2, --files: no path, or with --changed or suite names, fails with 2", () => {
+  const dir = fakeRepo();
+  for (const args of [["--files"], ["--files", "--list"], ["--files", "alpha/x", "--changed"], ["alpha", "--files", "alpha/x"]]) {
+    const r = runner(dir, ...args);
+    assert.equal(r.status, 2, `${args.join(" ")}: ${r.stdout}${r.stderr}`);
+    assert.match(r.stderr, /^test: --files takes /, args.join(" "));
+  }
 });
 
 test("D5: a run: suites one after another, a header line before each, dots for passes, a table, exit 0", () => {

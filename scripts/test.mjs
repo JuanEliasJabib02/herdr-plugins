@@ -8,6 +8,9 @@
 //   node scripts/test.mjs --changed [<base>] what the branch touched since its
 //                                            merge base with <base> (main),
 //                                            and the test files that read it
+//   node scripts/test.mjs --files <path>...  what --changed would run if those
+//                                            repo paths were what changed (no
+//                                            git; a leading ./ is dropped)
 //   add --list to print what would run and why, without running it
 //
 // What changed: the branch's commits, the working tree (staged or not) and
@@ -15,7 +18,8 @@
 // file in scripts/, in the root test/ or at the root (but a root *.md) runs
 // the root suite. A test file of another suite runs too when its code names
 // a changed top-level folder X as a path or a data location: X/ right after
-// a quote, a backtick or a slash (../ included), on a line that doesn't
+// a quote, a backtick or a slash (../ included), or X whole between two of
+// the same quote ("X", 'X', `X`: join(app, "X", …)), on a line that doesn't
 // start as a comment. A helper under a suite's test/ that does runs its
 // whole suite.
 //
@@ -38,7 +42,7 @@ import { fileURLToPath } from "node:url";
 export const ROOT = "root";
 // The root suite's folders: a change in them runs it.
 const ROOT_FOLDERS = new Set(["scripts", "test"]);
-const USAGE = "usage: node scripts/test.mjs [<suite>... | --changed [<base>]] [--list]";
+const USAGE = "usage: node scripts/test.mjs [<suite>... | --changed [<base>] | --files <path>...] [--list]";
 
 class UsageError extends Error {}
 
@@ -57,20 +61,21 @@ const COMMENT = /^\s*(\/\/|\/\*|\*|#)/;
 const escape = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 // The folders, of those given, that a file's code names as a path: X/ right
-// after a quote, a backtick or a slash, on a line that isn't a comment.
+// after a quote, a backtick or a slash, or X whole between two of the same
+// quote (a folder joined by name), on a line that isn't a comment.
 export function foldersRead(text, folders) {
   const code = text
     .split("\n")
     .filter((line) => !COMMENT.test(line))
     .join("\n");
-  return folders.filter((x) => new RegExp(`["'\`/]${escape(x)}/`).test(code));
+  return folders.filter((x) => new RegExp(`["'\`/]${escape(x)}/|(["'\`])${escape(x)}\\1`).test(code));
 }
 
 const slashed = (folders) => folders.map((f) => `${f}/`).join(", ");
 const entry = (suite, files, why, reads = null) => ({ name: suite.name, dir: suite.dir, files, why, reads });
 const allFiles = (suite) => suite.files.map((f) => f.path);
 
-// What --changed runs, from the changed repo paths and the suites as
+// What --changed (and --files) runs, from the changed repo paths and the suites as
 // findSuites reads them ({ name, dir, files: [{ path, text }], helpers:
 // [{ path, text }] }, paths relative to dir), in the suites' order:
 // [{ name, dir, files, why, reads }]. reads is null when the whole suite
@@ -220,18 +225,27 @@ async function runSuite(repo, e, tmp) {
   };
 }
 
+// A repo path as given to --files: "./keep-awake/x" is "keep-awake/x".
+const repoPath = (path) => path.replace(/^(\.\/)+/, "");
+
 function parseArgs(argv) {
-  const opts = { list: false, changed: false, base: "main", names: [] };
+  const opts = { list: false, changed: false, base: "main", names: [], files: null };
+  const next = (i) => argv[i + 1] !== undefined && !argv[i + 1].startsWith("-");
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--list") opts.list = true;
     else if (a === "--changed") {
       opts.changed = true;
-      if (argv[i + 1] !== undefined && !argv[i + 1].startsWith("-")) opts.base = argv[++i];
+      if (next(i)) opts.base = argv[++i];
+    } else if (a === "--files") {
+      opts.files ??= [];
+      while (next(i)) opts.files.push(repoPath(argv[++i]));
     } else if (a.startsWith("-")) throw new UsageError(`unknown option ${a}`);
     else opts.names.push(a);
   }
   if (opts.changed && opts.names.length) throw new UsageError("--changed takes one base, not suite names");
+  if (opts.files && !opts.files.length) throw new UsageError("--files takes at least one path");
+  if (opts.files && (opts.changed || opts.names.length)) throw new UsageError("--files takes repo paths, not --changed or suite names");
   return opts;
 }
 
@@ -241,6 +255,7 @@ async function main(argv, repo) {
     const opts = parseArgs(argv);
     const suites = findSuites(repo);
     if (opts.changed) plan = select(changedFiles(repo, opts.base), suites);
+    else if (opts.files) plan = select(opts.files, suites);
     else if (opts.names.length) plan = namedSuites(opts.names, suites);
     else plan = everySuite(suites);
     if (!plan.length) {

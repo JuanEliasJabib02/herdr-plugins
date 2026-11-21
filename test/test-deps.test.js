@@ -17,6 +17,8 @@ const PLUGINS = ["agent-sleep/", "claude-accounts/", "code-editor/", "dia-profil
 // A change to a file of that folder ("keep-awake/").
 const changedIn = (folder) => select([`${folder}mods/changed.js`], real);
 const filesOf = (plan, name) => plan.find((e) => e.name === name)?.files ?? [];
+// The other suites' files that run because they read the change: { suite: files }.
+const readersOf = (plan) => Object.fromEntries(plan.filter((e) => e.why !== "changed").map((e) => [e.name, e.files]));
 const includes = (plan, name, files) => {
   for (const f of files) assert.ok(filesOf(plan, name).includes(f), `${name} runs ${f}; it runs ${JSON.stringify(filesOf(plan, name))}`);
 };
@@ -44,26 +46,42 @@ test("a change in any plugin runs this file, and not test-runner's", () => {
   }
 });
 
-test("S2, projects-sidebar changed: spotlight's badges and menus, dia-profiles' open, code-editor's layout tests and the root keys test run", () => {
+test("S2, projects-sidebar changed: spotlight's badges and menus, dia-profiles' open, code-editor's layout tests, the root keys test and the installer's run", () => {
   const plan = changedIn("projects-sidebar/");
   assert.equal(plan.find((e) => e.name === "projects-sidebar").why, "changed");
   includes(plan, "spotlight", ["test/badges-model.test.js", "test/menus-model.test.js"]);
   includes(plan, "dia-profiles", ["test/dia-profiles-open.test.js"]);
   includes(plan, "code-editor", ["test/code-editor-install.test.js", "test/code-tabs-model.test.js"]);
-  includes(plan, ROOT, ["test/keys-merge.test.js"]);
+  // install.test.js installs the real plugin: run(INSTALL, home, "--no-keys", "projects-sidebar").
+  includes(plan, ROOT, ["test/keys-merge.test.js", "test/install.test.js"]);
   assert.ok(!filesOf(plan, "spotlight").includes("test/queue.test.js"), "a spotlight file that doesn't read it stays out");
 });
 
-test("S2, claude-accounts changed: agent-sleep runs whole (its harness reads the accounts), spotlight's CLI test runs", () => {
+test("S2, claude-accounts changed: agent-sleep runs whole (its harness reads the accounts), spotlight's CLI and resume tests run", () => {
   const plan = changedIn("claude-accounts/");
   const sleep = plan.find((e) => e.name === "agent-sleep");
   assert.match(sleep.why, /^test\/harness\.js reads .*claude-accounts\//);
   assert.equal(sleep.files.length, real.find((s) => s.name === "agent-sleep").files.length);
-  includes(plan, "spotlight", ["test/cli.test.js"]);
+  // resume.test.js builds the plugin's folders as join(app, "claude-accounts", …).
+  includes(plan, "spotlight", ["test/cli.test.js", "test/resume.test.js"]);
 });
 
-test("S2, agent-sleep changed: projects-sidebar's tests that read its keys run", () => {
-  includes(changedIn("agent-sleep/"), "projects-sidebar", ["test/agents-sleeping-model.test.js", "test/agents-workspace-model.test.js", "test/new-workspace-model.test.js"]);
+test("S2, agent-sleep changed: projects-sidebar's tests that read its keys run, and claude-accounts' restart test that reads its sleeping.json", () => {
+  const plan = changedIn("agent-sleep/");
+  includes(plan, "projects-sidebar", ["test/agents-sleeping-model.test.js", "test/agents-workspace-model.test.js", "test/new-workspace-model.test.js"]);
+  // join(box, "agent-sleep", "sleeping.json")
+  includes(plan, "claude-accounts", ["test/claude-accounts-restart.test.js"]);
+});
+
+test("S2, code-editor, dia-profiles or keep-awake changed: what reads them is the layout and the installer, nothing else", () => {
+  const expected = {
+    "code-editor/": { [ROOT]: ["test/test-deps.test.js"] },
+    "dia-profiles/": { [ROOT]: ["test/test-deps.test.js"] },
+    // The installer brings keep-awake through projects-sidebar's requires; the
+    // smoke test checks the layout's keep-awake block.
+    "keep-awake/": { [ROOT]: ["test/install.test.js", "test/test-deps.test.js"], "projects-sidebar": ["test/smoke.test.js"] },
+  };
+  for (const [folder, readers] of Object.entries(expected)) assert.deepEqual(readersOf(changedIn(folder)), readers, folder);
 });
 
 test("S2, scripts changed: the root suite and the install tests of code-editor and dia-profiles run", () => {

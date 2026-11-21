@@ -91,9 +91,10 @@ whose `main.js` defaults to it.
 `scripts/install.sh claude-accounts` installs the other plugin. Its views are
 checked with `scripts/check-views.sh claude-accounts/mods/claude-accounts
 footer popup panel accounts confirm details`, which makes such a copy per
-view. `scripts/check-snapshot.sh <task> <files…> [-- <views…>]` runs the
-given files' suites and those checks on `HEAD` plus those files, so tasks
-that share a worktree don't check each other's unfinished edits.
+view. `scripts/check-snapshot.sh <task> <files…> [-- <views…>]` runs what
+`test:changed` would for the given files (`scripts/test.mjs --files`) and
+those checks on `HEAD` plus those files, so tasks that share a worktree
+don't check each other's unfinished edits.
 
 ### Tests
 
@@ -101,6 +102,7 @@ that share a worktree don't check each other's unfinished edits.
 npm test                                   # every suite, one after another
 npm run test:changed [-- <base>]           # what the branch touched since main (or <base>), and what reads it
 node scripts/test.mjs <plugin>...          # the named suites (root for the root test/)
+node scripts/test.mjs --files <path>...    # what test:changed would run if those files were the change
 node scripts/test.mjs --changed --list     # what would run, without running
 ```
 

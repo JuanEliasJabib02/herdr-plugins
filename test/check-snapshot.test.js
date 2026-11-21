@@ -35,8 +35,9 @@ const write = (dir, files) => {
 };
 const git = (dir, ...args) => execFileSync("git", args, { cwd: dir, env: ENV, encoding: "utf8", stdio: "pipe" });
 
-// A committed repo with both scripts, the root suite and two plugins.
-function fakeRepo() {
+// A committed repo with both scripts, the root suite and two plugins, plus
+// `extra` files.
+function fakeRepo(extra = {}) {
   const dir = join(scratch, `repo-${++n}`);
   write(dir, {
     ".gitignore": "odd/\n",
@@ -45,8 +46,9 @@ function fakeRepo() {
     "alpha/mods/a.js": "export const a = 1;\n",
     "alpha/test/a.test.js": PASSES,
     "beta/test/b.test.js": PASSES,
+    ...extra,
   });
-  mkdirSync(join(dir, "scripts"));
+  mkdirSync(join(dir, "scripts"), { recursive: true });
   for (const name of ["check-snapshot.sh", "test.mjs"]) copyFileSync(join(repo, "scripts", name), join(dir, "scripts", name));
   chmodSync(join(dir, "scripts/check-snapshot.sh"), 0o755);
   git(dir, "init", "-q", "-b", "main");
@@ -74,7 +76,7 @@ test("D7: a plugin's file runs that plugin's suite, with the untracked files of 
   assert.match(r.stdout, /check-snapshot: T1 ok\n$/);
 });
 
-test("D7: scripts/, the root test/ and a root file run the root suite; suites run once each, in the order given", () => {
+test("D7: scripts/, the root test/ and a root file run the root suite; suites run once each, root first", () => {
   const dir = fakeRepo();
   write(dir, { "test/extra.test.js": PASSES }); // untracked, in test/: in
   const r = check(dir, "simplify-check", "package.json", "beta/test/b.test.js", "test/root.test.js", "scripts/test.mjs");
@@ -82,6 +84,45 @@ test("D7: scripts/, the root test/ and a root file run the root suite; suites ru
   assert.match(r.stdout, /\+ 1 untracked \+ 4 own file\(s\)/);
   assert.match(r.stdout, /^suite +files +pass +fail +seconds\nroot +2 +4 +0 +\d+\.\d\nbeta +1 +2 +0 +\d+\.\d\n/m);
   assert.match(r.stdout, /check-snapshot: simplify-check ok\n$/);
+});
+
+test("D7: the snapshot runs what --changed would for the given files: a changed scripts/ also runs the other suites' files that use it", () => {
+  const dir = fakeRepo({
+    "scripts/install.sh": "#!/bin/sh\n",
+    "beta/test/install.test.js": `const INSTALL = "../../scripts/install.sh";\n${PASSES}`,
+  });
+  write(dir, { "scripts/install.sh": "#!/bin/sh\nexit 0\n" });
+  const r = check(dir, "T4", "scripts/install.sh");
+  assert.equal(r.status, 0, out(r));
+  assert.match(r.stdout, /^suite +files +pass +fail +seconds\nroot +1 +2 +0 +\d+\.\d\nbeta +1 +2 +0 +\d+\.\d\n/m, "root whole, beta's install test alone");
+  assert.doesNotMatch(r.stdout, /^alpha /m);
+  assert.match(r.stdout, /check-snapshot: T4 ok\n$/);
+});
+
+test("D7: ./ in front of a file is the same file: its folder's untracked files only, never every untracked file", () => {
+  const dir = fakeRepo();
+  write(dir, {
+    "alpha/mods/a.js": "export const a = 2;\n",
+    "alpha/test/new.test.js": PASSES, // untracked, same folder: in
+    "beta/test/new.test.js": FAILS, // untracked, another folder: out
+  });
+  const r = check(dir, "T5", "./alpha/mods/a.js");
+  assert.equal(r.status, 0, out(r));
+  assert.match(r.stdout, /\+ 1 untracked \+ 1 own file\(s\)/);
+  assert.match(r.stdout, /^alpha +2 +4 +0 +\d+\.\d$/m);
+  assert.equal(existsSync(join(dir, "odd/check-T5/beta/test/new.test.js")), false);
+  assert.equal(existsSync(join(dir, "odd/check-T5/alpha/mods/a.js")), true);
+  assert.match(r.stdout, /check-snapshot: T5 ok\n$/);
+});
+
+test("D7: a folder with no test/ adds its untracked files, and nothing to test is a pass", () => {
+  const dir = fakeRepo({ "docs/notes.md": "# notes\n" });
+  write(dir, { "docs/notes.md": "# notes, edited\n", "docs/more.md": "# more\n" });
+  const r = check(dir, "T6", "docs/notes.md");
+  assert.equal(r.status, 0, out(r));
+  assert.match(r.stdout, /\+ 1 untracked \+ 1 own file\(s\)/, "docs/more.md");
+  assert.equal(existsSync(join(dir, "odd/check-T6/docs/more.md")), true);
+  assert.match(r.stdout, /^nothing to test\ncheck-snapshot: T6 ok\n$/m);
 });
 
 test("D7: a failing suite fails the check, and points at the full output", () => {

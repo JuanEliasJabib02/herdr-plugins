@@ -545,8 +545,10 @@ printf 'b.js\\0001\\0001\\000needle\\n'
   return { exec: (command, args, opts = {}) => realExec(command, args, { ...opts, env }), started: join(dir, "started") };
 }
 
-test("Risk 4: pkill stops the search and only the search: the shell and head live to hand over what it found", async () => {
+test("Risk 4: pkill stops the search and only the search: the shell and head live to hand over what it found", async (t) => {
   const tag = newTag(), { exec, started } = endlessGit();
+  // A failure before the stop never leaves the shim running out its 30 s.
+  t.after(() => realExec(...killArgs(tag)));
   assert.match(tag, /^[a-z0-9-]+$/, "safe in a pattern and in a command line");
   const running = readSearch({ root: base, options: options(), tag }, exec);
   // The search starts when the machine gets to it: under load, past any fixed wait.
