@@ -78,7 +78,7 @@ branch named like the workspace. Change `WORKTREE_ROOT` in
 ## Develop
 
 ```sh
-npm test                                              # pure logic, node --test
+npm run test:changed                                  # what the branch touched, and what reads it
 herdr-app check "$PWD/projects-sidebar/mods/projects" # the mod loads
 scripts/install.sh --no-keys                          # copy your edits into Herdr
 ```
@@ -94,3 +94,27 @@ footer popup panel accounts confirm details`, which makes such a copy per
 view. `scripts/check-snapshot.sh <task> <files…> [-- <views…>]` runs the
 suite and those checks on `HEAD` plus the given files, so tasks that share a
 worktree don't check each other's unfinished edits.
+
+### Tests
+
+Each plugin owns its suite in `<plugin>/test/` (`cd <plugin> && npm test`
+runs it alone); the root `test/` tests `scripts/` and is the suite named
+`root`. `scripts/test.mjs` runs them, one suite after another:
+
+```sh
+npm test                                   # every suite
+npm run test:changed                       # what the branch touched, and what reads it
+npm run test:changed -- <base>             # the same, from <base> instead of main
+node scripts/test.mjs <plugin>...          # the named suites (root for the root one)
+node scripts/test.mjs --changed --list     # what would run and why, without running
+```
+
+`test:changed` takes what changed since the branch left `main`: its commits,
+your edits (staged or not) and new files. A plugin with a changed file runs
+its whole suite; a change in `scripts/`, the root `test/` or a root file
+other than a `*.md` runs `root`. A test file of another plugin runs too when
+its code names a changed folder as a path (`"../../projects-sidebar/…"`,
+`` `${APP}/claude-accounts/accounts.json` ``), and a helper under its `test/`
+that does runs its whole suite. A line before each suite says why it runs, a
+pass prints a dot, a failure prints in full, and a table of suite, files,
+pass, fail and seconds ends the run.
