@@ -1650,7 +1650,11 @@ export class Coordinator {
   // claimed before anything is typed. A wake: "now" one that can't be resumed
   // yet (a typed shell line, another program in front) waits for its tab as
   // the rest do. A reload before the drop leaves an entry with its tabs back,
-  // which D9's rule 2 drops at start.
+  // which D9's rule 2 drops at start. With a wake by path under way for it
+  // (awake-agent D3: asked now, or its wakeAfter that step 6 acts on), each
+  // resume also leaves its `<t>: resumed (wake <path>)` line, as wakeClaudes'
+  // do: the entry is gone by the end of this pulse, so that line is what
+  // wake-agent's CLI finds for a Claude typed but never up.
   async wakeWorkspace(path) {
     const entry = own(this.workspaces, path);
     if (!entry) return;
@@ -1661,8 +1665,13 @@ export class Coordinator {
       records: this.records,
     });
     for (const id of unsettle) this.herdr("tab.unsettle", { id });
+    const byPath = this.wakes.has(path);
     let resumed = 0;
-    for (const address of now) if (await this.resume(address, "wake")) resumed += 1;
+    for (const address of now) {
+      if (!(await this.resume(address, "wake"))) continue;
+      resumed += 1;
+      if (byPath) this.log(`${address}: resumed (wake ${path})`);
+    }
     delete this.jobs[path];
     const saved = await this.updateEntries((entries) => (own(entries, path) ? withoutEntry(entries, path) : null));
     this.log(`${path}: woken, ${unsettle.length} tab(s) back, ${resumed} of ${now.length} wake: "now" Claude(s) resumed${saved ? "" : " (workspaces.json not written)"}`);

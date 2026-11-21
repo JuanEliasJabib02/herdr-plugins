@@ -434,6 +434,57 @@ test("Wake by path: an asleep workspace's entry is gone and every Claude it put 
   assert.deepEqual(wakes(co), []);
 });
 
+// wake-agent's CLI reads a terminal's own lines after its timeout: the entry
+// is dropped the same pulse, so `<path>: woken, …` names no terminal.
+const resumedLines = (w, from) => w.logs.slice(from).filter((l) => /^t\d+: resumed \(/.test(l));
+
+test("Wake by path: the wake: \"now\" Claude its asleep workspace's wake resumes gets its own `<t>: resumed (wake <path>)` line, as the rest do", async () => {
+  const { w, co } = await ready(working("t4"));
+  await sleepApp(co, w);
+  assert.equal(records(w).t4.wake, "now");
+  const from = w.logs.length;
+  co.command(wakeCommand("/code/app"));
+  await step(co, w);
+  assert.deepEqual(resumes(w).map((s) => s.address), ["t4", "t1", "t3"], "t4 by its workspace's wake, the rest by the wake's own");
+  assert.deepEqual(resumedLines(w, from), ["t4: resumed (wake /code/app)", "t1: resumed (wake /code/app)", "t3: resumed (wake /code/app)"]);
+  assert.ok(w.logs.includes('/code/app: woken, 3 tab(s) back, 1 of 1 wake: "now" Claude(s) resumed'), JSON.stringify(w.logs));
+});
+
+test("Waking by a click, no wake by path under way: its wake: \"now\" Claude's resume writes no `resumed (wake <path>)` line, as before", async () => {
+  const { w, co } = await ready(working("t4"));
+  await sleepApp(co, w);
+  const from = w.logs.length;
+  showSpace(w, "sa");
+  await step(co, w);
+  assert.deepEqual(resumes(w).map((s) => s.address), ["t4", "t1"]);
+  assert.deepEqual(resumedLines(w, from), []);
+  assert.ok(w.logs.includes('/code/app: woken, 3 tab(s) back, 1 of 1 wake: "now" Claude(s) resumed'), JSON.stringify(w.logs));
+});
+
+test("Wake by path mid-sleep: the wake: \"now\" Claude step 6's wake resumes for it gets its own `<t>: resumed (wake <path>)` line too", async () => {
+  const { w, co } = await ready((w) => {
+    working("t1")(w);
+    w.onSend = null; // Claude takes its time to exit
+  });
+  co.command(SLEEP_WORKSPACE);
+  await step(co, w);
+  if (co.question) await answer(co, w, true);
+  showSpace(w, "inicio");
+  for (let i = 0; i < 5 && records(w).t1?.state !== "stopping"; i++) await step(co, w);
+  assert.equal(records(w).t1.state, "stopping");
+  assert.equal(records(w).t1.wake, "now");
+  co.command(wakeCommand("/code/app"));
+  await step(co, w);
+  assert.equal(entries(w)["/code/app"].wakeAfter, true);
+  const from = w.logs.length;
+  exitClaude(w, "t1");
+  for (let i = 0; i < 5 && entries(w)["/code/app"]; i++) await step(co, w);
+  assert.deepEqual(entries(w), {});
+  assert.deepEqual(resumes(w).map((s) => s.address), ["t1"]);
+  assert.deepEqual(resumedLines(w, from), ["t1: resumed (wake /code/app)"]);
+  assert.ok(w.logs.includes('/code/app: woken, 3 tab(s) back, 1 of 1 wake: "now" Claude(s) resumed'), JSON.stringify(w.logs));
+});
+
 test("Wake by path mid-sleep: wakeAfter and its job gone, so no further /exit; the wake outlives the stop under way, and the idle Claude it was stopping resumes after step 6, its tab hidden", async () => {
   const { w, co } = await ready((w) => {
     w.onSend = null; // Claude takes its time to exit

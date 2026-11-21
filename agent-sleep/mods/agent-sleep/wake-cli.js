@@ -24,7 +24,7 @@ import { paths, parseRecords } from "./store.js";
 import { workspacesPaths, parseWorkspaces } from "./workspaces-store.js";
 import { wakeCommand, sleptTerminals, sleptBy, wakeTargets, entryWake } from "./workspace-sleep.js";
 import { loadSession, loadConfigDirs, isClaudeForeground, programName } from "./claude-session.js";
-import { logPaths, parseLogLine, notWokenHead } from "./log.js";
+import { logPaths, parseLogLine } from "./log.js";
 import { statusWord } from "./rules.js";
 import { workspaceOf, recordPath } from "./badges.js";
 
@@ -204,17 +204,19 @@ async function nothingThere(cx, path, gone, hc) {
   return 2;
 }
 
-// log.txt's lines (log.js parseLogLine) where the mod gave up a wake at
-// `path` for one of `subjects` (a terminal, or the path for its workspace),
-// stamped in the second of `since` or later: coordinator.js endWake's
-// `<t>: not woken (wake <path>): <why>` (log.js notWokenHead).
-export function wakeLogLines(text, { path, subjects, since }) {
+// log.txt's lines (log.js parseLogLine) about one of `subjects` (a terminal,
+// or the path for its workspace), `<subject>: …`, stamped in the second of
+// `since` or later. Every one, not only coordinator.js endWake's `<t>: not
+// woken (wake <path>): <why>` (log.js notWokenHead): the mod claims a record
+// before it types the resume, so a wake whose resume was typed (`resumed
+// (wake <path>)`) or failed to be (`resume not sent (…)`) ends as done and
+// gives up on nothing.
+export function wakeLogLines(text, { subjects, since }) {
   const from = Math.floor(since / 1000) * 1000;
-  const mark = notWokenHead("", path); // any subject's, looked for before a line is parsed
-  const heads = subjects.map((s) => notWokenHead(s, path));
+  const heads = subjects.map((s) => `${s}: `);
   const out = [];
   for (const line of String(text ?? "").split("\n")) {
-    if (!line.includes(mark)) continue;
+    if (!heads.some((h) => line.includes(h))) continue; // looked for before a line is parsed
     const parsed = parseLogLine(line);
     if (parsed !== null && parsed.at >= from && heads.some((h) => parsed.text.startsWith(h))) out.push(line);
   }
@@ -301,7 +303,7 @@ async function gaveUp(cx, path, { down, why, entryLeft, since }) {
   if (entryLeft) cx.err(`its workspace: ${entryLeft === "now" ? "still asleep" : "still going to sleep"}`);
   const log = logPaths(paths(cx.appHome).dir);
   const [rotated, current] = await Promise.all([cx.readText(log.rotated), cx.readText(log.file)]);
-  const lines = wakeLogLines(`${rotated ?? ""}\n${current ?? ""}`, { path, subjects: entryLeft ? [...down, path] : down, since });
+  const lines = wakeLogLines(`${rotated ?? ""}\n${current ?? ""}`, { subjects: entryLeft ? [...down, path] : down, since });
   if (lines.length === 0) {
     cx.err(
       "agent-sleep logged nothing about them since the wake was sent: Herdr's window may be closed (agent-sleep acts only while one is open, in a layout with its moon).",

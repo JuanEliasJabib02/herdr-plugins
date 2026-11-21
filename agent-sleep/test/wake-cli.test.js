@@ -459,7 +459,7 @@ test("a path the mod's encoder refuses (a lone surrogate) is a usage error, exit
 
 const NOT_WOKEN = "t1: not woken (wake /code/app): its shell line isn't a bare prompt (shell, typed)";
 
-test("not up after 90 s: exit 1 naming the terminals still down, then the mod's `not woken (wake <path>)` lines for them since the wake", async () => {
+test("not up after 90 s: exit 1 naming the terminals still down, then the mod's lines about them since the wake, its `not woken (wake <path>)` ones included", async () => {
   const w = world({ records: { t1: record(), t2: record() } });
   shell(w, "t1", { pid: 101 });
   shell(w, "t2", { pid: 102 });
@@ -470,6 +470,7 @@ test("not up after 90 s: exit 1 naming the terminals still down, then the mod's 
     logLine(NOW + 2_000, "t2: resumed (wake /code/app)"),
     logLine(NOW + 60_000, NOT_WOKEN),
     logLine(NOW + 60_000, "t9: not woken (wake /code/other): another path's"),
+    logLine(NOW + 60_000, "t10: not woken (wake /code/app): another terminal's"),
     logLine(NOW + 60_000, "t1: not woken (wake /code/app/web): a longer path's"),
     "",
   ].join("\n"));
@@ -483,7 +484,81 @@ test("not up after 90 s: exit 1 naming the terminals still down, then the mod's 
     "wake-agent: /code/app isn't up after 90 s:",
     "t1: still asleep (zsh in front)",
     "agent-sleep's log:",
-    `${logLine(NOW + 60_000, NOT_WOKEN)}`,
+    logLine(NOW + 1_000, "t1: not resumed (wake /code/app): its shell line isn't a bare prompt (shell, typed)"),
+    logLine(NOW + 60_000, NOT_WOKEN),
+    logLine(NOW + 60_000, "t1: not woken (wake /code/app/web): a longer path's"),
+  ].join("\n"));
+});
+
+// The mod claims a record (deletes it) before it types the resume, so a wake
+// whose resume was typed, or failed to be, ends as done and gives up on
+// nothing: its own line about the terminal is the cause, not a closed window.
+const claimed = (w, address) => {
+  const { [address]: _claimed, ...rest } = recordsOf(w);
+  setRecords(w, rest);
+};
+
+test("not up after 90 s, its resume typed but Claude never up: the mod's `resumed (wake <path>)` line, no window hint", async () => {
+  const w = oneAsleep();
+  const line = "t1: resumed (wake /code/app)";
+  w.files.set(LOG, `${logLine(NOW + 2_000, line)}\n`);
+  w.onSleep = (w) => {
+    if (w.sleeps === 1) claimed(w, "t1"); // its shell stays in front
+  };
+  const r = await run(w, "/code/app");
+  assert.equal(r.code, 1);
+  assert.equal(r.err, [
+    "wake-agent: /code/app isn't up after 90 s:",
+    "t1: zsh in front",
+    "agent-sleep's log:",
+    logLine(NOW + 2_000, line),
+  ].join("\n"));
+});
+
+test("not up after 90 s, its resume not sent: the mod's `resume not sent` line, no window hint", async () => {
+  const w = oneAsleep();
+  const line = `t1: resume not sent (no terminal "t1"); type it yourself: claude --resume ${SID1}`;
+  w.files.set(LOG, `${logLine(NOW + 2_000, line)}\n`);
+  w.onSleep = (w) => {
+    if (w.sleeps === 1) claimed(w, "t1");
+  };
+  const r = await run(w, "/code/app");
+  assert.equal(r.code, 1);
+  assert.equal(r.err, [
+    "wake-agent: /code/app isn't up after 90 s:",
+    "t1: zsh in front",
+    "agent-sleep's log:",
+    logLine(NOW + 2_000, line),
+  ].join("\n"));
+});
+
+test("not up after 90 s, its workspace woken and dropped, its wake: \"now\" Claude's resume typed but Claude never up: the mod's `resumed (wake <path>)` line, no window hint", async () => {
+  const w = world({
+    records: { t2: record({ cwd: "/code/shop", workspacePath: "/code/shop", by: "manual", wake: "now" }) },
+    entries: { "/code/shop": entry() },
+    spaces: [{ id: "sa", tabs: [{ id: "a1", settled: true, terminals: [{ terminal: "t2" }] }] }],
+  });
+  shell(w, "t2", { cwd: "/code/shop", pid: 102 });
+  // What the mod's wakeWorkspace writes (coordinator.js): the entry's line
+  // names no terminal, and the path is no subject once the entry is gone.
+  const line = "t2: resumed (wake /code/shop)";
+  w.files.set(LOG, [
+    logLine(NOW + 2_000, line),
+    logLine(NOW + 2_000, '/code/shop: woken, 1 tab(s) back, 1 of 1 wake: "now" Claude(s) resumed'),
+    "",
+  ].join("\n"));
+  w.onSleep = (w) => {
+    if (w.sleeps !== 1) return;
+    setEntries(w, {}); // dropped in the same pulse
+    claimed(w, "t2"); // its shell stays in front
+  };
+  const r = await run(w, "/code/shop");
+  assert.equal(r.code, 1);
+  assert.equal(r.err, [
+    "wake-agent: /code/shop isn't up after 90 s:",
+    "t2: zsh in front",
+    "agent-sleep's log:",
+    logLine(NOW + 2_000, line),
   ].join("\n"));
 });
 
@@ -513,17 +588,20 @@ test("not up after 90 s, its workspace still asleep: named, with the mod's line 
   ].join("\n"));
 });
 
-test("wakeLogLines keeps only `<t>: not woken (wake <path>): ` lines for the given subjects, stamped at or after the wake's second", () => {
+test("wakeLogLines keeps only the `<subject>: ` lines of the given subjects, stamped at or after the wake's second", () => {
   const since = NOW + 400; // the send, mid-second: a line stamped in that second counts
   const text = [
     logLine(NOW, NOT_WOKEN),
     logLine(NOW - 1_000, NOT_WOKEN),
+    logLine(NOW + 1_000, "t1: resumed (wake /code/app)"),
     logLine(NOW + 5_000, "t2: not woken (wake /code/app): x"),
-    "garbage line",
+    logLine(NOW + 5_000, "t10: resumed (wake /code/app)"),
+    logLine(NOW + 5_000, "pulse failed: t1: x"),
+    "t1: garbage line",
     "",
   ].join("\n");
-  assert.deepEqual(wakeLogLines(text, { path: "/code/app", subjects: ["t1"], since }), [logLine(NOW, NOT_WOKEN)]);
-  assert.deepEqual(wakeLogLines(null, { path: "/code/app", subjects: ["t1"], since }), []);
+  assert.deepEqual(wakeLogLines(text, { subjects: ["t1"], since }), [logLine(NOW, NOT_WOKEN), logLine(NOW + 1_000, "t1: resumed (wake /code/app)")]);
+  assert.deepEqual(wakeLogLines(null, { subjects: ["t1"], since }), []);
   // log.js, both directions: the line the mod writes, read back.
   assert.equal(NOT_WOKEN.startsWith(notWokenHead("t1", "/code/app")), true);
   assert.deepEqual(parseLogLine(logLine(NOW + 999, NOT_WOKEN)), { at: NOW, text: NOT_WOKEN });

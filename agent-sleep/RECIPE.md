@@ -164,8 +164,10 @@ its own.
     to wake. Exit 1: Herdr refused the command (its error, at once: the mod
     isn't loaded in the shown layout, Herdr isn't running), or not up after
     90 seconds. Then it names the terminals still down and prints the mod's
-    `not woken (wake <path>)` lines for them since the wake; with none, it
-    says Herdr's window may be closed.
+    lines about them since the wake: its `not woken (wake <path>)` ones, and
+    a `resumed (wake <path>)` or `resume not sent` one when the resume was
+    typed, or failed to be, but Claude never came up. With none, it says
+    Herdr's window may be closed.
 
 **Keys** (projects layout): `cmd-alt-s` Sleep now, `cmd-alt-w` Wake all. Commands
 you can bind or run with `herdr-app do agent-sleep.<name>`: `sleep-now`,

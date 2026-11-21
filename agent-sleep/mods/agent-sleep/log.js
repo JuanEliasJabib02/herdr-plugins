@@ -34,8 +34,10 @@ export function parseLogLine(line) {
 
 // awake-agent D3: how a wake by path's give-up line starts, `<subject>: not
 // woken (wake <path>): ` (a terminal, or the path for its workspace), the
-// reason after it. The coordinator writes it (endWake); wake-agent's CLI
-// looks for it after its own timeout.
+// reason after it. The coordinator writes it (endWake). wake-agent's CLI,
+// after its own timeout, prints every `<subject>: ` line since the wake
+// (wake-cli.js wakeLogLines): these, and the ones a resume leaves (`resumed
+// (wake <path>)`, `resume not sent (…)`, `not resumed (…)`).
 export const notWokenHead = (subject, path) => `${subject}: not woken (wake ${path}): `;
 
 // One event, one line: a stack's lines are joined with " | ", and control
