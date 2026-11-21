@@ -4,16 +4,16 @@
 # files, never another coder's half-written edits:
 #   1. rm -rf odd/check-<task>
 #   2. extracts `git archive HEAD` there, adds the untracked files under
-#      claude-accounts/ and test/fixtures/ (files no commit has yet: before
-#      T1's commit, the whole plugin), then the task's own files on top
-#   3. runs the whole suite there (node --test 'test/*.test.js') and prints
-#      its last 8 lines
+#      claude-accounts/ (files no commit has yet: before T1's commit, the
+#      whole plugin), then the task's own files on top
+#   3. runs claude-accounts' suite there (node --test 'test/*.test.js' in
+#      claude-accounts/) and prints its last 8 lines
 #   4. runs scripts/check-views.sh on the snapshot's mod, one line per view
 #   5. exits non-zero on the first failure
 #
 #   scripts/check-snapshot.sh <task> <file>... [-- <view>...]
-#   scripts/check-snapshot.sh T3 claude-accounts/mods/claude-accounts/cli/usage.mjs test/claude-accounts-usage.test.js
-#   scripts/check-snapshot.sh T1 test/claude-accounts-smoke.test.js -- footer popup
+#   scripts/check-snapshot.sh T3 claude-accounts/mods/claude-accounts/cli/usage.mjs claude-accounts/test/claude-accounts-usage.test.js
+#   scripts/check-snapshot.sh T1 claude-accounts/test/claude-accounts-smoke.test.js -- footer popup
 #
 # Files are relative to the repo root. Only untracked files are added under
 # those folders: another task's edits to a committed file stay out. The views
@@ -56,7 +56,7 @@ mkdir -p "$snap"
 git archive HEAD | tar -x -C "$snap" || fail "git archive HEAD failed"
 
 untracked=0
-list=$(git ls-files --others --exclude-standard -- claude-accounts test/fixtures) || fail "git ls-files failed"
+list=$(git ls-files --others --exclude-standard -- claude-accounts) || fail "git ls-files failed"
 while IFS= read -r f; do
   [ -n "$f" ] || continue
   put "$f"
@@ -74,9 +74,9 @@ done
 [ $# -gt 0 ] && shift
 echo "check-snapshot: $task: HEAD $(git rev-parse --short HEAD) + $untracked untracked + $own own file(s) in $snap"
 
-# 3. The whole suite, in the snapshot.
+# 3. claude-accounts' suite, in the snapshot.
 log="$snap/check-snapshot.log"
-(cd "$snap" && node --test 'test/*.test.js') > "$log" 2>&1
+(cd "$snap/claude-accounts" && node --test 'test/*.test.js') > "$log" 2>&1
 code=$?
 tail -n 8 "$log"
 [ "$code" -eq 0 ] || fail "the suite failed (exit $code); full output in $log"
