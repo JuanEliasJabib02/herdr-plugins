@@ -9,12 +9,12 @@
 // own map, who reads whom, is test-deps.test.js.
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync, spawnSync } from "node:child_process";
-import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { ROOT, foldersRead, select, everySuite, namedSuites, listLines, headLine, tableLines } from "../scripts/test.mjs";
+import { ROOT, foldersRead, select, everySuite, namedSuites, listLines, headLine, tableLines, suiteLimit } from "../scripts/test.mjs";
 
 const repo = fileURLToPath(new URL("..", import.meta.url));
 const RUNNER = join(repo, "scripts/test.mjs");
@@ -264,6 +264,28 @@ function gitRepo(extra = {}) {
 }
 // The runner, from a cwd outside the repo: it finds its repo by itself.
 const runner = (dir, ...args) => spawnSync(process.execPath, [join(dir, "scripts/test.mjs"), ...args], { cwd: scratch, env: ENV, encoding: "utf8" });
+// The same, with env vars on top of ENV.
+const runnerWith = (env, dir, ...args) => spawnSync(process.execPath, [join(dir, "scripts/test.mjs"), ...args], { cwd: scratch, env: { ...ENV, ...env }, encoding: "utf8" });
+const LIMIT = "HERDR_TEST_SUITE_LIMIT_MS";
+// Whether a process is gone, checked every 50 ms for up to 5 s.
+async function gone(pid) {
+  for (let i = 0; i < 100; i++) {
+    try {
+      process.kill(pid, 0);
+    } catch (e) {
+      if (e.code === "ESRCH") return true;
+      throw e;
+    }
+    await new Promise((resolve) => { setTimeout(resolve, 50); });
+  }
+  return false;
+}
+// A test file that writes its process's pid to `pids`, then keeps it alive
+// for a minute: `hold` is "timer" (the test passes, a timer holds the file)
+// or "test" (the test itself waits).
+const holds = (pids, hold) =>
+  `import { test } from "node:test";\nimport { appendFileSync } from "node:fs";\ntest("holds", async () => {\n  appendFileSync(${JSON.stringify(pids)}, process.pid + "\\n");\n  ${hold === "timer" ? "setTimeout(() => {}, 60_000);" : "await new Promise((r) => setTimeout(r, 60_000));"}\n});\n`;
+const pidsIn = (file) => readFileSync(file, "utf8").trim().split("\n").map(Number);
 
 test("D6, --changed --list: the branch's commits, staged, unstaged and untracked files; what reads them; nothing runs", () => {
   const dir = gitRepo();
@@ -414,13 +436,64 @@ test("D5: a failing suite prints its failure in full, the others still run, and 
   assert.match(r.stdout, /^gamma +1 +2 +0 +\d+\.\d$/m);
 });
 
-test("D5: a test that leaves something running doesn't hold its suite: the run ends and goes on", () => {
-  const dir = fakeRepo({ "alpha/test/open.test.js": 'import { test } from "node:test";\ntest("leaves a timer", () => { setTimeout(() => {}, 20_000); });\n' });
+test("D5: the table's pass count is node's own, on a suite of many files", () => {
+  // 20 files of 50 tests with long names: --test-force-exit dropped some of
+  // their results on every run (the more bytes a result takes between node's
+  // processes, the more it dropped).
+  const many = {};
+  for (let f = 0; f < 20; f++) {
+    const tests = Array.from({ length: 50 }, (_, t) => `test(${JSON.stringify(`file ${f} test ${t} `.padEnd(150, "x"))}, () => {});\n`).join("");
+    many[`alpha/test/many-${String(f).padStart(2, "0")}.test.js`] = `import { test } from "node:test";\n${tests}`;
+  }
+  const dir = fakeRepo(many);
+  const files = Object.keys(many).map((p) => p.slice("alpha/".length)).concat("test/a.test.js");
+  const own = spawnSync(process.execPath, ["--test", "--test-reporter=tap", ...files], { cwd: join(dir, "alpha"), env: ENV, encoding: "utf8" });
+  const ownPass = Number(own.stdout.match(/^# pass (\d+)$/m)?.[1]);
+  assert.equal(ownPass, 20 * 50 + 2, own.stdout.slice(-500));
+  for (let i = 0; i < 2; i++) {
+    const r = runner(dir, "alpha");
+    assert.equal(r.status, 0, r.stdout.slice(-500) + r.stderr);
+    assert.match(r.stdout, new RegExp(`^alpha +21 +${ownPass} +0 +\\d+\\.\\d$`, "m"), `run ${i + 1}: ${r.stdout.trim().split("\n").at(-1)}`);
+  }
+});
+
+test("D5: a suite still running past HERDR_TEST_SUITE_LIMIT_MS is stopped with its whole process tree, its row fails, and the run goes on", async () => {
+  const pids = join(scratch, `pids-${++n}.txt`);
+  const dir = fakeRepo({ "alpha/test/open.test.js": holds(pids, "timer") });
   const started = performance.now();
-  const r = runner(dir, "alpha", "gamma");
+  const r = runnerWith({ [LIMIT]: "3000" }, dir, "alpha", "gamma");
   const seconds = (performance.now() - started) / 1000;
-  assert.equal(r.status, 0, r.stdout + r.stderr);
-  assert.ok(seconds < 10, `the run waited on the timer: ${seconds.toFixed(1)} s`);
-  assert.match(r.stdout, /^alpha +2 +3 +0 +\d+\.\d$/m);
-  assert.match(r.stdout, /^gamma +1 +2 +0 +\d+\.\d$/m, "the next suite ran");
+  assert.equal(r.status, 1, r.stdout + r.stderr);
+  assert.ok(seconds < 30, `the run waited on the timer: ${seconds.toFixed(1)} s`);
+  assert.match(r.stdout, /^alpha: stopped after 3 s$/m);
+  assert.match(r.stdout, /^gamma: 1 file, named$/m, "the next suite ran");
+  assert.match(r.stdout, /^alpha +2 +\S+ +[1-9?]\d* +\d+\.\d$/m, "alpha's row failed");
+  assert.match(r.stdout, /^gamma +1 +2 +0 +\d+\.\d$/m);
+  for (const pid of pidsIn(pids)) assert.ok(await gone(pid), `the test file's process ${pid} was killed`);
+});
+
+test("D5: a suite gets 15 minutes, or HERDR_TEST_SUITE_LIMIT_MS; a limit that isn't a whole number of ms above 0 is a usage error", () => {
+  assert.equal(suiteLimit({}), 15 * 60_000);
+  assert.equal(suiteLimit({ [LIMIT]: "" }), 15 * 60_000, "set but empty is unset");
+  assert.equal(suiteLimit({ [LIMIT]: "3000" }), 3000);
+  for (const bad of ["abc", "0", "-5", "1.5", "3s"]) {
+    assert.throws(() => suiteLimit({ [LIMIT]: bad }), new RegExp(`^Error: HERDR_TEST_SUITE_LIMIT_MS is a whole number of milliseconds above 0, not "${bad}"$`), bad);
+  }
+  const dir = fakeRepo();
+  const r = runnerWith({ [LIMIT]: "abc" }, dir, "gamma");
+  assert.equal(r.status, 2, r.stdout + r.stderr);
+  assert.match(r.stderr, /^test: HERDR_TEST_SUITE_LIMIT_MS is a whole number of milliseconds above 0, not "abc"$/m);
+  assert.equal(r.stdout, "", "nothing ran");
+});
+
+test("D5: a Ctrl-C, which reaches only the runner, stops the suite it is running too", async () => {
+  const pids = join(scratch, `pids-${++n}.txt`);
+  const dir = fakeRepo({ "alpha/test/wait.test.js": holds(pids, "test") });
+  const child = spawn(process.execPath, [join(dir, "scripts/test.mjs"), "alpha"], { cwd: scratch, env: ENV, stdio: "ignore" });
+  const closed = new Promise((resolve) => { child.on("close", (code, signal) => resolve({ code, signal })); });
+  for (let i = 0; i < 400 && !existsSync(pids); i++) await new Promise((resolve) => { setTimeout(resolve, 25); });
+  assert.ok(existsSync(pids), "the suite's test started");
+  child.kill("SIGINT");
+  assert.deepEqual(await closed, { code: 130, signal: null });
+  for (const pid of pidsIn(pids)) assert.ok(await gone(pid), `the test file's process ${pid} was killed`);
 });

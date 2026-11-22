@@ -33,17 +33,23 @@
 //
 // Suites run one after another, never at once, each from its folder as
 // `node --test --test-reporter=dot <files>`: a pass prints a dot, a failure
-// prints in full. A test past 2 minutes fails (--test-timeout), and a suite
-// ends once its tests have, whatever they left running (--test-force-exit):
-// a hang is a failed row, never a run that doesn't end. A line before each
+// prints in full. A test past 2 minutes fails (--test-timeout). A suite
+// whose processes are still running after 15 minutes (spotlight, the
+// slowest, takes about 5; HERDR_TEST_SUITE_LIMIT_MS=<ms> sets another limit)
+// is stopped, its whole process group, with SIGTERM and then SIGKILL; a line
+// says `<suite>: stopped after <limit>` and its row fails: a hang is a
+// failed row, never a run that doesn't end. (Not --test-force-exit: it
+// drops results it hasn't counted yet.) Each suite runs in a process group
+// of its own, so a Ctrl-C reaches only the runner, which stops the suite
+// and runs no more (a second one kills it at once). A line before each
 // suite says why it runs, and a table of suite | files | pass | fail |
 // seconds ends the run (cancelled counts as fail). Exit 0 when every suite
 // passed or nothing maps ("nothing to test"), 1 when one failed, 2 on a
-// usage error.
+// usage error, 128 + the signal's number when interrupted.
 
 import { execFileSync, spawn } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { constants, tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -205,14 +211,48 @@ function tapCount(tap, key) {
   return all.length ? Number(all.at(-1)[1]) : null;
 }
 
-// Runs one suite from its folder: dots on stdout, a TAP copy in tmp for the
-// counts. Resolves to its table row and whether it passed.
-async function runSuite(repo, e, tmp) {
+// How long a suite may run before it is stopped: 15 minutes (spotlight, the
+// slowest, takes about 5), or HERDR_TEST_SUITE_LIMIT_MS from `env`.
+export const LIMIT_VAR = "HERDR_TEST_SUITE_LIMIT_MS";
+export function suiteLimit(env) {
+  const value = env[LIMIT_VAR];
+  if (value === undefined || value === "") return 15 * 60_000;
+  if (!/^[1-9]\d*$/.test(value)) throw new UsageError(`${LIMIT_VAR} is a whole number of milliseconds above 0, not ${JSON.stringify(value)}`);
+  return Number(value);
+}
+const limitText = (ms) => (ms % 60_000 === 0 ? `${ms / 60_000} min` : `${ms / 1000} s`);
+
+// A stopped suite's processes get this long between SIGTERM and SIGKILL.
+const GRACE_MS = 2000;
+
+// A signal to a suite's process group: node --test, its test files and what
+// they started. The group may be gone already.
+function signalGroup(pid, signal) {
+  try {
+    process.kill(-pid, signal);
+  } catch {
+    // gone
+  }
+}
+
+// Stops a suite's process group: SIGTERM, then SIGKILL to what is left.
+function stopGroup(pid) {
+  signalGroup(pid, "SIGTERM");
+  setTimeout(() => signalGroup(pid, "SIGKILL"), GRACE_MS);
+}
+
+// The pid of the suite running now (its process group's), or null.
+let running = null;
+
+// Runs one suite from its folder, in a process group of its own: dots on
+// stdout, a TAP copy in tmp for the counts. Past `limit` ms the group is
+// stopped. Resolves to its table row, whether it passed and whether the
+// limit stopped it.
+async function runSuite(repo, e, tmp, limit) {
   const tap = join(tmp, `${e.name}.tap`);
   const args = [
     "--test",
     "--test-timeout=120000",
-    "--test-force-exit",
     "--test-reporter=dot",
     "--test-reporter-destination=stdout",
     "--test-reporter=tap",
@@ -220,17 +260,29 @@ async function runSuite(repo, e, tmp) {
     ...e.files,
   ];
   const started = performance.now();
+  let stopped = false;
   const code = await new Promise((resolve) => {
-    const child = spawn(process.execPath, args, { cwd: join(repo, e.dir), stdio: ["ignore", "inherit", "inherit"] });
-    child.on("error", () => resolve(-1));
-    child.on("close", (status) => resolve(status ?? -1));
+    const child = spawn(process.execPath, args, { cwd: join(repo, e.dir), stdio: ["ignore", "inherit", "inherit"], detached: true });
+    running = child.pid ?? null;
+    const watchdog = setTimeout(() => {
+      stopped = true;
+      stopGroup(child.pid);
+    }, limit);
+    const done = (status) => {
+      clearTimeout(watchdog);
+      running = null;
+      resolve(status);
+    };
+    child.on("error", () => done(-1));
+    child.on("close", (status) => done(status ?? -1));
   });
   const seconds = (performance.now() - started) / 1000;
   const text = existsSync(tap) ? readFileSync(tap, "utf8") : "";
   const fail = tapCount(text, "fail");
   const cancelled = tapCount(text, "cancelled");
   return {
-    ok: code === 0,
+    ok: code === 0 && !stopped,
+    stopped,
     row: { name: e.name, files: e.files.length, pass: tapCount(text, "pass"), fail: fail === null ? null : fail + (cancelled ?? 0), seconds },
   };
 }
@@ -276,10 +328,11 @@ function parseArgs(argv) {
   return opts;
 }
 
-async function main(argv, repo) {
-  let plan;
+async function main(argv, repo, env) {
+  let plan, limit;
   try {
     const opts = parseArgs(argv);
+    limit = suiteLimit(env);
     const suites = findSuites(repo);
     if (opts.changed) plan = select(changedFiles(repo, opts.base), suites);
     else if (opts.files) {
@@ -301,19 +354,38 @@ async function main(argv, repo) {
     process.stderr.write(`test: ${e.message}\n${USAGE}\n`);
     return 2;
   }
+  // A suite runs in a process group of its own, so a Ctrl-C (or a hangup)
+  // reaches only the runner: it stops the suite running and runs no more. A
+  // second one kills the suite's group and exits at once.
+  let interrupted = null;
+  const onSignal = (signal) => {
+    if (interrupted) {
+      if (running !== null) signalGroup(running, "SIGKILL");
+      process.exit(128 + constants.signals[signal]);
+    }
+    interrupted = signal;
+    if (running !== null) stopGroup(running);
+  };
+  const signals = ["SIGINT", "SIGTERM", "SIGHUP"];
+  for (const s of signals) process.on(s, onSignal);
   const tmp = mkdtempSync(join(tmpdir(), "herdr-plugins-test-"));
   try {
     const rows = [];
     let failed = false;
     for (const e of plan) {
+      if (interrupted) break;
       await say(headLine(e));
-      const { ok, row } = await runSuite(repo, e, tmp);
+      const { ok, stopped, row } = await runSuite(repo, e, tmp, limit);
+      // On a line of its own: the stopped suite's dots never ended theirs.
+      if (stopped) await say(`\n${e.name}: stopped after ${limitText(limit)}`);
       rows.push(row);
       failed ||= !ok;
     }
+    if (interrupted) return 128 + constants.signals[interrupted];
     await say(["", ...tableLines(rows)].join("\n"));
     return failed ? 1 : 0;
   } finally {
+    for (const s of signals) process.off(s, onSignal);
     rmSync(tmp, { recursive: true, force: true });
   }
 }
@@ -325,4 +397,4 @@ const invoked = (() => {
     return false;
   }
 })();
-if (invoked) process.exitCode = await main(process.argv.slice(2), fileURLToPath(new URL("..", import.meta.url)));
+if (invoked) process.exitCode = await main(process.argv.slice(2), fileURLToPath(new URL("..", import.meta.url)), process.env);
