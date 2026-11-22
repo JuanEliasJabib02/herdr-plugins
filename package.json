@@ -4,7 +4,8 @@
   "type": "module",
   "description": "Orca Pro Max features rebuilt as Herdr plugins (mods and layouts).",
   "scripts": {
-    "test": "node --test 'test/*.test.js'"
+    "test": "node scripts/test.mjs",
+    "test:changed": "node scripts/test.mjs --changed"
   },
   "engines": {
     "node": ">=22.15"

@@ -1,0 +1,11 @@
+{
+  "name": "claude-accounts",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.15"
+  },
+  "scripts": {
+    "test": "node --test 'test/*.test.js'"
+  }
+}
